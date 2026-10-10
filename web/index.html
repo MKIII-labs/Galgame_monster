@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Galgame_monster</title>
+<link rel="stylesheet" href="/static/style.css">
+<!-- 第三方样式非阻塞加载（否则慢 CDN 会拖住首屏）；加载后由 app.js 补齐渲染 -->
+<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-light"
+      media="print" onload="this.media='all'"
+      onerror="__fbc(this,'https://cdn.staticfile.org/highlight.js/11.9.0/styles/github.min.css')">
+<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-dark" disabled
+      media="print" onload="this.media='all'">
+<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.css"
+      media="print" onload="this.media='all'"
+      onerror="__fbc(this,'https://cdn.staticfile.org/KaTeX/0.16.9/katex.min.css')">
+<script>
+  /* CDN 兜底 + 「库就绪」通知：脚本/样式都不阻塞首屏，就绪后再补齐渲染 */
+  window.__libs = {};
+  window.__libReady = function (name) {
+    if (!name) return;
+    window.__libs[name] = true;
+    if (window.__onLibReady) { try { window.__onLibReady(name); } catch (e) { } }
+  };
+  window.__fbc = function (el, url) {
+    if (el.dataset.fb) return; el.dataset.fb = '1';
+    var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = url;
+    l.media = 'print'; l.onload = function () { this.media = 'all'; };
+    document.head.appendChild(l);
+  };
+  window.__fb = function (el, url, name) {
+    if (el.dataset.fb) return; el.dataset.fb = '1';
+    var s = document.createElement('script'); s.async = true; s.src = url;
+    s.onload = function () { window.__libReady(name); };
+    document.head.appendChild(s);
+  };
+</script>
+</head>
+<body>
+<div id="app">
+  <!-- 侧栏 -->
+  <aside id="sidebar">
+    <div class="side-top">
+      <button id="btn-new" class="new-chat">＋ 新建对话</button>
+    </div>
+    <div class="side-label">会话记录</div>
+    <div id="session-list" class="session-list"></div>
+    <div class="side-foot">
+      <button id="btn-usage" class="ghost wide" title="Token 用量统计">📊 用量统计</button>
+      <button id="btn-kb" class="ghost wide" title="知识库 / 记忆图谱">🧠 知识库</button>
+      <button id="btn-notes" class="ghost wide" title="内置笔记库（Markdown + 双链 + 关系图谱）">📝 笔记</button>
+      <button id="btn-theme" class="ghost" title="切换主题">◐ 主题</button>
+      <button id="btn-settings" class="ghost" title="设置">⚙ 设置</button>
+    </div>
+    <div id="status-line" class="status-line">加载中…</div>
+  </aside>
+
+  <!-- 主区 -->
+  <main id="main">
+    <div id="chat" class="chat">
+      <div id="empty" class="empty">
+        <div class="empty-logo">✦</div>
+        <h1>有什么可以帮你的？</h1>
+        <p class="empty-sub">支持 Markdown、LaTeX 公式、图片识别与用户画像</p>
+        <div class="chips">
+          <button class="chip" data-prompt="用简单的语言解释一下量子纠缠">解释量子纠缠</button>
+          <button class="chip" data-prompt="帮我写一个 Python 快速排序，并解释思路">写个快速排序</button>
+          <button class="chip" data-prompt="用一句话总结一下相对论">总结相对论</button>
+        </div>
+      </div>
+    </div>
+
+    <button id="btn-bottom" class="to-bottom t-fade off" title="回到底部">↓</button>
+
+    <div class="composer">
+      <div id="ctx-bar" class="ctx-bar hidden" title="当前会话的「对话上限」占用（估算值）；达到上限时 AI 会自动把较早的对话历史压缩成摘要">
+        <span class="ctx-label">对话上限</span>
+        <div class="ctx-track"><div id="ctx-fill" class="ctx-fill"></div></div>
+        <div id="ctx-text" class="ctx-text"></div>
+        <button id="btn-compress" class="ctx-btn" title="立即把较早的对话历史压缩成摘要（保留最近 8 条原文）">压缩历史</button>
+      </div>
+      <div class="composer-box">
+        <textarea id="input" rows="1" placeholder="给 AI 发送消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <div class="composer-toolbar">
+          <div class="toolbar-left">
+            <button id="btn-think" class="pill" title="开启 / 关闭深度思考">
+              <span class="pill-dot">✦</span>深度思考
+            </button>
+            <select id="think-level" class="think-level hidden" title="思考档位">
+              <option value="low">低</option>
+              <option value="medium">中</option>
+              <option value="high">高</option>
+              <option value="max">最高</option>
+            </select>
+            <button id="btn-search" class="pill" title="开启 / 关闭联网搜索">
+              <span class="pill-dot">🔍</span>联网搜索
+            </button>
+          </div>
+          <div class="toolbar-right">
+            <div class="swap-slot">
+              <button id="btn-image" class="icon" title="上传图片（也可直接 Ctrl+V 粘贴图片）">🖼</button>
+              <button id="btn-stop" class="icon stop off" title="停止生成">■</button>
+            </div>
+            <button id="btn-send" class="send" title="发送">↑</button>
+          </div>
+        </div>
+      </div>
+      <div class="composer-tip">内容由 AI 生成，请自行甄别 · 图片可直接粘贴或拖入窗口</div>
+    </div>
+  </main>
+</div>
+
+<!-- 设置弹窗 -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-tabs">
+        <button class="tab active" data-tab="chat">聊天 API</button>
+        <button class="tab" data-tab="vision">图像 API</button>
+        <button class="tab" data-tab="search">联网搜索</button>
+        <button class="tab" data-tab="profile">用户画像</button>
+        <button class="tab" data-tab="appearance">外观</button>
+        <button class="tab" data-tab="help">功能说明</button>
+      </div>
+      <button id="btn-close-modal" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <section class="pane" data-pane="chat"></section>
+      <section class="pane hidden" data-pane="vision"></section>
+      <section class="pane hidden" data-pane="profile">
+        <label class="field-label">手动偏好（你主动设置的规则）</label>
+        <textarea id="pf-manual" class="ta" rows="5" placeholder="例如：回答数学题时先给结论再给证明"></textarea>
+        <label class="field-label">用户画像（AI 自主记录）</label>
+        <p class="hint">AI 会在对话中自主增删改偏好，写入「用户画像」知识库，可在知识图谱中查看与编辑；每条偏好即一个节点。写入后回复下方有「已更新记忆」标记，可撤销。</p>
+        <button id="btn-open-profile-kb" class="ghost wide">🧠 打开用户画像知识库</button>
+        <label class="check-row">
+          <input type="checkbox" id="pf-auto-learn"> 允许 AI 记录用户画像（从对话中自主增删改偏好）
+        </label>
+        <label class="field-label">学习指令预设</label>
+        <div class="preset-row">
+          <select id="learn-preset"></select>
+          <button id="btn-save-learn-preset">另存为预设</button>
+          <button id="btn-del-learn-preset">删除预设</button>
+        </div>
+        <label class="field-label">自定义学习指令（留空使用内置默认；支持 {current_auto} {user_input} {ai_reply}）</label>
+        <textarea id="pf-prompt" class="ta" rows="6"></textarea>
+      </section>
+      <section class="pane hidden" data-pane="appearance">
+        <label class="field-label">主题</label>
+        <div class="radio-row">
+          <label><input type="radio" name="theme" value="light"> 浅色</label>
+          <label><input type="radio" name="theme" value="dark"> 深色</label>
+        </div>
+        <p class="hint">保存后立即生效。</p>
+      </section>
+      <section class="pane hidden" data-pane="help">
+        <p class="hint">下面说明各项功能的实际作用与区别。点击标题可展开/收起。</p>
+
+        <details class="help-sec" open>
+          <summary>深度思考：开关与档位有什么区别</summary>
+          <div class="help-body">
+            <p><strong>开关</strong>（输入框左下「✦ 深度思考」）：开启后模型在给答案前先输出一段思维链（CoT），回答通常更准，但更慢、更费 token。思维链会以可折叠的「已深度思考」块展示。</p>
+            <p><strong>档位</strong>（低 / 中 / 高 / 最高）：控制"想多久"。本程序按当前「思考参数模式」把它作为 <code>reasoning_effort</code> 发送。<strong>DeepSeek 官方会对档位做映射</strong>（依其官方文档）：</p>
+            <table>
+              <tr><th>本程序档位</th><th>发送值</th><th>DeepSeek 实际生效</th></tr>
+              <tr><td>低</td><td>low</td><td>low</td></tr>
+              <tr><td>中</td><td>medium</td><td>high</td></tr>
+              <tr><td>高</td><td>high</td><td>high</td></tr>
+              <tr><td>最高</td><td>max</td><td>max</td></tr>
+            </table>
+            <p class="help-tip">注意：在 DeepSeek 上「中」与「高」效果相同（都映射为 high），真正有区别的是「低 / 高 / 最高」。其它厂商对 <code>reasoning_effort</code> 的支持与映射可能不同，甚至不支持（会被忽略或报错）。</p>
+            <p class="help-tip">另：思考模式下 DeepSeek 会忽略 <code>temperature</code> / <code>top_p</code> 等采样参数（不报错但不生效）。</p>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>思考参数模式（设置 → 聊天 API）</summary>
+          <div class="help-body">
+            <p>决定"深度思考"开关如何传给接口，避免不支持的接口报错：</p>
+            <ul>
+              <li><strong>自动</strong>：按接口地址是否含 <code>deepseek</code> 自动判断。</li>
+              <li><strong>不发送</strong>：完全不带思考参数，最通用。</li>
+              <li><strong>OpenAI 兼容</strong>：开启时发 <code>reasoning_effort</code>，关闭时不发（无法表达"禁用"）。</li>
+              <li><strong>DeepSeek</strong>：开启→ <code>thinking.type=enabled</code>，关闭→ <code>disabled</code>；档位走 <code>reasoning_effort</code>。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>对话上限（输入框上方的进度条）</summary>
+          <div class="help-body">
+            <p>估算当前会话离模型上下文上限还有多远，避免"聊到一半突然报错"。</p>
+            <ul>
+              <li><strong>单位换算</strong>（按本项目的估算口径）：1 个汉字 / 中文标点 ≈ 0.6 token，1 个英文字符 ≈ 0.3 token。即 1000 token ≈ 1700 汉字；128000 token ≈ 21 万汉字；1000000 token ≈ 170 万汉字。填写时<strong>只写数字</strong>：128K 写 <code>128000</code>，1M 写 <code>1000000</code>。</li>
+              <li><strong>已用</strong> ≈ 本地估算 × 校准系数；校准系数取最近一次接口返回的真实 <code>prompt_tokens</code> ÷ 当时估算。</li>
+              <li><strong>剩余</strong> = 上限 − 已用；剩余低于上限 10% / 5% 时进度条转黄 / 红并弹出提醒。</li>
+              <li><strong>自动压缩</strong>：达到上限时（「已用 + 为回复预留」超过上限），AI 会<strong>自动压缩你的对话历史记录</strong>——把较早的对话总结成摘要（不是删除），保留最近 8 条原文，之后照常发送。</li>
+              <li><strong>手动压缩</strong>：点进度条右侧的「压缩历史」可立即压缩一次；压缩点之后的消息不足 9 条、或未配聊天密钥时会给出提示。</li>
+              <li>上限 / 预留可在「聊天 API」里按所用模型填写（默认 128000 / 4096）。估算为近似值，仅供参考。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>联网搜索</summary>
+          <div class="help-body">
+            <p>输入框的「🔍 联网搜索」开关开启后：<strong>改写检索式 → 并行搜索 → 抓取正文 → 注入提示 → 再让模型回答</strong>；回答上方会出现可折叠的「参考来源」列表。后端可选博查 / Tavily 两个服务商；在「联网搜索」设置里可配置密钥、结果条数，以及是否开启「查询改写」（更准）与「抓取正文」（更全）。</p>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>用户画像：手动偏好 vs AI 自主记录</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>手动偏好</strong>：你自己写的规则（如"回答数学题先给结论"），<strong>每轮都会注入</strong>，优先级最高。</li>
+              <li><strong>自动学习</strong>：AI 在<strong>主对话里直接读写</strong>记忆——需要记录时会自己动手，它输出的写入指令用户看不到；写入后回复下方会出现「已更新记忆」标记，点「撤销」即可回滚。判断准则来自「学习指令预设」，可自定义。</li>
+              <li><strong>写什么、改什么</strong>：由 AI 自主判断——明确要求「记住 / 删掉那条 / 改一下」会直接执行；新旧信息矛盾时以更晚、更明确者为准，<strong>不会让两条矛盾条目并存</strong>。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>知识库与记忆（侧栏 🧠 知识库）</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>本会话记忆</strong>：只属于当前对话，切到别的对话就看不到。</li>
+              <li><strong>通用知识库</strong>：可有多个、跨对话共享；在编辑器右侧勾选哪些库给"本会话"用（可多选）。</li>
+              <li><strong>用户画像库</strong>：系统库（AI 自主写入），<strong>每轮固定注入</strong>，不允许删除 / 改名。</li>
+              <li><strong>AI 可否修改</strong>：分两级——会话级「允许 AI 写本会话记忆」与库级「允许 AI 修改本库」；被<strong>锁定</strong>的节点 AI 不会改。</li>
+              <li><strong>检索方式</strong>：先按关键词从记忆 / 知识库预筛候选；候选超过 20 条时才让模型挑选相关条目，最后把选中条目注入提示。</li>
+              <li><strong>图谱编辑</strong>：拖拽移动、双击空白新增、「＋ 节点」新增、点节点改内容、连线 / 删边（画布左上角工具栏）、删除节点。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>图谱关系类型（箭头代表什么）</summary>
+          <div class="help-body">
+            <p>知识库的边是<strong>有向</strong>的：箭头从 A 指向 B，读作「A <em>关系</em> B」。
+              关系取自下面的固定词表，图上按类型着色；AI 也只能从词表里选（写别的说法会自动归一到最近的类型）。</p>
+            <ul id="help-relations"></ul>
+            <p class="hint">你可以点节点后用「＋ 连线」手动建立关系；AI 整理记忆时若发现两个已有条目之间存在明确关系，也会<strong>主动连边</strong>。</p>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>图像识别：独立视觉 API vs 聊天模型</summary>
+          <div class="help-body">
+            <ul>
+              <li>默认用「图像 API」里配置的视觉模型。</li>
+              <li>开启「<strong>使用聊天模型识别图片</strong>」后，改由「聊天 API」的模型与密钥识图（要求聊天模型自带视觉能力，如 GPT-4o / deepseek-flash / 通义兼容模式）。</li>
+              <li>两种视觉协议的区别：<br>
+                · <strong>DashScope 原生</strong>：图片放 <code>input.messages[].content</code> 的 <code>{"image": ...}</code>，结果取 <code>output.choices[0].message.content</code>。<br>
+                · <strong>OpenAI 兼容</strong>：图片放 <code>messages[].content</code> 的 <code>{"type":"image_url"}</code>，结果取 <code>choices[0].message.content</code>。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>账户余额</summary>
+          <div class="help-body">
+            <p>在「聊天 API / 图像 API」面板查看余额，打开设置时自动查一次，也可点「刷新」。</p>
+            <ul>
+              <li><strong>DeepSeek</strong>：按接口地址自动识别，调用官方 <code>GET /user/balance</code>。</li>
+              <li><strong>其它厂商</strong>：若提供余额接口，在「余额查询地址」填写（GET + Bearer）；留空且非 DeepSeek 则显示"不支持"。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>用量统计（侧栏 📊 用量统计）</summary>
+          <div class="help-body">
+            <p>每次回复下方会显示本次消耗的 token；「用量统计」里可按近 7 天 / 近 30 天 / 近 12 个月查看按模型与按日 / 月的明细，并用折线图展示趋势。</p>
+          </div>
+        </details>
+
+        <details class="help-sec">
+          <summary>消息操作（悬停消息时显示）</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>复制</strong>：复制消息文本。</li>
+              <li><strong>撤回</strong>（用户消息）：连同它后面的 AI 回复一起移除。</li>
+              <li><strong>修改</strong>（用户消息）：行内编辑后重新发送，其后的回复会被丢弃并重新生成。</li>
+              <li><strong>重新发言</strong>（AI 回复）：丢弃这条回复及之后的消息，重新生成。</li>
+              <li><strong>选择文本</strong>（AI 回复）：切换成源码视图，这样复制到的是 Markdown / LaTeX <strong>源码</strong>（而非渲染后的文字 / 公式）。</li>
+            </ul>
+          </div>
+        </details>
+      </section>
+    </div>
+    <div class="modal-foot">
+      <button id="btn-save" class="primary">保存</button>
+      <button id="btn-cancel" class="ghost">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 用量统计弹窗 -->
+<div id="usage-modal" class="modal hidden">
+  <div class="modal-card wide-card">
+    <div class="modal-head">
+      <div class="modal-tabs">
+        <button class="tab active" data-usage-range="day7">近 7 天</button>
+        <button class="tab" data-usage-range="day30">近 30 天</button>
+        <button class="tab" data-usage-range="month12">近 12 个月</button>
+      </div>
+      <button id="btn-close-usage" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="usage-cards" class="usage-cards"></div>
+      <div id="usage-chart" class="usage-chart"></div>
+      <div id="usage-tables" class="usage-tables"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 知识库 / 记忆图谱弹窗 -->
+<div id="kb-modal" class="modal hidden">
+  <div class="modal-card wide-card">
+    <div class="modal-head kb-head">
+      <div class="kb-head-left">
+        <select id="kb-select" class="field-input kb-select"></select>
+        <button id="kb-new" class="ghost">＋ 新建</button>
+        <button id="kb-rename" class="ghost">重命名</button>
+        <button id="kb-del" class="ghost">删除</button>
+        <button id="kb-add-node" class="ghost">＋ 节点</button>
+        <button id="kb-add-edge" class="ghost" title="在选中的节点与另一个节点之间建立连线">＋ 连线</button>
+        <button id="kb-refresh" class="ghost" title="从磁盘重新加载当前知识库">刷新</button>
+        <label class="check-row kb-check"><input type="checkbox" id="kb-ai-write"> 允许 AI 修改本库</label>
+      </div>
+      <button id="btn-close-kb" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="kb-body">
+      <div id="kb-graph" class="kb-graph"></div>
+      <aside class="kb-side">
+        <div class="kb-bind">
+          <div class="field-label">本会话使用的通用知识库</div>
+          <div id="kb-bind-list" class="kb-bind-list"></div>
+          <p class="hint">AI 会<b>优先写入上面勾选</b>的知识库（各库还需开启「允许 AI 修改本库」）；未勾选任何库时，AI 只写本会话记忆。</p>
+          <p class="hint kb-ai-target" id="kb-ai-target"></p>
+          <label class="check-row"><input type="checkbox" id="sess-ai-write"> 允许 AI 写本会话记忆</label>
+        </div>
+        <div class="field-label">节点详情</div>
+        <div id="kb-node-form" class="kb-node-form hidden">
+          <input id="kd-title" class="field-input" placeholder="标题">
+          <input id="kd-category" class="field-input" placeholder="分类（如 喜好 / 禁忌 / 事实）">
+          <textarea id="kd-content" class="ta" rows="4" placeholder="内容"></textarea>
+          <input id="kd-tags" class="field-input" placeholder="标签（逗号分隔）">
+          <label class="check-row"><input type="checkbox" id="kd-locked"> 锁定（AI 不可修改）</label>
+          <div class="kb-node-btns">
+            <button id="kd-save" class="primary">应用</button>
+            <button id="kd-del" class="ghost">删除节点</button>
+          </div>
+        </div>
+        <div id="kb-node-empty" class="hint">点击节点查看/编辑；双击空白处或点上方「＋ 节点」新增；用「＋ 连线」或画布左上角编辑工具连线。</div>
+        <div id="kb-edge-form" class="kb-node-form hidden">
+          <div class="field-label">新增连线</div>
+          <div class="hint" id="ke-from"></div>
+          <select id="ke-to" class="field-input"></select>
+          <select id="ke-relation" class="field-input"></select>
+          <div class="kb-node-btns">
+            <button id="ke-add" class="primary">添加连线</button>
+            <button id="ke-cancel" class="ghost">取消</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<!-- 内置笔记库（Obsidian 核心版） -->
+<div id="notes-modal" class="modal hidden">
+  <div class="modal-card notes-card">
+    <div class="modal-head">
+      <div class="notes-head-title">📝 笔记库
+        <span class="hint">本地 Markdown 文件（data/notes），用 <code>[[双链]]</code> 建立关系</span>
+      </div>
+      <button id="btn-close-notes" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="notes-body">
+      <aside class="notes-left">
+        <input id="nt-search" class="field-input" placeholder="搜索笔记（标题 / 全文）…">
+        <div class="notes-left-btns">
+          <button id="nt-new" class="ghost">＋ 笔记</button>
+          <button id="nt-new-folder" class="ghost">＋ 文件夹</button>
+        </div>
+        <div id="nt-hits" class="notes-hits hidden"></div>
+        <div id="nt-tree" class="notes-tree"></div>
+      </aside>
+
+      <section class="notes-main">
+        <div class="notes-editor-head">
+          <span id="nt-path" class="notes-path">未打开笔记</span>
+          <div class="notes-actions">
+            <button id="nt-edit" class="ghost">编辑</button>
+            <button id="nt-preview" class="ghost">预览</button>
+            <button id="nt-rename" class="ghost">重命名</button>
+            <button id="nt-delete" class="ghost">删除</button>
+          </div>
+        </div>
+        <textarea id="nt-textarea" class="notes-textarea hidden"
+                  placeholder="# 标题&#10;&#10;正文…用 [[笔记名]] 建立双链，左侧图谱会自动连起来。"></textarea>
+        <div id="nt-preview-box" class="notes-preview content hidden"></div>
+        <div id="nt-empty" class="hint notes-empty">从左侧选择一篇笔记，或点「＋ 笔记」新建。</div>
+      </section>
+
+      <aside class="notes-right">
+        <div class="notes-tabs">
+          <button class="ntab active" data-ntab="graph">关系图谱</button>
+          <button class="ntab" data-ntab="backlinks">反向链接</button>
+        </div>
+        <div id="nt-graph" class="notes-graph"></div>
+        <div id="nt-backlinks" class="notes-backlinks hidden"></div>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<input type="file" id="file-input" accept="image/*" hidden>
+
+<script>window.__TOKEN__ = "%%TOKEN%%";</script>
+<!-- 以下三方库全部异步加载：不阻塞首屏，加载完成后由 app.js 补齐渲染 -->
+<script async src="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.js"
+        onload="__libReady('katex')"
+        onerror="__fb(this,'https://cdn.staticfile.org/KaTeX/0.16.9/katex.min.js','katex')"></script>
+<script async src="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/highlight.min.js"
+        onload="__libReady('hljs')"
+        onerror="__fb(this,'https://cdn.staticfile.org/highlight.js/11.9.0/highlight.min.js','hljs')"></script>
+<script async src="https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js"
+        onload="__libReady('echarts')"
+        onerror="__fb(this,'https://cdn.staticfile.org/echarts/5.5.0/echarts.min.js','echarts')"></script>
+<script async src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"
+        onload="__libReady('vis')"
+        onerror="__fb(this,'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js','vis')"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

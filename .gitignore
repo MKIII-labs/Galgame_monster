@@ -1,0 +1,18 @@
+# 运行时数据（会话 / 配置 / 画像 / 知识库 / 浏览器缓存 等）
+/data/
+
+# 开发笔记（纯本地，不随项目发布）
+/docs/
+
+# Python 缓存
+**/__pycache__/
+*.pyc
+
+# 虚拟环境（.venv 自带 .gitignore，但显式忽略更稳妥）
+.venv/
+venv/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+*.log
