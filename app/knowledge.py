@@ -50,6 +50,84 @@ RELATION_LABEL = {c: lb for c, lb, _ in RELATIONS}
 RELATION_DESC = {c: d for c, _, d in RELATIONS}
 RELATION_CODES = [c for c, _, _ in RELATIONS]
 
+# 天然对称（互相）的关系：连线默认画双向箭头
+SYMMETRIC_RELATIONS = {"related", "same", "opposite"}
+
+
+def is_symmetric(code):
+    return (code or "") in SYMMETRIC_RELATIONS
+
+
+# ------------------------------------------------------------
+# 节点外观（大小 / 颜色）与图谱力学默认值
+# ------------------------------------------------------------
+NODE_SIZE_MIN, NODE_SIZE_MAX = 8, 60
+
+# AI 只能用这些命名色（名称 -> 固定 hex），避免写出看不清的颜色
+NODE_PALETTE = {
+    "red": "#e5484d", "orange": "#e8890c", "yellow": "#d9a406",
+    "green": "#30a46c", "teal": "#12a594", "blue": "#4d6bfe",
+    "purple": "#8e4ec6", "pink": "#d6409f", "gray": "#8b8d98",
+}
+_PALETTE_ALIASES = {
+    "红": "red", "橙": "orange", "黄": "yellow", "绿": "green",
+    "青": "teal", "蓝": "blue", "紫": "purple", "粉": "pink", "灰": "gray",
+}
+
+
+def normalize_color(raw):
+    """把颜色归一成 hex；无法识别返回 None（表示不设颜色 / 恢复默认）"""
+    if raw is None:
+        return None
+    s = str(raw).strip().lower().lstrip("#")
+    if not s:
+        return None
+    if s in NODE_PALETTE:
+        return NODE_PALETTE[s]
+    if s in _PALETTE_ALIASES:
+        return NODE_PALETTE[_PALETTE_ALIASES[s]]
+    for k, v in _PALETTE_ALIASES.items():
+        if k in s:
+            return NODE_PALETTE[v]
+    if re.match(r"^[0-9a-f]{6}$", s):
+        return "#" + s
+    if re.match(r"^[0-9a-f]{3}$", s):
+        return "#" + "".join(ch * 2 for ch in s)
+    return None
+
+
+def normalize_size(raw):
+    """把节点大小夹紧到 [8,60] 的整数；非法 / 空返回 None"""
+    if raw is None or raw == "":
+        return None
+    try:
+        n = int(round(float(raw)))
+    except (TypeError, ValueError):
+        return None
+    return max(NODE_SIZE_MIN, min(NODE_SIZE_MAX, n))
+
+
+def default_graph():
+    """图谱力学默认值（四项，对齐 Obsidian 力导向：斥力 / 中心引力 / 弹簧强度 / 线段长度）
+    repel 为正数，前端取负作为 vis 的 gravitationalConstant。"""
+    return {"repel": 9000, "center": 0.3, "link": 0.04, "distance": 130}
+
+
+def _apply_appearance(node, op):
+    """把 op 里的 size / color 应用到节点；color 传空串表示清除（恢复默认）"""
+    if "size" in op:
+        sz = normalize_size(op.get("size"))
+        if sz is None:
+            node.pop("size", None)
+        else:
+            node["size"] = sz
+    if "color" in op:
+        col = normalize_color(op.get("color"))
+        if col:
+            node["color"] = col
+        else:
+            node.pop("color", None)
+
 # 归一化：把 AI 输出的自由说法映射回词表
 _REL_ALIASES = {
     "相关": "related", "关联": "related", "有关": "related", "related": "related",
@@ -88,8 +166,9 @@ def relation_label(code):
 
 
 def relations_payload():
-    """给前端用的关系词表"""
-    return [{"code": c, "label": lb, "desc": d} for c, lb, d in RELATIONS]
+    """给前端用的关系词表（sym=true 表示天然对称，连线默认双向）"""
+    return [{"code": c, "label": lb, "desc": d, "sym": c in SYMMETRIC_RELATIONS}
+            for c, lb, d in RELATIONS]
 
 
 def _kb_id():
@@ -148,6 +227,7 @@ def load_kb(kb_id):
         return None
     kb.setdefault("nodes", [])
     kb.setdefault("edges", [])
+    kb.setdefault("graph", default_graph())
     return kb
 
 
@@ -168,7 +248,8 @@ def save_kb(kb):
 def new_kb(name):
     now = time.time()
     kb = {"id": _kb_id(), "name": (name or "未命名知识库").strip() or "未命名知识库",
-          "nodes": [], "edges": [], "created_at": now, "updated_at": now}
+          "nodes": [], "edges": [], "graph": default_graph(),
+          "created_at": now, "updated_at": now}
     save_kb(kb)
     idx = load_kb_index()
     idx["kbs"].append({"id": kb["id"], "name": kb["name"], "ai_write": True,
@@ -220,11 +301,16 @@ def get_profile_kb():
     return new_kb(PROFILE_KB_NAME)["id"]
 
 
-def make_node(title, content="", category="其他", tags=None, source=None):
+def make_node(title, content="", category="其他", tags=None, source=None, size=None, color=None):
     now = time.time()
-    return {"id": _node_id(), "title": (title or "").strip()[:120], "content": content or "",
+    node = {"id": _node_id(), "title": (title or "").strip()[:120], "content": content or "",
             "category": category or "其他", "tags": tags or [], "locked": False,
             "x": None, "y": None, "created_at": now, "updated_at": now, "source": source}
+    if size is not None:
+        node["size"] = size
+    if color:
+        node["color"] = color
+    return node
 
 
 def migrate_profile_to_kb():
@@ -392,99 +478,191 @@ def retrieve_memory(s, user_text):
     return "\n".join(parts), count
 
 
-def _find_node(nodes, nid=None, title=None):
+def _norm_text(s):
+    """去掉所有空白并转小写，用于宽松匹配"""
+    return re.sub(r"\s+", "", (s or "")).lower()
+
+
+def _find_node(nodes, nid=None, title=None, fuzzy=False):
+    """按 id 或标题定位节点。
+    fuzzy=True 时逐级放宽：精确 → 归一化（去空白/大小写）→ 唯一子串；
+    出现多个候选（有歧义）时直接放弃，避免连错 / 改错节点。"""
     if nid:
         for n in nodes:
             if n.get("id") == nid:
                 return n
-    if title:
-        t = title.strip()
-        for n in nodes:
-            if (n.get("title") or "").strip() == t:
-                return n
-    return None
+    if not title:
+        return None
+    t = str(title).strip()
+    for n in nodes:
+        if (n.get("title") or "").strip() == t:
+            return n
+    if not fuzzy:
+        return None
+    nt = _norm_text(t)
+    if len(nt) < 2:
+        return None
+    for n in nodes:                                   # 去空白/大小写后完全一致
+        if _norm_text(n.get("title")) == nt:
+            return n
+    hit = [n for n in nodes if nt in _norm_text(n.get("title"))]
+    return hit[0] if len(hit) == 1 else None
+
+
+def _truthy(v):
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v or "").strip().lower()
+    return s in ("1", "true", "yes", "y", "on", "单向", "有向", "directed", "forward")
+
+
+def _edge_directed(op, rel):
+    """边是单向还是双向：显式字段优先（directed / bidirectional），
+    都没给时按关系是否天然对称判断（相关 / 同义 / 对立 -> 双向）。"""
+    if "bidirectional" in op:
+        return not _truthy(op.get("bidirectional"))
+    if "directed" in op:
+        return _truthy(op.get("directed"))
+    return not is_symmetric(rel)
+
+
+def _same_edge(edge, a_id, b_id, rel, directed):
+    """已存在的边与新边是否重复；无向边「反着连」也算同一条，避免出现 A⇄B / B⇄A 两条重影"""
+    if (edge.get("relation") or "related") != rel:
+        return False
+    ef, et = edge.get("from"), edge.get("to")
+    if ef == a_id and et == b_id:
+        return True
+    if not directed and ef == b_id and et == a_id:
+        return True
+    return False
 
 
 def apply_memory_ops(session_id, allowed_kb_ids, ops):
-    """把 AI 产出的操作指令应用到会话记忆与允许的知识库"""
+    """把 AI 产出的操作指令应用到会话记忆与允许的知识库。
+    返回 (counts, problems)：counts 是各类成功计数；problems 是未生效的原因说明。"""
+    problems = []
     sdata = load_sessions()
     s = find_session(sdata, session_id)
     if not s:
-        return
+        return {}, ["会话不存在"]
     ensure_session_kb_fields(s)
     kb_cache, s_changed, touched = {}, False, set()
     counts = {}
 
-    def scope_store(key):
-        if key == "session":
+    all_keys = ["session"] + [k for k in (allowed_kb_ids or []) if k != "session"]
+
+    def scope_store(scope_key):
+        if scope_key == "session":
             return s["memory"]["nodes"], s["memory"]["edges"]
-        kb = kb_cache.get(key)
+        if scope_key not in all_keys:
+            return None, None
+        if scope_key not in kb_cache:
+            kb_cache[scope_key] = load_kb(scope_key)
+        kb = kb_cache.get(scope_key)
         return (kb["nodes"], kb["edges"]) if kb else (None, None)
+
+    def locate(ref):
+        """先在本 op 的作用域找端点，找不到再到其它可写作用域找；返回 (作用域, 节点)"""
+        if not ref:
+            return None, None
+        ref = str(ref)
+        for k in [key] + [x for x in all_keys if x != key]:
+            nodes, _edges = scope_store(k)
+            if not nodes:
+                continue
+            n = _find_node(nodes, ref, ref, fuzzy=True)
+            if n:
+                return k, n
+        return None, None
 
     for op in ops:
         if not isinstance(op, dict):
             continue
         key = op.get("scope") or "session"
-        if key != "session":
-            if key not in allowed_kb_ids:
-                continue
-            if key not in kb_cache:
-                kb_cache[key] = load_kb(key)
+        kind = (op.get("op") or "").lower()
+        if key != "session" and key not in all_keys:
+            problems.append("作用域 %s 不可写" % key)
+            continue
         nodes, edges = scope_store(key)
         if nodes is None:
+            problems.append("作用域 %s 不存在" % key)
             continue
-        kind = (op.get("op") or "").lower()
         did = False
         try:
             if kind == "add":
                 title = (op.get("title") or "").strip()
                 if not title:
                     continue
-                exist = _find_node(nodes, title=title)
+                exist = _find_node(nodes, title=title, fuzzy=True)
                 if exist and not exist.get("locked"):
                     if op.get("content"):
                         exist["content"] = op["content"]
                     exist["category"] = op.get("category") or exist.get("category", "其他")
+                    _apply_appearance(exist, op)
                     exist["updated_at"] = time.time()
                     did = True
                     counts["update"] = counts.get("update", 0) + 1
                 elif not exist:
                     nodes.append(make_node(title, op.get("content") or "",
                                            op.get("category") or "其他",
-                                           op.get("tags") or [], session_id))
+                                           op.get("tags") or [], session_id,
+                                           size=normalize_size(op.get("size")),
+                                           color=normalize_color(op.get("color"))))
                     did = True
                     counts["add"] = counts.get("add", 0) + 1
             elif kind == "update":
-                n = _find_node(nodes, op.get("id"), op.get("title"))
+                n = _find_node(nodes, op.get("id"), op.get("title"), fuzzy=True)
                 if n and not n.get("locked"):
                     for f in ("content", "title", "category", "tags"):
                         if op.get(f):
                             n[f] = op[f]
+                    _apply_appearance(n, op)
                     n["updated_at"] = time.time()
                     did = True
                     counts["update"] = counts.get("update", 0) + 1
+                elif not n:
+                    problems.append("找不到条目「%s」" % (op.get("title") or op.get("id") or ""))
             elif kind == "delete":
-                n = _find_node(nodes, op.get("id"), op.get("title"))
+                n = _find_node(nodes, op.get("id"), op.get("title"), fuzzy=True)
                 if n and not n.get("locked"):
                     nid = n["id"]
                     nodes.remove(n)
                     edges[:] = [e for e in edges if e.get("from") != nid and e.get("to") != nid]
                     did = True
                     counts["delete"] = counts.get("delete", 0) + 1
+                elif not n:
+                    problems.append("找不到条目「%s」" % (op.get("title") or op.get("id") or ""))
             elif kind == "link":
-                a = _find_node(nodes, op.get("from"), op.get("from"))
-                b = _find_node(nodes, op.get("to"), op.get("to"))
-                if a and b and a["id"] != b["id"]:
-                    rel = normalize_relation(op.get("relation") or op.get("label"))
-                    label = (op.get("label") or "").strip() or relation_label(rel)
-                    # 同一对节点允许存在不同的关系，完全重复才跳过
-                    dup = any(e.get("from") == a["id"] and e.get("to") == b["id"]
-                              and (e.get("relation") or "related") == rel for e in edges)
-                    if not dup:
-                        edges.append({"id": _edge_id(), "from": a["id"], "to": b["id"],
-                                      "label": label, "relation": rel, "type": "relation"})
-                        did = True
-                        counts["link"] = counts.get("link", 0) + 1
+                rel = normalize_relation(op.get("relation") or op.get("label"))
+                directed = _edge_directed(op, rel)
+                a_scope, a = locate(op.get("from"))
+                b_scope, b = locate(op.get("to"))
+                if not a or not b:
+                    miss = [str(x) for x, n in ((op.get("from"), a), (op.get("to"), b)) if not n]
+                    problems.append("找不到节点「%s」" % "」「".join(miss))
+                    continue
+                if a["id"] == b["id"]:
+                    problems.append("两端是同一节点「%s」" % (a.get("title") or ""))
+                    continue
+                # 边写进 from 端点实际所在的作用域（端点可能在别的可写库里）
+                tkey = a_scope
+                _tn, tedges = scope_store(tkey)
+                if tedges is None:
+                    problems.append("作用域 %s 不存在" % tkey)
+                    continue
+                # 同一对节点允许存在不同的关系，完全重复才跳过（无向边反向也算重复）
+                if any(_same_edge(e, a["id"], b["id"], rel, directed) for e in tedges):
+                    continue
+                label = (op.get("label") or "").strip() or relation_label(rel)
+                tedges.append({"id": _edge_id(), "from": a["id"], "to": b["id"],
+                               "label": label, "relation": rel, "directed": directed,
+                               "type": "relation"})
+                counts["link"] = counts.get("link", 0) + 1
+                did = True
+                key = tkey
         except Exception:
             continue
         if not did:
@@ -501,4 +679,4 @@ def apply_memory_ops(session_id, allowed_kb_ids, ops):
     for key in touched:
         if kb_cache.get(key):
             save_kb(kb_cache[key])
-    return counts
+    return counts, problems

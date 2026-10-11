@@ -16,3 +16,6 @@ venv/
 .DS_Store
 Thumbs.db
 *.log
+
+# IDE / Agent 过程文件（方案稿等，不随项目发布）
+.trae/

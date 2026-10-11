@@ -1,1 +1,7 @@
 requests>=2.25.0
+# 本地语音识别（语音输入功能需要；运行 scripts/fetch_speech_model.py 下载中文模型）
+sherpa-onnx>=1.13.0
+# GAL 台词朗读：Edge TTS（免费、无需密钥；也可改用 OpenAI 兼容接口或本地 GPT-SoVITS）
+edge-tts>=6.1.0
+# GAL 角色包导入：解析 Shinsekai 的 character.yaml
+pyyaml>=6.0

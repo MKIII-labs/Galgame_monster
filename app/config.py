@@ -31,7 +31,44 @@ def load_config():
         "search_fetch_count": 4,         # 抓正文的条数（1–10）
         "search_fetch_reader": "jina",   # 抓正文方式：jina（免 key）| direct
         "learning_presets": {},
-        "theme": "light",
+        "speech_model_dir": "",          # 本地语音模型目录；留空则用 data/models 下的默认目录
+        "speech_polish": False,          # 语音输入结束后是否自动做一次 AI 矫正
+        "speech_denoise": False,         # 语音输入是否开启流式降噪（DPDFNet）
+        "speech_denoise_model": "",      # 降噪模型路径；留空则用 data/models/dpdfnet_baseline.onnx
+        "speech_final_model_dir": "",    # 两遍识别的精修模型目录；留空则用 data/models 下的默认目录
+        "ui_mode": "solo",               # 界面模式：solo（纯对话）| ide（左侧工作区 + 右侧对话）
+        "theme": "light",                # 默认浅色（VS Code Light+）
+        # ---- GAL 演出模式（见 docs/GAL_MODE_DESIGN.md）----
+        "gal_emotion_multi": False,      # 情绪字段是否用多标签数组（默认单值）
+        "gal_options_instant": True,     # 点选项是否立即发送（否则填回输入框）
+        "gal_tts_priority": "sprite",    # 台词发声优先级：sprite=绑定音频优先 | tts
+        # ---- GAL 演出皮肤 / 节奏 / 特效 ----
+        "gal_theme": "sakura",           # 演出主题：sakura 樱粉 | night 夜蓝 | washi 和风纸
+        "gal_typewriter": True,          # 打字机逐字显示
+        "gal_cps": 12,                   # 打字机速度（字符/秒）
+        "gal_seg_mode": "single",         # 对白展示：single 单行推进（默认，= 新世界观感）| append 逐段追加
+        "gal_auto": False,               # 单行推进时：语音播完自动切下一段
+        "gal_min_show": 0.6,             # 每段最短展示秒数（自动推进用）
+        "gal_fx": True,                  # 关键词特效（*闪光* / *震动* 等）
+        "gal_show_think": False,         # 是否显示 AI 思考过程（关闭时只显示「思考中…」，更不破坏沉浸感）
+        "gal_show_exec": True,           # 是否显示 AI 行为（搜索/工具等，以「幕间」呈现）
+        "gal_dialog_max": 46,            # 对白框最大高度（占舞台高度百分比，30–70）
+        "gal_sprite_fx": True,           # 立绘进出场 / 换人过渡动画
+        "gal_bar_auto": True,            # 顶部工具条沉浸式淡出（鼠标移入才实显）
+        # ---- GAL AI 自动写剧本 ----
+        "gal_auto_script": False,        # 总开关：由 AI 依据角色设定与用户画像自己编剧情并推进
+        "gal_auto_script_acts": 5,       # 大纲幕数（1–12）
+        "gal_auto_script_rounds": 4,     # 每幕最多回合数（1–12）
+        "gal_auto_script_replan": True,  # 允许在剧情跑偏时重新规划
+        # ---- GAL 台词朗读（TTS）----
+        "tts_enabled": False,            # 是否朗读台词
+        "tts_provider": "edge",           # edge（免费·免密钥）| openai（兼容 /v1/audio/speech）| gpt-sovits（本地 HTTP）
+        "tts_url": "",                   # edge 忽略；openai 留空用 api.openai.com；gpt-sovits 留空用 127.0.0.1:9880
+        "tts_api_key": "",
+        "tts_model": "",                 # openai 用，如 tts-1 / gpt-4o-mini-tts
+        "tts_voice": "",                 # edge: zh-CN-XiaoxiaoNeural 等；openai: alloy 等；留空用各自默认
+        "tts_speed": 1.0,
+        "tts_max_len": 80,               # 单句最大字数（按标点切句）
     }
     data = read_json(CONFIG_FILE)
     if not isinstance(data, dict):

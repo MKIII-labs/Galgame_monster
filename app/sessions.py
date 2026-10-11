@@ -10,6 +10,19 @@ def ensure_session_kb_fields(s):
     s.setdefault("memory", {"nodes": [], "edges": []})
     s.setdefault("kb_ids", [])
     s.setdefault("ai_write", True)
+    s.setdefault("agent_enabled", False)   # 是否开启「文件 Agent」模式
+    s.setdefault("sandbox", "")            # Agent 的沙箱目录（绝对路径）
+    s.setdefault("allow_outside_read", False)  # 允许 Agent 读取沙箱外的文件（只读）
+    # ---- GAL 演出模式（见 docs/GAL_MODE_DESIGN.md）----
+    s.setdefault("gal_enabled", False)      # 该会话是否以 GAL 模式对话
+    s.setdefault("gal_character_id", "")    # 当前角色 id
+    s.setdefault("gal_node_id", "")         # 剧情节点（P4 使用）
+    s.setdefault("gal_round", 0)            # 当前节点内回合数（P4 使用）
+    # ---- GAL AI 自动写剧本（每个会话独立保存 AI 生成的剧本）----
+    s.setdefault("gal_auto_on", False)      # 该会话是否启用 AI 自动剧本
+    s.setdefault("gal_auto_story", {})      # AI 生成的剧本（结构与 story.json 一致）
+    s.setdefault("gal_auto_outline", "")    # 全剧走向摘要（注入用）
+    s.setdefault("gal_auto_acts_done", 0)   # 已演出完成的幕数
     if not isinstance(s.get("memory"), dict):
         s["memory"] = {"nodes": [], "edges": []}
     s["memory"].setdefault("nodes", [])
@@ -76,6 +89,14 @@ def slim_sessions(data):
         item["messages"] = s.get("messages", []) if s["id"] == cur else None
         item["kb_ids"] = s.get("kb_ids", [])
         item["ai_write"] = s.get("ai_write", True)
+        item["agent_enabled"] = s.get("agent_enabled", False)
+        item["sandbox"] = s.get("sandbox", "")
+        item["allow_outside_read"] = s.get("allow_outside_read", False)
+        item["gal_enabled"] = s.get("gal_enabled", False)
+        item["gal_character_id"] = s.get("gal_character_id", "")
+        item["gal_node_id"] = s.get("gal_node_id", "")
+        item["gal_round"] = s.get("gal_round", 0)
+        item["gal_auto_on"] = s.get("gal_auto_on", False)
         item["mem_count"] = len((s.get("memory") or {}).get("nodes", []))
         out["sessions"].append(item)
     return out

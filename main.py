@@ -76,6 +76,15 @@ def main():
 
     proc = open_app_window(url)
 
+    # 应用窗口标题栏跟随明暗主题（Windows DWM；标题栏由系统绘制，网页改不动它）
+    try:
+        from app import config as _cfg
+        from app import winframe
+        _theme = str((_cfg.load_config() or {}).get("theme") or "light")
+        winframe.apply_async(_theme == "dark", "#1e1e1e" if _theme == "dark" else "#ffffff")
+    except Exception as e:
+        print(f"[启动] 标题栏配色跳过：{e}")
+
     if proc is None:
         # 没有找到 Chromium 系浏览器，退回系统默认浏览器
         webbrowser.open(url)

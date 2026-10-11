@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- color-scheme 让原生控件/滚动条跟随主题；theme-color 给 Edge/Chrome 应用窗口的标题栏上色 -->
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" id="theme-color" content="#ffffff">
 <title>Galgame_monster</title>
 <link rel="stylesheet" href="/static/style.css">
 <!-- 第三方样式非阻塞加载（否则慢 CDN 会拖住首屏）；加载后由 app.js 补齐渲染 -->
@@ -42,6 +45,11 @@
   <aside id="sidebar">
     <div class="side-top">
       <button id="btn-new" class="new-chat">＋ 新建对话</button>
+      <div id="mode-switch" class="mode-switch" title="在「Solo 对话」「IDE 工作区」「GAL 演出」之间切换">
+        <button class="ms-btn active" data-mode="solo">Solo</button>
+        <button class="ms-btn" data-mode="ide">IDE</button>
+        <button class="ms-btn" data-mode="gal">GAL</button>
+      </div>
     </div>
     <div class="side-label">会话记录</div>
     <div id="session-list" class="session-list"></div>
@@ -57,6 +65,211 @@
 
   <!-- 主区 -->
   <main id="main">
+    <!-- IDE 模式：以「当前会话的沙箱」为根的工作区（Solo 模式下隐藏） -->
+    <section id="ide-panel" class="ide-panel hidden">
+      <!-- 顶部提示条：说明原生 IDE 的定位 -->
+      <div id="ide-notice" class="ide-notice">
+        <span class="ide-notice-text">💡 本 IDE 仅用于临时直观查看文件改动；需要更强大的编辑与插件能力，请点左栏 🧩 用 VS Code 打开当前沙箱。</span>
+        <button id="ide-notice-close" class="ide-notice-x" title="不再提示">✕</button>
+      </div>
+      <div class="ide-body">
+      <!-- 活动栏 -->
+      <div class="ide-activity">
+        <button class="act-btn active" data-act="explorer" title="资源管理器">🗂</button>
+        <button class="act-btn" data-act="search" title="在沙箱内搜索">🔍</button>
+        <span class="act-spacer"></span>
+        <button class="act-btn" id="ide-open-vscode" title="在 VS Code 中打开当前沙箱">🧩</button>
+      </div>
+
+      <!-- 侧边栏：资源管理器 -->
+      <div class="ide-side" id="ide-side-explorer">
+        <div class="ide-side-head">
+          <span class="ide-side-title">资源管理器</span>
+          <span class="ide-side-actions">
+            <button id="ide-newfile" class="ico-btn" title="新建文件">＋</button>
+            <button id="ide-newdir" class="ico-btn" title="新建文件夹">⊕</button>
+            <button id="ide-rename" class="ico-btn" title="重命名当前文件">✎</button>
+            <button id="ide-deldir" class="ico-btn" title="删除当前文件">🗑</button>
+            <button id="ide-refresh" class="ico-btn" title="刷新目录树">⟳</button>
+          </span>
+        </div>
+        <div id="ide-root" class="ide-root" title="当前会话的沙箱目录"></div>
+        <div id="ide-tree" class="ide-tree"></div>
+      </div>
+
+      <!-- 侧边栏：搜索 -->
+      <div class="ide-side hidden" id="ide-side-search">
+        <div class="ide-side-head"><span class="ide-side-title">在沙箱内搜索</span></div>
+        <div class="ide-search">
+          <input id="ide-search-input" class="field-input" placeholder="文件内容正则或文件名，回车搜索">
+          <div id="ide-search-hits" class="ide-search-hits"></div>
+        </div>
+      </div>
+
+      <!-- 编辑区 -->
+      <div class="ide-main">
+        <div class="ide-tabsbar">
+          <div id="ide-tabs" class="ide-tabs"></div>
+          <button id="ide-save" class="ico-btn" title="保存（Ctrl+S）">💾</button>
+        </div>
+        <div class="ide-editor-wrap">
+          <div id="ide-editor" class="ide-editor-area"></div>
+          <div id="ide-fallback" class="ide-fallback">
+            <textarea id="ide-text" class="ide-text" spellcheck="false"
+                      placeholder="从左侧选择一个文件查看 / 编辑…"></textarea>
+          </div>
+          <div id="ide-image" class="ide-image hidden">
+            <img id="ide-image-img" alt="">
+          </div>
+        </div>
+        <div class="ide-status">
+          <span id="ide-status-path" class="ide-status-path">—</span>
+          <span class="ide-status-right">
+            <span id="ide-status-enc"></span>
+            <span id="ide-status-pos"></span>
+            <span id="ide-status-lang"></span>
+            <span id="ide-status-dirty" class="hidden">● 未保存</span>
+          </span>
+        </div>
+      </div>
+
+      <!-- 命令面板 / 快速打开 -->
+      <div id="ide-cmd" class="ide-cmd hidden">
+        <input id="ide-cmd-input" class="ide-cmd-input" autocomplete="off"
+               placeholder="输入命令，或直接输入文件名快速打开…">
+        <div id="ide-cmd-list" class="ide-cmd-list"></div>
+      </div>
+
+      <!-- 信息浮层（从 VS Code 导入设置时展示） -->
+      <div id="ide-info" class="ide-info hidden">
+        <div class="ide-info-card">
+          <div class="ide-info-head">
+            <span id="ide-info-title">信息</span>
+            <button id="ide-info-close" class="ico-btn" title="关闭">✕</button>
+          </div>
+          <div id="ide-info-body" class="ide-info-body"></div>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <div class="chat-col">
+    <!-- GAL 演出模式：舞台分层（背景 / 立绘 / 对白 / 选项） -->
+    <section id="gal-panel" class="gal-panel hidden">
+      <div class="gal-stage">
+        <div id="gal-bg" class="gal-bg"></div>
+        <div id="gal-bg-next" class="gal-bg"></div>
+        <div id="gal-sprites" class="gal-sprites"></div>
+        <div id="gal-fx-layer"></div>
+        <div id="gal-bar" class="gal-bar">
+          <button id="gal-char-btn" class="gal-char-btn" title="选择 / 管理角色">
+            <img id="gal-char-btn-avatar" class="gal-char-btn-avatar" alt="">
+            <span id="gal-char-btn-name">选择角色</span>
+            <span class="gal-caret">▾</span>
+          </button>
+          <select id="gal-tts-preset" class="gal-select" title="该角色的配音预设（「跟随全局」表示不用预设）"></select>
+          <span id="gal-role-name" class="gal-role"></span>
+          <span class="gal-bar-spacer"></span>
+          <button id="gal-skip" class="gal-tbtn gal-skip hidden" title="跳过当前朗读">⏭</button>
+          <button id="gal-more" class="gal-tbtn gal-more-btn" title="更多">⋯</button>
+          <div id="gal-menu" class="gal-menu hidden">
+            <button id="gal-auto-btn" class="gal-tbtn" title="自动播放（快捷键 A）">▶ 自动播放</button>
+            <button id="gal-review" class="gal-tbtn" title="回顾对话记录">📜 回顾对话</button>
+            <button id="gal-script" class="gal-tbtn" title="AI 剧本：查看大纲 / 生成 / 重新生成">🎬 剧本</button>
+            <button id="gal-clone" class="gal-tbtn" title="快速克隆：用参考音频克隆角色音色（需本地 GPT-SoVITS 服务）">🎙 快速克隆</button>
+            <button id="gal-tts" class="gal-tbtn" title="朗读台词（TTS）：需在设置里配置语音合成">🔊 朗读开关</button>
+            <button id="gal-manage" class="gal-tbtn" title="角色管理：新建 / 编辑 / 导入 / 导出 / 删除">⚙ 角色管理</button>
+            <button id="gal-refresh" class="gal-tbtn" title="刷新角色列表（角色放在 data/gal/characters/）">⟳ 刷新角色</button>
+          </div>
+        </div>
+        <div id="gal-chars" class="gal-chars hidden">
+          <div class="gal-chars-head">
+            <input id="gal-chars-search" class="gal-chars-search" type="text" placeholder="搜索角色…">
+            <span id="gal-chars-count" class="gal-chars-count"></span>
+          </div>
+          <div id="gal-chars-list" class="gal-chars-list"></div>
+          <div class="gal-chars-actions">
+            <button id="gal-new-char" class="gal-tbtn" title="新建角色">＋ 新建</button>
+            <button id="gal-import" class="gal-tbtn" title="导入 .char / zip 角色包（兼容 Shinsekai）">📦 导入文件</button>
+            <button id="gal-import-dir" class="gal-tbtn" title="批量导入 data/gal/packs/ 下的角色包">📂 导入 packs 目录</button>
+            <button id="gal-export" class="gal-tbtn" title="导出当前角色为 .char">⬇ 导出</button>
+            <button id="gal-edit" class="gal-tbtn" title="编辑当前角色 / 立绘 / 剧本">✎ 编辑</button>
+            <button id="gal-del-char" class="gal-tbtn danger" title="删除当前角色（不可恢复）">🗑 删除</button>
+            <input id="gal-import-file" type="file" accept=".char,.zip,application/zip" multiple hidden>
+          </div>
+          <p id="gal-packs-hint" class="hint"></p>
+        </div>
+        <div id="gal-tools" class="gal-tools"></div>
+        <div id="gal-dialog" class="gal-dialog">
+          <div id="gal-name" class="gal-name"></div>
+          <div id="gal-think" class="gal-think hidden"></div>
+          <div id="gal-user-echo" class="gal-user-echo hidden"></div>
+          <div id="gal-text" class="gal-text"></div>
+          <div id="gal-status" class="gal-status hidden">
+            <span class="gal-dots"><i></i><i></i><i></i></span>
+            <span id="gal-status-text">思考中…</span>
+          </div>
+        </div>
+        <div id="gal-options" class="gal-options"></div>
+        <div id="gal-review-panel" class="gal-review hidden">
+          <div class="gal-review-head">
+            <span class="gal-review-title">对话回顾</span>
+            <span id="gal-review-count" class="gal-review-count"></span>
+            <span class="gal-bar-spacer"></span>
+            <button id="gal-review-close" class="gal-tbtn" title="关闭">✕</button>
+          </div>
+          <div id="gal-review-list" class="gal-review-list"></div>
+        </div>
+        <div id="gal-script-panel" class="gal-review hidden">
+          <div class="gal-review-head">
+            <span class="gal-review-title">AI 剧本</span>
+            <span id="gal-script-status" class="gal-review-count"></span>
+            <span class="gal-bar-spacer"></span>
+            <button id="gal-script-gen" class="gal-tbtn" title="让 AI 重新编写大纲（会覆盖当前剧本）">✨ 生成 / 重新生成</button>
+            <button id="gal-script-close" class="gal-tbtn" title="关闭">✕</button>
+          </div>
+          <div id="gal-script-list" class="gal-review-list"></div>
+        </div>
+        <div id="gal-clone-panel" class="gal-review hidden">
+          <div class="gal-review-head">
+            <span class="gal-review-title">快速克隆音色</span>
+            <span id="gal-clone-hint" class="gal-review-count"></span>
+            <span class="gal-bar-spacer"></span>
+            <button id="gal-clone-close" class="gal-tbtn" title="关闭">✕</button>
+          </div>
+          <div class="gal-clone-body">
+            <p class="hint">用一段 5~10 秒的参考音频克隆音色，需本机运行 GPT-SoVITS 服务（默认 127.0.0.1:9880）。</p>
+            <label class="gal-clone-row"><span>参考音频</span>
+              <select id="gal-clone-ref" class="gal-select"></select>
+            </label>
+            <label class="gal-clone-row"><span>上传音频</span>
+              <input id="gal-clone-upload" type="file" accept="audio/*">
+            </label>
+            <label class="gal-clone-row"><span>参考文本</span>
+              <textarea id="gal-clone-prompt" rows="2" placeholder="参考音频里说的话（用于对齐音色，越准确越好）"></textarea>
+            </label>
+            <label class="gal-clone-row"><span>语言</span>
+              <select id="gal-clone-lang" class="gal-select">
+                <option value="zh">中文</option>
+                <option value="ja">日语</option>
+                <option value="en">英文</option>
+              </select>
+            </label>
+            <label class="gal-clone-row"><span>试听文本</span>
+              <input id="gal-clone-text" type="text" value="你好，很高兴认识你。">
+            </label>
+            <label class="gal-clone-row"><span>预设名称</span>
+              <input id="gal-clone-name" type="text" value="克隆音色">
+            </label>
+            <div class="gal-clone-actions">
+              <button id="gal-clone-test" class="gal-tbtn" title="用当前参数合成一句试听">🔊 试听</button>
+              <button id="gal-clone-save" class="gal-tbtn" title="把参数存为当前角色的配音预设">💾 存为预设</button>
+            </div>
+            <audio id="gal-clone-audio" class="gal-clone-audio hidden" controls></audio>
+          </div>
+        </div>
+      </div>
+    </section>
     <div id="chat" class="chat">
       <div id="empty" class="empty">
         <div class="empty-logo">✦</div>
@@ -79,8 +292,13 @@
         <div id="ctx-text" class="ctx-text"></div>
         <button id="btn-compress" class="ctx-btn" title="立即把较早的对话历史压缩成摘要（保留最近 8 条原文）">压缩历史</button>
       </div>
+      <div id="attach-bar" class="attach-bar hidden">
+        <img id="attach-thumb" class="attach-thumb" alt="待发送图片">
+        <span class="attach-text">已附带 1 张图片 · 可继续输入文字后一起发送</span>
+        <button id="attach-remove" class="attach-remove" title="移除图片">✕</button>
+      </div>
       <div class="composer-box">
-        <textarea id="input" rows="1" placeholder="给 AI 发送消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <textarea id="input" rows="1" placeholder="给 AI 发送消息…（Enter 发送，Shift+Enter 换行；可附图片后一起提问）"></textarea>
         <div class="composer-toolbar">
           <div class="toolbar-left">
             <button id="btn-think" class="pill" title="开启 / 关闭深度思考">
@@ -95,6 +313,21 @@
             <button id="btn-search" class="pill" title="开启 / 关闭联网搜索">
               <span class="pill-dot">🔍</span>联网搜索
             </button>
+            <button id="btn-mic" class="pill" title="语音输入：点一下开始，边说边出字；再点一下停止">
+              <span class="pill-dot">🎤</span><span id="mic-label">语音输入</span>
+            </button>
+            <button id="btn-denoise" class="pill" title="语音输入降噪：开启后先在本机对音频做流式去噪再识别（适用于嘈杂环境）">
+              <span class="pill-dot">🎛</span>降噪
+            </button>
+            <button id="btn-agent" class="pill" title="开启 / 关闭 Agent 沙箱：模型可在指定目录内自主读写文件（不提供命令行工具）">
+              <span class="pill-dot">🛠</span>Agent
+            </button>
+            <button id="btn-sandbox" class="pill hidden" title="选择 Agent 沙箱目录">
+              <span class="pill-dot">📁</span><span id="sandbox-name">选择目录</span>
+            </button>
+            <button id="btn-outside-read" class="pill hidden" title="允许 Agent 读取沙箱外的文件（只读）：开启后，只有当你明确要求时才会读沙箱外的绝对路径；写入仍只能在沙箱内">
+              <span class="pill-dot">📤</span>读沙箱外
+            </button>
           </div>
           <div class="toolbar-right">
             <div class="swap-slot">
@@ -105,62 +338,271 @@
           </div>
         </div>
       </div>
-      <div class="composer-tip">内容由 AI 生成，请自行甄别 · 图片可直接粘贴或拖入窗口</div>
+      <div id="stt-chip" class="stt-chip hidden">
+        <span class="stt-chip-tag">✨ AI 已矫正</span>
+        <button id="stt-revert" class="stt-revert" type="button">撤回原文</button>
+      </div>
+      <div class="composer-tip">内容由 AI 生成，请自行甄别 · 图片可粘贴/拖入，附上后能继续打字</div>
     </div>
+    </div><!-- /.chat-col -->
   </main>
 </div>
 
 <!-- 设置弹窗 -->
 <div id="modal" class="modal hidden">
-  <div class="modal-card">
-    <div class="modal-head">
-      <div class="modal-tabs">
-        <button class="tab active" data-tab="chat">聊天 API</button>
-        <button class="tab" data-tab="vision">图像 API</button>
-        <button class="tab" data-tab="search">联网搜索</button>
-        <button class="tab" data-tab="profile">用户画像</button>
-        <button class="tab" data-tab="appearance">外观</button>
-        <button class="tab" data-tab="help">功能说明</button>
-      </div>
+  <div class="modal-card settings-card">
+    <div class="modal-head settings-head">
+      <div class="settings-title">设置</div>
       <button id="btn-close-modal" class="modal-close" title="关闭">✕</button>
     </div>
-    <div class="modal-body">
-      <section class="pane" data-pane="chat"></section>
-      <section class="pane hidden" data-pane="vision"></section>
-      <section class="pane hidden" data-pane="profile">
-        <label class="field-label">手动偏好（你主动设置的规则）</label>
-        <textarea id="pf-manual" class="ta" rows="5" placeholder="例如：回答数学题时先给结论再给证明"></textarea>
-        <label class="field-label">用户画像（AI 自主记录）</label>
-        <p class="hint">AI 会在对话中自主增删改偏好，写入「用户画像」知识库，可在知识图谱中查看与编辑；每条偏好即一个节点。写入后回复下方有「已更新记忆」标记，可撤销。</p>
-        <button id="btn-open-profile-kb" class="ghost wide">🧠 打开用户画像知识库</button>
-        <label class="check-row">
-          <input type="checkbox" id="pf-auto-learn"> 允许 AI 记录用户画像（从对话中自主增删改偏好）
-        </label>
-        <label class="field-label">学习指令预设</label>
-        <div class="preset-row">
-          <select id="learn-preset"></select>
-          <button id="btn-save-learn-preset">另存为预设</button>
-          <button id="btn-del-learn-preset">删除预设</button>
+    <div class="settings-body">
+      <nav class="settings-nav">
+        <div class="settings-search" data-search="搜索 查找 定位">
+          <input id="settings-search-input" class="settings-search-input" type="text" autocomplete="off"
+                 placeholder="搜索设置项…（如 密钥 / 压缩 / 主题）">
+          <div id="settings-search-list" class="settings-search-list hidden"></div>
         </div>
-        <label class="field-label">自定义学习指令（留空使用内置默认；支持 {current_auto} {user_input} {ai_reply}）</label>
-        <textarea id="pf-prompt" class="ta" rows="6"></textarea>
-      </section>
-      <section class="pane hidden" data-pane="appearance">
-        <label class="field-label">主题</label>
-        <div class="radio-row">
-          <label><input type="radio" name="theme" value="light"> 浅色</label>
-          <label><input type="radio" name="theme" value="dark"> 深色</label>
+        <div class="snav-group">
+          <div class="snav-group-title">接入与密钥</div>
+          <button class="snav-btn active" data-tab="chat" data-search="api 密钥 key 模型 接口 预设">聊天模型</button>
+          <button class="snav-btn" data-tab="vision" data-search="图片 识图 视觉 api 密钥">视觉模型</button>
+          <button class="snav-btn" data-tab="search" data-search="联网 检索 搜索 bocha 密钥">联网搜索</button>
         </div>
-        <p class="hint">保存后立即生效。</p>
-      </section>
-      <section class="pane hidden" data-pane="help">
-        <p class="hint">下面说明各项功能的实际作用与区别。点击标题可展开/收起。</p>
+        <div class="snav-group">
+          <div class="snav-group-title">对话行为</div>
+          <button class="snav-btn" data-tab="context" data-search="token 上限 压缩 上下文 预留">上下文与压缩</button>
+          <button class="snav-btn" data-tab="think" data-search="思考 cot 思维链 档位">深度思考</button>
+        </div>
+        <div class="snav-group">
+          <div class="snav-group-title">记忆与学习</div>
+          <button class="snav-btn" data-tab="profile" data-search="画像 偏好 记忆 自动记录">用户画像</button>
+          <button class="snav-btn" data-tab="learning" data-search="学习 指令 预设 记录准则">学习指令</button>
+        </div>
+        <div class="snav-group">
+          <div class="snav-group-title">外观与演出</div>
+          <button class="snav-btn" data-tab="appearance" data-search="主题 深色 浅色 外观">主题与外观</button>
+          <button class="snav-btn" data-tab="gal" data-search="gal 演出 立绘 打字机 tts 剧本 特效">GAL 演出</button>
+          <button class="snav-btn" data-tab="speech" data-search="语音 识别 朗读 tts 音色 降噪">语音与朗读</button>
+        </div>
+        <div class="snav-group">
+          <div class="snav-group-title">操作</div>
+          <button class="snav-btn" data-tab="keys" data-search="快捷键 按键 操作 esc ctrl">快捷键</button>
+        </div>
+        <div class="snav-group">
+          <div class="snav-group-title">说明</div>
+          <button class="snav-btn" data-tab="help" data-search="帮助 说明 文档 faq">功能说明</button>
+        </div>
+      </nav>
+      <div class="modal-body settings-content">
+        <section class="pane" data-pane="chat"></section>
+        <section class="pane hidden" data-pane="vision"></section>
+        <section class="pane hidden" data-pane="search"></section>
+        <section class="pane hidden" data-pane="context"></section>
+        <section class="pane hidden" data-pane="think"></section>
+        <section class="pane hidden" data-pane="profile">
+          <h4 class="set-group">手动偏好</h4>
+          <label class="field-label" data-search="手动偏好 规则 回答方式">手动偏好（你主动设置的规则）</label>
+          <textarea id="profile-manual" class="ta" rows="5" placeholder="例如：回答数学题时先给结论再给证明"></textarea>
 
-        <details class="help-sec" open>
-          <summary>深度思考：开关与档位有什么区别</summary>
+          <h4 class="set-group">自动记录</h4>
+          <label class="check-row" data-search="AI 记录 画像 自动 记忆">
+            <input type="checkbox" id="profile-auto-learn"> 允许 AI 记录用户画像（从对话中自主增删改偏好）
+          </label>
+          <p class="hint">AI 会在对话中自主增删改偏好，写入「用户画像」知识库，可在知识图谱中查看与编辑；每条偏好即一个节点。写入后回复下方有「已更新记忆」标记，可撤销。判断准则可在左侧「学习指令」中自定义。</p>
+          <button id="profile-open-kb" class="ghost wide">🧠 打开用户画像知识库</button>
+        </section>
+        <section class="pane hidden" data-pane="learning">
+          <h4 class="set-group">预设</h4>
+          <label class="field-label" data-search="学习指令 预设 记录准则">学习指令预设</label>
+          <div class="preset-row">
+            <select id="learning-preset"></select>
+            <button id="learning-preset-save">另存为预设</button>
+            <button id="learning-preset-del">删除预设</button>
+          </div>
+
+          <h4 class="set-group">自定义指令</h4>
+          <label class="field-label" data-search="学习指令 自定义 占位符">自定义学习指令（留空使用内置默认；支持 {current_auto} {user_input} {ai_reply}）</label>
+          <textarea id="learning-prompt" class="ta" rows="6"></textarea>
+          <p class="hint">决定 AI 在对话中如何判断「该记什么、改什么、删什么」，以及写入用户画像时的准则。详见「功能说明 → 学习指令」。</p>
+        </section>
+        <section class="pane hidden" data-pane="appearance">
+          <h4 class="set-group">主题</h4>
+          <label class="field-label" data-search="主题 深色 浅色 外观">主题</label>
+          <div class="radio-row">
+            <label><input type="radio" name="theme" value="light"> 浅色</label>
+            <label><input type="radio" name="theme" value="dark"> 深色</label>
+          </div>
+          <p class="hint">切换界面明暗；应用窗口的标题栏也会跟随。GAL 演出主题（樱粉 / 夜蓝 / 和风纸）在「GAL 演出」里单独设置，进入 GAL 模式时它会覆盖配色。详见「功能说明 → 主题与外观」。</p>
+        </section>
+        <section class="pane hidden" data-pane="gal">
+          <p class="hint">GAL 演出模式的界面与节奏。快捷键见左侧「快捷键」；台词朗读在「语音与朗读」里配置。</p>
+
+          <h4 class="set-group">演出主题</h4>
+          <label class="field-label" data-search="主题 皮肤 对话框 名字框 选项">演出主题（对话框 / 名字框 / 选项）</label>
+          <div class="radio-row">
+            <label><input type="radio" name="gal-theme" value="sakura"> 樱粉（衬线）</label>
+            <label><input type="radio" name="gal-theme" value="night"> 夜蓝</label>
+            <label><input type="radio" name="gal-theme" value="washi"> 和风纸（衬线）</label>
+          </div>
+          <label class="field-label" data-search="对白框 高度 舞台">对白框最大高度（占舞台高度 %，30–70）</label>
+          <input id="gal-dialog-max" class="field-input" type="number" min="30" max="70" step="1" value="46">
+          <p class="hint">主题会同时作用于 GAL 模式的对白框、说话人名牌与选项按钮，并覆盖到全部 UI（含弹窗）。台词里的 <code>$公式$</code> 与 Markdown 仍照常排版。</p>
+
+          <h4 class="set-group">打字机</h4>
+          <label class="check-row" data-search="打字机 逐字 对白"><input type="checkbox" id="gal-typewriter"> 逐字显示对白</label>
+          <label class="field-label" data-search="打字速度 字每秒 cps 速度">打字速度（字/秒，8–120）</label>
+          <input id="gal-cps" class="field-input" type="number" min="8" max="120" step="1" value="12">
+
+          <h4 class="set-group">关键词特效与立绘</h4>
+          <label class="check-row" data-search="特效 关键词 闪光 震动 黑屏 淡入"><input type="checkbox" id="gal-fx"> 关键词特效（内置 <code>*闪光*</code> / <code>*震动*</code> / <code>*黑屏*</code> / <code>*淡入*</code>）</label>
+          <label class="check-row" data-search="立绘 过渡 换人 动画"><input type="checkbox" id="gal-sprite-fx"> 立绘进出场 / 换人过渡动画</label>
+          <label class="check-row" data-search="工具条 淡出 沉浸"><input type="checkbox" id="gal-bar-auto"> 顶部工具条沉浸式淡出（鼠标移入才实显）</label>
+          <p class="hint">在台词里用 <code>*关键词*</code> 或 <code>【关键词】</code> 触发（不会被朗读）。可自定义关键词、CSS 效果与音效：编辑 <code>data/gal/effects/effects.json</code>，音效放 <code>data/gal/effects/</code>；<code>mode</code> 支持 before / after / loop / stop（loop、stop 用于循环音效）。</p>
+
+          <h4 class="set-group">推进与节奏</h4>
+          <label class="field-label" data-search="对白展示 追加 单行 推进">对白展示</label>
+          <div class="radio-row">
+            <label><input type="radio" name="gal-seg-mode" value="append"> 逐段追加（可回看）</label>
+            <label><input type="radio" name="gal-seg-mode" value="single"> 单行推进（点一下下一句）</label>
+          </div>
+          <label class="check-row" data-search="自动播放 语音 下一句"><input type="checkbox" id="gal-auto"> 单行推进时：语音播完自动切下一句（自动播放）</label>
+          <label class="field-label" data-search="最短展示 自动播放 秒">每句最短展示（秒，自动播放用）</label>
+          <input id="gal-min-show" class="field-input" type="number" min="0" max="5" step="0.1" value="0.6">
+          <p class="hint">GAL 的快捷键（空格 / 回车推进 · 按住 Ctrl 快进 · A 自动播放 · ↑ 回顾 · Esc 关面板 · 点击舞台推进）见左侧「快捷键」。</p>
+
+          <h4 class="set-group">沉浸</h4>
+          <label class="check-row" data-search="思考 显示 沉浸 思考中"><input type="checkbox" id="gal-show-think"> 显示 AI 思考过程（关闭时只显示「思考中…」，更不破坏沉浸感）</label>
+          <label class="check-row" data-search="AI 行为 工具 幕间 搜索"><input type="checkbox" id="gal-show-exec"> 显示 AI 行为（搜索 / 工具等，以「幕间」呈现）</label>
+
+          <h4 class="set-group">剧本</h4>
+          <label class="check-row" data-search="自动写剧本 大纲 剧情 逐幕"><input type="checkbox" id="gal-auto-script"> 由 AI 依据「角色设定 + 用户画像」自己编剧情并逐幕推进</label>
+          <div class="preset-row">
+            <div class="gal-field gal-field-scale">
+              <label class="field-label" data-search="总幕数 幕">总幕数</label>
+              <input id="gal-auto-acts" class="field-input" type="number" min="1" max="12" step="1" value="5">
+            </div>
+            <div class="gal-field gal-field-scale">
+              <label class="field-label" data-search="每幕轮数 轮">每幕轮数</label>
+              <input id="gal-auto-rounds" class="field-input" type="number" min="1" max="12" step="1" value="4">
+            </div>
+          </div>
+          <p class="hint">开启后可在 GAL 工具条 <code>⋯ → 🎬 剧本</code> 查看大纲或重新生成。剧本<strong>按会话独立保存</strong>；生成时会读取该角色的设定与「用户画像」，之后每一幕会结合刚才的对话走向展开，最后一幕自动收束为结局。详见「功能说明 → GAL 推进与自动写剧本」。</p>
+        </section>
+        <section class="pane hidden" data-pane="speech">
+          <h4 class="set-group">语音输入</h4>
+          <label class="check-row" data-search="语音 矫正 标点 错别字">
+            <input type="checkbox" id="speech-polish"> 语音转写结束后自动做一次 AI 矫正
+          </label>
+          <p class="hint">开启后，识别出的文字会先交给「聊天模型」的模型做最小必要的校对（补标点、纠错别字、去口癖），再填入输入框；可在输入框下方点「撤回原文」恢复未矫正的文本。降噪开关在输入框上方的「🎛 降噪」按钮处；实时转写 / 两遍精修无需在此配置。详见「功能说明 → 语音输入」。</p>
+
+          <h4 class="set-group">台词朗读（TTS）</h4>
+          <label class="check-row" data-search="朗读 tts 自动 台词"><input type="checkbox" id="speech-tts-enabled"> 在 GAL 模式自动朗读角色台词</label>
+          <label class="field-label" data-search="服务商 tts provider">服务商</label>
+          <select id="speech-tts-provider" class="field-input">
+            <option value="edge">Edge TTS（免费 · 无需密钥，推荐）</option>
+            <option value="openai">OpenAI 兼容（POST /v1/audio/speech）</option>
+            <option value="gpt-sovits">本地 GPT-SoVITS（POST /tts）</option>
+          </select>
+          <label class="field-label" data-search="接口地址 tts url 服务地址">接口地址（Edge 可留空；OpenAI 留空用官方；GPT-SoVITS 默认 127.0.0.1:9880）</label>
+          <input id="speech-tts-url" class="field-input" type="text"
+                 placeholder="openai: https://api.openai.com ｜ gpt-sovits: http://127.0.0.1:9880 ｜ edge: 留空">
+          <label class="field-label" data-search="API 密钥 tts key">API 密钥（Edge / GPT-SoVITS 可留空）</label>
+          <input id="speech-tts-key" class="field-input" type="password">
+          <div class="preset-row">
+            <input id="speech-tts-model" class="field-input" type="text" placeholder="模型：tts-1（仅 OpenAI 用）">
+            <input id="speech-tts-voice" class="field-input" type="text" list="speech-tts-voice-list"
+                   placeholder="音色：zh-CN-XiaoxiaoNeural / alloy">
+          </div>
+          <datalist id="speech-tts-voice-list"></datalist>
+          <div class="preset-row">
+            <button id="speech-tts-test" class="ghost" type="button">🔊 测试朗读</button>
+            <button id="speech-tts-voices" class="ghost" type="button">查看 Edge 中文音色</button>
+          </div>
+          <p class="hint">GAL 模式的台词会按标点切句后逐句合成播放；若该立绘配了「绑定音频」，默认优先播放它。Edge TTS 免费且无需密钥，但需本机能访问微软服务。工具条 <code>⋯ → 🎙 快速克隆</code> 可用参考音频克隆音色（需本地 GPT-SoVITS 服务）。详见「功能说明 → 台词朗读」。</p>
+        </section>
+      <section class="pane hidden" data-pane="keys">
+          <p class="hint">下列快捷键与实际行为一一对应。标了「生效条件」的，只在满足条件时才生效。</p>
+
+          <h4 class="set-group">全局</h4>
+          <table class="key-table">
+            <tr><th>按键</th><th>作用</th><th>生效条件</th></tr>
+            <tr><td><kbd>Esc</kbd></td><td>依次关闭 GAL 的浮层：抽屉菜单 → 快速克隆 → 剧本面板 → 回顾面板</td><td>有对应浮层打开时（不限模式）</td></tr>
+          </table>
+
+          <h4 class="set-group">GAL 演出</h4>
+          <table class="key-table">
+            <tr><th>按键</th><th>作用</th><th>生效条件</th></tr>
+            <tr><td><kbd>空格</kbd> / <kbd>Enter</kbd></td><td>推进一句；正在逐字显示时先立即补全</td><td rowspan="4">GAL 模式、焦点不在输入框、角色编辑器未打开</td></tr>
+            <tr><td>按住 <kbd>Ctrl</kbd></td><td>快进（逐字显示速度 ×6）</td></tr>
+            <tr><td><kbd>A</kbd></td><td>切换自动播放</td></tr>
+            <tr><td><kbd>↑</kbd></td><td>打开「回顾对话」（回顾面板已打开时不重复开）</td></tr>
+            <tr><td>点击舞台任意处</td><td>等同「推进」</td><td>不点在按钮 / 面板上</td></tr>
+            <tr><td><kbd>Esc</kbd></td><td>关闭 GAL 角色面板（焦点在角色搜索框时）</td><td>角色列表面板打开时</td></tr>
+          </table>
+
+          <h4 class="set-group">编辑器 IDE</h4>
+          <table class="key-table">
+            <tr><th>按键</th><th>作用</th><th>生效条件</th></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>保存当前文件</td><td rowspan="3">IDE 模式</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>P</kbd></td><td>打开文件快速跳转</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd></td><td>打开命令面板</td></tr>
+            <tr><td><kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>在命令面板 / 文件面板内选择、执行、关闭</td><td>对应面板打开时</td></tr>
+            <tr><td><kbd>Enter</kbd></td><td>执行沙箱内搜索</td><td>焦点在搜索框时</td></tr>
+          </table>
+
+          <h4 class="set-group">输入框</h4>
+          <table class="key-table">
+            <tr><th>按键</th><th>作用</th></tr>
+            <tr><td><kbd>Enter</kbd></td><td>发送消息</td></tr>
+            <tr><td><kbd>Shift</kbd> + <kbd>Enter</kbd></td><td>换行（不发送）</td></tr>
+            <tr><td><kbd>Enter</kbd></td><td>提交 Agent 提问卡的回答</td></tr>
+          </table>
+
+          <h4 class="set-group">设置面板（本页）</h4>
+          <table class="key-table">
+            <tr><th>按键</th><th>作用</th><th>生效条件</th></tr>
+            <tr><td><kbd>Esc</kbd></td><td>关闭设置；搜索框有内容时先清空搜索</td><td rowspan="2">设置面板打开时</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>保存并关闭</td></tr>
+            <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>切换左侧分类（到头不循环）</td><td>焦点不在输入框 / 下拉 / 文本域时</td></tr>
+            <tr><td><kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>搜索结果：选择 / 跳转 / 清空</td><td>焦点在搜索框时</td></tr>
+          </table>
+        </section>
+      <section class="pane hidden" data-pane="help">
+        <p class="hint">下面说明各项功能的实际作用与区别。点击标题可展开/收起；也可用左上角搜索框直接定位设置项。快捷键的完整清单见左侧「快捷键」。</p>
+
+        <h4 class="set-group">模型接入</h4>
+
+        <details class="help-sec" data-search="图像识别 视觉 api 聊天模型 协议 dashscope openai">
+          <summary>图像识别：独立视觉 API vs 聊天模型</summary>
+          <div class="help-body">
+            <ul>
+              <li>默认用「视觉模型」里配置的视觉 API。</li>
+              <li>开启「<strong>使用聊天模型识别图片</strong>」后，改由「聊天模型」的模型与密钥识图（要求聊天模型自带视觉能力，如 GPT-4o / deepseek-flash / 通义兼容模式）。</li>
+              <li>两种视觉协议的区别：<br>
+                · <strong>DashScope 原生</strong>：图片放 <code>input.messages[].content</code> 的 <code>{"image": ...}</code>，结果取 <code>output.choices[0].message.content</code>（qwen-vl-plus / max）。<br>
+                · <strong>OpenAI 兼容</strong>：图片放 <code>messages[].content</code> 的 <code>{"type":"image_url"}</code>，结果取 <code>choices[0].message.content</code>（GPT-4o、vLLM / Ollama、deepseek-flash）。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="余额 balance deepseek 充值 赠金">
+          <summary>账户余额</summary>
+          <div class="help-body">
+            <p>在「聊天模型 / 视觉模型」面板查看余额，打开设置时自动查一次，也可点「刷新」。</p>
+            <ul>
+              <li><strong>DeepSeek</strong>：按接口地址自动识别，调用官方 <code>GET /user/balance</code>。</li>
+              <li><strong>其它厂商</strong>：若提供余额接口，在「余额查询地址」填写（GET + Bearer）；留空且非 DeepSeek 则显示"不支持"。</li>
+            </ul>
+          </div>
+        </details>
+
+        <h4 class="set-group">对话行为</h4>
+
+        <details class="help-sec" data-search="深度思考 档位 思维链 cot reasoning">
+          <summary>深度思考：开关、档位与参数模式</summary>
           <div class="help-body">
             <p><strong>开关</strong>（输入框左下「✦ 深度思考」）：开启后模型在给答案前先输出一段思维链（CoT），回答通常更准，但更慢、更费 token。思维链会以可折叠的「已深度思考」块展示。</p>
-            <p><strong>档位</strong>（低 / 中 / 高 / 最高）：控制"想多久"。本程序按当前「思考参数模式」把它作为 <code>reasoning_effort</code> 发送。<strong>DeepSeek 官方会对档位做映射</strong>（依其官方文档）：</p>
+            <p><strong>档位</strong>（低 / 中 / 高 / 最高）：控制"想多久"。本程序按「思考参数模式」把它作为 <code>reasoning_effort</code> 发送。<strong>DeepSeek 官方会对档位做映射</strong>（依其官方文档）：</p>
             <table>
               <tr><th>本程序档位</th><th>发送值</th><th>DeepSeek 实际生效</th></tr>
               <tr><td>低</td><td>low</td><td>low</td></tr>
@@ -168,58 +610,74 @@
               <tr><td>高</td><td>high</td><td>high</td></tr>
               <tr><td>最高</td><td>max</td><td>max</td></tr>
             </table>
-            <p class="help-tip">注意：在 DeepSeek 上「中」与「高」效果相同（都映射为 high），真正有区别的是「低 / 高 / 最高」。其它厂商对 <code>reasoning_effort</code> 的支持与映射可能不同，甚至不支持（会被忽略或报错）。</p>
-            <p class="help-tip">另：思考模式下 DeepSeek 会忽略 <code>temperature</code> / <code>top_p</code> 等采样参数（不报错但不生效）。</p>
-          </div>
-        </details>
-
-        <details class="help-sec">
-          <summary>思考参数模式（设置 → 聊天 API）</summary>
-          <div class="help-body">
-            <p>决定"深度思考"开关如何传给接口，避免不支持的接口报错：</p>
+            <p><strong>参数模式</strong>（设置 →「深度思考」）决定上述开关如何传给接口，避免不支持的接口报错：</p>
             <ul>
               <li><strong>自动</strong>：按接口地址是否含 <code>deepseek</code> 自动判断。</li>
               <li><strong>不发送</strong>：完全不带思考参数，最通用。</li>
               <li><strong>OpenAI 兼容</strong>：开启时发 <code>reasoning_effort</code>，关闭时不发（无法表达"禁用"）。</li>
               <li><strong>DeepSeek</strong>：开启→ <code>thinking.type=enabled</code>，关闭→ <code>disabled</code>；档位走 <code>reasoning_effort</code>。</li>
             </ul>
+            <p class="help-tip">注意：在 DeepSeek 上「中」与「高」效果相同（都映射为 high），真正有区别的是「低 / 高 / 最高」。其它厂商对 <code>reasoning_effort</code> 的支持与映射可能不同，甚至不支持（会被忽略或报错）。</p>
+            <p class="help-tip">另：思考模式下 DeepSeek 会忽略 <code>temperature</code> / <code>top_p</code> 等采样参数（不报错但不生效）。</p>
           </div>
         </details>
 
-        <details class="help-sec">
-          <summary>对话上限（输入框上方的进度条）</summary>
+        <details class="help-sec" data-search="上下文 上限 token 压缩 进度条">
+          <summary>上下文上限（输入框上方的进度条）</summary>
           <div class="help-body">
-            <p>估算当前会话离模型上下文上限还有多远，避免"聊到一半突然报错"。</p>
+            <p>估算当前会话离模型上下文上限还有多远，避免"聊到一半突然报错"。相关设置项在「上下文与压缩」。</p>
             <ul>
               <li><strong>单位换算</strong>（按本项目的估算口径）：1 个汉字 / 中文标点 ≈ 0.6 token，1 个英文字符 ≈ 0.3 token。即 1000 token ≈ 1700 汉字；128000 token ≈ 21 万汉字；1000000 token ≈ 170 万汉字。填写时<strong>只写数字</strong>：128K 写 <code>128000</code>，1M 写 <code>1000000</code>。</li>
               <li><strong>已用</strong> ≈ 本地估算 × 校准系数；校准系数取最近一次接口返回的真实 <code>prompt_tokens</code> ÷ 当时估算。</li>
               <li><strong>剩余</strong> = 上限 − 已用；剩余低于上限 10% / 5% 时进度条转黄 / 红并弹出提醒。</li>
               <li><strong>自动压缩</strong>：达到上限时（「已用 + 为回复预留」超过上限），AI 会<strong>自动压缩你的对话历史记录</strong>——把较早的对话总结成摘要（不是删除），保留最近 8 条原文，之后照常发送。</li>
               <li><strong>手动压缩</strong>：点进度条右侧的「压缩历史」可立即压缩一次；压缩点之后的消息不足 9 条、或未配聊天密钥时会给出提示。</li>
-              <li>上限 / 预留可在「聊天 API」里按所用模型填写（默认 128000 / 4096）。估算为近似值，仅供参考。</li>
+              <li>上限 / 预留可在「上下文与压缩」里按所用模型填写（默认 128000 / 4096）。估算为近似值，仅供参考。</li>
             </ul>
           </div>
         </details>
 
-        <details class="help-sec">
-          <summary>联网搜索</summary>
+        <details class="help-sec" data-search="联网 搜索 检索 改写 抓取 来源">
+          <summary>联网搜索（改写 / 抓取 / 来源）</summary>
           <div class="help-body">
-            <p>输入框的「🔍 联网搜索」开关开启后：<strong>改写检索式 → 并行搜索 → 抓取正文 → 注入提示 → 再让模型回答</strong>；回答上方会出现可折叠的「参考来源」列表。后端可选博查 / Tavily 两个服务商；在「联网搜索」设置里可配置密钥、结果条数，以及是否开启「查询改写」（更准）与「抓取正文」（更全）。</p>
+            <p>输入框的「🔍 联网搜索」开关开启后：<strong>改写检索式 → 并行搜索 → 抓取正文 → 注入提示 → 再让模型回答</strong>；回答上方会出现可折叠的「参考来源」列表。</p>
+            <ul>
+              <li><strong>服务商 / 密钥</strong>：在「联网搜索」设置里选服务商（内置博查 / Tavily）并填密钥；接口地址留空则用该服务商的默认地址。</li>
+              <li><strong>查询改写</strong>：用「聊天模型」把你的问题转成 2–3 个关键词式检索式，口语化长问句的召回明显更好；未配聊天密钥时自动回落用原问题。</li>
+              <li><strong>抓取正文</strong>：对命中的网页取正文（而不是只有摘要），信息密度更高；可设抓取条数。抓取优先走 Jina Reader（免密钥），失败回落直连抓取，再失败则保留摘要。</li>
+              <li><strong>结果条数</strong>：每个检索式各取多少条。</li>
+              <li><strong>注入不入库</strong>：抓到的正文只用于本轮提示，不会写进会话文件。</li>
+            </ul>
           </div>
         </details>
 
-        <details class="help-sec">
+        <h4 class="set-group">记忆与学习</h4>
+
+        <details class="help-sec" data-search="用户画像 手动偏好 自动记录 记忆 撤销">
           <summary>用户画像：手动偏好 vs AI 自主记录</summary>
           <div class="help-body">
             <ul>
-              <li><strong>手动偏好</strong>：你自己写的规则（如"回答数学题先给结论"），<strong>每轮都会注入</strong>，优先级最高。</li>
-              <li><strong>自动学习</strong>：AI 在<strong>主对话里直接读写</strong>记忆——需要记录时会自己动手，它输出的写入指令用户看不到；写入后回复下方会出现「已更新记忆」标记，点「撤销」即可回滚。判断准则来自「学习指令预设」，可自定义。</li>
+              <li><strong>手动偏好</strong>：你自己写的规则（如"回答数学题先给结论"），<strong>每轮都会注入</strong>，优先级最高。在「用户画像」里编辑。</li>
+              <li><strong>自动学习</strong>：打开「允许 AI 记录用户画像」后，AI 在<strong>主对话里直接读写</strong>记忆——需要记录时会自己动手，它输出的写入指令用户看不到；写入后回复下方会出现「已更新记忆」标记，点「撤销」即可回滚。判断准则来自「学习指令预设」，可自定义。</li>
               <li><strong>写什么、改什么</strong>：由 AI 自主判断——明确要求「记住 / 删掉那条 / 改一下」会直接执行；新旧信息矛盾时以更晚、更明确者为准，<strong>不会让两条矛盾条目并存</strong>。</li>
+              <li><strong>查看与编辑</strong>：点「🧠 打开用户画像知识库」可跳到知识图谱里查看 / 修改每条偏好。</li>
             </ul>
           </div>
         </details>
 
-        <details class="help-sec">
+        <details class="help-sec" data-search="学习指令 预设 占位符 记录准则">
+          <summary>学习指令（预设与自定义）</summary>
+          <div class="help-body">
+            <p>决定 AI 在对话中<strong>如何判断「该记什么、改什么、删什么」</strong>，以及写入用户画像时的准则。</p>
+            <ul>
+              <li><strong>预设下拉</strong>有三类来源：<em>内置默认</em>、<em>你保存的预设</em>、<em>当前未保存的自定义内容</em>（切走前会提示）。</li>
+              <li><strong>自定义指令</strong>：留空即用内置默认。支持三个占位符：<code>{current_auto}</code>（当前已记录的画像）、<code>{user_input}</code>（用户这句话）、<code>{ai_reply}</code>（AI 的回复）。</li>
+              <li><strong>另存为 / 删除预设</strong>可把当前内容存成命名预设，随时切换。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="知识库 记忆 图谱 检索 锁定">
           <summary>知识库与记忆（侧栏 🧠 知识库）</summary>
           <div class="help-body">
             <ul>
@@ -228,67 +686,166 @@
               <li><strong>用户画像库</strong>：系统库（AI 自主写入），<strong>每轮固定注入</strong>，不允许删除 / 改名。</li>
               <li><strong>AI 可否修改</strong>：分两级——会话级「允许 AI 写本会话记忆」与库级「允许 AI 修改本库」；被<strong>锁定</strong>的节点 AI 不会改。</li>
               <li><strong>检索方式</strong>：先按关键词从记忆 / 知识库预筛候选；候选超过 20 条时才让模型挑选相关条目，最后把选中条目注入提示。</li>
-              <li><strong>图谱编辑</strong>：拖拽移动、双击空白新增、「＋ 节点」新增、点节点改内容、连线 / 删边（画布左上角工具栏）、删除节点。</li>
+              <li><strong>图谱编辑</strong>：拖拽移动、双击空白新增、「＋ 节点」新增、点节点改内容、连线 / 删边（画布左上角工具栏）、删除节点；节点可调<strong>大小与颜色</strong>（AI 也能设，用于区分重要度 / 分组）。</li>
+              <li><strong>图谱力学</strong>：右侧「⚙ 图谱设置」可调<strong>斥力 / 中心引力 / 弹簧强度 / 线段长度</strong>，拖动即时生效，设置随该知识库保存。</li>
             </ul>
           </div>
         </details>
 
-        <details class="help-sec">
+        <details class="help-sec" data-search="图谱 关系 箭头 单向 双向 词表">
           <summary>图谱关系类型（箭头代表什么）</summary>
           <div class="help-body">
-            <p>知识库的边是<strong>有向</strong>的：箭头从 A 指向 B，读作「A <em>关系</em> B」。
-              关系取自下面的固定词表，图上按类型着色；AI 也只能从词表里选（写别的说法会自动归一到最近的类型）。</p>
+            <p>知识库的边分<strong>单向</strong>和<strong>双向</strong>两种：
+              <strong>单向</strong>箭头从 A 指向 B，读作「A <em>关系</em> B」（如因果、条件这类有先后的）；
+              <strong>双向</strong>两端都有箭头，表示互相（如相关、同义、对立这类 symmetric 关系默认画双向）。
+              关系取自下面的固定词表（标注「⇄ 默认双向」的即为对称关系），图上按类型着色；AI 也只能从词表里选（写别的说法会自动归一到最近的类型）。</p>
             <ul id="help-relations"></ul>
-            <p class="hint">你可以点节点后用「＋ 连线」手动建立关系；AI 整理记忆时若发现两个已有条目之间存在明确关系，也会<strong>主动连边</strong>。</p>
+            <p class="hint">你可以点节点后用「＋ 连线」手动建立关系，并在表单里选择「单向 →」或「双向 ⇄」；AI 整理记忆时若发现两个已有条目之间存在明确关系，也会<strong>主动连边</strong>（方向按关系类型自动判断，也可由 AI 显式指定）。</p>
           </div>
         </details>
 
-        <details class="help-sec">
-          <summary>图像识别：独立视觉 API vs 聊天模型</summary>
+        <h4 class="set-group">外观与演出</h4>
+
+        <details class="help-sec" data-search="主题 深色 浅色 外观 标题栏">
+          <summary>主题与外观（浅色 / 深色 / GAL 主题）</summary>
           <div class="help-body">
             <ul>
-              <li>默认用「图像 API」里配置的视觉模型。</li>
-              <li>开启「<strong>使用聊天模型识别图片</strong>」后，改由「聊天 API」的模型与密钥识图（要求聊天模型自带视觉能力，如 GPT-4o / deepseek-flash / 通义兼容模式）。</li>
-              <li>两种视觉协议的区别：<br>
-                · <strong>DashScope 原生</strong>：图片放 <code>input.messages[].content</code> 的 <code>{"image": ...}</code>，结果取 <code>output.choices[0].message.content</code>。<br>
-                · <strong>OpenAI 兼容</strong>：图片放 <code>messages[].content</code> 的 <code>{"type":"image_url"}</code>，结果取 <code>choices[0].message.content</code>。</li>
+              <li><strong>界面主题</strong>（设置 →「主题与外观」）：浅色 / 深色，切换后界面与应用窗口标题栏一起变。</li>
+              <li><strong>GAL 演出主题</strong>（设置 →「GAL 演出」）：樱粉 / 夜蓝 / 和风纸三套，决定对白框、名字牌与选项的观感。</li>
+              <li><strong>覆盖关系</strong>：进入 GAL 模式时，GAL 主题会<strong>覆盖到全部 UI</strong>（含设置弹窗、提示、弹窗等）；退出 GAL 模式即恢复界面主题。</li>
             </ul>
           </div>
         </details>
 
-        <details class="help-sec">
-          <summary>账户余额</summary>
+        <details class="help-sec" data-search="gal 演出 主题 打字机 特效 立绘 对白框">
+          <summary>GAL 演出：主题 / 打字机 / 特效 / 立绘</summary>
           <div class="help-body">
-            <p>在「聊天 API / 图像 API」面板查看余额，打开设置时自动查一次，也可点「刷新」。</p>
             <ul>
-              <li><strong>DeepSeek</strong>：按接口地址自动识别，调用官方 <code>GET /user/balance</code>。</li>
-              <li><strong>其它厂商</strong>：若提供余额接口，在「余额查询地址」填写（GET + Bearer）；留空且非 DeepSeek 则显示"不支持"。</li>
+              <li><strong>演出主题</strong>：三套配色（樱粉 / 夜蓝 / 和风纸），作用于对白框、说话人名牌与选项按钮。</li>
+              <li><strong>对白框最大高度</strong>：占舞台高度的百分比（30–70）；对白框是浮在立绘之上的半透明层，立绘会自动避让。</li>
+              <li><strong>打字机</strong>：「逐字显示对白」开关 + 速度（8–120 字/秒，线性生效）。关闭即整句直接出现。</li>
+              <li><strong>关键词特效</strong>：在台词里写 <code>*关键词*</code> 或 <code>【关键词】</code> 触发（不会被朗读）。可自定义关键词、CSS 效果与音效——编辑 <code>data/gal/effects/effects.json</code>，音效放 <code>data/gal/effects/</code>；<code>mode</code> 支持 before / after / loop / stop（loop、stop 用于循环音效）。</li>
+              <li><strong>立绘过渡</strong>：换人或进出场时的淡入淡出动画；工具条还可设为「沉浸式淡出」（鼠标移入才实显）。</li>
             </ul>
           </div>
         </details>
 
-        <details class="help-sec">
+        <details class="help-sec" data-search="gal 推进 自动播放 剧本 幕 轮数 大纲">
+          <summary>GAL 推进与自动写剧本</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>对白展示</strong>：「逐段追加（可回看）」会把一轮话累积显示；「单行推进」一次只显示一句，点一下出下一句。</li>
+              <li><strong>自动播放</strong>：单行推进时，语音播完自动切下一句（快捷键 <code>A</code>）；「每句最短展示」控制切换的最短间隔。</li>
+              <li><strong>AI 自动写剧本</strong>：打开后由 AI 依据「角色设定 + 用户画像」先写一份<strong>分幕大纲</strong>，再<strong>逐幕展开</strong>推进剧情，最后一幕自动收束为结局。</li>
+              <li><strong>总幕数 / 每幕轮数</strong>：控制大纲的规模与每幕的对话长度。</li>
+              <li><strong>剧本按会话独立保存</strong>；可在 GAL 工具条 <code>⋯ → 🎬 剧本</code> 查看大纲或重新生成。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="语音 识别 转写 矫正 降噪 两遍识别">
+          <summary>语音输入（实时转写 + AI 矫正）</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>实时转写</strong>：点「🎤 语音输入」后<strong>边说边出字</strong>，文字实时进入输入框；再点一下停止。识别在<strong>本机</strong>完成（sherpa-onnx 流式模型），音频不出电脑。</li>
+              <li><strong>两遍识别（更准）</strong>：说话时用流式模型出字；<strong>停止后</strong>再用离线模型（SenseVoice）对整段音频重新解码，用更准的结果覆盖实时文本。需先运行 <code>scripts/fetch_speech_model.py final</code> 下载精修模型；未下载时自动沿用流式结果。</li>
+              <li><strong>降噪</strong>（默认关闭）：点「🎛 降噪」开启后，会先在本机对音频做<strong>流式去背景噪声</strong>（DPDFNet）再识别，嘈杂环境下更准；安静环境可关掉。需先运行 <code>scripts/fetch_speech_model.py denoise</code> 下载降噪模型。</li>
+              <li><strong>AI 矫正</strong>（默认关闭）：在「设置 → 语音与朗读」里打开后，停止时会用「聊天模型」的模型对文本做最小必要校对（补标点 / 纠错别字 / 去口癖）。</li>
+              <li><strong>可改可撤回</strong>：矫正后的文本可以直接编辑；输入框下方的「撤回原文」按钮可一键恢复未矫正的原始转写。</li>
+              <li><strong>发送键保护</strong>：<strong>录音中、识别中、AI 矫正中</strong>发送键都会置灰不可点（Enter 也不会发送），避免"发出去的"与"随后矫正的"两段文本同时留存。</li>
+              <li><strong>模型</strong>：需先运行 <code>scripts/fetch_speech_model.py streaming</code> 下载流式中文模型；缺失时点麦克风会有提示。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="朗读 tts 音色 克隆 gpt-sovits edge">
+          <summary>台词朗读（TTS）：三种后端与音色克隆</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>三种后端</strong>：<strong>Edge TTS</strong>（免费、免密钥，推荐）/ OpenAI 兼容 <code>/v1/audio/speech</code> / 本地 <strong>GPT-SoVITS</strong>。</li>
+              <li><strong>切句播放</strong>：GAL 模式的台词按标点切句后逐句合成播放；若该立绘配了「绑定音频」，默认优先播放它（可在角色设置里调优先级）。</li>
+              <li><strong>音色</strong>：可直接填音色名（如 <code>zh-CN-XiaoxiaoNeural</code> / <code>alloy</code>），也可点「查看 Edge 中文音色」列出可选值。每个角色还能存多套「配音预设」，在 GAL 工具条一键切换。</li>
+              <li><strong>测试朗读</strong>：点「🔊 测试朗读」用当前填写的配置合成一句试听。</li>
+              <li><strong>音色克隆</strong>：GAL 工具条 <code>⋯ → 🎙 快速克隆</code>，给一段 5–10 秒参考音频 + 参考文本即可克隆（GPT-SoVITS 零样本）；带微调权重的角色会在合成前自动切换加载。需本机跑一个 GPT-SoVITS 服务。</li>
+            </ul>
+          </div>
+        </details>
+
+        <h4 class="set-group">编辑器与 Agent</h4>
+
+        <details class="help-sec" data-search="ide solo monaco vscode 编辑器">
+          <summary>IDE / Solo 模式（VS Code 风格工作区）</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>切换</strong>：左侧栏顶部「Solo | IDE」切换；状态会保存，下次打开还记得。</li>
+              <li><strong>Solo</strong>：以对话为主。</li>
+              <li><strong>IDE</strong>：VS Code 风格布局 —— 最左<strong>活动栏</strong>（资源管理器 / 搜索 / 在 VS Code 打开）、<strong>侧边栏文件树</strong>、中间<strong>多标签编辑器</strong>、底部<strong>状态栏</strong>（路径 / 编码 / 行列 / 语言），右侧仍是窄栏对话。工作区根目录 = <strong>当前会话的沙箱</strong>，切会话会自动换。</li>
+              <li><strong>编辑器</strong>：内置 <strong>Monaco</strong>（VS Code 同款，<strong>本地内置、离线可用</strong>）——语法高亮、多光标、查找替换、MiniMap、代码折叠。</li>
+              <li><strong>快捷键</strong>：<code>Ctrl+S</code> 保存、<code>Ctrl+P</code> 快速打开文件、<code>Ctrl+Shift+P</code> 命令面板；完整清单见左侧「快捷键」。</li>
+              <li><strong>文件操作</strong>：新建文件 / 新建文件夹 / 重命名 / 删除；可同时开多个标签，未保存的标签带 <code>●</code> 标记。</li>
+              <li><strong>搜索</strong>：点活动栏放大镜，在沙箱内按内容或文件名搜索。</li>
+              <li><strong>编码</strong>：读取自动识别 UTF-8 / GBK，保存时<strong>按原编码写回</strong>，中文文件不乱码。</li>
+              <li><strong>AI 改动同步</strong>：AI 每次写/改/删/移动文件后，目录树自动刷新，并把改过的文件<strong>高亮</strong>；若改的正是你打开的文件且你没在编辑，会自动重载。</li>
+              <li><strong>与 VS Code 联动</strong>：点活动栏「🧩」可<strong>在本机 VS Code 中打开当前沙箱</strong>（用你自己的 VS Code 和它的全部插件）；命令面板里的「从 VS Code 导入设置与扩展清单」会<strong>只读</strong>读取你的 VS Code 设置（字号 / 缩进 / 换行 / 空白字符 / 滚轮缩放）并应用到编辑器，同时列出你已装的扩展（<strong>仅展示，不安装</strong>）。</li>
+              <li><strong>安全</strong>：与 Agent 同一套沙箱约束——越界、<code>.git / .venv / node_modules / __pycache__</code> 与 <code>data/</code> 都不会出现在工作区里。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="agent 沙箱 文件 读写 提问 撤回">
+          <summary>Agent 沙箱（文件读写）与中途提问</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>开启</strong>：点输入框上方的「🛠 Agent」开启，再点「📁」选择<strong>沙箱目录</strong>；设置按会话保存。</li>
+              <li><strong>能力</strong>：模型可在沙箱内 <code>列目录 / 读文件 / 搜索 / 写文件 / 改文件 / 建目录 / 移动 / 删除</code>；<strong>不提供命令行工具</strong>。</li>
+              <li><strong>安全</strong>：只接受沙箱内<strong>相对路径</strong>，越界、绝对路径直接拒绝；<code>.git / .venv / node_modules / __pycache__</code> 与本项目 <code>data/</code> 永久禁止访问。</li>
+              <li><strong>改动可撤回</strong>：每次写操作生成一张工具卡片，点卡片上的「撤回」即可恢复该次改动。</li>
+              <li><strong>读沙箱外</strong>：输入框的「📤 读沙箱外」开关（仅 Agent 开启时显示）可让 AI 在你<strong>明确要求</strong>时读取沙箱外的文件——<strong>只读，写入仍只在沙箱内</strong>。</li>
+              <li><strong>中途提问</strong>：需要你决策时，AI 会在对话里弹出一张<strong>提问卡</strong>（可点选项或自己输入），你回答后它会<strong>原地继续</strong>，不用重新发消息。<strong>提问与 Agent 无关，不选沙箱也能用</strong>。</li>
+            </ul>
+          </div>
+        </details>
+
+        <h4 class="set-group">其它</h4>
+
+        <details class="help-sec" data-search="快捷键 按键 esc ctrl 操作">
+          <summary>快捷键总览</summary>
+          <div class="help-body">
+            <p>完整清单（全局 / GAL 演出 / 编辑器 IDE / 输入框 / 设置面板）见左侧「<strong>快捷键</strong>」分类。</p>
+            <ul>
+              <li><strong>输入框</strong>：<code>Enter</code> 发送、<code>Shift+Enter</code> 换行。</li>
+              <li><strong>GAL</strong>：<code>空格</code> / <code>Enter</code> 推进、按住 <code>Ctrl</code> 快进、<code>A</code> 自动播放、<code>↑</code> 打开回顾、<code>Esc</code> 关面板。</li>
+              <li><strong>设置</strong>：<code>Esc</code> 关闭、<code>Ctrl+S</code> 保存、<code>←</code> / <code>→</code> 切分类；左上角搜索框可直接搜「快捷键」跳过来。</li>
+              <li><strong>IDE</strong>：<code>Ctrl+S</code> 保存、<code>Ctrl+P</code> 打开文件、<code>Ctrl+Shift+P</code> 命令面板。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="用量 统计 token 折线图">
           <summary>用量统计（侧栏 📊 用量统计）</summary>
           <div class="help-body">
             <p>每次回复下方会显示本次消耗的 token；「用量统计」里可按近 7 天 / 近 30 天 / 近 12 个月查看按模型与按日 / 月的明细，并用折线图展示趋势。</p>
           </div>
         </details>
 
-        <details class="help-sec">
+        <details class="help-sec" data-search="消息 复制 撤回 修改 重新发言 源码">
           <summary>消息操作（悬停消息时显示）</summary>
           <div class="help-body">
             <ul>
               <li><strong>复制</strong>：复制消息文本。</li>
               <li><strong>撤回</strong>（用户消息）：连同它后面的 AI 回复一起移除。</li>
               <li><strong>修改</strong>（用户消息）：行内编辑后重新发送，其后的回复会被丢弃并重新生成。</li>
+              <li><strong>删除本条</strong>：只删这一条，不影响其它消息。</li>
               <li><strong>重新发言</strong>（AI 回复）：丢弃这条回复及之后的消息，重新生成。</li>
               <li><strong>选择文本</strong>（AI 回复）：切换成源码视图，这样复制到的是 Markdown / LaTeX <strong>源码</strong>（而非渲染后的文字 / 公式）。</li>
             </ul>
           </div>
         </details>
       </section>
+      </div>
     </div>
     <div class="modal-foot">
+      <div class="foot-note">改动保存后立即生效，无需重启（<kbd>Ctrl</kbd>+<kbd>S</kbd> 保存、<kbd>Esc</kbd> 关闭）。</div>
       <button id="btn-save" class="primary">保存</button>
       <button id="btn-cancel" class="ghost">取消</button>
     </div>
@@ -346,6 +903,15 @@
           <input id="kd-category" class="field-input" placeholder="分类（如 喜好 / 禁忌 / 事实）">
           <textarea id="kd-content" class="ta" rows="4" placeholder="内容"></textarea>
           <input id="kd-tags" class="field-input" placeholder="标签（逗号分隔）">
+          <div class="kb-knob-row">
+            <span class="kb-knob-label">大小</span>
+            <input type="range" id="kd-size" class="kb-range" min="8" max="60" step="1" value="16">
+            <span class="kb-knob-val" id="kd-size-val">16</span>
+          </div>
+          <div class="kb-knob-row">
+            <span class="kb-knob-label">颜色</span>
+            <div id="kd-color" class="kb-colors"></div>
+          </div>
           <label class="check-row"><input type="checkbox" id="kd-locked"> 锁定（AI 不可修改）</label>
           <div class="kb-node-btns">
             <button id="kd-save" class="primary">应用</button>
@@ -358,11 +924,39 @@
           <div class="hint" id="ke-from"></div>
           <select id="ke-to" class="field-input"></select>
           <select id="ke-relation" class="field-input"></select>
+          <select id="ke-dir" class="field-input" title="箭头方向">
+            <option value="1">单向 →（起点到终点）</option>
+            <option value="0">双向 ⇄（互相）</option>
+          </select>
           <div class="kb-node-btns">
             <button id="ke-add" class="primary">添加连线</button>
             <button id="ke-cancel" class="ghost">取消</button>
           </div>
         </div>
+        <details class="kb-graphset">
+          <summary>⚙ 图谱设置（力与线段长度）</summary>
+          <div class="kb-knob-row">
+            <span class="kb-knob-label">斥力</span>
+            <input type="range" id="kg-repel" class="kb-range" min="1000" max="20000" step="250">
+            <span class="kb-knob-val" id="kg-repel-val"></span>
+          </div>
+          <div class="kb-knob-row">
+            <span class="kb-knob-label">中心引力</span>
+            <input type="range" id="kg-center" class="kb-range" min="0" max="1" step="0.02">
+            <span class="kb-knob-val" id="kg-center-val"></span>
+          </div>
+          <div class="kb-knob-row">
+            <span class="kb-knob-label">弹簧强度</span>
+            <input type="range" id="kg-link" class="kb-range" min="0.005" max="0.2" step="0.005">
+            <span class="kb-knob-val" id="kg-link-val"></span>
+          </div>
+          <div class="kb-knob-row">
+            <span class="kb-knob-label">线段长度</span>
+            <input type="range" id="kg-distance" class="kb-range" min="30" max="400" step="5">
+            <span class="kb-knob-val" id="kg-distance-val"></span>
+          </div>
+          <button id="kg-reset" class="ghost kb-reset">恢复默认</button>
+        </details>
       </aside>
     </div>
   </div>
@@ -412,6 +1006,125 @@
         <div id="nt-graph" class="notes-graph"></div>
         <div id="nt-backlinks" class="notes-backlinks hidden"></div>
       </aside>
+    </div>
+  </div>
+</div>
+
+<!-- GAL 角色 / 立绘 / 剧本编辑 -->
+<div id="gal-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head settings-head">
+      <div class="settings-title">GAL 角色编辑</div>
+      <button id="gal-modal-close" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <details class="gal-sec" open>
+        <summary>基本</summary>
+        <div class="gal-sec-body">
+          <label class="field-label">角色 id（目录名，仅字母 / 数字 / _ / -；新建后不可改）</label>
+          <input id="gal-ed-id" class="field-input" type="text" placeholder="如 alice">
+          <div class="preset-row gal-three">
+            <div class="gal-field">
+              <label class="field-label">角色名</label>
+              <input id="gal-ed-name" class="field-input" type="text" placeholder="如 爱丽丝">
+            </div>
+            <div class="gal-field gal-field-color">
+              <label class="field-label">主题色</label>
+              <div class="preset-row">
+                <input id="gal-ed-color" class="gal-color" type="color" value="#7c9cff">
+                <button id="gal-ed-color-clear" type="button" class="ghost">默认</button>
+              </div>
+            </div>
+            <div class="gal-field gal-field-scale">
+              <label class="field-label">立绘缩放</label>
+              <input id="gal-ed-scale" class="field-input" type="number" min="0.2" max="3" step="0.05" value="1">
+            </div>
+          </div>
+          <div class="gal-label-row">
+            <label class="field-label">角色设定（注入系统提示）</label>
+            <button id="gal-ed-draft" type="button" class="ghost" title="用「设置 → 聊天模型」生成">🤖 AI 帮写</button>
+          </div>
+          <textarea id="gal-ed-profile" class="ta" rows="5" placeholder="性格、说话方式、背景…（可点右上「AI 帮写」）"></textarea>
+        </div>
+      </details>
+
+      <details class="gal-sec" open>
+        <summary>立绘</summary>
+        <div class="gal-sec-body">
+          <div id="gal-ed-sprites" class="gal-ed-sprites"></div>
+          <datalist id="gal-ed-filelist"></datalist>
+          <div class="gal-ed-actions">
+            <button id="gal-ed-add-sprite" class="ghost">＋ 添加立绘</button>
+            <label class="ghost gal-ed-upload-label">
+              上传图片…<input id="gal-ed-upload" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" multiple hidden>
+            </label>
+          </div>
+          <p class="hint">立绘文件放在 <code>data/gal/characters/&lt;id&gt;/sprites/</code>；「情绪标签」用逗号分隔，AI 的 emotion 命中任一标签即切到该图；「绑定音频」填该图对应的台词音频相对路径（可选）。</p>
+        </div>
+      </details>
+
+      <details class="gal-sec">
+        <summary>配音</summary>
+        <div class="gal-sec-body">
+          <div class="preset-row">
+            <select id="gal-ed-tts-preset"></select>
+            <button id="gal-ed-tts-add" type="button">＋ 新建预设</button>
+            <button id="gal-ed-tts-del" type="button">删除预设</button>
+            <button id="gal-ed-tts-test" type="button">🔊 试听</button>
+          </div>
+          <div class="preset-row">
+            <select id="gal-ed-tts-provider" class="field-input">
+              <option value="">（跟随全局服务）</option>
+              <option value="edge">Edge TTS（免费·免密钥）</option>
+              <option value="openai">OpenAI 兼容 /v1/audio/speech</option>
+              <option value="gpt-sovits">本地 GPT-SoVITS /tts</option>
+            </select>
+            <input id="gal-ed-tts-voice" class="field-input" type="text" list="speech-tts-voice-list"
+                   placeholder="音色：zh-CN-XiaoxiaoNeural / alloy">
+          </div>
+          <div class="preset-row">
+            <input id="gal-ed-tts-model" class="field-input" type="text" placeholder="模型（OpenAI 用，如 tts-1）">
+            <input id="gal-ed-tts-speed" class="field-input" type="number" min="0.25" max="4" step="0.05" placeholder="语速（默认 1.0）">
+          </div>
+          <input id="gal-ed-tts-url" class="field-input" type="text" placeholder="服务地址（留空用全局/默认）">
+          <div class="preset-row">
+            <select id="gal-ed-tts-ref" class="field-input" title="GPT-SoVITS 参考音频：用于克隆角色音色">
+              <option value="">（不使用参考音频）</option>
+            </select>
+            <select id="gal-ed-tts-lang" class="field-input" title="参考音频 / 台词语言">
+              <option value="">语言：默认（zh）</option>
+              <option value="zh">zh</option>
+              <option value="en">en</option>
+              <option value="ja">ja</option>
+            </select>
+            <label class="ghost gal-ed-upload-label">上传参考音频…<input id="gal-ed-ref-upload" type="file" accept="audio/*,.wav,.mp3,.ogg,.m4a,.flac" hidden></label>
+          </div>
+          <input id="gal-ed-tts-prompt" class="field-input" type="text" placeholder="参考音频里说的那句话（GPT-SoVITS 需要，越准越像）">
+          <div class="preset-row">
+            <select id="gal-ed-tts-gpt" class="field-input" title="GPT 微调权重（.ckpt）：需本地 GPT-SoVITS，可选">
+              <option value="">GPT 权重：不使用</option>
+            </select>
+            <select id="gal-ed-tts-sovits" class="field-input" title="SoVITS 微调权重（.pth）：需本地 GPT-SoVITS，可选">
+              <option value="">SoVITS 权重：不使用</option>
+            </select>
+          </div>
+          <p class="hint">选「gpt-sovits」时：填「参考音频 + 参考文本」即可克隆该角色音色；参考音频须为 GPT-SoVITS 服务端可读的本地文件（与本程序同机时可直接用这里上传的文件）。若该角色有微调权重（.ckpt / .pth），选中后合成前会自动切换加载。同一个角色可以存多套音色预设（例如「日常」「激动」），在 GAL 顶部工具条的下拉里一键切换。</p>
+        </div>
+      </details>
+
+      <details class="gal-sec">
+        <summary>剧本</summary>
+        <div class="gal-sec-body">
+          <textarea id="gal-ed-story" class="ta" rows="6"
+            placeholder='{"start":"n1","nodes":[{"id":"n1","type":"limited_turn","maxRounds":6,"transitions":["n2"],"defaultTo":"n2","prompt":"本节点的剧情要求"}]}'></textarea>
+          <label class="check-row"><input type="checkbox" id="gal-ed-story-on"> 让本会话启用该剧本（从 start 节点开始）</label>
+          <p class="hint">节点类型：<code>limited_turn</code>（该节点最多 maxRounds 轮，到上限后由 AI 在 transitions 里选下一个）/ <code>free_chat</code>（不限轮）/ <code>ending</code>（终点）。</p>
+        </div>
+      </details>
+    </div>
+    <div class="modal-foot">
+      <button id="gal-ed-save" class="primary">保存</button>
+      <button id="gal-ed-cancel" class="ghost">取消</button>
     </div>
   </div>
 </div>

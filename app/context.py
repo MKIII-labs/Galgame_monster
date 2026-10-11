@@ -116,7 +116,12 @@ def build_context_messages(s, system_prompt):
             messages.insert(0, {"role": "system", "content": block})
     cut = int(s.get("summary_upto") or 0)
     for m in s.get("messages", [])[cut:]:
-        messages.append({"role": m["role"], "content": m.get("content") or ""})
+        text = m.get("content") or ""
+        # 图片描述存在独立字段里：界面只显示用户打的字，模型能看到图片内容
+        if m.get("vision"):
+            text = (text + "\n\n【图片内容】\n" + m["vision"]) if text \
+                   else ("【用户上传了一张图片】\n" + m["vision"])
+        messages.append({"role": m["role"], "content": text})
     return messages
 
 
