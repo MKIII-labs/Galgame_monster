@@ -133,6 +133,8 @@ Galgame_monster/
 │   ├── uploads/          # 聊天图片附件（按会话分目录，随消息/会话删除清理）
 │   ├── models/           # 语音识别模型（下载后放这里）
 │   └── .browser_profile/
+├── Galgame_monster.bat   # Windows 启动器（双击即用；桌面快捷方式指向它，%~dp0 自定位）
+├── app.ico               # 应用图标（桌面快捷方式显示的图案）
 ├── requirements.txt      # Python 依赖
 ├── .gitignore
 └── readme.md             # 本文件
@@ -186,6 +188,16 @@ python main.py
 启动后会自动打开应用窗口。**首次运行**会自动弹出设置，请先填写「聊天模型 → API 密钥」。
 
 退出：关闭应用窗口即可；或在控制台按 `Ctrl+C`。
+
+### 5. 建桌面快捷方式（可选，Windows）
+
+想双击桌面图标就启动：
+
+1. 右键 `Galgame_monster.bat` → **发送到 → 桌面快捷方式**
+2. 右键那个快捷方式 → **属性 → 更改图标** → 选根目录的 `app.ico`
+
+> `Galgame_monster.bat` 用 `%~dp0`（自身所在目录）定位，所以**项目放到哪个盘、哪个文件夹都能用**，不需要改路径。
+> 它默认用 `.venv` 里的 `pythonw.exe`（无控制台窗口）；找不到 `.venv` 时自动回落系统的 `pythonw`。
 
 ---
 
