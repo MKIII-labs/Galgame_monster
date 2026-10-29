@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 
-APP_VERSION = "2.0"
+APP_VERSION = "3.0.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(ROOT, "web")
 DATA_DIR = os.path.join(ROOT, "data")             # 运行时数据（整目录 gitignore）
