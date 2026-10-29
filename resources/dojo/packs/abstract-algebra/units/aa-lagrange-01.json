@@ -1,0 +1,33 @@
+{
+  "id": "aa-lagrange-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "有限群 G 的子群 H，其阶 |H| 满足：",
+    "options": [
+      { "key": "A", "text": "|H| 整除 |G|" },
+      { "key": "B", "text": "|H| = |G|" },
+      { "key": "C", "text": "|H| 与 |G| 互素" },
+      { "key": "D", "text": "与 |G| 没有必然关系" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "拉格朗日定理：|G| = |H| · [G:H]，所以子群的阶一定整除群的阶。反过来，整除 |G| 的数不一定有对应子群。",
+    "signals": ["有限群", "子群阶", "整除"],
+    "traps": {
+      "B": "只有 H=G 时才相等。",
+      "C": "互素是相反方向的特例，不普遍成立。",
+      "D": "整除关系是确定的。"
+    }
+  },
+  "card": {
+    "title": "子群阶整除群阶",
+    "trigger": "有限群的子群",
+    "first_step": "用拉格朗日定理",
+    "pitfall": "把「整除」误当成「存在」"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "拉格朗日定理" }
+}

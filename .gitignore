@@ -2,20 +2,69 @@
 /data/
 
 # 开发笔记（纯本地，不随项目发布）
-/docs/
+# 注意：docs/ 下只忽略笔记，screenshots/ 需要随 README 一起发布
+/docs/*
+!/docs/screenshots/
+
+# 个人文件（简历、本机开发日志）
+/resume.pdf
+/resume.html
+/NOTE.md
+
+# 临时审计 / 探针产物
+/.tmp_audit/
+/_probe.pdf
+/scripts/_tmp_*.py
 
 # Python 缓存
 **/__pycache__/
 *.pyc
+*.pyo
+
+# 测试 / 静态检查缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # 虚拟环境（.venv 自带 .gitignore，但显式忽略更稳妥）
 .venv/
 venv/
+*.egg-info/
+
+# 密钥 / 证书（本项目不需要入库任何凭证）
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 数据库（运行时库都在 data/；这条防将来换目录后误传）
+*.db
+*.db-wal
+*.db-shm
+
+# 日志 / 运行状态文件
+*.log
+/server.json
+/app_port.txt
 
 # 编辑器 / 系统
 .DS_Store
 Thumbs.db
-*.log
+desktop.ini
 
 # IDE / Agent 过程文件（方案稿等，不随项目发布）
 .trae/
+
+# 本地备份归档（旧版本文件与脚本临时产物）
+/_backup/
+
+# Electron 窗口壳的依赖（desktop/ 自己 npm install 得到，不入库）
+/desktop/node_modules/
+
+# 打包产物
+/build/
+/dist/

@@ -1,0 +1,33 @@
+{
+  "id": "ca-cauchy-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "柯西积分定理 ∮_C f(z)dz = 0 的常用条件是：",
+    "options": [
+      { "key": "A", "text": "f 在简单闭曲线 C 及其内部解析" },
+      { "key": "B", "text": "f 在 C 上连续" },
+      { "key": "C", "text": "f 在 C 内有界" },
+      { "key": "D", "text": "C 是任意曲线" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "柯西积分定理要求 f 在 C 及内部解析（单连通区域内无奇点）。只在边界连续或内部有界都不够；C 若不是闭曲线，结论也不成立。",
+    "signals": ["围道积分", "闭曲线", "问条件"],
+    "traps": {
+      "B": "边界连续不能排除内部奇点。",
+      "C": "有界不能保证解析，例如 1/z 在去心区域有界但含奇点。",
+      "D": "不是闭曲线时积分一般不为 0。"
+    }
+  },
+  "card": {
+    "title": "柯西定理看内部解析",
+    "trigger": "∮_C f dz",
+    "first_step": "先找 C 内部有没有奇点",
+    "pitfall": "只看边界连续"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "柯西积分定理" }
+}

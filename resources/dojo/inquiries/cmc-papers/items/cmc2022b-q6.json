@@ -1,0 +1,365 @@
+{
+  "id": "cmc2022b-q6",
+  "title": "等值点与换元比较：证明 ab<1 和 b+ln a>1",
+  "subject": "数学分析",
+  "track": "竞赛",
+  "minutes": 30,
+  "source": {
+    "contest": "CMC",
+    "year": 2022,
+    "paper": "数学B类",
+    "problem": "6",
+    "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十四届全国大学生数学竞赛初赛（数学B类）试题及参考答案.pdf",
+    "note": "改编自官方真题，题干为教学改写"
+  },
+  "exam": {
+    "topic": "函数不等式与唯一性",
+    "weight": "CMC 数学类初赛",
+    "variant": "常见考法"
+  },
+  "prerequisites": [
+    "函数单调性与极值",
+    "对数不等式",
+    "换元与函数比较"
+  ],
+  "brief": "本题研究由同一个函数在两点取值相等所导出的不等式与唯一性。核心不是求显式解，而是用 f(x)=x-ln x 的单调性定位 a<1<b，再通过换元与关键不等式推出 ab<1 和 b+ln a>1。训练学生识别函数结构、安排证明主线、检验条件边界，并把同一方法迁移到带参数的同类方程。",
+  "acts": [
+    {
+      "id": "cmc2022b-q6-a1",
+      "label": "原题在问什么",
+      "ability": "framing",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "设 0<a<b 且 a-ln a=b-ln b。要证明 ab<1 与 b+ln a>1。首先应如何理解这个条件？",
+        "options": [
+          {
+            "key": "A",
+            "text": "把左右两边看成同一个函数 f(x)=x-ln x 在两个点的取值相等；f 在 (0,1) 减、在 (1,∞) 增，故先定位 a<1<b。"
+          },
+          {
+            "key": "B",
+            "text": "由 a-ln a=b-ln b 可直接相减得到 a=b，所以题设矛盾。"
+          },
+          {
+            "key": "C",
+            "text": "先解出 ln a 和 ln b 的具体表达式，再逐项估计。"
+          },
+          {
+            "key": "D",
+            "text": "因为 ln 递增，等式说明 a 与 b 必在 1 的同侧。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "等式本质是 f(a)=f(b)，其中 f(x)=x-ln x。f'(x)=1-1/x，故 f 在 (0,1) 上递减、在 (1,∞) 上递增，最小值在 x=1。若 0<a<b 且 f(a)=f(b)，则只能有 a<1<b。",
+        "signals": [
+          "同一函数取值相等",
+          "f'(x)=1-1/x",
+          "a<1<b"
+        ],
+        "traps": {
+          "B": "a-ln a=b-ln b 不能直接推出 a=b；f 不是全局单射。",
+          "C": "该方程一般没有简单显式解，研究函数结构比硬解更有效。",
+          "D": "等差数列不在 1 的同侧；若 a,b 都在 1 的同侧且不同，由严格单调性不可能取等。"
+        }
+      },
+      "card": {
+        "title": "等值点定位卡",
+        "trigger": "出现 f(a)=f(b) 且 f 有唯一极小值",
+        "first_step": "求 f' 判断单调区间",
+        "pitfall": "不要误以为 f 全局单调"
+      }
+    },
+    {
+      "id": "cmc2022b-q6-a2",
+      "label": "具体数值探路",
+      "ability": "evidence",
+      "primitive": "numeric",
+      "judge": "L1",
+      "minutes": 4,
+      "payload": {
+        "situation": "取 a=1/2。方程 b-ln b=1/2+ln 2 在 b>1 有唯一解。求 ab 的近似值（保留两位小数）。"
+      },
+      "expert": {
+        "value": 0.88,
+        "tolerance": 0.02,
+        "why": "1/2+ln 2≈1.193147，解 b-ln b≈1.193147 得 b≈1.756，因此 ab≈0.5×1.756≈0.878，保留两位小数为 0.88，与待证 ab<1 一致。",
+        "signals": [
+          "f(1/2)>1",
+          "b>1",
+          "ab≈0.88"
+        ]
+      },
+      "card": {
+        "title": "数值探路卡",
+        "trigger": "给定 a 的值验证不等式",
+        "first_step": "用 f(1/2)>1 确定 b>1 并数值求根",
+        "pitfall": "b 不是 1/a；ab<1 是待证结论"
+      }
+    },
+    {
+      "id": "cmc2022b-q6-a3",
+      "label": "条件边界与反例",
+      "ability": "condition",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "若把条件 0<a<b 放宽为 a>0,b>0 且 a-ln a=b-ln b（不再要求 a<b），下列哪项仍必然成立？",
+        "options": [
+          {
+            "key": "A",
+            "text": "ab<1"
+          },
+          {
+            "key": "B",
+            "text": "b+ln a>1"
+          },
+          {
+            "key": "C",
+            "text": "a=b=1"
+          },
+          {
+            "key": "D",
+            "text": "若 a≠b，则 (a-1)(b-1)<0"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "D",
+        "why": "f(x)=x-ln x 在 (0,1) 上严格递减、在 (1,∞) 上严格递增，且在 x=1 取唯一最小值。若 a≠b 但 f(a)=f(b)，两点必须分居 1 的两侧，故 (a-1)(b-1)<0。",
+        "signals": [
+          "唯一最小值在 1",
+          "等值点分居 1 两侧",
+          "去掉 a<b 后不能保留有序结论"
+        ],
+        "traps": {
+          "A": "反例 a=b=2 时等式成立，但 ab=4，不满足 ab<1。",
+          "B": "反例 a=b=1/2 时等式成立，但 b+ln a=1/2-ln 2<1。",
+          "C": "任意 a=b>0 都使等式成立，不限于 a=b=1。"
+        }
+      },
+      "card": {
+        "title": "条件边界卡",
+        "trigger": "去掉 a<b 或正性条件",
+        "first_step": "检查 a=b 情形和等值点是否跨极小值",
+        "pitfall": "不能把有序情形的结论直接套到无序情形"
+      }
+    },
+    {
+      "id": "cmc2022b-q6-a4",
+      "label": "证明主线排序",
+      "ability": "method",
+      "primitive": "order",
+      "judge": "L2",
+      "minutes": 7,
+      "payload": {
+        "situation": "下面给出利用换元 x=-ln a 的证明主线，请按逻辑顺序排列。记 φ(t)=t-ln t，且 φ 在 (1,∞) 上递增。",
+        "steps": [
+          {
+            "id": "s1",
+            "text": "由 f(x)=x-ln x 的单调性（在 (0,1) 减、在 (1,∞) 增）及 0<a<b、f(a)=f(b)，得 a<1<b。"
+          },
+          {
+            "id": "s2",
+            "text": "令 x=-ln a>0，则 a=e^{-x}，原等式化为 b-ln b=e^{-x}+x，即 φ(b)=e^{-x}+x。"
+          },
+          {
+            "id": "s3",
+            "text": "对 x>0 有 e^x-e^{-x}>2x，故 φ(e^x)=e^x-x>e^{-x}+x=φ(b)；由 φ 在 (1,∞) 递增得 b<e^x。"
+          },
+          {
+            "id": "s4",
+            "text": "于是 ab=e^{-x}b<1。"
+          },
+          {
+            "id": "s5",
+            "text": "对 x>0 有 ln(1+x)>1-e^{-x}，故 φ(1+x)=1+x-ln(1+x)<e^{-x}+x=φ(b)；由 φ 递增得 b>1+x。"
+          },
+          {
+            "id": "s6",
+            "text": "因此 b+ln a=b-x>1。"
+          }
+        ]
+      },
+      "expert": {
+        "order": [
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5",
+          "s6"
+        ],
+        "why": "先用单调性确定 a<1<b，才能把 b 与 1 比较；换元后 φ(b)=e^{-x}+x。要证 ab<1 等价于 b<e^x，通过 e^x-e^{-x}>2x 得 φ(e^x)>φ(b)。要证 b+ln a>1 等价于 b>1+x，通过 ln(1+x)>1-e^{-x} 得 φ(1+x)<φ(b)。",
+        "signals": [
+          "先定位 a<1<b",
+          "换元 x=-ln a",
+          "用 φ 在 (1,∞) 递增比较"
+        ]
+      },
+      "card": {
+        "title": "换元比较法",
+        "trigger": "等式 x-ln x=y-ln y 且 x<y",
+        "first_step": "先由单调性定位 x<1<y，再令 x=-ln a",
+        "pitfall": "不要直接解 b；用 φ 在 (1,∞) 递增比较"
+      }
+    },
+    {
+      "id": "cmc2022b-q6-a5",
+      "label": "关键不等式与条件辨析",
+      "ability": "argument",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "在换元 x=-ln a>0 后，已知 φ(t)=t-ln t 在 (1,∞) 递增，且 b>1。下列判断中正确的是（多选）。",
+        "options": [
+          {
+            "key": "A",
+            "text": "x>0 时 e^x-e^{-x}>2x；由此可由 φ(e^x)>φ(b) 推出 b<e^x。"
+          },
+          {
+            "key": "B",
+            "text": "x>0 时 ln(1+x)>1-e^{-x}；由此可由 φ(1+x)<φ(b) 推出 b>1+x。"
+          },
+          {
+            "key": "C",
+            "text": "φ(t)=t-ln t 在 (1,∞) 上严格递增。"
+          },
+          {
+            "key": "D",
+            "text": "由 a<1 可直接推出 ab<1。"
+          },
+          {
+            "key": "E",
+            "text": "b+ln a>1 等价于 b>1+x（其中 x=-ln a）。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": [
+          "A",
+          "B",
+          "C",
+          "E"
+        ],
+        "why": "A 中 e^x-e^{-x}>2x 确保 φ(e^x)>φ(b)，再用 φ 在 (1,∞) 严格递增得 b<e^x。B 中 ln(1+x)>1-e^{-x} 确保 φ(1+x)<φ(b)，同样用单调性得 b>1+x。C 是基本单调性。E 只是把 x=-ln a 代入不等式的等价改写。D 不成立，a<1 只给出 a 的上界，不能控制 b。",
+        "signals": [
+          "e^x-e^{-x}>2x",
+          "ln(1+x)>1-e^{-x}",
+          "φ 在 (1,∞) 严格递增"
+        ]
+      },
+      "card": {
+        "title": "关键不等式卡",
+        "trigger": "需要比较 φ(e^x)、φ(1+x) 与 φ(b)",
+        "first_step": "把差值写成 e^x-e^{-x}-2x 或 ln(1+x)-1+e^{-x}",
+        "pitfall": "忘记 b>1 才能使用 φ 在 (1,∞) 递增"
+      }
+    },
+    {
+      "id": "cmc2022b-q6-a6",
+      "label": "同类变式：带系数方程",
+      "ability": "reflection",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "situation": "把原方程改为 x-2ln x=y-2ln y，并仍设 0<x<y。用缩放 X=x/2,Y=y/2 可化回原题。下列哪项是与原题对应的正确结论？",
+        "options": [
+          {
+            "key": "A",
+            "text": "xy<4 且 y+2ln x>2+2ln2。"
+          },
+          {
+            "key": "B",
+            "text": "xy<2 且 y+2ln x>2+2ln2。"
+          },
+          {
+            "key": "C",
+            "text": "xy<4 且 y+ln x>2+2ln2。"
+          },
+          {
+            "key": "D",
+            "text": "xy<1 且 y+2ln x>2+2ln2。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "令 X=x/2,Y=y/2，则 0<X<Y 且 X-ln X=Y-ln Y。由原题结论 XY<1 得 xy<4；由 Y+ln X>1 得 y/2+ln(x/2)>1，即 y+2ln x>2+2ln2。",
+        "signals": [
+          "缩放 X=x/2,Y=y/2",
+          "XY<1 推出 xy<4",
+          "第二结论按系数同步缩放"
+        ],
+        "traps": {
+          "B": "缩放只给 xy<4，不是 xy<2。",
+          "C": "第二式应为 y+2ln x>2+2ln2；当 x,y 接近 2 时 y+ln x 不满足该下界。",
+          "D": "xy<1 是没有按系数 2 缩放的结果；正确上界是 xy<4。"
+        }
+      },
+      "card": {
+        "title": "缩放迁移卡",
+        "trigger": "方程 x-c ln x=y-c ln y",
+        "first_step": "令 X=x/c,Y=y/c 化回原方程",
+        "pitfall": "第二结论要按尺度改写，不能只把 1 照搬"
+      }
+    }
+  ],
+  "artifact": {
+    "prompt": "用 150–300 字回答：这道题的条件、关键证明步骤、去掉 a<b 后的反例，以及如何把方法迁移到 x-2ln x=y-2ln y。要求说清每一步在证明哪一条结论。",
+    "rubric": [
+      {
+        "id": "r1",
+        "text": "把等式识别为 f(x)=x-ln x 两点取值相等，并用单调性得到 a<1<b",
+        "keywords": [
+          "x-ln x",
+          "单调",
+          "a<1<b"
+        ]
+      },
+      {
+        "id": "r2",
+        "text": "用换元 x=-ln a 将结论转化为 b<e^x 与 b>1+x",
+        "keywords": [
+          "换元",
+          "b<e^x",
+          "b>1+x"
+        ]
+      },
+      {
+        "id": "r3",
+        "text": "正确使用关键不等式 e^x-e^{-x}>2x、ln(1+x)>1-e^{-x} 完成比较",
+        "keywords": [
+          "e^x-e^{-x}",
+          "ln(1+x)",
+          "比较"
+        ]
+      },
+      {
+        "id": "r4",
+        "text": "给出反例说明条件不可随意去掉：a=b=2 与 a=b=1/2",
+        "keywords": [
+          "反例",
+          "a=b=2",
+          "a=b=1/2"
+        ]
+      },
+      {
+        "id": "r5",
+        "text": "通过缩放 X=x/2,Y=y/2 迁移到 x-2ln x=y-2ln y，得到 xy<4 与 y+2ln x>2+2ln2",
+        "keywords": [
+          "缩放",
+          "xy<4",
+          "2+2ln2"
+        ]
+      }
+    ],
+    "expert_sample": "核心是把等式看成 f(x)=x-ln x 在两个点的函数值相等。由单调性并结合 0<a<b 得 a<1<b。证明时作换元 x=-ln a>0，把目标化为 b<e^x 与 b>1+x；再用 φ(t)=t-ln t 在 (1,∞) 递增进行比较，关键是比较 e^x-e^{-x}>2x 和 ln(1+x)>1-e^{-x}。条件边界也重要：反例说明去掉 a<b 后，a=b=2 会破坏 ab<1，a=b=1/2 会破坏 b+ln a>1。最后可迁移到 x-2ln x=y-2ln y：用缩放 X=x/2,Y=y/2 回到原题，得到 xy<4 与 y+2ln x>2+2ln2。"
+  }
+}

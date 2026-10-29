@@ -1,0 +1,34 @@
+{
+  "id": "cmc-post-01",
+  "test": "post",
+  "ability": "assumption",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "求 lim(x→0) (cos x − 1 + x²/2)/x⁴，cos x 至少要展开到几阶？",
+    "options": [
+      { "key": "A", "text": "二阶" },
+      { "key": "B", "text": "三阶" },
+      { "key": "C", "text": "四阶" },
+      { "key": "D", "text": "一阶" }
+    ]
+  },
+  "expert": {
+    "choice": "C",
+    "why": "cos x = 1 − x²/2 + x⁴/24 − …，二阶项会与式子里的 −1 + x²/2 抵消，必须保留到四阶，极限是 1/24。",
+    "signals": ["分子是 cos x 与它的二阶截断之差", "分母是 x⁴"],
+    "traps": {
+      "A": "展开到二阶时分子恰好为 0，信息全丢。",
+      "B": "cos x 没有三阶项，展到三阶等价于只到二阶。",
+      "D": "一阶只有常数项，抵消后仍为 0。"
+    }
+  },
+  "card": {
+    "title": "抵消到哪一阶",
+    "trigger": "函数减去它的低阶截断",
+    "first_step": "对照分母次数，找到第一个不抵消的项",
+    "pitfall": "展开阶数不足，分子变成 0"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-post-01" }
+}

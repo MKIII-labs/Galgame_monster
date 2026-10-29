@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "bug_fix",
+      "title": "修复三个失败的测试",
+      "tags": ["code", "debug"],
+      "difficulty": "easy",
+      "max_turns": 12,
+      "timeout": 300,
+      "fixture": "bug_fix",
+      "prompt": "修复 calc.py 里的缺陷，让 `python -m pytest -q` 全部通过。不要修改 test_calc.py，不要删除或跳过测试。完成后用一句话说明改了什么。",
+      "expect": {
+        "command": {"argv": ["python", "-m", "pytest", "-q"], "exit": 0, "timeout": 120},
+        "files": [
+          {"path": "calc.py", "min_bytes": 50},
+          {"path": "test_calc.py", "text_contains": "def test_"}
+        ],
+        "tool_calls": {"require": ["run_command"], "min": 1}
+      }
+    },
+    {
+      "id": "refactor",
+      "title": "重命名函数并保持测试通过",
+      "tags": ["code", "refactor"],
+      "difficulty": "easy",
+      "max_turns": 10,
+      "timeout": 300,
+      "fixture": "refactor",
+      "prompt": "把 legacy.py 里的 `process_data` 重命名为 `normalize_records`（包括所有调用点），保持行为不变。不要修改 test_legacy.py。完成后跑一遍 `python -m pytest -q`。",
+      "expect": {
+        "command": {"argv": ["python", "-m", "pytest", "-q"], "exit": 0, "timeout": 120},
+        "files": [
+          {"path": "legacy.py", "text_contains": "def normalize_records"},
+          {"path": "legacy.py", "text_not_contains": "def process_data"},
+          {"path": "test_legacy.py", "text_contains": "normalize_records"}
+        ],
+        "tool_calls": {"require_any": ["edit_file", "write_file"], "min": 1}
+      }
+    },
+    {
+      "id": "tool_pipeline",
+      "title": "批量读取并汇总为 JSON",
+      "tags": ["code", "io", "pipeline"],
+      "difficulty": "easy",
+      "max_turns": 12,
+      "timeout": 300,
+      "fixture": "tool_pipeline",
+      "prompt": "读取 data/ 目录下所有 .txt 文件，取每个文件的第一行非空文本，把「文件名 → 第一行」写成 summary.json（JSON 对象，UTF-8）。不要修改 data/ 里的文件。",
+      "expect": {
+        "files": [
+          {"path": "summary.json", "json_keys": 5},
+          {"path": "summary.json", "text_contains": "01.txt"},
+          {"path": "summary.json", "text_contains": "05.txt"}
+        ],
+        "tool_calls": {"require_any": ["read_file", "run_script", "run_command"], "min": 2}
+      }
+    },
+    {
+      "id": "asset_mc",
+      "title": "生成像素贴图并打包图集",
+      "tags": ["asset", "image", "script"],
+      "difficulty": "medium",
+      "max_turns": 18,
+      "timeout": 420,
+      "fixture": "asset_mc",
+      "prompt": "用脚本生成 4 张 16×16 的像素贴图：grass（草绿底 + 深绿斑点）、dirt（棕色底 + 深棕斑点）、stone（灰色底 + 深灰斑点）、wood（棕色底 + 深色年轮）。不要下载外部素材。把它们按 2×2 排布打包成 atlas.png（32×32），并写 manifest.json：{\"frames\":[{\"name\":\"grass\",\"x\":0,\"y\":0,\"w\":16,\"h\":16}, ...]}。完成后检查图片尺寸与帧数。",
+      "expect": {
+        "files": [
+          {"path": "atlas.png", "image": {"width_min": 32, "height_min": 32}},
+          {"path": "manifest.json", "text_contains": "frames"},
+          {"path": "manifest.json", "text_contains": "grass"}
+        ],
+        "tool_calls": {"require_any": ["run_command", "run_script", "asset_atlas"], "min": 1}
+      }
+    },
+    {
+      "id": "web_voxel",
+      "title": "单文件 canvas 体素小岛",
+      "tags": ["web", "visual", "canvas"],
+      "difficulty": "medium",
+      "max_turns": 18,
+      "timeout": 420,
+      "fixture": "web_voxel",
+      "prompt": "写一个单文件 index.html：用 canvas（2D 或 WebGL）渲染一个由立方体组成的等距小岛，至少 3×3 个方块，带持续渲染的帧循环和缓慢旋转。不要依赖外网资源。完成后用 render_check 或 visual_check 自检。",
+      "expect": {
+        "files": [{"path": "index.html", "min_bytes": 800}],
+        "visual": {
+          "path": "index.html",
+          "console_errors_max": 0,
+          "blank_score_max": 0.85,
+          "fps_min": 10
+        }
+      }
+    },
+    {
+      "id": "ui_restore",
+      "title": "按规格还原页面",
+      "tags": ["web", "ui", "visual"],
+      "difficulty": "easy",
+      "max_turns": 14,
+      "timeout": 330,
+      "fixture": "ui_restore",
+      "prompt": "按 spec.md 实现 index.html：只用一个文件，内联 CSS，不依赖外网资源。完成后用 render_check 自检布局问题。",
+      "expect": {
+        "files": [
+          {"path": "index.html", "text_contains": ["任务面板", "开始", "v1"]}
+        ],
+        "visual": {"path": "index.html", "console_errors_max": 0}
+      }
+    }
+  ]
+}

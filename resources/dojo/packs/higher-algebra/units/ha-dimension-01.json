@@ -1,0 +1,23 @@
+{
+  "id": "ha-dimension-01",
+  "ability": "method",
+  "primitive": "numeric",
+  "judge": "L1",
+  "minutes": 3,
+  "payload": {
+    "situation": "设 U、W 是同一线性空间的子空间，dim U = 3，dim W = 4，dim(U ∩ W) = 1。求 dim(U + W)。"
+  },
+  "expert": {
+    "value": 6,
+    "tolerance": 0.001,
+    "why": "维数公式：dim(U+W) = dim U + dim W − dim(U∩W) = 3 + 4 − 1 = 6。",
+    "signals": ["两个子空间", "已知各自的维数与交的维数", "求和空间的维数"]
+  },
+  "card": {
+    "title": "和空间维数：相加再减交",
+    "trigger": "求 dim(U+W)",
+    "first_step": "写 dimU + dimW − dim(U∩W)",
+    "pitfall": "忘记减去交的维数"
+  },
+  "source_ref": { "doc": "self-authored:higher-algebra", "loc": "线性空间" }
+}

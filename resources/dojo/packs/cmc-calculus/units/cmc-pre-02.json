@@ -1,0 +1,34 @@
+{
+  "id": "cmc-pre-02",
+  "test": "pre",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "要证明存在 ξ∈(a,b)，使 f(b) − f(a) = f′(ξ)(b − a)，直接用哪个定理？",
+    "options": [
+      { "key": "A", "text": "罗尔定理" },
+      { "key": "B", "text": "拉格朗日中值定理" },
+      { "key": "C", "text": "柯西中值定理" },
+      { "key": "D", "text": "介值定理" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "这就是拉格朗日中值定理的结论形式；罗尔是它在 f(a)=f(b) 时的特例，柯西是两函数之比，介值定理只涉及函数值、不涉及导数。",
+    "signals": ["结论里出现 f(b)−f(a) 与 b−a 的比", "只有一个函数"],
+    "traps": {
+      "A": "罗尔要求 f(a)=f(b)，本题一般不等；它可以作为证明工具，但不是直接结论。",
+      "C": "柯西中值定理是 f 与 g 两个函数之比，本题只有一个函数。",
+      "D": "介值定理只保证某个函数值被取到，不提供导数信息。"
+    }
+  },
+  "card": {
+    "title": "看到差商想拉格朗日",
+    "trigger": "结论是 f(b)−f(a) 与 b−a 的关系",
+    "first_step": "先确认闭区间连续、开区间可导",
+    "pitfall": "把罗尔定理当成通用形式，忘记 f(a)=f(b) 的前提"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-pre-02" }
+}

@@ -1,0 +1,31 @@
+{
+  "id": "cumcm",
+  "name": "CUMCM 建模",
+  "desc": "数学建模竞赛中的判断：数据、模型、检验与表达",
+  "version": 1,
+  "grade": "official",
+  "alignment": {
+    "standard": "全国大学生数学建模竞赛（CUMCM）",
+    "dimensions": ["数据预处理", "模型选择", "模型检验", "论文表达"]
+  },
+  "ability_weights": {
+    "framing": 0.25,
+    "assumption": 0.15,
+    "method": 0.3,
+    "condition": 0.2,
+    "evidence": 0.1
+  },
+  "entry": { "minutes": 5, "first_unit": "cumcm-explore-01" },
+  "sequence": [
+    "cumcm-explore-01",
+    "cumcm-missing-01",
+    "cumcm-outlier-01",
+    "cumcm-corr-01",
+    "cumcm-collinear-01",
+    "cumcm-imbalance-01",
+    "cumcm-series-01",
+    "cumcm-opt-01",
+    "cumcm-eval-01",
+    "cumcm-sensitivity-01"
+  ]
+}

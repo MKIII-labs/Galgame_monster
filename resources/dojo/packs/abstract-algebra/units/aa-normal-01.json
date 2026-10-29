@@ -1,0 +1,33 @@
+{
+  "id": "aa-normal-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "H 是群 G 的正规子群，等价于：",
+    "options": [
+      { "key": "A", "text": "对任意 g ∈ G，都有 gHg⁻¹ = H" },
+      { "key": "B", "text": "H 是循环群" },
+      { "key": "C", "text": "H 的阶是素数" },
+      { "key": "D", "text": "H 是交换群" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "正规子群的定义就是对所有 g∈G 共轭不变，等价于左右陪集相等 gH=Hg。交换群的所有子群都正规，但正规子群本身不必交换、也不必循环。",
+    "signals": ["正规子群", "共轭", "陪集"],
+    "traps": {
+      "B": "正规子群可以是任意结构，不要求循环。",
+      "C": "阶为素数只是特殊情况。",
+      "D": "交换群的所有子群正规，但正规子群不一定交换。"
+    }
+  },
+  "card": {
+    "title": "正规 = 共轭不变",
+    "trigger": "判断正规子群",
+    "first_step": "验证 gHg⁻¹=H 或 gH=Hg",
+    "pitfall": "把交换性当成正规性"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "正规子群" }
+}

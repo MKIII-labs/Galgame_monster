@@ -1,0 +1,34 @@
+{
+  "id": "cmc-pre-08",
+  "test": "pre",
+  "ability": "framing",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "方程 y′ = x + y 属于哪种类型？",
+    "options": [
+      { "key": "A", "text": "可分离变量" },
+      { "key": "B", "text": "一阶线性（可用积分因子）" },
+      { "key": "C", "text": "伯努利方程" },
+      { "key": "D", "text": "二阶常系数线性" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "写成标准形 y′ − y = x，就是 y′ + P(x)y = Q(x) 的一阶线性方程，积分因子 e^(−x)。x + y 不能拆成 g(y)h(x)，所以不是可分离。",
+    "signals": ["y 与 y′ 都是一次", "右边是 x 与 y 的加法"],
+    "traps": {
+      "A": "x + y 无法写成 g(y)h(x) 的乘积形式。",
+      "C": "伯努利方程要求出现 y 的幂次（如 y²），这里没有。",
+      "D": "只有一阶导数，不是二阶。"
+    }
+  },
+  "card": {
+    "title": "先化标准形再认类型",
+    "trigger": "一阶方程",
+    "first_step": "整理成 y′ + P(x)y = Q(x) 看是否线性",
+    "pitfall": "看到 x+y 就以为能分离"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-pre-08" }
+}

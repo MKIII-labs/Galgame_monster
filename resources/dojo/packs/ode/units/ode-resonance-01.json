@@ -1,0 +1,33 @@
+{
+  "id": "ode-resonance-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "方程 y″ − y = e^x 的一个特解形式是：",
+    "options": [
+      { "key": "A", "text": "A e^x" },
+      { "key": "B", "text": "A x e^x" },
+      { "key": "C", "text": "A x² e^x" },
+      { "key": "D", "text": "A cos x" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "齐次方程的特征根是 ±1，而右端 e^x 对应根 1，与齐次解重合，发生共振，特解要乘 x。代入可得 A=1/2。",
+    "signals": ["右端是指数", "指数与齐次解重合"],
+    "traps": {
+      "A": "A e^x 是齐次解，代入左边为 0，无法匹配右端。",
+      "C": "乘两次 x 对应二重根共振，这里只是一重。",
+      "D": "右端不是三角函数。"
+    }
+  },
+  "card": {
+    "title": "与齐次解重合就乘 x",
+    "trigger": "非齐次项与齐次解同型",
+    "first_step": "先看特征根是否与右端指数重合",
+    "pitfall": "直接设 A e^x 导致无解"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "非齐次方程" }
+}

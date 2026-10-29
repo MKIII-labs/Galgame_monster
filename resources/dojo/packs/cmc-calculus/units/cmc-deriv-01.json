@@ -1,0 +1,33 @@
+{
+  "id": "cmc-deriv-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 5,
+  "payload": {
+    "situation": "设 f(x) = x²·sin(1/x)（x ≠ 0），f(0) = 0。关于 f 在 x = 0 处的性质，下列哪一项正确？",
+    "options": [
+      { "key": "A", "text": "在 x = 0 处不连续" },
+      { "key": "B", "text": "在 x = 0 处连续，但不可导" },
+      { "key": "C", "text": "在 x = 0 处可导，且导函数在 x = 0 处连续" },
+      { "key": "D", "text": "在 x = 0 处可导，但导函数在 x = 0 处不连续" }
+    ]
+  },
+  "expert": {
+    "choice": "D",
+    "why": "先看连续：|x²sin(1/x)| ≤ x² → 0，故连续。再看可导：f′(0) = lim [x²sin(1/x)]/x = lim x·sin(1/x) = 0，可导。但 x ≠ 0 时 f′(x) = 2x·sin(1/x) − cos(1/x)，其中 cos(1/x) 在 0 附近没有极限，所以导函数在 0 处不连续。",
+    "signals": ["分段点处要先连续再可导", "含 sin(1/x) 的项通常只影响导数的连续性"],
+    "traps": {
+      "A": "有界因子 x² 把振荡压住了，函数本身连续。",
+      "B": "差商极限存在（等于 0），所以可导，不是「不可导」。",
+      "C": "可导成立，但导函数里的 cos(1/x) 振荡，连续性不成立。"
+    }
+  },
+  "card": {
+    "title": "连续 → 可导 → 导函数连续，是三件事",
+    "trigger": "分段点、含振荡因子 sin(1/x)",
+    "first_step": "按「连续 → 可导 → 导函数连续」逐层验证，不要跳步",
+    "pitfall": "把「函数可导」直接当成「导函数连续」"
+  },
+  "source_ref": { "doc": "self-authored", "loc": "导数·分段点" }
+}

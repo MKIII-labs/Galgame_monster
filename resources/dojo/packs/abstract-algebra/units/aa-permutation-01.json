@@ -1,0 +1,33 @@
+{
+  "id": "aa-permutation-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "关于置换的奇偶性，下列说法正确的是：",
+    "options": [
+      { "key": "A", "text": "每个置换都能分解为对换，奇偶性由对换个数的奇偶决定，且与分解方式无关" },
+      { "key": "B", "text": "不同的分解方式会得到不同的奇偶性" },
+      { "key": "C", "text": "只有恒等置换是偶置换" },
+      { "key": "D", "text": "奇置换不能分解为对换" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "置换可写成对换之积；虽然分解不唯一，但对换个数目的奇偶性不变，这就是奇偶性的良定义。恒等置换是偶置换，但偶置换远不止它。",
+    "signals": ["置换", "对换分解", "奇偶性"],
+    "traps": {
+      "B": "分解不唯一，但奇偶性是分解的不变量。",
+      "C": "例如 (123) 是两个对换之积，也是偶置换。",
+      "D": "奇置换正是奇数次对换之积。"
+    }
+  },
+  "card": {
+    "title": "奇偶性是对换数的奇偶",
+    "trigger": "判断置换奇偶",
+    "first_step": "分解为对换并数个数",
+    "pitfall": "以为分解方式会改变奇偶性"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "置换群" }
+}

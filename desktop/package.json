@@ -1,0 +1,13 @@
+{
+  "name": "galgame-monster-shell",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Galgame_monster 的窗口壳：无系统标题栏，顶栏由网页自绘",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron main.js http://127.0.0.1:8000/"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0"
+  }
+}

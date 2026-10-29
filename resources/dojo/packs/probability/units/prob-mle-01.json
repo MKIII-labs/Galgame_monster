@@ -1,0 +1,33 @@
+{
+  "id": "prob-mle-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "求最大似然估计，第一步是：",
+    "options": [
+      { "key": "A", "text": "直接对参数求导" },
+      { "key": "B", "text": "写出似然函数（通常再取对数）" },
+      { "key": "C", "text": "先算参数的期望" },
+      { "key": "D", "text": "先做假设检验" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "最大似然是先构造样本的联合密度（似然函数），再最大化它。取对数把乘积变求和，便于求导；直接求导缺少目标函数。",
+    "signals": ["最大似然估计", "求参数"],
+    "traps": {
+      "A": "没有似然函数就无从求导。",
+      "C": "期望不是最大似然的第一步。",
+      "D": "估计与检验是两件事。"
+    }
+  },
+  "card": {
+    "title": "似然 → 对数 → 求导",
+    "trigger": "最大似然估计",
+    "first_step": "写似然函数并取对数",
+    "pitfall": "跳过似然直接求导"
+  },
+  "source_ref": { "doc": "self-authored:probability", "loc": "参数估计" }
+}

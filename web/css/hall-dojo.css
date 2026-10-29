@@ -1,0 +1,881 @@
+/* ============================================================
+   功能大厅：研究道场
+   ------------------------------------------------------------
+   左侧是训练单元（情境 → 判断 → 专家对照 → 方法卡），
+   右侧是 8 维能力画像与方法卡盒。
+   颜色 / 圆角 / 动效走 base.css 的 token，跟随主题。
+   ============================================================ */
+
+.dojo-root { display: flex; flex-direction: column; gap: 14px; position: relative; }
+
+/* ---------- 顶栏 ---------- */
+.dojo-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dojo-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg); color: var(--text-dim);
+  font-size: 12px; white-space: nowrap;
+}
+.dojo-pill.accent {
+  border-color: transparent; background: var(--accent-soft);
+  color: var(--accent); font-weight: 600;
+}
+.dojo-pill.mono { font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; }
+.dojo-pill-btn { cursor: pointer; transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
+.dojo-pill-btn:hover { border-color: var(--accent); color: var(--accent); }
+.dojo-pill-btn:disabled { cursor: default; opacity: .5; }
+.dojo-top-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* ---------- 布局 ---------- */
+.dojo-layout {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .dojo-layout { grid-template-columns: minmax(0, 1fr); }
+}
+.dojo-main { min-width: 0; }
+
+/* ---------- 训练卡 ---------- */
+.dojo-card {
+  padding: 22px;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg); box-shadow: var(--shadow-sm);
+}
+.dojo-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.dojo-chip {
+  padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg-side);
+  color: var(--text-dim); font-size: 11.5px; white-space: nowrap;
+}
+.dojo-chip.ability {
+  border-color: transparent; background: var(--accent-soft);
+  color: var(--accent); font-weight: 600;
+}
+.dojo-chip.level { font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; }
+.dojo-chip.minutes { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+.dojo-situation {
+  font-size: 15.5px; line-height: 1.85; color: var(--text);
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* ---------- 作答区：选项 ---------- */
+.dojo-options { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
+.dojo-opt {
+  display: flex; align-items: flex-start; gap: 11px;
+  padding: 11px 14px; text-align: left;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: none; color: var(--text);
+  font-family: var(--font); font-size: 13.5px; line-height: 1.6;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              background var(--t-fast) var(--ease);
+}
+.dojo-opt:hover { border-color: var(--border-strong); }
+.dojo-opt.sel { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.dojo-opt.ok { border-color: var(--ok); }
+.dojo-opt.bad { border-color: var(--danger); }
+.dojo-opt-key {
+  flex: none; min-width: 20px;
+  font-family: var(--mono); font-size: 11px; line-height: 1.9;
+  color: var(--text-dim);
+}
+.dojo-opt.sel .dojo-opt-key, .dojo-opt.ok .dojo-opt-key { color: inherit; }
+.dojo-opt.resolved { cursor: default; }
+.dojo-opt.resolved:hover { border-color: var(--border); }
+.dojo-opt.ok.resolved:hover { border-color: var(--ok); }
+.dojo-opt.bad.resolved:hover { border-color: var(--danger); }
+
+/* ---------- 作答区：排序 ---------- */
+.dojo-steps { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
+.dojo-step {
+  display: flex; align-items: flex-start; gap: 11px;
+  padding: 10px 13px; text-align: left;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: none; color: var(--text);
+  font-family: var(--font); font-size: 13.5px; line-height: 1.6;
+  cursor: pointer;
+}
+.dojo-step:hover { border-color: var(--border-strong); }
+.dojo-step.sel { border-color: var(--accent); background: var(--accent-soft); }
+.dojo-step-no {
+  flex: none; width: 20px; height: 20px;
+  display: grid; place-items: center;
+  border-radius: 50%; border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+}
+.dojo-step.sel .dojo-step-no {
+  border-color: transparent; background: var(--accent); color: var(--on-accent);
+}
+.dojo-steps-tip { margin-top: 8px; font-size: 11.5px; color: var(--text-dim); }
+
+/* ---------- 作答区：配对 ---------- */
+.dojo-pairs { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
+.dojo-pair-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr);
+  align-items: center; gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.dojo-pair-left { font-size: 13px; line-height: 1.55; }
+.dojo-pair-arrow { color: var(--text-dim); text-align: center; }
+.dojo-select {
+  width: 100%; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 12.5px; outline: none;
+}
+.dojo-select:focus { border-color: var(--accent); }
+
+/* ---------- 作答区：文本 / 数值 ---------- */
+.dojo-input, .dojo-textarea {
+  width: 100%; box-sizing: border-box; margin-top: 18px;
+  padding: 11px 13px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 13.5px; line-height: 1.65;
+  outline: none; resize: vertical;
+}
+.dojo-input:focus, .dojo-textarea:focus { border-color: var(--accent); }
+.dojo-textarea { min-height: 88px; }
+.dojo-input { max-width: 240px; }
+
+/* ---------- 操作区 ---------- */
+.dojo-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
+.dojo-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: none; color: var(--text);
+  font-family: var(--font); font-size: 13px; cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              background var(--t-fast) var(--ease);
+}
+.dojo-btn:hover { border-color: var(--border-strong); }
+.dojo-btn.primary {
+  border-color: transparent; background: var(--accent); color: var(--on-accent);
+  font-weight: 600;
+}
+.dojo-btn.primary:hover { filter: brightness(1.06); }
+.dojo-btn.primary:disabled { cursor: default; opacity: .55; filter: none; }
+.dojo-msg { min-height: 18px; margin-top: 10px; font-size: 12.5px; color: var(--text-dim); }
+.dojo-msg.err { color: var(--danger); }
+
+/* ---------- 揭晓 ---------- */
+.dojo-reveal { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.dojo-verdict { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
+.dojo-verdict.ok { color: var(--ok); }
+.dojo-verdict.bad { color: var(--danger); }
+.dojo-verdict.diag { color: var(--text-dim); }
+.dojo-verdict-note { margin-left: auto; font-size: 11.5px; font-weight: 400; color: var(--text-dim); }
+.dojo-block { margin-top: 14px; }
+.dojo-block-title {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  color: var(--text-dim); text-transform: uppercase; margin-bottom: 6px;
+}
+.dojo-block-body { font-size: 13.5px; line-height: 1.75; color: var(--text); }
+.dojo-signals { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.8; color: var(--text-dim); }
+.dojo-trap { margin-top: 6px; padding: 9px 12px; border-left: 2px solid var(--danger); background: var(--bg-side); font-size: 12.5px; line-height: 1.7; }
+.dojo-trap.ok { border-left-color: var(--ok); }
+.dojo-hits { display: flex; flex-wrap: wrap; gap: 6px; }
+.dojo-hit {
+  padding: 3px 8px; border-radius: 999px;
+  background: var(--bg-side); border: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-dim);
+}
+.dojo-hit.ok { border-color: var(--ok); color: var(--ok); }
+.dojo-hit.miss { border-color: var(--danger); color: var(--danger); }
+
+/* 方法卡 */
+.dojo-card-note {
+  margin-top: 14px; padding: 14px 16px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-side);
+}
+.dojo-card-note-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 600; margin-bottom: 8px;
+}
+.dojo-card-note-head .ic { width: 14px; height: 14px; color: var(--accent); }
+.dojo-card-note dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; font-size: 12px; line-height: 1.65; }
+.dojo-card-note dt { color: var(--text-dim); white-space: nowrap; }
+.dojo-card-note dd { margin: 0; color: var(--text); }
+
+/* ---------- 侧栏 ---------- */
+.dojo-side { display: flex; flex-direction: column; gap: 12px; }
+.dojo-side-block {
+  padding: 14px 16px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg);
+}
+.dojo-side-title {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 12px; font-weight: 600; margin-bottom: 10px;
+}
+.dojo-side-title span { font-weight: 400; color: var(--text-dim); font-size: 11px; }
+.dojo-ability { margin-bottom: 8px; }
+.dojo-ability-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11.5px; color: var(--text-dim); margin-bottom: 3px;
+}
+.dojo-ability-bar { height: 3px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.dojo-ability-bar i { display: block; height: 100%; background: var(--accent); transition: width var(--t) var(--ease); }
+.dojo-empty { font-size: 12px; line-height: 1.7; color: var(--text-dim); }
+.dojo-align-line { font-size: 12px; line-height: 1.7; color: var(--text-dim); }
+.dojo-align-line b { color: var(--text); font-weight: 500; }
+.dojo-card-item {
+  padding: 8px 0; border-top: 1px solid var(--border);
+  font-size: 12px; line-height: 1.65;
+}
+.dojo-card-item:first-child { border-top: 0; padding-top: 0; }
+.dojo-card-item b { display: block; font-weight: 600; margin-bottom: 2px; }
+.dojo-card-item span { color: var(--text-dim); }
+
+/* 完成态 */
+.dojo-done { padding: 26px; text-align: center; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg); }
+.dojo-done h2 { font-size: 18px; margin: 0 0 8px; }
+.dojo-done p { font-size: 13px; line-height: 1.8; color: var(--text-dim); margin: 0 0 16px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .dojo-ability-bar i { transition: none; }
+}
+
+/* ============================================================
+   复习模式
+   ============================================================ */
+.dojo-review { display: flex; flex-direction: column; gap: 12px; }
+.dojo-review-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dojo-review-exit { margin-left: auto; }
+.dojo-review-card {
+  padding: 26px 24px;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg); box-shadow: var(--shadow-sm);
+}
+.dojo-review-tag {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+  color: var(--text-dim); text-transform: uppercase; margin-bottom: 10px;
+}
+.dojo-review-trigger { font-size: 20px; line-height: 1.6; font-weight: 600; }
+.dojo-review-prompt { margin-top: 10px; font-size: 13px; line-height: 1.75; color: var(--text-dim); }
+.dojo-review-hint { margin-top: 12px; font-family: var(--mono); font-size: 10px; color: var(--text-dim); }
+.dojo-review-dl {
+  display: grid; grid-template-columns: auto 1fr; gap: 8px 12px;
+  margin: 0 0 16px; font-size: 13px; line-height: 1.7;
+}
+.dojo-review-dl dt { color: var(--text-dim); white-space: nowrap; }
+.dojo-review-dl dd { margin: 0; }
+@media (max-width: 640px) {
+  .dojo-review-card { padding: 18px 16px; }
+  .dojo-review-trigger { font-size: 17px; }
+}
+
+/* ============================================================
+   测评：前测 / 后测
+   ============================================================ */
+.dojo-assess { display: flex; flex-direction: column; gap: 12px; }
+.dojo-assess-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.dojo-assess-situation { font-size: 15.5px; line-height: 1.8; white-space: pre-wrap; }
+.dojo-assess-big {
+  font-size: 42px; font-weight: 600; line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.dojo-assess-sub { margin-top: 8px; font-size: 12.5px; color: var(--text-dim); line-height: 1.7; }
+.dojo-assess-delta { margin-top: 12px; font-size: 14px; font-weight: 600; }
+.dojo-assess-delta.up { color: var(--ok); }
+.dojo-assess-delta.down { color: var(--danger); }
+.dojo-assess-note { margin-top: 12px; font-size: 11.5px; line-height: 1.75; color: var(--text-dim); }
+.dojo-assess-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12px; }
+.dojo-assess-table th,
+.dojo-assess-table td {
+  padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: left;
+}
+.dojo-assess-table th { color: var(--text-dim); font-weight: 500; }
+.dojo-assess-muted { color: var(--text-dim); }
+@media (max-width: 640px) {
+  .dojo-assess-big { font-size: 34px; }
+}
+
+/* ============================================================
+   复现实验
+   ============================================================ */
+.dojo-repro { display: flex; flex-direction: column; gap: 12px; }
+.dojo-repro-grid {
+  display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
+  gap: 16px; align-items: start;
+}
+@media (max-width: 900px) {
+  .dojo-repro-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.dojo-repro-left,
+.dojo-repro-right { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.dojo-repro-question { font-size: 15px; line-height: 1.8; white-space: pre-wrap; }
+.dojo-repro-source { font-size: 11.5px; color: var(--text-dim); }
+.dojo-repro-targets {
+  padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-side);
+}
+.dojo-repro-target-line { font-size: 13px; line-height: 1.7; }
+.dojo-repro-target-line b { font-family: var(--mono); }
+.dojo-repro-target-line span { color: var(--text-dim); font-size: 11.5px; }
+.dojo-repro-file { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.dojo-repro-file-name {
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+  background: var(--bg-side);
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
+}
+.dojo-repro-data {
+  margin: 0; padding: 10px; max-height: 180px; overflow: auto;
+  font-family: var(--mono); font-size: 11px; line-height: 1.6;
+  white-space: pre;
+}
+.dojo-repro-code {
+  width: 100%; box-sizing: border-box; min-height: 320px;
+  padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--mono); font-size: 12px; line-height: 1.65;
+  resize: vertical; outline: none; tab-size: 4;
+}
+.dojo-repro-code:focus { border-color: var(--accent); }
+.dojo-repro-hint { font-family: var(--mono); font-size: 10px; color: var(--text-dim); }
+.dojo-repro-note { font-size: 11px; line-height: 1.7; color: var(--text-dim); }
+.dojo-repro-ok { color: var(--ok); }
+.dojo-repro-bad { color: var(--danger); }
+.dojo-repro-out { margin-top: 8px; font-size: 11.5px; }
+.dojo-repro-out summary { cursor: pointer; color: var(--text-dim); }
+.dojo-repro-out pre {
+  margin: 6px 0 0; padding: 8px 10px; max-height: 200px; overflow: auto;
+  background: var(--bg-side); border-radius: 6px;
+  font-family: var(--mono); font-size: 11px; white-space: pre-wrap;
+}
+
+/* ============================================================
+   复现包编辑器
+   ============================================================ */
+.dojo-repro-editor {
+  position: fixed; inset: 0; z-index: 85;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .45);
+}
+.dojo-repro-editor .dojo-import-card { width: min(900px, 100%); max-height: 88vh; }
+.dre-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dre-row .dojo-input { flex: 1 1 160px; max-width: none; margin-top: 0; }
+.dre-file {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.dre-file .dojo-repro-code { min-height: 110px; }
+.dre-target {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr) minmax(0, .8fr) auto;
+  gap: 8px; align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.dre-target .dojo-input { max-width: none; margin-top: 0; }
+.dre-remove { padding: 4px 10px; font-size: 12px; }
+.dre-section { margin-top: 6px; font-size: 12px; font-weight: 600; }
+.dre-hint { font-size: 11px; line-height: 1.6; color: var(--text-dim); }
+@media (max-width: 640px) {
+  .dojo-repro-editor { padding: 10px; }
+  .dre-target { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ============================================================
+   场景切换与个人包管理
+   ============================================================ */
+.dojo-pack-menu {
+  position: absolute; top: 38px; left: 0; z-index: 30;
+  width: min(340px, calc(100vw - 48px));
+  padding: 8px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg); box-shadow: var(--shadow);
+}
+.dojo-pack-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 260px; overflow: auto;
+}
+.dojo-pack-item {
+  display: flex; align-items: center; gap: 10px; justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid transparent; border-radius: 6px;
+  background: none; color: var(--text);
+  font-family: var(--font); font-size: 12.5px; text-align: left;
+  cursor: pointer;
+}
+.dojo-pack-item:hover { background: var(--bg-hover); }
+.dojo-pack-item.current {
+  border-color: var(--accent); background: var(--accent-soft); color: var(--accent);
+}
+.dojo-pack-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dojo-pack-meta { flex: none; font-size: 10.5px; color: var(--text-dim); }
+.dojo-pack-ops {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
+}
+.dojo-pack-op { padding: 4px 10px; font-size: 12px; }
+.dojo-pack-msg { min-height: 16px; margin-top: 6px; font-size: 11.5px; color: var(--text-dim); }
+.dojo-pack-msg.err { color: var(--danger); }
+.dojo-pack-rename { margin: 4px 0; max-width: none; }
+
+/* ============================================================
+   导入材料（P1）
+   ============================================================ */
+.dojo-import {
+  position: fixed; inset: 0; z-index: 80;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .45);
+}
+.dojo-import-card {
+  width: min(780px, 100%); max-height: 86vh;
+  display: flex; flex-direction: column;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.dojo-import-head {
+  flex: none; display: flex; align-items: flex-start; gap: 12px;
+  padding: 16px 20px; border-bottom: 1px solid var(--border);
+}
+.dojo-import-title { font-size: 15px; font-weight: 600; }
+.dojo-import-sub { margin-top: 3px; font-size: 12px; line-height: 1.6; color: var(--text-dim); }
+.dojo-import-x {
+  flex: none; margin-left: auto;
+  width: 28px; height: 28px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: none; color: var(--text-dim); cursor: pointer;
+  font-size: 13px;
+}
+.dojo-import-x:hover { border-color: var(--border-strong); color: var(--text); }
+.dojo-import-body {
+  flex: 1; min-height: 0; overflow: auto;
+  padding: 16px 20px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.dojo-import-foot {
+  flex: none; display: flex; align-items: center; gap: 12px; justify-content: flex-end;
+  padding: 12px 20px; border-top: 1px solid var(--border);
+}
+.dojo-imp-adopted { margin-right: auto; font-size: 12px; color: var(--text-dim); }
+
+.dojo-imp-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dojo-imp-row .dojo-input { flex: 1 1 200px; max-width: none; margin-top: 0; }
+.dojo-imp-pick { display: inline-flex; align-items: center; }
+.dojo-imp-filename { font-size: 12px; color: var(--text-dim); word-break: break-all; }
+.dojo-imp-count { flex: none; width: 88px; }
+.dojo-imp-paste { margin-top: 0; min-height: 72px; }
+
+.dojo-imp-preview {
+  padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-side);
+}
+.dojo-imp-meta { font-size: 11.5px; color: var(--text-dim); margin-bottom: 6px; }
+.dojo-imp-text {
+  margin: 0; max-height: 180px; overflow: auto;
+  white-space: pre-wrap; word-break: break-word;
+  font-family: var(--mono); font-size: 11px; line-height: 1.65;
+  color: var(--text-dim);
+}
+
+.dojo-imp-drafts { display: flex; flex-direction: column; gap: 10px; }
+.dojo-imp-draft {
+  padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg);
+  transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.dojo-imp-draft.adopted { border-color: var(--accent); background: var(--accent-soft); }
+.dojo-imp-draft-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.dojo-imp-situation { font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
+.dojo-imp-options { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.dojo-imp-opt {
+  position: relative;
+  padding: 6px 58px 6px 10px;
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 12.5px; line-height: 1.6;
+}
+.dojo-imp-opt b { margin-right: 6px; font-family: var(--mono); font-size: 11px; }
+.dojo-imp-opt.hit { border-color: var(--accent); background: var(--accent-soft); }
+.dojo-imp-tag {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  font-size: 10px; color: var(--accent);
+}
+.dojo-imp-rubric { margin-top: 8px; font-size: 12px; line-height: 1.7; color: var(--text-dim); }
+.dojo-imp-quote {
+  margin-top: 8px; padding-left: 8px;
+  border-left: 2px solid var(--border-strong);
+  font-size: 11.5px; line-height: 1.65; color: var(--text-dim);
+}
+.dojo-imp-actions { display: flex; gap: 6px; margin-top: 10px; }
+.dojo-imp-actions .dojo-btn { padding: 4px 12px; font-size: 12px; }
+.dojo-imp-reject { font-size: 11.5px; line-height: 1.7; color: var(--danger); }
+
+@media (max-width: 640px) {
+  .dojo-import { padding: 10px; }
+  .dojo-import-body { padding: 12px; }
+}
+
+/* ============================================================
+   完整建模案例 / 知识地图 / 今日一题
+   ============================================================ */
+.dojo-mini {
+  margin-top: 10px; padding: 3px 10px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: none; color: var(--text-dim);
+  font-family: var(--font); font-size: 11px; cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.dojo-mini:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 场景菜单：完整建模分组 */
+.dojo-case-block {
+  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.dojo-pack-section {
+  padding: 2px 10px 4px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+  color: var(--text-dim); text-transform: uppercase;
+}
+.dojo-case-item {
+  display: flex; align-items: center; gap: 10px; justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid transparent; border-radius: 6px;
+  background: none; color: var(--text);
+  font-family: var(--font); font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.dojo-case-item:hover { background: var(--bg-hover); border-color: var(--border); }
+.dojo-case-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dojo-case-meta { flex: none; font-size: 10.5px; color: var(--text-dim); }
+
+/* 知识地图 */
+.dojo-map { display: flex; flex-direction: column; gap: 12px; }
+.dojo-map-top { display: flex; align-items: flex-start; gap: 12px; }
+.dojo-map-head { font-size: 15px; font-weight: 600; }
+.dojo-map-sub { margin-top: 3px; font-size: 11.5px; color: var(--text-dim); }
+.dojo-map-exit { margin-left: auto; flex: none; padding: 4px 12px; font-size: 12px; }
+.dojo-map-list {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg);
+}
+.dojo-map-row {
+  display: grid; grid-template-columns: 26px minmax(0, 1fr) 78px 44px;
+  align-items: center; gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid transparent; border-radius: 7px;
+  background: none; color: var(--text);
+  font-family: var(--font); font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.dojo-map-row:hover { background: var(--bg-hover); border-color: var(--border); }
+.dojo-map-no {
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.dojo-map-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dojo-map-ability { font-size: 11.5px; color: var(--text-dim); }
+.dojo-map-score {
+  text-align: right; font-family: var(--mono); font-size: 11px;
+  color: var(--text-dim); font-variant-numeric: tabular-nums;
+}
+.dojo-map-row.ok .dojo-map-no { color: var(--ok); }
+.dojo-map-row.bad .dojo-map-no { color: var(--danger); }
+.dojo-map-row.bad .dojo-map-score { color: var(--danger); }
+.dojo-map-row.todo .dojo-map-title { color: var(--text-dim); }
+.dojo-map-note { font-size: 11.5px; line-height: 1.7; color: var(--text-dim); }
+
+/* 案例报告 */
+.dojo-report { display: flex; flex-direction: column; gap: 12px; }
+.dojo-report-verdict {
+  padding: 14px 16px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--bg-side);
+  font-size: 15px; font-weight: 600;
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+}
+.dojo-report-verdict.ok { border-color: var(--ok); color: var(--ok); }
+.dojo-report-verdict.bad { border-color: var(--danger); color: var(--danger); }
+.dojo-report-verdict .dojo-verdict-note { color: var(--text-dim); font-weight: 400; font-size: 11.5px; }
+.dojo-report-abilities {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+}
+.dojo-report-ability { display: inline-flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.dojo-report-ability span { color: var(--text-dim); }
+.dojo-report-ability b { font-family: var(--mono); font-weight: 600; }
+.dojo-report-hint { font-size: 12.5px; line-height: 1.7; color: var(--text); }
+.dojo-report-note { font-size: 11.5px; line-height: 1.7; color: var(--text-dim); }
+
+@media (max-width: 640px) {
+  .dojo-map-row { grid-template-columns: 22px minmax(0, 1fr) 38px; }
+  .dojo-map-ability { display: none; }
+}
+
+/* ============================================================
+   深度研究：模式切换 / 主题列表 / 断点续做
+   ============================================================ */
+.dojo-modes { display: flex; gap: 6px; }
+.dojo-mode {
+  padding: 5px 14px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: none; color: var(--text-dim);
+  font-family: var(--font); font-size: 12.5px; cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              background var(--t-fast) var(--ease);
+}
+.dojo-mode:hover { border-color: var(--border-strong); color: var(--text); }
+.dojo-mode.active {
+  border-color: transparent; background: var(--accent-soft);
+  color: var(--accent); font-weight: 600;
+}
+
+.dojo-research { display: flex; flex-direction: column; gap: 12px; }
+.dojo-research-head { display: flex; align-items: flex-start; gap: 12px; }
+.dojo-research-title { font-size: 20px; font-weight: 600; line-height: 1.4; }
+.dojo-research-sub {
+  margin-top: 5px; max-width: 640px;
+  font-size: 12.5px; line-height: 1.7; color: var(--text-dim);
+}
+.dojo-research-count {
+  margin-left: auto; flex: none;
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
+  white-space: nowrap;
+}
+.dojo-research-head-right {
+  margin-left: auto; flex: none;
+  display: flex; align-items: center; gap: 10px;
+}
+.dojo-research-records { padding: 4px 12px; font-size: 12px; }
+.dojo-research-authoring { padding: 4px 12px; font-size: 12px; }
+.dojo-research-head-right .dojo-research-count { margin-left: 0; }
+
+.dojo-authoring-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-side); font-size: 12px;
+}
+.dojo-authoring-meta span { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); }
+.dojo-chapter-list { display: flex; flex-direction: column; gap: 8px; }
+.dojo-chapter {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg);
+}
+.dojo-chapter-head { display: flex; align-items: baseline; gap: 10px; }
+.dojo-chapter-head b { font-size: 13.5px; font-weight: 600; }
+.dojo-chapter-head span {
+  margin-left: auto; font-family: var(--mono); font-size: 10px;
+  color: var(--text-dim); font-weight: 400;
+}
+.dojo-chapter-sections { font-size: 11px; line-height: 1.6; color: var(--text-dim); }
+.dojo-chapter-action { display: flex; justify-content: flex-end; }
+.dojo-section-done { font-size: 10.5px; color: var(--ok); }
+.dojo-draft-box {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 320px; overflow-y: auto;
+  padding: 10px 12px; border: 1px solid var(--accent); border-radius: 10px;
+  background: var(--accent-soft);
+}
+.dojo-draft-box .dojo-side-title {
+  position: sticky; top: -10px; z-index: 1;
+  padding: 4px 0; background: var(--accent-soft);
+}
+.dojo-draft-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); text-align: left;
+  font-family: var(--font); font-size: 12px; cursor: pointer;
+}
+.dojo-draft-row span { flex: none; color: var(--text-dim); font-size: 10.5px; }
+.dojo-draft-row b { font-weight: 500; }
+.dojo-draft-head { display: flex; flex-direction: column; gap: 4px; }
+.dojo-draft-head b { font-size: 17px; }
+.dojo-draft-head span { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); }
+.dojo-draft-acts { display: flex; flex-direction: column; gap: 8px; }
+.dojo-draft-act { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.dojo-draft-act-head { display: flex; align-items: baseline; gap: 10px; }
+.dojo-draft-act-head b { font-size: 12.5px; }
+.dojo-draft-act-head span { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--text-dim); }
+.dojo-draft-act-body { margin-top: 5px; font-size: 12px; line-height: 1.65; color: var(--text-dim); }
+.dojo-draft-rubric { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.7; }
+.dojo-authoring-json {
+  width: 100%; min-height: 420px; box-sizing: border-box;
+  padding: 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
+  resize: vertical;
+}
+.dojo-authoring-json:focus { outline: none; border-color: var(--accent); }
+.dojo-record-list { display: flex; flex-direction: column; gap: 8px; }
+.dojo-record {
+  display: flex; align-items: stretch; gap: 8px;
+}
+.dojo-record-main {
+  flex: 1; display: flex; flex-direction: column; gap: 3px;
+  padding: 12px 14px; text-align: left;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font); cursor: pointer;
+}
+.dojo-record-main:hover { border-color: var(--accent); }
+.dojo-record-title { font-size: 14.5px; font-weight: 600; line-height: 1.5; }
+.dojo-record-meta { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); }
+.dojo-record-verdict { font-size: 11.5px; color: var(--text-dim); }
+.dojo-record-score { font-family: var(--mono); font-size: 10.5px; color: var(--accent); }
+.dojo-record-del {
+  flex: none; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg); color: var(--text-dim);
+  font-family: var(--font); font-size: 11.5px; cursor: pointer;
+}
+.dojo-record-del:hover { border-color: var(--bad); color: var(--bad); }
+.dojo-research-col {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-side);
+}
+.dojo-research-col b { font-size: 12.5px; }
+.dojo-research-col span { font-size: 11.5px; line-height: 1.6; color: var(--text-dim); }
+.dojo-research-note { font-size: 11.5px; line-height: 1.7; color: var(--text-dim); }
+.dojo-research-back { margin-left: auto; flex: none; padding: 4px 12px; font-size: 12px; }
+
+.dojo-resume {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; text-align: left;
+  border: 1px dashed var(--accent); border-radius: 12px;
+  background: var(--accent-soft); color: var(--text);
+  font-family: var(--font); cursor: pointer;
+}
+.dojo-resume:hover { filter: brightness(1.04); }
+.dojo-resume b { font-size: 13.5px; font-weight: 600; }
+.dojo-resume span { font-size: 11.5px; color: var(--text-dim); }
+.dojo-resume-tag {
+  flex: none; padding: 2px 8px; border-radius: 999px;
+  background: var(--accent); color: var(--on-accent);
+  font-size: 10px; letter-spacing: .04em;
+}
+
+.dojo-inquiry-list { display: flex; flex-direction: column; gap: 8px; }
+
+.dojo-filter {
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-side);
+}
+.dojo-filter-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.dojo-filter-chip {
+  padding: 3px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg);
+  color: var(--text-dim); font-family: var(--font); font-size: 11.5px;
+  cursor: pointer;
+}
+.dojo-filter-chip:hover { border-color: var(--accent); color: var(--text); }
+.dojo-filter-chip.active {
+  border-color: var(--accent); background: var(--accent-soft);
+  color: var(--accent); font-weight: 600;
+}
+.dojo-filter-search {
+  flex: 1 1 180px; min-width: 140px; height: 28px;
+  padding: 0 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 12px;
+}
+.dojo-filter-search:focus { outline: none; border-color: var(--accent); }
+.dojo-filter-count {
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
+}
+
+/* 真题索引 */
+.dojo-filter-chip i {
+  margin-left: 5px; font-style: normal;
+  font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+}
+.dojo-paper-note {
+  padding: 8px 12px; border-left: 2px solid var(--border);
+  color: var(--text-dim); font-size: 11.5px; line-height: 1.7;
+}
+.dojo-paper-list { display: flex; flex-direction: column; gap: 12px; }
+.dojo-paper-block {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg); overflow: hidden;
+}
+.dojo-paper-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 14px; background: var(--bg-side);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.dojo-paper-head a { color: var(--accent); font-size: 11px; text-decoration: none; }
+.dojo-paper-head a:hover { text-decoration: underline; }
+.dojo-paper-head span { color: var(--text-dim); font-size: 10.5px; }
+.dojo-paper-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 14px; border-top: 1px solid var(--border);
+}
+.dojo-paper-block .dojo-paper-row:first-of-type { border-top: none; }
+.dojo-paper-no {
+  flex: 0 0 52px; padding-top: 2px;
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+}
+.dojo-paper-main { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dojo-paper-main b { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.dojo-paper-main em {
+  font-style: normal; font-size: 11px; color: var(--text-dim); line-height: 1.55;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dojo-paper-meta {
+  flex: 0 0 auto; padding-top: 2px;
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
+}
+.dojo-paper-go {
+  flex: 0 0 auto; padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--accent); background: var(--accent-soft);
+  color: var(--accent); font-family: var(--font); font-size: 11px; cursor: pointer;
+}
+.dojo-paper-go:hover { background: var(--accent); color: #fff; }
+.dojo-paper-todo {
+  flex: 0 0 auto; padding: 2px 9px; border-radius: 999px;
+  border: 1px dashed var(--border); color: var(--text-dim); font-size: 11px;
+}
+
+.dojo-inquiry {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 14px 16px; text-align: left;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font); cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease);
+}
+.dojo-inquiry:hover { border-color: var(--accent); }
+.dojo-inquiry-top {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 11px; color: var(--text-dim);
+}
+.dojo-inquiry-subject {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em;
+}
+.dojo-inquiry-title { font-size: 16px; font-weight: 600; line-height: 1.5; }
+.dojo-inquiry-meta { font-size: 11.5px; line-height: 1.6; color: var(--text-dim); }
+.dojo-inquiry-state { font-size: 11px; color: var(--text-dim); }
+.dojo-inquiry-state.done { color: var(--ok); }
+
+@media (max-width: 640px) {
+  .dojo-research-title { font-size: 17px; }
+  .dojo-research-count { display: none; }
+  .dojo-research-records { padding: 4px 8px; font-size: 11px; }
+  .dojo-research-authoring { padding: 4px 8px; font-size: 11px; }
+  .dojo-inquiry { padding: 12px 13px; }
+  .dojo-inquiry-title { font-size: 14.5px; }
+}
+
+#dojo-answer .dojo-textarea { min-height: 150px; line-height: 1.75; }

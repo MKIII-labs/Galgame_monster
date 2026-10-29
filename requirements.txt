@@ -5,3 +5,19 @@ sherpa-onnx>=1.13.0
 edge-tts>=6.1.0
 # GAL 角色包导入：解析 Shinsekai 的 character.yaml
 pyyaml>=6.0
+# PDF 附件解析：pypdf 抽文本；pypdfium2 负责把扫描件逐页渲染成图片走视觉识别
+# （自带 PDFium，无需额外系统组件；扫描件没有文本层时必须靠它渲染）
+pypdf>=4.0
+pypdfium2>=4.0
+# 代码库语义检索：本地 ONNX embedding（模型需运行 scripts/fetch_embed_model.py 下载）
+fastembed>=0.4
+# IDE 内置终端：Windows ConPTY 伪终端（自带 winpty 回退；仅 Windows 需要）
+pywinpty>=3.1.0; sys_platform == "win32"
+# Computer Use · 桌面后端：Windows UIA 控件树（仅 Windows；不用桌面功能时不会初始化 COM）
+uiautomation>=2.0; sys_platform == "win32"
+# 音频自检（audio_probe / audio_compare）：读 WAV/FLAC/OGG/MP3 并算声学指标。
+# 自带 libsndfile，不依赖系统 ffmpeg；纯本地，不需要任何 API key。
+numpy>=1.24
+soundfile>=0.12
+# 素材管线 / 视觉 QA：图片尺寸、转换、图集、截图指标（亮度/对比度/清晰度）
+Pillow>=10.0

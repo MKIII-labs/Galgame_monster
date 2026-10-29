@@ -1,0 +1,33 @@
+{
+  "id": "prob-var-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "Var(X + Y) = Var(X) + Var(Y) 成立的条件是：",
+    "options": [
+      { "key": "A", "text": "对任意随机变量都成立" },
+      { "key": "B", "text": "X 与 Y 不相关（独立是充分条件）" },
+      { "key": "C", "text": "X 与 Y 同分布" },
+      { "key": "D", "text": "E(X) = E(Y) = 0" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "Var(X+Y)=Var(X)+Var(Y)+2Cov(X,Y)。只有协方差为 0（不相关）时最后一项才消失；独立能推出不相关，所以是充分条件。",
+    "signals": ["方差相加", "是否要求独立"],
+    "traps": {
+      "A": "相关时还要加 2Cov(X,Y)。",
+      "C": "同分布与协方差无关。",
+      "D": "期望是否为 0 不影响协方差。"
+    }
+  },
+  "card": {
+    "title": "方差可加要不相关",
+    "trigger": "Var(X+Y)",
+    "first_step": "先看 Cov(X,Y) 是否为 0",
+    "pitfall": "默认方差无条件可加"
+  },
+  "source_ref": { "doc": "self-authored:probability", "loc": "方差" }
+}

@@ -1,0 +1,34 @@
+{
+  "id": "cmc-pre-06",
+  "test": "pre",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "设 z = x² + y²，在点 (1,1) 处的全微分 dz 是：",
+    "options": [
+      { "key": "A", "text": "dz = 2dx + 2dy" },
+      { "key": "B", "text": "dz = dx + dy" },
+      { "key": "C", "text": "dz = 4" },
+      { "key": "D", "text": "dz = 2dx + 2dy + 2" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "z_x = 2x，z_y = 2y，在 (1,1) 处都等于 2，所以 dz = 2dx + 2dy。全微分是线性主部，不能带常数项。",
+    "signals": ["求的是全微分不是函数值", "点已经给定，偏导要代入"],
+    "traps": {
+      "B": "漏掉了偏导系数 2。",
+      "C": "4 是 z(1,1) 的函数值，不是微分。",
+      "D": "全微分是线性主部，不能加常数项。"
+    }
+  },
+  "card": {
+    "title": "全微分只留线性主部",
+    "trigger": "求 dz",
+    "first_step": "先算两个偏导，再代点",
+    "pitfall": "把函数值或常数项混进微分"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-pre-06" }
+}

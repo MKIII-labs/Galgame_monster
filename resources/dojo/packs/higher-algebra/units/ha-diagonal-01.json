@@ -1,0 +1,33 @@
+{
+  "id": "ha-diagonal-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "n 阶复矩阵 A 可对角化的充要条件是：",
+    "options": [
+      { "key": "A", "text": "A 的特征值互不相同" },
+      { "key": "B", "text": "每个特征值的几何重数等于代数重数" },
+      { "key": "C", "text": "det(A) ≠ 0" },
+      { "key": "D", "text": "A 是实矩阵" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "可对角化等价于有 n 个线性无关的特征向量，也就是每个特征值对应的特征子空间维数（几何重数）达到它的代数重数。特征值互不相同只是充分条件。",
+    "signals": ["判断可对角化", "涉及重特征值"],
+    "traps": {
+      "A": "特征值互不相同能推出可对角化，但有重特征值时也可能可对角化，所以不是必要条件。",
+      "C": "det≠0 只说明可逆，与是否可对角化无关。",
+      "D": "实矩阵与可对角化没有必然关系。"
+    }
+  },
+  "card": {
+    "title": "可对角化看两个重数",
+    "trigger": "有重特征值",
+    "first_step": "比较几何重数与代数重数",
+    "pitfall": "把「特征值互异」当成充要条件"
+  },
+  "source_ref": { "doc": "self-authored:higher-algebra", "loc": "线性变换" }
+}

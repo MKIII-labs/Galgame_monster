@@ -1,0 +1,346 @@
+{
+  "id": "nt-ch04",
+  "title": "同余式 ax≡b (mod m) 何时有解？解数为何？",
+  "subject": "初等数论",
+  "track": "教材",
+  "minutes": 30,
+  "exam": {
+    "topic": "一次同余式的可解性、解数与模分解",
+    "weight": "教材章节",
+    "variant": "判断与计算"
+  },
+  "prerequisites": [
+    "整除与最大公因数",
+    "同余的基本性质",
+    "模逆元"
+  ],
+  "brief": "本章主线不是背同余式定义，而是判断同余式何时可解、有多少解。以 ax≡b (mod m) 为核心，把整除条件、约化到互素模、解数 d 串起来；孙子定理与高次同余式只在分解模数、解释边界时出现。学生要重走猜条件、找反例、补证明、看考试流程的过程。",
+  "acts": [
+    {
+      "id": "nt-ch04-a1",
+      "label": "它从哪来",
+      "ability": "framing",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "教材从“找整数 x 使 m 整除 ax-b”引入同余式。面对 ax≡b (mod m)，研究它最核心的问题应是什么？",
+        "options": [
+          {
+            "key": "A",
+            "text": "把同余式化为整除条件 m|(ax-b)，研究 gcd(a,m) 与 b 的整除关系，并确定模 m 下的解数"
+          },
+          {
+            "key": "B",
+            "text": "只要把 a 移到右边除以 b，就能得到 x 的唯一表达式"
+          },
+          {
+            "key": "C",
+            "text": "先假设 a 与 m 互素，否则同余式没有研究价值"
+          },
+          {
+            "key": "D",
+            "text": "同余式的解就是普通方程 ax=b 的整数解，二者没有差别"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "同余式是剩余类方程；核心是整除条件与 gcd 对解数的影响，B/C/D 都忽视模运算或错误排除非互素情形。",
+        "signals": [
+          "看到 ax≡b mod m 想到 m|(ax-b)",
+          "需要讨论 gcd(a,m)",
+          "关心模 m 下解数"
+        ],
+        "traps": {
+          "B": "同余式不能直接作普通除法；b 未必可逆",
+          "C": "非互素是重要情形，条件为 gcd(a,m)|b",
+          "D": "普通方程最多一个整数解，同余式可能有多个剩余类解"
+        }
+      },
+      "card": {
+        "title": "同余式先转整除",
+        "trigger": "遇到 ax≡b (mod m)",
+        "first_step": "写 m|(ax-b) 并算 d=gcd(a,m)",
+        "pitfall": "不要直接约去 a，先看 d 是否整除 b"
+      }
+    },
+    {
+      "id": "nt-ch04-a2",
+      "label": "先猜",
+      "ability": "assumption",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "先猜：关于 ax≡b (mod m)（d=gcd(a,m)），哪些判断在一般情况下正确？可多选。",
+        "options": [
+          {
+            "key": "A",
+            "text": "若 d=1，则对任意 b 都有唯一解模 m"
+          },
+          {
+            "key": "B",
+            "text": "若 d>1，则有解当且仅当 d|b"
+          },
+          {
+            "key": "C",
+            "text": "若有解，则模 m 下解的个数为 d"
+          },
+          {
+            "key": "D",
+            "text": "若 d∤b，则把两边同时除以 d 后仍可得到原同余式的解"
+          }
+        ]
+      },
+      "expert": {
+        "choice": [
+          "A",
+          "B",
+          "C"
+        ],
+        "why": "互素时 a 可逆；一般情形用 d 约化，d|b 才可约，约化后模 m/d 唯一解还原为 d 个模 m 解。",
+        "signals": [
+          "先算 gcd",
+          "看 b 是否被 gcd 整除",
+          "解数与 gcd 相等"
+        ]
+      },
+      "card": {
+        "title": "可解性猜测表",
+        "trigger": "判断一次同余式",
+        "first_step": "算 d=gcd(a,m)，检查 d|b",
+        "pitfall": "d 不整除 b 时无解，不能继续除"
+      }
+    },
+    {
+      "id": "nt-ch04-a3",
+      "label": "构造反例",
+      "ability": "robustness",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "要反驳“只要 gcd(a,m)>1，同余式 ax≡b (mod m) 就无解”，下列哪个例子最直接？",
+        "options": [
+          {
+            "key": "A",
+            "text": "6x≡4 (mod 8)"
+          },
+          {
+            "key": "B",
+            "text": "2x≡1 (mod 4)"
+          },
+          {
+            "key": "C",
+            "text": "3x≡1 (mod 6)"
+          },
+          {
+            "key": "D",
+            "text": "4x≡1 (mod 8)"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "6x≡4 (mod 8) 中 gcd(6,8)=2>1，但 2|4，所以有解，且约化后得到两个模 8 解；它直接说明非互素不等于无解。",
+        "signals": [
+          "gcd>1",
+          "b 被 gcd 整除",
+          "解不只一个"
+        ],
+        "traps": {
+          "B": "gcd(2,4)=2 不整除 1，是无解例子，不能反驳错误命题",
+          "C": "gcd(3,6)=3 不整除 1，是无解例子，不能反驳错误命题",
+          "D": "gcd(4,8)=4 不整除 1，是无解例子，不能反驳错误命题"
+        }
+      },
+      "card": {
+        "title": "反例看整除",
+        "trigger": "有人把非互素等同无解",
+        "first_step": "找 gcd>1 且 d|b 的例子",
+        "pitfall": "只看 gcd 不看 b"
+      }
+    },
+    {
+      "id": "nt-ch04-a4",
+      "label": "证明骨架",
+      "ability": "argument",
+      "primitive": "order",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "steps": [
+          {
+            "id": "s1",
+            "text": "令 d=gcd(a,m)。若 x 是解，则 m|(ax-b)，而 d|a、d|m，所以 d|b，得到必要条件。"
+          },
+          {
+            "id": "s2",
+            "text": "设 d|b，写 a=d a1、m=d m1、b=d b1，则原同余式等价于 a1 x≡b1 (mod m1)，且 gcd(a1,m1)=1。"
+          },
+          {
+            "id": "s3",
+            "text": "因 gcd(a1,m1)=1，a1 在模 m1 下可逆，取逆元得唯一剩余类 x≡x0 (mod m1)。"
+          },
+          {
+            "id": "s4",
+            "text": "把模 m1 的唯一解还原到模 m：x=x0+k m1（k=0,1,...,d-1），得到 d 个模 m 的不同剩余类。"
+          },
+          {
+            "id": "s5",
+            "text": "合并：原同余式有解当且仅当 d|b；有解时模 m 下恰有 d 个解。"
+          }
+        ]
+      },
+      "expert": {
+        "order": [
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5"
+        ],
+        "why": "先由解推出 d|b 的必要性，再在 d|b 时约化为互素模求唯一解，最后按模 m 还原出 d 个剩余类，得到完整判据与解数。",
+        "signals": [
+          "先必要性",
+          "再约化",
+          "最后还原 d 个解"
+        ]
+      },
+      "card": {
+        "title": "约化+还原",
+        "trigger": "证明一次同余式解数",
+        "first_step": "令 d=gcd(a,m) 并检查 d|b",
+        "pitfall": "忘记把模 m/d 的解还原成 d 个模 m 解"
+      }
+    },
+    {
+      "id": "nt-ch04-a5",
+      "label": "条件边界",
+      "ability": "condition",
+      "primitive": "numeric",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "用孙子定理处理高次同余式：x^2≡1 (mod 35)。先分别看素数模 5 与 7，再合并。模 35 下共有多少个解？"
+      },
+      "expert": {
+        "value": 4,
+        "tolerance": 0,
+        "why": "35=5·7 且互素；模 5 时 x≡±1，有 2 个解；模 7 时 x≡±1，有 2 个解；孙子定理合并得 2×2=4 个模 35 解。",
+        "signals": [
+          "模数分解",
+          "素数模各 2 解",
+          "孙子定理合并"
+        ]
+      },
+      "card": {
+        "title": "分解后合并",
+        "trigger": "高次同余式模合数",
+        "first_step": "分解为互素素数模",
+        "pitfall": "不要直接猜解数；各因子解数要相乘"
+      }
+    },
+    {
+      "id": "nt-ch04-a6",
+      "label": "考试怎么考",
+      "ability": "reflection",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "考试中解一次同余式 ax≡b (mod m)，最稳妥的流程是？",
+        "options": [
+          {
+            "key": "A",
+            "text": "先算 d=gcd(a,m) 并判断 d|b；若有解，约化为互素情形求出模 m/d 的一个解，再写成 d 个模 m 的剩余类"
+          },
+          {
+            "key": "B",
+            "text": "先随便试一个 x，若不行就说明无解"
+          },
+          {
+            "key": "C",
+            "text": "直接把 a 和 b 同时除以任意公因数，不必检查是否整除"
+          },
+          {
+            "key": "D",
+            "text": "只写出一个解即可，因为同余式的解数总是 1"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "考试流程应体现判据、约化、还原三步；只试数或忽略整除检查会漏解或误判无解，解数也不总为 1。",
+        "signals": [
+          "先判 gcd",
+          "再约化",
+          "最后列全解"
+        ],
+        "traps": {
+          "B": "试一个 x 不能证明无解；无解要靠 d∤b 判断",
+          "C": "除以公因数前必须保证 d|b，否则不能约化",
+          "D": "有解时解数为 d，未必是 1，漏写剩余类会失分"
+        }
+      },
+      "card": {
+        "title": "考试流程",
+        "trigger": "求解一次同余式",
+        "first_step": "算 gcd 判整除",
+        "pitfall": "漏写全部 d 个剩余类"
+      }
+    }
+  ],
+  "artifact": {
+    "prompt": "请用 150–300 字回答：一次同余式 ax≡b (mod m) 的可解性与解数是什么？为什么 d=gcd(a,m) 是关键？请给出一个非互素但仍有解的反例，并说明孙子定理在高次/合数模同余式中如何作为工具出现。最后写出考试求解流程。",
+    "rubric": [
+      {
+        "id": "r1",
+        "text": "能写出同余式的定义：ax≡b (mod m) 等价于 m|(ax-b)，解是模 m 的剩余类。",
+        "keywords": [
+          "同余式",
+          "m|(ax-b)",
+          "剩余类"
+        ]
+      },
+      {
+        "id": "r2",
+        "text": "能给出可解性判据与解数：令 d=gcd(a,m)，有解当且仅当 d|b；有解时解数为 d。",
+        "keywords": [
+          "gcd(a,m)",
+          "d|b",
+          "解数"
+        ]
+      },
+      {
+        "id": "r3",
+        "text": "能举出非互素但仍有解的反例，并说明真正无解要看 d∤b。",
+        "keywords": [
+          "6x≡4 mod8",
+          "d∤b",
+          "反例"
+        ]
+      },
+      {
+        "id": "r4",
+        "text": "能说明证明中约化到互素模、用逆元求一个解并还原 d 个解；合数模高次同余式可用孙子定理合并。",
+        "keywords": [
+          "逆元",
+          "x0+k(m/d)",
+          "孙子定理"
+        ]
+      },
+      {
+        "id": "r5",
+        "text": "能总结考试流程：先判 gcd 与整除，再约化求一个解，最后列全解；合数模先分解再合并。",
+        "keywords": [
+          "先判",
+          "约化",
+          "合并"
+        ]
+      }
+    ],
+    "expert_sample": "同余式 ax≡b (mod m) 的定义是 m|(ax-b)，它的解应看成模 m 的剩余类。令 d=gcd(a,m)，有解当且仅当 d|b；有解时解数恰为 d。反例：6x≡4 mod8 中 d=2>1 但 2|4，所以有两个解；真正无解要看 d∤b。证明时先由 d|b 约化到互素情形，用逆元得一个解，再写成 x0+k(m/d) 还原 d 个解。高次同余式若模数是合数，可分解后用孙子定理合并。考试流程是：先判 gcd 与整除，再约化求一个解，最后列全解并合并。"
+  }
+}

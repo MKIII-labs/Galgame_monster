@@ -1,0 +1,33 @@
+{
+  "id": "ma-partial-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "二元函数 f(x,y) 在点 P 处两个偏导数都存在。能否推出 f 在 P 处可微？",
+    "options": [
+      { "key": "A", "text": "能，偏导存在就可微" },
+      { "key": "B", "text": "不能，还需要偏导在该点连续等条件" },
+      { "key": "C", "text": "能，而且可以推出 f 在 P 连续" },
+      { "key": "D", "text": "偏导数与可微性没有关系" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "偏导只描述沿坐标轴方向的变化，不能控制其他方向的增量比。偏导连续是可微的充分条件；只有偏导存在时，函数甚至可能不连续。",
+    "signals": ["二元函数", "偏导存在", "问可微"],
+    "traps": {
+      "A": "偏导存在不足以保证可微，这是多元微分里最典型的陷阱。",
+      "C": "偏导存在连连续性都推不出来。",
+      "D": "偏导是可微判定的入口，但需要更强条件。"
+    }
+  },
+  "card": {
+    "title": "偏导存在 ≠ 可微",
+    "trigger": "多元函数判断可微",
+    "first_step": "先看偏导是否连续",
+    "pitfall": "拿偏导存在当可微"
+  },
+  "source_ref": { "doc": "self-authored:math-analysis", "loc": "多元微分" }
+}

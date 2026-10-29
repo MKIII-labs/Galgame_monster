@@ -1,0 +1,33 @@
+{
+  "id": "ha-jordan-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "关于 Jordan 标准形，下列说法正确的是：",
+    "options": [
+      { "key": "A", "text": "任何复矩阵都相似于一个 Jordan 形" },
+      { "key": "B", "text": "只有可对角化矩阵才有 Jordan 形" },
+      { "key": "C", "text": "Jordan 形一定是对角阵" },
+      { "key": "D", "text": "Jordan 块的大小由特征值的个数决定" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "代数闭域（如复数域）上，任何方阵都相似于 Jordan 标准形；可对角化只是所有 Jordan 块都是 1×1 的特殊情形。块的大小由特征值的代数重数与几何重数之差决定。",
+    "signals": ["Jordan 标准形", "复数域", "问存在性"],
+    "traps": {
+      "B": "不可对角化的矩阵同样有 Jordan 形，只是含非平凡块。",
+      "C": "有非平凡 Jordan 块时就不是对角阵。",
+      "D": "块大小取决于重数与特征向量个数，不是特征值个数。"
+    }
+  },
+  "card": {
+    "title": "Jordan 形一定存在",
+    "trigger": "矩阵不可对角化",
+    "first_step": "在代数闭域上找 Jordan 形",
+    "pitfall": "把可对角化当成存在前提"
+  },
+  "source_ref": { "doc": "self-authored:higher-algebra", "loc": "Jordan 标准形" }
+}

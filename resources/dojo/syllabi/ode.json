@@ -1,0 +1,53 @@
+{
+  "id": "ode",
+  "item_prefix": "ode",
+  "course": "常微分方程",
+  "textbook": "王高雄、周之铭、朱思铭、王寿松《常微分方程》第四版",
+  "publisher": "高等教育出版社",
+  "level": "chapter",
+  "note": "按章生成；小节为范围提示。共 8 章。带 optional 的为原书选学内容。",
+  "chapters": [
+    {"id": "ch01", "title": "绪论", "sections": [
+      {"id": "ch01-s01", "title": "常微分方程模型"},
+      {"id": "ch01-s02", "title": "常微分方程基本概念和学习常微分方程的重要性"}
+    ]},
+    {"id": "ch02", "title": "一阶微分方程的初等解法", "sections": [
+      {"id": "ch02-s01", "title": "变量分离方程与变量变换"},
+      {"id": "ch02-s02", "title": "线性微分方程与常数变易法"},
+      {"id": "ch02-s03", "title": "恰当微分方程与积分因子"},
+      {"id": "ch02-s04", "title": "一阶隐式微分方程与参数表示"}
+    ]},
+    {"id": "ch03", "title": "一阶微分方程的解的存在定理", "sections": [
+      {"id": "ch03-s01", "title": "解的存在唯一性定理与逐步逼近法"},
+      {"id": "ch03-s02", "title": "解的延拓和解对初值的连续性与可微性"},
+      {"id": "ch03-s03", "title": "奇解", "optional": true},
+      {"id": "ch03-s04", "title": "数值解", "optional": true}
+    ]},
+    {"id": "ch04", "title": "高阶微分方程", "sections": [
+      {"id": "ch04-s01", "title": "线性微分方程的一般理论"},
+      {"id": "ch04-s02", "title": "常系数线性微分方程的解法"},
+      {"id": "ch04-s03", "title": "高阶微分方程的降阶和幂级数解法"}
+    ]},
+    {"id": "ch05", "title": "线性微分方程组", "sections": [
+      {"id": "ch05-s01", "title": "线性微分方程组的一般理论"},
+      {"id": "ch05-s02", "title": "常系数线性微分方程组"},
+      {"id": "ch05-s03", "title": "拉普拉斯变换"}
+    ]},
+    {"id": "ch06", "title": "非线性微分方程", "sections": [
+      {"id": "ch06-s01", "title": "稳定性：李雅普诺夫稳定性与 V 函数"},
+      {"id": "ch06-s02", "title": "定性：奇点、极限环及平面图貌"},
+      {"id": "ch06-s03", "title": "哈密顿方程、孤立子和混沌", "optional": true}
+    ]},
+    {"id": "ch07", "title": "一阶线性偏微分方程", "sections": [
+      {"id": "ch07-s01", "title": "首次积分和求解常微分方程组"},
+      {"id": "ch07-s02", "title": "一阶线性偏微分方程的解法"},
+      {"id": "ch07-s03", "title": "柯西问题"},
+      {"id": "ch07-s04", "title": "李群分析与对称", "optional": true}
+    ]},
+    {"id": "ch08", "title": "边值问题", "sections": [
+      {"id": "ch08-s01", "title": "边值问题的可解性和待定系数法"},
+      {"id": "ch08-s02", "title": "格林函数"},
+      {"id": "ch08-s03", "title": "本征值和本征函数"}
+    ]}
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "id": "aa-field-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "有限域的特征一定是：",
+    "options": [
+      { "key": "A", "text": "素数" },
+      { "key": "B", "text": "0" },
+      { "key": "C", "text": "合数" },
+      { "key": "D", "text": "任意正整数" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "域的特征要么是 0，要么是素数。若特征是合数 mn，则 (m·1)(n·1)=0，域中没有零因子，矛盾。有限域的特征不能是 0。",
+    "signals": ["有限域", "特征", "无零因子"],
+    "traps": {
+      "B": "特征为 0 的域必含有理数域，是无限域。",
+      "C": "合数特征会导致零因子，与域的定义矛盾。",
+      "D": "只有素数与 0 两种可能。"
+    }
+  },
+  "card": {
+    "title": "有限域特征必素数",
+    "trigger": "有限域特征",
+    "first_step": "用无零因子排除合数",
+    "pitfall": "忽略特征为 0 只能是无限域"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "域" }
+}

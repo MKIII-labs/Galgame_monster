@@ -1,0 +1,33 @@
+{
+  "id": "ca-harmonic-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "若 f(z) = u + iv 在区域 D 内解析，则：",
+    "options": [
+      { "key": "A", "text": "u 与 v 都是调和函数" },
+      { "key": "B", "text": "u 一定是常数" },
+      { "key": "C", "text": "v 一定恒为 0" },
+      { "key": "D", "text": "f 一定有界" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "由 CR 方程可推出 u_xx+u_yy=0、v_xx+v_yy=0，即实部与虚部都调和；反过来，调和的 u 在单连通区域上能配上共轭调和函数 v。",
+    "signals": ["解析函数", "实部虚部", "二阶偏导"],
+    "traps": {
+      "B": "u 可以非常数，例如 f(z)=z² 的实部 x²−y²。",
+      "C": "v 一般不为 0，例如 f(z)=z。",
+      "D": "解析函数不一定有界，例如 e^z。"
+    }
+  },
+  "card": {
+    "title": "解析的两个分量都调和",
+    "trigger": "已知 f 解析",
+    "first_step": "用 CR 推二阶偏导",
+    "pitfall": "以为实部虚部可以是任意函数"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "调和函数" }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "aa-poly-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "设 F 是域，关于多项式环 F[x]，下列说法正确的是：",
+    "options": [
+      { "key": "A", "text": "F[x] 是唯一分解整环" },
+      { "key": "B", "text": "F[x] 是域" },
+      { "key": "C", "text": "F[x] 中所有多项式都可约" },
+      { "key": "D", "text": "F[x] 的每个理想都是极大理想" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "F[x] 有带余除法，是欧氏环，因此是主理想整环，也是唯一分解整环。它不是域（x 没有乘法逆元），也并非所有多项式可约。",
+    "signals": ["域上的多项式环", "唯一分解"],
+    "traps": {
+      "B": "x 在 F[x] 中不可逆，所以不是域。",
+      "C": "一次多项式通常不可约。",
+      "D": "零理想不是极大理想。"
+    }
+  },
+  "card": {
+    "title": "F[x] 是欧氏环",
+    "trigger": "域上的多项式环",
+    "first_step": "用带余除法 → PID → UFD",
+    "pitfall": "把 F[x] 当成域"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "多项式环" }
+}

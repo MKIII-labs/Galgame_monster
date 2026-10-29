@@ -1,0 +1,33 @@
+{
+  "id": "la-positive-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "判断实对称矩阵 A 正定，最直接的充要条件是：",
+    "options": [
+      { "key": "A", "text": "所有顺序主子式都大于 0" },
+      { "key": "B", "text": "所有对角元素都大于 0" },
+      { "key": "C", "text": "det(A) > 0" },
+      { "key": "D", "text": "迹大于 0" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "Sylvester 判据：实对称矩阵正定当且仅当所有顺序主子式为正。对角元为正、行列式为正、迹为正都只是必要条件，不能保证正定。",
+    "signals": ["判断正定", "实对称矩阵"],
+    "traps": {
+      "B": "对角元为正但整体可能不定，例如 [[1,2],[2,1]]。",
+      "C": "det>0 只说明特征值乘积为正，可能两个都为负。",
+      "D": "迹为正也可能是两个负特征值之外的情况，不能保证全部为正。"
+    }
+  },
+  "card": {
+    "title": "正定看顺序主子式",
+    "trigger": "判断正定",
+    "first_step": "从左上角开始算各阶顺序主子式",
+    "pitfall": "只看行列式或对角元"
+  },
+  "source_ref": { "doc": "self-authored:linear-algebra", "loc": "正定矩阵" }
+}

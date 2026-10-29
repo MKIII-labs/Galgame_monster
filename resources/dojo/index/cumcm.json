@@ -1,0 +1,99 @@
+{
+  "contest": "CUMCM",
+  "name": "CUMCM 本科组真题",
+  "standard": "全国大学生数学建模竞赛（高教社杯）本科组 A / B / C 题",
+  "source_url": "https://www.mcm.edu.cn/html_cn/block/8579f5fce999cdc896f78bca5d4f8237.html",
+  "note": "题目名称与发布页来自官网历年赛题栏目。本站改编案例只做教学改写，数值为合成算例，不代表官方附件数据。",
+  "papers": [
+    {
+      "id": "cumcm2016", "year": 2016, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/6d026d84bd785435f92e3079b4a87a2b.html",
+      "problems": [
+        {"no": "A", "title": "系泊系统的设计", "topic": "浮标系泊系统受力平衡与姿态优化"},
+        {"no": "B", "title": "小区开放对道路通行的影响", "topic": "路网通行能力评价与交通流仿真"},
+        {"no": "C", "title": "电池剩余放电时间预测", "topic": "放电曲线拟合与剩余时间预测"}
+      ]
+    },
+    {
+      "id": "cumcm2017", "year": 2017, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/460baf68ab0ed0e1e557a0c79b1c4648.html",
+      "problems": [
+        {"no": "A", "title": "CT 系统参数标定及成像", "topic": "参数标定与图像重建反问题"},
+        {"no": "B", "title": "「拍照赚钱」的任务定价", "topic": "众包任务定价与市场供需分析"},
+        {"no": "C", "title": "颜色与物质浓度辨识", "topic": "颜色读数与物质浓度回归建模"}
+      ]
+    },
+    {
+      "id": "cumcm2018", "year": 2018, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/7cec7725b9a0ea07b4dfd175e8042c33.html",
+      "problems": [
+        {"no": "A", "title": "高温作业专用服装设计", "topic": "多层介质热传导与厚度优化"},
+        {"no": "B", "title": "智能 RGV 的动态调度策略", "topic": "流水线动态调度与作业效率优化"},
+        {"no": "C", "title": "大型百货商场会员画像描绘", "topic": "会员价值分层与购买力预测"}
+      ]
+    },
+    {
+      "id": "cumcm2019", "year": 2019, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/b0ae8510b9ec0cc0deb2266d2de19ecb.html",
+      "problems": [
+        {"no": "A", "title": "高压油管的压力控制", "topic": "高压油管压力波动与阀门控制"},
+        {"no": "B", "title": "「同心协力」策略研究", "topic": "团队协作击球策略与力度控制"},
+        {"no": "C", "title": "机场的出租车问题", "topic": "出租车排队决策与上车点优化"}
+      ]
+    },
+    {
+      "id": "cumcm2020", "year": 2020, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/10405905647c52abfd6377c0311632b5.html",
+      "problems": [
+        {"no": "A", "title": "炉温曲线", "topic": "回焊炉温度曲线机理建模与求解"},
+        {"no": "B", "title": "穿越沙漠", "topic": "资源约束下的路径与策略优化"},
+        {"no": "C", "title": "中小微企业的信贷决策", "topic": "信贷风险量化评价与放贷策略"}
+      ]
+    },
+    {
+      "id": "cumcm2021", "year": 2021, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/90d223833c1eb50f899aa096a66c6896.html",
+      "problems": [
+        {"no": "A", "title": "FAST 主动反射面的形状调节", "topic": "反射面形变调节与接收效率优化"},
+        {"no": "B", "title": "乙醇偶合制备 C4 烯烃", "topic": "催化剂与温度对收率的回归优化"},
+        {"no": "C", "title": "生产企业原材料的订购与运输", "topic": "订购与运输方案的多目标优化"}
+      ]
+    },
+    {
+      "id": "cumcm2022", "year": 2022, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/388239ded4b057d37b7b8e51e33fe903.html",
+      "problems": [
+        {"no": "A", "title": "波浪能最大输出功率设计", "topic": "波浪能装置动力学与功率优化"},
+        {"no": "B", "title": "无人机遂行编队飞行中的纯方位无源定位", "topic": "纯方位定位与编队队形调整"},
+        {"no": "C", "title": "古代玻璃制品的成分分析与鉴别", "topic": "玻璃成分统计规律与类别鉴别"}
+      ]
+    },
+    {
+      "id": "cumcm2023", "year": 2023, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/c74d72127066f510a5723a94b5323a26.html",
+      "problems": [
+        {"no": "A", "title": "定日镜场的优化设计", "topic": "定日镜场光学效率与参数优化"},
+        {"no": "B", "title": "多波束测线问题", "topic": "多波束海底测线布设与覆盖优化"},
+        {"no": "C", "title": "蔬菜类商品自动定价与补货决策", "topic": "定价补货联合决策与需求预测"}
+      ]
+    },
+    {
+      "id": "cumcm2024", "year": 2024, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/a0c1fb5c31d43551f08cd8ad16870444.html",
+      "problems": [
+        {"no": "A", "title": "板凳龙闹元宵", "topic": "螺线运动学建模与路径规划"},
+        {"no": "B", "title": "生产过程中的决策问题", "topic": "抽样检测方案与生产决策优化"},
+        {"no": "C", "title": "农作物的种植策略", "topic": "种植方案优化与风险收益权衡"}
+      ]
+    },
+    {
+      "id": "cumcm2025", "year": 2025, "paper": "本科组",
+      "url": "https://www.mcm.edu.cn/html_cn/node/03c91a444e62eee81a3740fa97a461a6.html",
+      "problems": [
+        {"no": "A", "title": "烟幕干扰弹的投放策略", "topic": "遮蔽时长优化与投放路径规划"},
+        {"no": "B", "title": "碳化硅外延层厚度的确定", "topic": "红外光谱反演与外延层厚度估计"},
+        {"no": "C", "title": "NIPT 的时点选择与胎儿异常判定", "topic": "检测时点优化与胎儿异常判定"}
+      ]
+    }
+  ]
+}

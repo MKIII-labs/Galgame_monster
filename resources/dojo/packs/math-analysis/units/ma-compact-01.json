@@ -1,0 +1,33 @@
+{
+  "id": "ma-compact-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "闭区间 [a,b] 上的连续函数一定：",
+    "options": [
+      { "key": "A", "text": "一致连续" },
+      { "key": "B", "text": "可导" },
+      { "key": "C", "text": "单调" },
+      { "key": "D", "text": "无界" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "Cantor 定理：闭区间上的连续函数一致连续。可导、单调都不是连续能推出的；闭区间连续还保证有界，所以 D 反了。",
+    "signals": ["闭区间", "连续", "问一定成立"],
+    "traps": {
+      "B": "连续不一定可导，例如 |x| 在 0 点。",
+      "C": "连续函数可以剧烈振荡，不必单调。",
+      "D": "闭区间连续函数一定有界。"
+    }
+  },
+  "card": {
+    "title": "闭连续 → 一致连续",
+    "trigger": "闭区间上的连续函数",
+    "first_step": "想到 Cantor 定理",
+    "pitfall": "把连续当成可导或单调"
+  },
+  "source_ref": { "doc": "self-authored:math-analysis", "loc": "一致连续" }
+}

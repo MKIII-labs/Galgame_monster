@@ -1,0 +1,33 @@
+{
+  "id": "la-rank-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "A 是 4×6 矩阵，r(A) = 3。则齐次方程组 Ax = 0 的解空间维数是：",
+    "options": [
+      { "key": "A", "text": "1" },
+      { "key": "B", "text": "2" },
+      { "key": "C", "text": "3" },
+      { "key": "D", "text": "4" }
+    ]
+  },
+  "expert": {
+    "choice": "C",
+    "why": "秩-零化度定理：解空间维数 = 未知数个数 − 秩 = 6 − 3 = 3。行数 4 不参与这个计算。",
+    "signals": ["m×n 矩阵", "已知秩", "问解空间维数"],
+    "traps": {
+      "A": "把 4−3 当成答案，用了行数而不是列数。",
+      "B": "6−4 混淆了秩与行数。",
+      "D": "直接取了秩的值。"
+    }
+  },
+  "card": {
+    "title": "解空间维数 n−r",
+    "trigger": "Ax=0 解空间维数",
+    "first_step": "找未知数个数 n 与秩 r",
+    "pitfall": "用行数 m 去减秩"
+  },
+  "source_ref": { "doc": "self-authored:linear-algebra", "loc": "秩-零化度" }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "ma-riemann-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "[a,b] 上有界函数黎曼可积的充要条件（Lebesgue 判据）是：",
+    "options": [
+      { "key": "A", "text": "函数连续" },
+      { "key": "B", "text": "不连续点构成的集合是零测集" },
+      { "key": "C", "text": "函数单调" },
+      { "key": "D", "text": "函数有界" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "有界函数黎曼可积当且仅当其不连续点集为零测集。连续、单调都是充分条件；有界只是前提，不保证可积（如 Dirichlet 函数）。",
+    "signals": ["有界函数", "黎曼可积", "充要条件"],
+    "traps": {
+      "A": "连续是充分条件，但可积函数可以不连续（有限个跳变点）。",
+      "C": "单调也是充分条件，不是必要条件。",
+      "D": "有界是可积讨论的前提，Dirichlet 函数有界但不可积。"
+    }
+  },
+  "card": {
+    "title": "可积看间断点测度",
+    "trigger": "判断黎曼可积",
+    "first_step": "看间断点是否为零测集",
+    "pitfall": "把连续当成必要条件"
+  },
+  "source_ref": { "doc": "self-authored:math-analysis", "loc": "黎曼积分" }
+}

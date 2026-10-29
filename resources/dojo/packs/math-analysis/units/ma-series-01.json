@@ -1,0 +1,33 @@
+{
+  "id": "ma-series-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "若级数 ∑|aₙ| 收敛，则级数 ∑aₙ：",
+    "options": [
+      { "key": "A", "text": "一定收敛，称为绝对收敛" },
+      { "key": "B", "text": "一定发散" },
+      { "key": "C", "text": "可能收敛也可能发散，无法判断" },
+      { "key": "D", "text": "一定条件收敛" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "绝对收敛蕴含收敛：由 0 ≤ aₙ + |aₙ| ≤ 2|aₙ| 及比较判别法可得正部与负部都收敛。条件收敛是「收敛但绝对值级数发散」的情形。",
+    "signals": ["绝对值级数收敛", "问原级数"],
+    "traps": {
+      "B": "绝对收敛是比普通收敛更强的结论。",
+      "C": "这是级数理论的基本定理，可以判断。",
+      "D": "条件收敛要求绝对值级数发散，与题设相反。"
+    }
+  },
+  "card": {
+    "title": "绝对收敛必收敛",
+    "trigger": "∑|aₙ| 收敛",
+    "first_step": "直接得 ∑aₙ 绝对收敛",
+    "pitfall": "把绝对收敛与条件收敛弄反"
+  },
+  "source_ref": { "doc": "self-authored:math-analysis", "loc": "级数" }
+}

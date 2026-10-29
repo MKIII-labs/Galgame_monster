@@ -1,0 +1,33 @@
+{
+  "id": "aa-hom-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "设 φ: G → G′ 是群同态。同态基本定理给出：",
+    "options": [
+      { "key": "A", "text": "G / ker φ ≅ im φ" },
+      { "key": "B", "text": "G ≅ G′" },
+      { "key": "C", "text": "ker φ = G" },
+      { "key": "D", "text": "im φ = G′" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "同态基本定理：商掉核之后与像同构。核是正规子群，所以商群有定义；这个同构把「同态」化成「商群到像的同构」。",
+    "signals": ["群同态", "核与像", "商群"],
+    "traps": {
+      "B": "只有同构时才有 G≅G′，一般同态不成立。",
+      "C": "ker φ=G 只在零同态时成立。",
+      "D": "同态不必是满射。"
+    }
+  },
+  "card": {
+    "title": "商掉核等于像",
+    "trigger": "群同态",
+    "first_step": "写 G/ker φ ≅ im φ",
+    "pitfall": "把核与像混为一谈"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "同态基本定理" }
+}

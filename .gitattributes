@@ -1,0 +1,3 @@
+# 换行符统一由 git 管理：仓库内存 LF，工作区按平台检出，
+# 避免 Windows 上整文件出现「LF will be replaced by CRLF」的伪差异。
+* text=auto

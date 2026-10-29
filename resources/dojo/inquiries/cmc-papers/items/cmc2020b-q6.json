@@ -1,0 +1,333 @@
+{
+  "id": "cmc2020b-q6",
+  "title": "从带权积分下界估计 ∫f²：Cauchy-Schwarz 与条件边界",
+  "subject": "数学分析",
+  "track": "竞赛",
+  "minutes": 30,
+  "source": {
+    "contest": "CMC",
+    "year": 2020,
+    "paper": "数学B类",
+    "problem": "6",
+    "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十二届全国大学生数学竞赛初赛（数学B类）试题及参考答案.pdf",
+    "note": "改编自官方真题，题干为教学改写"
+  },
+  "exam": {
+    "topic": "积分不等式证明",
+    "weight": "CMC 数学类初赛",
+    "variant": "常见考法"
+  },
+  "prerequisites": [
+    "定积分与函数内积",
+    "Cauchy-Schwarz 不等式",
+    "连续函数的基本性质"
+  ],
+  "brief": "这道题要求从带权积分 ∫x f 的下界推出 f 的 L² 下界。核心不是求 f，而是把积分看作内积并用 Cauchy-Schwarz。研究它可以看清权函数如何决定常数、哪些条件是冗余的，以及换权重时方法如何迁移。",
+  "acts": [
+    {
+      "id": "cmc2020b-q6-a1",
+      "label": "原题在问什么",
+      "ability": "framing",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "设 f∈C[0,1]，f(0)=0，且 ∫_0^1 x f(x) dx ≥1/2。要证明 ∫_0^1 f²(x) dx ≥1/10。先判断这道题的核心任务。",
+        "options": [
+          {
+            "key": "A",
+            "text": "把带权积分 ∫x f 看作内积，用 Cauchy-Schwarz 由权函数 x 的 L² 范数控制 f 的 L² 范数，从而得到下界。"
+          },
+          {
+            "key": "B",
+            "text": "先求出 f 的显式表达式，再直接计算 ∫f²。"
+          },
+          {
+            "key": "C",
+            "text": "证明 f 单调或凸，再用面积比较推出 ∫f² 的下界。"
+          },
+          {
+            "key": "D",
+            "text": "利用 f(0)=0，用中值定理找到 f'=c，再由导数推出积分不等式。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "条件是带权积分下界，目标是被积函数平方的积分下界；Cauchy-Schwarz 正好用权函数 x 的 L² 范数把两者联系起来。",
+        "signals": [
+          "看到 ∫x f 与 ∫f²",
+          "有明确的权函数 x",
+          "目标是 L² 下界"
+        ],
+        "traps": {
+          "B": "题目没有给出 f 的解析式，也不需要求出 f。",
+          "C": "单调性或凸性没有给出，且不能用它推出该下界。",
+          "D": "f 只设为连续，未给可导性，中值定理不是本题工具；即使有导数也不是主线。"
+        }
+      },
+      "card": {
+        "title": "识别内积结构",
+        "trigger": "题目同时出现带权积分 ∫w f 与 ∫f² 时",
+        "first_step": "把 ∫w f 看成内积 ⟨w,f⟩",
+        "pitfall": "不要先假设 f 有单调性或可导性"
+      }
+    },
+    {
+      "id": "cmc2020b-q6-a2",
+      "label": "先算一个特例",
+      "ability": "evidence",
+      "primitive": "numeric",
+      "judge": "L1",
+      "minutes": 4,
+      "payload": {
+        "situation": "取测试函数 f(x)=3x/2。验证它满足 f(0)=0 且 ∫_0^1 x f(x) dx=1/2，然后计算 ∫_0^1 f²(x) dx。"
+      },
+      "expert": {
+        "value": 0.75,
+        "tolerance": 0.001,
+        "why": "∫_0^1 x f(x) dx=∫_0^1 (3/2)x² dx=1/2；∫_0^1 f² dx=∫_0^1 (9/4)x² dx=(9/4)(1/3)=3/4。",
+        "signals": [
+          "先由条件确定系数 3/2",
+          "平方积分是 ∫x² 的常数倍"
+        ]
+      },
+      "card": {
+        "title": "特例检验",
+        "trigger": "需要判断下界是否合理时",
+        "first_step": "选一个满足条件的简单函数代入",
+        "pitfall": "忘记先验证条件，只算目标积分"
+      }
+    },
+    {
+      "id": "cmc2020b-q6-a3",
+      "label": "构造反例与条件判断",
+      "ability": "robustness",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "下列改动中，哪些会使结论 ∫f²≥1/10 不再成立，即存在满足新条件的 f 但 ∫f²<1/10？",
+        "options": [
+          {
+            "key": "A",
+            "text": "删去条件 ∫x f≥1/2，只保留 f(0)=0。"
+          },
+          {
+            "key": "B",
+            "text": "删去条件 f(0)=0，只保留 ∫x f≥1/2。"
+          },
+          {
+            "key": "C",
+            "text": "将条件 ∫x f≥1/2 改成 ∫x f=1/2。"
+          },
+          {
+            "key": "D",
+            "text": "将条件 ∫x f≥1/2 改成 ∫x f≥0。"
+          },
+          {
+            "key": "E",
+            "text": "将权函数 x 改成 x²，并要求 ∫x² f≥1/2。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": [
+          "A",
+          "D"
+        ],
+        "why": "A 和 D 都允许 f≡0，此时新条件成立但 ∫f²=0<1/10；B、C、E 仍保留足够强的下界，Cauchy-Schwarz 可推出结论。",
+        "signals": [
+          "用零函数检验条件是否仍强制非零",
+          "检查积分下界是否被保留"
+        ],
+        "traps": {
+          "B": "去掉 f(0)=0 不影响 Cauchy 证明，结论仍成立。",
+          "C": "等号条件仍给出 ∫x f=1/2，Cauchy 推出 ∫f²≥3/4。",
+          "E": "换成 x² 后 Cauchy 给出 ∫f²≥5/4，仍成立。"
+        }
+      },
+      "card": {
+        "title": "零函数反例",
+        "trigger": "判断某个条件能否删去时",
+        "first_step": "先试 f≡0 是否满足新条件",
+        "pitfall": "把较弱条件误当成仍能强制非零积分"
+      }
+    },
+    {
+      "id": "cmc2020b-q6-a4",
+      "label": "证明骨架",
+      "ability": "argument",
+      "primitive": "order",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "situation": "排列下面证明的主线，使由条件推出 ∫f²≥1/10。",
+        "steps": [
+          {
+            "id": "s1",
+            "text": "把条件改写成内积：⟨x,f⟩=∫_0^1 x f(x) dx ≥1/2。"
+          },
+          {
+            "id": "s2",
+            "text": "对函数 x 与 f 应用 Cauchy-Schwarz：⟨x,f⟩²≤⟨x,x⟩⟨f,f⟩。"
+          },
+          {
+            "id": "s3",
+            "text": "计算 ⟨x,x⟩=∫_0^1 x² dx=1/3。"
+          },
+          {
+            "id": "s4",
+            "text": "由 ⟨x,f⟩≥1/2 得 1/4≤⟨x,f⟩²≤(1/3)∫f²。"
+          },
+          {
+            "id": "s5",
+            "text": "整理得 ∫f²≥3/4，从而满足 ∫f²≥1/10。"
+          }
+        ]
+      },
+      "expert": {
+        "order": [
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5"
+        ],
+        "why": "先用内积语言对位，再应用 Cauchy-Schwarz，随后计算权函数范数并代入已知下界，最后整理出目标下界。",
+        "signals": [
+          "Cauchy-Schwarz 必须作用于 x 与 f",
+          "∫x²=1/3 是中间计算",
+          "最终得到的是 ∫f² 的下界"
+        ]
+      },
+      "card": {
+        "title": "Cauchy-Schwarz 三步走",
+        "trigger": "带权积分与平方积分同时出现",
+        "first_step": "写成内积并应用不等式",
+        "pitfall": "不要漏算权函数自身的 L² 范数"
+      }
+    },
+    {
+      "id": "cmc2020b-q6-a5",
+      "label": "条件边界",
+      "ability": "condition",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "上面的 Cauchy-Schwarz 证明中，关于条件 f(0)=0 的哪项判断是正确的？",
+        "options": [
+          {
+            "key": "A",
+            "text": "f(0)=0 在 Cauchy-Schwarz 证明中未被用到；去掉它而保留 ∫x f≥1/2，∫f²≥1/10 仍成立。"
+          },
+          {
+            "key": "B",
+            "text": "f(0)=0 是必需的，否则 f 可取负值使 ∫f² 任意小。"
+          },
+          {
+            "key": "C",
+            "text": "f(0)=0 用来保证 f 非负，从而可以去掉绝对值。"
+          },
+          {
+            "key": "D",
+            "text": "f(0)=0 与 ∫x f≥1/2 不可能同时成立。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "Cauchy-Schwarz 只用到权函数 x 与 f 的 L² 信息，并不使用 f 在单点的取值；条件 ∫x f≥1/2 本身已足够推出 ∫f²≥3/4，从而推出 ≥1/10。",
+        "signals": [
+          "证明中没有出现 f(0)",
+          "单点值不影响 L² 积分估计"
+        ],
+        "traps": {
+          "B": "f 取负值不会破坏 Cauchy-Schwarz；关键下界来自 ∫x f≥1/2。",
+          "C": "题目没有假设 f 非负，也不需要用非负性去掉绝对值。",
+          "D": "例如 f(x)=3x/2 同时满足 f(0)=0 和 ∫x f=1/2。"
+        }
+      },
+      "card": {
+        "title": "识别冗余条件",
+        "trigger": "检查证明中是否真正用到某个条件",
+        "first_step": "逐步核对证明出现的量",
+        "pitfall": "看到条件就默认必须使用"
+      }
+    },
+    {
+      "id": "cmc2020b-q6-a6",
+      "label": "同类变式",
+      "ability": "reflection",
+      "primitive": "expr",
+      "judge": "L1",
+      "minutes": 5,
+      "payload": {
+        "situation": "同类变式：设 f∈C[0,1]（不再需要 f(0)=0），且 ∫_0^1 x² f(x) dx ≥1/2。用同样的 Cauchy-Schwarz 方法，得到的 ∫_0^1 f²(x) dx 的下界是多少？"
+      },
+      "expert": {
+        "expr": "5/4",
+        "why": "对权函数 x² 与 f 用 Cauchy-Schwarz：(∫x² f)²≤(∫x⁴)(∫f²)。计算 ∫_0^1 x⁴ dx=1/5，故 ∫f²≥(1/2)²/(1/5)=5/4。",
+        "signals": [
+          "权函数从 x 换成 x²",
+          "分母变为 ∫x⁴=1/5"
+        ]
+      },
+      "card": {
+        "title": "换权函数不换方法",
+        "trigger": "积分约束中的权重改变",
+        "first_step": "写出新的 Cauchy-Schwarz 配对",
+        "pitfall": "仍用旧的 ∫x²=1/3 作为分母"
+      }
+    }
+  ],
+  "artifact": {
+    "prompt": "用 150–300 字回答：本题要证什么？写出由条件到结论的关键不等式；指出证明中哪个条件并非必需；给出一个说明积分约束不能完全删除的反例；最后说明把权函数 x 换成 x² 时，同样方法给出什么下界。",
+    "rubric": [
+      {
+        "id": "r1",
+        "text": "写明已知条件（包含 ∫x f 的下界）与目标 ∫f²≥1/10。",
+        "keywords": [
+          "∫x f",
+          "∫f²",
+          "1/10"
+        ]
+      },
+      {
+        "id": "r2",
+        "text": "写出关键的 Cauchy-Schwarz 步骤，并使用权函数 x 计算 ∫x²=1/3。",
+        "keywords": [
+          "Cauchy-Schwarz",
+          "∫x²=1/3"
+        ]
+      },
+      {
+        "id": "r3",
+        "text": "完成代数整理，得到 ∫f²≥3/4，从而推出 ≥1/10。",
+        "keywords": [
+          "3/4",
+          "≥1/10"
+        ]
+      },
+      {
+        "id": "r4",
+        "text": "指出 f(0)=0 在该证明中是冗余/非必需条件。",
+        "keywords": [
+          "f(0)=0",
+          "非必需"
+        ]
+      },
+      {
+        "id": "r5",
+        "text": "给出反例 f=0 说明不能删去全部积分约束，并说明换为 x² 时同样方法给出 5/4。",
+        "keywords": [
+          "f=0",
+          "x²",
+          "5/4"
+        ]
+      }
+    ],
+    "expert_sample": "本题在 f(0)=0 且 ∫x f 的下界 ≥1/2 下，要证 ∫f²≥1/10。关键是把 ∫x f 看成内积，用 Cauchy-Schwarz：(∫x f)²≤(∫x²)(∫f²)，并算出 ∫x²=1/3，于是 ∫f²≥(1/2)²/(1/3)=3/4，故 ≥1/10。这里 f(0)=0 在证明中未被使用，是非必需条件；但不能删去全部积分约束：若去掉 ∫x f≥1/2，取 f=0 有 ∫f²=0<1/10。同类变式把权函数 x 换成 x² 时，因 ∫x⁴=1/5，同样方法给出 ∫f²≥(1/2)²/(1/5)=5/4。"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "id": "ma-integral-01",
+  "ability": "method",
+  "primitive": "order",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "用定积分定义证明 ∫₀¹ x² dx = 1/3。请把步骤排成合理顺序。",
+    "steps": [
+      { "id": "s1", "text": "把 [0,1] 等分成 n 个小区间" },
+      { "id": "s2", "text": "在每个小区间上取样本点（如右端点 i/n）" },
+      { "id": "s3", "text": "写出黎曼和 ∑(i/n)²·(1/n)" },
+      { "id": "s4", "text": "化简为 (1/n³)·∑i²" },
+      { "id": "s5", "text": "令 n→∞，用 ∑i² 的公式取极限得 1/3" }
+    ]
+  },
+  "expert": {
+    "why": "定积分是黎曼和的极限：先分割、再取点、写和式、化简，最后取极限。顺序颠倒会失去「先构造再求极限」的逻辑。",
+    "signals": ["用定义证明定积分", "分割与求和"],
+    "order": ["s1", "s2", "s3", "s4", "s5"]
+  },
+  "card": {
+    "title": "定积分四步",
+    "trigger": "用定义算定积分",
+    "first_step": "分割 → 取点 → 求和 → 取极限",
+    "pitfall": "跳过黎曼和直接套公式"
+  },
+  "source_ref": { "doc": "self-authored:math-analysis", "loc": "定积分定义" }
+}

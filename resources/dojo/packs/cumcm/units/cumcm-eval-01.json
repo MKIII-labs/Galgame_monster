@@ -1,0 +1,34 @@
+{
+  "id": "cumcm-eval-01",
+  "ability": "method",
+  "primitive": "pair",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "把常用的评价方法与它的核心特点配对。",
+    "left": [
+      { "id": "l1", "text": "熵权法" },
+      { "id": "l2", "text": "层次分析法（AHP）" },
+      { "id": "l3", "text": "TOPSIS" },
+      { "id": "l4", "text": "灰色关联分析" }
+    ],
+    "right": [
+      { "id": "r1", "text": "按指标离散程度客观赋权" },
+      { "id": "r2", "text": "用判断矩阵体现主观偏好" },
+      { "id": "r3", "text": "按与理想解的贴近度排序" },
+      { "id": "r4", "text": "用小样本序列的相似程度排序" }
+    ]
+  },
+  "expert": {
+    "why": "熵权法用信息熵衡量指标区分度，越离散权重越大；AHP 靠专家判断矩阵，是主观赋权；TOPSIS 计算与正负理想解的距离；灰色关联看序列几何形状的相似度，适合小样本。",
+    "signals": ["综合评价", "需要确定权重或排序", "指标多、样本少"],
+    "pairs": { "l1": "r1", "l2": "r2", "l3": "r3", "l4": "r4" }
+  },
+  "card": {
+    "title": "评价方法四件套",
+    "trigger": "多指标综合评价",
+    "first_step": "先分清要赋权还是要排序",
+    "pitfall": "把所有方法都当成「打分」混用"
+  },
+  "source_ref": { "doc": "self-authored:cumcm", "loc": "评价模型" }
+}

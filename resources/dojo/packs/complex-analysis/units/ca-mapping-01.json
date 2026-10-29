@@ -1,0 +1,33 @@
+{
+  "id": "ca-mapping-01",
+  "ability": "assumption",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "解析函数 f 在点 z₀ 处保角的常用条件是：",
+    "options": [
+      { "key": "A", "text": "f′(z₀) ≠ 0" },
+      { "key": "B", "text": "f(z₀) ≠ 0" },
+      { "key": "C", "text": "f 在 z₀ 有界" },
+      { "key": "D", "text": "f 是实值函数" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "解析函数在导数非零的点处局部是保角映射：两条曲线的夹角在映射后保持不变。f(z₀) 的值与保角性无关。",
+    "signals": ["保角映射", "解析函数", "导数"],
+    "traps": {
+      "B": "函数值是否为 0 不影响角度。",
+      "C": "有界与保角无关。",
+      "D": "实值解析函数只能是常数，谈不上保角。"
+    }
+  },
+  "card": {
+    "title": "保角看 f′≠0",
+    "trigger": "判断是否保角",
+    "first_step": "算 f′(z₀) 是否非零",
+    "pitfall": "拿函数值判断"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "保角映射" }
+}

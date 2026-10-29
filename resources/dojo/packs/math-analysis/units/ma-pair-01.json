@@ -1,0 +1,34 @@
+{
+  "id": "ma-pair-01",
+  "ability": "method",
+  "primitive": "pair",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "把概念与它的关键性质配对。",
+    "left": [
+      { "id": "l1", "text": "一致收敛" },
+      { "id": "l2", "text": "绝对收敛" },
+      { "id": "l3", "text": "条件收敛" },
+      { "id": "l4", "text": "可微" }
+    ],
+    "right": [
+      { "id": "r1", "text": "能保持极限函数的连续性" },
+      { "id": "r2", "text": "绝对值级数也收敛" },
+      { "id": "r3", "text": "本身收敛但绝对值级数发散" },
+      { "id": "r4", "text": "存在线性主部" }
+    ]
+  },
+  "expert": {
+    "why": "一致收敛能穿过极限保持连续性；绝对收敛是绝对值级数收敛；条件收敛是原级数收敛但绝对值级数发散；可微的本质是增量有线性主部。",
+    "signals": ["概念辨析", "收敛类型与微分"],
+    "pairs": { "l1": "r1", "l2": "r2", "l3": "r3", "l4": "r4" }
+  },
+  "card": {
+    "title": "四个概念的判据",
+    "trigger": "区分收敛与可微",
+    "first_step": "先问是函数列还是级数",
+    "pitfall": "把一致收敛与绝对收敛混在一起"
+  },
+  "source_ref": { "doc": "self-authored:math-analysis", "loc": "概念辨析" }
+}

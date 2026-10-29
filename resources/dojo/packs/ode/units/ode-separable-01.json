@@ -1,0 +1,33 @@
+{
+  "id": "ode-separable-01",
+  "ability": "framing",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "方程 y′ = x²y 属于哪种类型？",
+    "options": [
+      { "key": "A", "text": "可分离变量" },
+      { "key": "B", "text": "一阶线性非齐次" },
+      { "key": "C", "text": "恰当方程" },
+      { "key": "D", "text": "二阶常系数" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "右边能写成 x² 与 y 的乘积，移项得 dy/y = x² dx，两边分别积分即可。它是可分离变量方程，也是一阶线性齐次方程，但最直接的解法是分离变量。",
+    "signals": ["右边是 x 的函数乘 y 的函数", "一阶"],
+    "traps": {
+      "B": "它确实是一阶线性齐次，但右边不含 x 的加法项，分离变量更直接；题目问类型，最贴近的是可分离。",
+      "C": "没有写成 P dx + Q dy 并检验偏导的形式。",
+      "D": "只有一阶导数。"
+    }
+  },
+  "card": {
+    "title": "能分离先分离",
+    "trigger": "y′ = f(x)g(y)",
+    "first_step": "把 y 与 x 分到两边",
+    "pitfall": "一阶方程一律套线性公式"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "一阶方程" }
+}

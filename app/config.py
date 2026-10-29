@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """接口配置：服务商默认值、配置读写（带缓存）、地址补全与思考参数"""
+import copy
+
 from app.store import CONFIG_FILE, read_json, write_json
 
 API_PROVIDERS = {
@@ -16,63 +18,377 @@ API_PROVIDERS = {
 }
 
 
+DEFAULT_CONFIG = {
+    "chat_api_key": "", "chat_url": "", "chat_model": "", "chat_presets": {},
+    # 服务商协议：""（按地址自动判断）| openai | anthropic
+    # openai 走 /chat/completions 兼容协议；anthropic 走原生 /v1/messages
+    "chat_kind": "", "vision_kind": "",
+    # 故障转移链：主服务商失败（且一个字都没输出）时，按顺序尝试这些预设名
+    "chat_fallback": [],
+    # 各模型的上下文窗口（键是模型名前缀，如 "claude": 200000）；匹配不到用 chat_context_limit
+    "model_contexts": {},
+    # 每日 token 上限：0 = 不限；达到后拒绝发起新请求（按本地用量流水统计）
+    "usage_daily_tokens": 0,
+    # 分级模型调度：轻量任务（摘要 / 记忆挑选 / GAL 判定 / 语音矫正）可选用的「小模型」。
+    # 三项都留空 = 沿用主 chat 模型（默认，行为与从前一致）。
+    "light_url": "", "light_api_key": "", "light_model": "",
+    "chat_think_mode": "", "chat_think_enabled": False, "chat_think_level": "high",
+    "chat_native_tools": True,       # 优先用模型原生 function calling；不支持时自动回退文本协议
+    # 0 = 按模型自动（用 model_contexts / 内置表 / 能力注册表）；
+    # 填具体值则以它为准（既能收紧也能放宽，只受 MAX_CONTEXT_HARD 防呆上限约束）
+    "chat_context_limit": 0, "chat_reserve_output": 16384,
+    # 上下文压缩：占用达到 ratio 时后台预压缩；保留最近 keep_ratio 的原文；
+    # 摘要输出 token 上限。比例按 0–1 存储，设置页用百分数。
+    # keep_ratio 的口径对齐 dsh：按 (窗口 - 输出上限) 的比例算，而不是整个窗口。
+    "compress_ratio": 0.8,
+    "compress_keep_ratio": 0.16,
+    "compress_summary_tokens": 8192,
+    # 历史「过程旁白」压缩：assistant 的 content 是所有轮次正文的拼接，过程占大头。
+    # 最近 keep_turns 条 assistant 消息保留原文，更早的只留「过程摘要 + 最后一段答案」。
+    # 0 = 关闭（整段保留）。
+    "history_process_keep_turns": 2,
+    "history_process_digest": 240,
+    # 本会话记忆的自整理：
+    # soft_limit：超过这么多条时提示先整理（0 = 不限）；
+    # organize_every：每多少个工具轮提醒一次整理（0 = 关）；
+    # list_recent：超限时在提示词里列最近多少条，方便合并（12–80）。
+    "memory_soft_limit": 60,
+    "memory_organize_every": 20,
+    "memory_list_recent": 40,
+    # 单次模型调用的输出上限（max_tokens，硬截断）；0 = 不传，用服务商默认。
+    # 思考模式的 reasoning 也计入这个额度：设得太小，模型会在写工具块之前就被截断
+    # （现象是正文停在冒号、却没有工具调用，见 NOTE 43.76）。
+    "chat_max_tokens": 8192,
+    # 输出上限最多占窗口的多少（对齐 dsh 的 1M 窗口 / 256k 输出比例）；
+    # 0 = 不按比例夹紧。用户填得更大也会被夹到这个值，避免「提示词 + 输出」越过窗口。
+    "chat_output_window_ratio": 0.25,
+    # 除输出上限外，再为估算误差 / 消息元数据留的余量（token）。
+    # 可用提示词 = min(窗口*compress_ratio, 窗口 - 输出上限 - headroom)。
+    "chat_output_headroom": 8192,
+    # 瞬时错误重试策略：normal（有限次，沿用 chat_round_retries / chat_upload_retries）
+    # / always（无上限，直到成功或用户停止）。billing / auth / bad_request / context
+    # 永不进入无限重试（dsh 的 always 连余额不足也重试，对桌面应用是纯烧钱）。
+    "chat_retry_mode": "always",
+    # always 模式的安全阀（分钟）：0 = 不限；到点仍未成功就收尾并给「继续任务」。
+    "chat_retry_max_minutes": 0,
+    # 普通失败（空响应 / 限流 / 5xx）退避：0.5s → 10s，±jitter（对齐 dsh）。
+    "chat_retry_backoff_ms": 500,
+    "chat_retry_backoff_max_ms": 10000,
+    "chat_retry_jitter": 0.1,
+    # 传输类失败（上传 / 断网 / 静默）退避：弱网实测 1 秒连撞必失败，保留长退避。
+    "chat_transport_backoff_ms": 5000,
+    "chat_transport_backoff_max_ms": 30000,
+    # 首包看门狗：上游连续多少秒连一个 `data:` 行都没有就中止本轮（秒）；0 = 不限。
+    # socket 读超时会被 SSE 注释行续命，只有这一项能兜住「连接活着但正文永远不来」。
+    "chat_stream_idle_timeout": 90,
+    # 空转看门狗：上游一直在发 `data:` 行，但连续多少秒没有思考 / 正文 / 工具 / 结束标记
+    # 就中止本轮（秒）；0 = 关。空 delta / role-only / usage-only 会续命 socket，
+    # 却不会让界面出现任何内容 —— 这一项专门兜「有数据但界面全静默」。
+    "chat_stream_stall_timeout": 45,
+    # 单轮零产出自动重试：这一轮「一个字都没产出」就断了（超时 / 静默 / 连接错误）时，
+    # 重发同一份 messages，最多几次；0 = 不重试。有正文或工具调用就绝不重发
+    # （否则会拼出两段回答 / 重复执行副作用）。
+    "chat_round_retries": 2,
+    # 请求体还没发完就断（上行写超时 / 连接被掐）时的独立重试次数。
+    # 这种失败没有产出、重发无副作用，而弱网恢复常超过普通预算的 2 次；0 = 跟随普通预算。
+    "chat_upload_retries": 4,
+    # 单次请求的字符硬上限（约等于 token×2）：超过就折叠旧工具结果 / 临时丢中间历史。
+    # 上下文上限配得很大时裁剪不会触发，请求体能涨到 2 MB 以上，上传阶段必然超时；
+    # 0 = 不限（只受上下文上限约束）。
+    "chat_request_max_chars": 500000,
+    # Code Mode：单次脚本工具调用上限与并发上限；0 = 不限调用次数。
+    "code_mode_max_calls": 2000,
+    "code_mode_parallel": 16,
+    # Code Mode 是否允许脚本直接写文件 / 跑命令（默认关闭）。
+    # 打开前脚本被 audit hook 限制为「只读沙箱内文件」：内置 open()、os.remove、
+    # subprocess 一律拒绝；打开后写入仍只能落在沙箱内。只在可信任务里开。
+    "code_mode_allow_write": False,
+    "code_mode_allow_cmd": False,
+    # 应用窗口关闭后，若还有任务在生成，服务继续保活的分钟数（期间重开窗口可接回）；
+    # 0 = 立即退出（旧行为）。chat_window_keep_alive 为 True 时忽略这个上限。
+    "chat_window_grace_min": 10,
+    # 窗口关闭后是否等正在生成的任务彻底结束再退出（对齐 dsh：任务与 UI 解耦）。
+    # False 时退回 chat_window_grace_min 的分钟数。
+    "chat_window_keep_alive": True,
+    # 思考是否落库：开着时刷新会话仍能回看思考；关掉只存正文 / 工具的顺序。
+    # 思考只写本地 sessions.json，不会上传。
+    "chat_persist_reasoning": True,
+    # 每条消息保留的思考字数上限；0 = 不限。超限时丢最早的思考块、保留最近的。
+    "chat_reasoning_keep_chars": 12000,
+    "chat_balance_url": "",
+    "vision_api_key": "", "vision_url": "", "vision_model": "", "vision_protocol": "", "vision_presets": {},
+    "vision_use_chat": False, "vision_balance_url": "",
+    # 默认：聊天模型支持识图就用聊天模型；勾选此项则优先使用独立的视觉 API
+    "vision_prefer_api": False,
+    "search_enabled": False, "search_provider": "bocha", "search_api_key": "",
+    "search_url": "", "search_count": 8,
+    # 默认：聊天模型自带搜索（目前是 DeepSeek Search API，复用聊天密钥）优先；
+    # 勾选此项则始终使用下面配置的服务商（博查 / 豆包 / Tavily）
+    "search_prefer_api": False,
+    # B 站数据读取：SESSDATA 是本机登录凭证，只用于请求 B 站，不进入模型上下文
+    "bili_sessdata": "", "bili_comment_pages": 3,
+    # 注：检索式改写已取消——改由主模型在调用 web_search 时自己给关键词
+    "search_fetch": True,            # 抓取命中网页的正文（仅注入提示，不入库）
+    "search_fetch_count": 4,         # 抓正文的条数（1–10）
+    "search_fetch_reader": "jina",   # 抓正文方式：jina（免 key）| direct
+    # 多检索式合并后的条数上限 / 每条正文保留字数。0 = 用代码里的常量（12 / 2500）。
+    "search_merged_max": 12,
+    "search_fetch_chars": 2500,
+    # 复刻 / 还原 / 从零实现类任务：单轮信息量放宽（0 = 用上面两项）。
+    "search_research_merged_max": 20,
+    "search_research_fetch_chars": 4000,
+    # 搜索服务商余额接口：留空时按服务商自动识别（bocha / tavily）；volc 无可用接口。
+    "search_balance_url": "",
+    "learning_presets": {},
+    # 已停用的 Skill id 列表；Skill 本体存在 data/skills/<id>/SKILL.md
+    "skills_disabled": [],
+    # 预设 Skill 是否已播种过（老字段，保留兼容）；新增/删除用下面两个列表精确记录
+    "skills_seeded": False,
+    "skills_seeded_ids": [],     # 已处理过的预设 id（含用户自己已有的同名目录）
+    "skills_deleted": [],        # 用户删除过的预设 id：以后不再播种回来
+    "speech_model_dir": "",          # 本地语音模型目录；留空则用 data/models 下的默认目录
+    "speech_stream_model_dir": "",   # 流式识别模型目录；留空则用 data/models 下的默认目录
+    "speech_polish": False,          # 语音输入结束后是否自动做一次 AI 矫正
+    "speech_denoise": False,         # 语音输入是否开启流式降噪（DPDFNet）
+    "speech_denoise_model": "",      # 降噪模型路径；留空则用 data/models/dpdfnet_baseline.onnx
+    "speech_final_model_dir": "",    # 两遍识别的精修模型目录；留空则用 data/models 下的默认目录
+    "ui_mode": "solo",               # 界面模式：solo（纯对话）| ide（工作区）| gal（演出）| hall（功能大厅）| work（工作台）
+    "theme": "light",                # 默认浅色（VS Code Light+）
+    # ---- IDE 编辑器主题（与上面的界面主题完全解耦，两套配置各自独立）----
+    # 空串 = 跟随界面主题；其余取值只在 IDE 模式下生效（见 web/css/ide.css）
+    "ide_theme": "vscode-dark",      # vscode-dark | vscode-light | trae-dark | trae-light | trae-blue | ""
+    "ide_whitespace": "all",         # 空白字符可视化：none | selection | trailing | boundary | all
+    # ---- GAL 演出模式（见 docs/GAL_MODE_DESIGN.md）----
+    "gal_emotion_multi": False,      # 情绪字段是否用多标签数组（默认单值）
+    "gal_options_instant": True,     # 点选项是否立即发送（否则填回输入框）
+    "gal_tts_priority": "sprite",    # 台词发声优先级：sprite=绑定音频优先 | tts
+    # ---- GAL 演出皮肤 / 节奏 / 特效 ----
+    "gal_theme": "sakura",           # 演出主题：sakura 樱粉 | night 夜蓝 | washi 和风纸 | mono 极简黑白 | cyber 霓虹夜景 | pixel 像素复古
+    "gal_typewriter": True,          # 打字机逐字显示
+    "gal_cps": 12,                   # 打字机速度（字符/秒）
+    "gal_seg_mode": "single",         # 对白展示：single 单行推进（默认，= 新世界观感）| append 逐段追加
+    "gal_auto": False,               # 单行推进时：语音播完自动切下一段
+    "gal_min_show": 0.6,             # 每段最短展示秒数（自动推进用）
+    "gal_fx": True,                  # 关键词特效（*闪光* / *震动* 等）
+    "gal_ui_sfx": True,              # 选项界面音效（悬停轻响 / 确认实响，WebAudio 现场合成）
+    "gal_nudge": True,               # 本轮没给选项时，在段末提示玩家可主动发言（文案由 AI 按场景生成）
+    "gal_show_think": False,         # 是否显示 AI 思考过程（关闭时只显示「思考中…」，更不破坏沉浸感）
+    "gal_think": False,              # GAL 是否**启用**深度思考（默认关：实测首 token 差约 10 倍）
+    "gal_show_exec": True,           # 是否显示 AI 行为（搜索/工具等，以「幕间」呈现）
+    # 下面三项由演出界面直接消费：显示状态参数 / GAL 允许联网 / 自动隐藏鼠标指针
+    "gal_show_stats": True,
+    "gal_search": False,
+    "gal_hide_cursor": True,
+    "gal_dialog_max": 46,            # 对白框最大高度（占舞台高度百分比，30–70）
+    "gal_sprite_fx": True,           # 立绘进出场 / 换人过渡动画
+    "gal_bar_auto": True,            # 顶部工具条沉浸式淡出（鼠标移入才实显）
+    "gal_bgm_volume": 0.5,           # 舞台 BGM 音量（0–1）
+    # ---- 界面：可收起的区域（输入框 / 侧栏 / IDE 文件管理区）----
+    "composer_collapsed": False,      # 输入框是否收起
+    "sidebar_collapsed": False,       # 左侧会话栏是否收起
+    "ide_side_collapsed": False,      # IDE 文件管理区（活动栏右侧视图）是否收起
+    # ---- 功能大厅（AI 互动玩法，见 app/hall.py 与 web/hall.js）----
+    # 大厅模块内部的 AI 开关（id -> bool）；默认开启，可在模块里关掉独自游玩
+    "hall_ai_enabled": {},
+    "hall_stock_ai_count": 3,         # 模拟股市：AI 对手人数（1–3）
+    # ---- GAL AI 自动写剧本 ----
+    "gal_auto_script": False,        # 总开关：由 AI 依据角色设定与用户画像自己编剧情并推进
+    "gal_auto_script_acts": 5,       # 大纲幕数（1–12）
+    "gal_auto_script_rounds": 4,     # 每幕最多回合数（1–12）
+    # ---- GAL 台词朗读（TTS）----
+    "tts_enabled": False,            # 是否朗读台词
+    "tts_provider": "edge",           # edge（免费·免密钥）| openai（兼容 /v1/audio/speech）| gpt-sovits（本地 HTTP）
+    "tts_url": "",                   # edge 忽略；openai 留空用 api.openai.com；gpt-sovits 留空用 127.0.0.1:9880
+    "tts_api_key": "",
+    "tts_model": "",                 # openai 用，如 tts-1 / gpt-4o-mini-tts
+    "tts_voice": "",                 # edge: zh-CN-XiaoxiaoNeural 等；openai: alloy 等；留空用各自默认
+    "tts_speed": 1.0,
+    "tts_max_len": 80,               # 单句最大字数（按标点切句）
+    # ---- Agent 执行上限（设置 → Agent；缺省值等于 agent.py 里的常量，不配置时行为不变）----
+    # 下面五项都能填 0 = 不限：上限由你自己取舍，代码只守最小值（负数视为填错，回落默认）。
+    "agent_max_rounds": 0,           # 单轮对话最多循环几次「调工具 → 再问模型」；0 = 不限
+    "agent_auto_continue": 3,        # 任务没做完时自动续跑几次；0 = 关闭，-1 = 无上限（1–10）
+    # 空转刹车：连续几次「续跑后一个新工具都没执行」就停（默认 1 = 给一次机会）。
+    # 实测 844 个续跑后仍无工具的轮次约吃掉 95M prompt token，第二次机会基本没救回来过。
+    "agent_auto_idle_limit": 1,
+    # 阶段总结放行：一段正文达到这个字数、且带「已完成 / 结果 / 目前」等总结信号时，
+    # 允许本轮先收尾（给「继续输出」按钮），不再强制续跑。0 = 关闭。
+    "agent_summary_stop_chars": 180,
+    # 用户这轮问的是「为什么中断 / 进度 / 是否完成」时，不自动续跑，先让它回答。
+    "agent_meta_turn_stop": True,
+    "agent_repeat_limit": 5,         # 同工具同参数连续几次就拦截；0 = 不拦截
+    "agent_cmd_timeout": 60,         # 命令默认超时（秒）；0 = 不限，直到命令自己结束或你点停止
+    # 只读工具并发预取：一轮里的多个读取一起跑（写之后的同文件读、命令之后的读除外）。
+    # 0 = 关闭（全部串行）；上限防止模型一次发几十个读把机器打满。
+    "agent_prefetch_max": 24,
+    "agent_prefetch_workers": 10,
+    # 执行阶段只读并行：连续的只读调用按段并发执行（写 / 命令 / 交互是屏障）。
+    # 0 = 关闭；与预取不同，屏障之后的只读段也能并行（例如「跑测试 → 读 B/C/D」）。
+    "agent_tool_parallel": True,
+    "agent_tool_parallel_max": 10,
+    # 写前读：覆盖已有文件前必须先在会话里读过；读后文件被外部改动（mtime / size 变化）
+    # 会要求重读，避免模型拿过期内容整体覆盖。新建文件不受影响。
+    "agent_require_read": True,
+    # 多步交付任务开工前先定义机检验收项；拦两次后放行，避免搜索/工具不可用时死锁。
+    "agent_acceptance_gate": True,
+    # 同一目标连续失败几次后追加「先诊断、别只调参数」的熔断提示；0 = 关闭。
+    "agent_fail_streak": 2,
+    # 单轮任务时间预算（分钟）；0 = 不限。到 80% 提醒先交最小切片，到 100% 停止本轮。
+    "agent_task_budget_min": 0,
+    # 每轮开始检查本会话写过的文件是否在工具调用之外消失；发现后提示 recover_file。
+    "agent_file_watch": True,
+    # 沙箱里已有 Git 仓库且工作树不干净时，每个会话提示一次。
+    "agent_sandbox_warn": True,
+    # 是否把「功能大厅（模拟股市 / B 站）」的说明与界面数据注入系统提示。
+    # 日历 / 日程始终注入，不受这个开关影响。
+    "agent_hall_prompt": True,
+    # 工具结果超过这个字符数就落盘：只回头尾 + locator，模型可用 read_tool_result 跨轮取回。
+    # 0 = 关闭落盘（退回「头尾截断 + 请求内句柄」）；keep / mb 控制 data/spills 的保留上限。
+    "tool_spill_max": 50000,
+    "tool_spill_keep": 400,
+    "tool_spill_mb": 256,
+    # 单条工具结果回灌预算：超 max 时回灌「头 head + 尾 tail」，中间省略。
+    # 0 = 不截断；旧结果折叠保留最近 keep_recent 条原文，其余压成 fold_chars 以内的结构化摘要。
+    "tool_result_max": 8192,
+    "tool_result_head": 4096,
+    "tool_result_tail": 1024,
+    "tool_result_keep_recent": 2,
+    "tool_result_fold_chars": 240,
+    # 外联审计：记录命令（含子进程）连过哪些外部地址，只记录、不拦截。
+    # 关掉后命令结果里不再附「外部连接」摘要。
+    "agent_net_audit": True,
+    # ---- 并行探索（子代理，只读）----
+    # 主代理可派 1–N 个只读侦察兵并行查代码；每个只回 600 字结论，原文不进主上下文。
+    "agent_explore_enabled": True,
+    "agent_explore_max": 8,          # 一次最多几个子代理（1–8）
+    "agent_explore_budget": 160000,  # 整批子代理的 token 预算；0 = 不限
+    "agent_explore_model": "",       # 子代理用的模型；留空 = 跟随主聊天模型
+    "agent_explore_ttl": 600,        # 子会话保留秒数（explore_followup 追问）；0 = 关闭
+    # 真 fork：把父会话已完成的历史（受预算裁剪）带给子代理；关掉退回 2000 字摘要。
+    # fork_tokens 是前缀预算（0 = 不限），并会与 agent_explore_budget 联动取较小值。
+    "agent_explore_fork": True,
+    "agent_explore_fork_tokens": 12000,
+    # 子代理写入：需要模型显式 allow_write，且每次写仍走主循环审批。0 = 不限次数。
+    "agent_explore_write": True,
+    "agent_explore_write_max": 16,
+    # 结论里的「文件:行号」重新读取核对（引用不存在则重试一次）
+    "agent_explore_verify": True,
+    # 嵌套：根 depth=0，子代理最多再往下 max_depth 层；max_total 是一棵子代理树的总数上限。
+    # 嵌套层默认只读；nested_write 打开后仍走主循环审批。
+    "agent_explore_max_depth": 5,
+    "agent_explore_max_total": 60,
+    "agent_explore_nested_write": False,
+    # 后台批次：启动后立即返回；status / result / cancel 取用。并发与结果保留时间可调。
+    "agent_explore_background": True,
+    "agent_explore_background_max": 12,
+    "agent_explore_background_ttl": 86400,
+    # ---- 研究闸门（复刻 / 还原 / 从零实现类任务）----
+    # 这类任务的信息缺口在外部（规格、机制、参数），光读本地代码会「凭记忆硬写」。
+    # 打开后：写第一个文件之前，至少要先检索；缺口用 research_note 记账，跨轮保留。
+    "agent_research_gate": True,
+    "agent_research_min_searches": 2,   # 动笔前最少检索次数；0 = 不设下限
+    "agent_research_fetch_count": 6,    # 研究类搜索抓正文的条数（0 = 用 search_fetch_count）
+    # 持久化工作流（编排层）：每步落盘、可 resume；写 / 命令仍走审批。
+    # max_steps / max_parallel / keep 填 0 = 不限（keep=0 表示不清理历史文件）。
+    "workflow_enabled": True,
+    "workflow_max_steps": 48,
+    "workflow_max_parallel": 10,
+    "workflow_keep": 200,
+    # 「查看变更 / 撤销」靠撤销快照：每个会话保留多少条**往期**写入（本轮写入的不受此限）。
+    # 0 = 不限（一直留到进程退出）；调大更占内存，但能回看更早的改动。
+    "agent_max_undo": 60,
+    # Shell 自由度：strict（默认，禁管道/重定向，与从前一致）
+    #              standard（允许 | 与沙箱内重定向，每段仍过白名单）
+    #              trusted（额外允许 ; && || 串联，仅建议手动会话使用）
+    "agent_shell_mode": "standard",
+    # 写后自动格式化：off（默认）| auto（有 ruff / prettier 就用）
+    # 只调用本机已安装的工具，不用 npx 临时下载；失败一律保留原文件。
+    "agent_formatter": "off",
+    "autopilot_max_turns": 30,       # 自动化：单个目标最多跑几个回合（回合 = 一次完整对话请求）
+    "autopilot_max_minutes": 90,     # 自动化：单个目标最长跑多久（分钟）
+    # 自动化重构后的策略（2026-10-27）：
+    # use_budget = False 时上面两项只作展示，不硬刹；改用「连续无进展」看门狗。
+    "autopilot_use_budget": False,
+    "autopilot_watchdog_turns": 4,   # 连续几回合没有新写入 / 计划变更 / 验收变化就干预；0 = 关闭
+    "autopilot_stall_minutes": 60,   # 多久没有任何进展就暂停（含一直重试）；0 = 关闭
+    "autopilot_retry_max": 0,        # 瞬态错误最多重试几次；0 = 不设上限（仍有 stall 兜底）
+    "autopilot_resume_on_start": True,   # 应用重启后自动接回未完成目标
+    "autopilot_verify": True,        # 没有机检命令时，用独立评审员判定 rubric
+    # 遇到提问卡 / 正文决策问句时的策略：auto（一律自决）/ smart（可逆自决、不可逆问人）/ ask（一律问）
+    "autonomy_question_policy": "smart",
+    # 插件：加载 data/plugins/*.py（每个文件提供 register()）。默认关闭 —— 插件是任意 Python 代码。
+    "plugins_enabled": False,
+    # ---- MCP（外部工具服务）----
+    # 默认关闭：stdio server 是任意代码、权限与主进程相同；远程 server 意味着数据出境。
+    # 每个 server 形如：
+    #   {"name":"fs","transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","D:/work"],
+    #    "env":{},"cwd":"","enabled":true,"readonly_tools":["read_*"],"timeout":60}
+    #   {"name":"api","transport":"http","url":"https://example.com/mcp","headers":{}}
+    "mcp_enabled": False,
+    "mcp_servers": [],
+    # lazy = 只挂 mcp_list_servers / mcp_list_tools，模型要用哪个 server 才挂它的工具（省上下文）
+    # always = 所有已启用 server 的工具常驻
+    "mcp_tool_mode": "lazy",
+    "mcp_timeout": 60,
+    # ---- Hooks（生命周期钩子）----
+    # 默认关闭：command 钩子会执行任意命令，python 钩子会加载插件代码。
+    # 结构：{"PreToolUse":[{"type":"command","command":"python hooks/audit.py","timeout":10}],
+    #        "PostToolUse":[{"type":"python","handler":"my_hook"}]}
+    "hooks_enabled": False,
+    "hooks": {},
+    # ---- pyright 语言服务（类型检查 / 跳转定义 / 引用 / 重命名）----
+    # 首次调用会用 npx 拉取 pyright（走 npmmirror，约 50MB）；关掉后模型退回正则版 find_symbol。
+    "lsp_enabled": True,
+    # ---- Git ----
+    # AI 提交策略：off = 不给模型 git_commit；ask = 每次确认；auto = 直接提交
+    "git_commit_mode": "ask",
+    # 提交前验证：auto（默认，用符号图找相关测试并只跑它们）| off（不验证）
+    # 只跑「受改动影响的测试」，不跑全量；失败会拒绝提交并把失败摘要回灌给模型。
+    "git_verify_before_commit": "auto",
+    # ---- 响应速度相关（默认值都取「更快」，需要精度时再手动打开）----
+    # 用轻量模型从候选里挑记忆：更准，但发生在首字节之前（实测 p90 1.9s / 最坏 7s）
+    "memory_llm_pick": False,
+    # 会话内容的真相源：events = 启动时以事件流为准（sessions.json 只作快照与列表）；
+    # json = 旧行为（只读 sessions.json）。事件流始终会写，切换只影响读取。
+    "session_store": "events",
+    # 「是否读取用户画像」已改为会话级开关（session.use_profile，默认开），
+    # 在「知识库 → 本会话使用的知识库」里按会话管理，不再有全局配置项。
+    # 「AI 自动记录画像」是另一件事，由 profile.auto_learn_enabled 单独控制。
+    # 能力工具下发方式：auto = 按本轮意图只挂相关域（bili / calendar / stock / memory / observe）
+    #                  always = 全部常驻（旧行为，schema 更大、首 token 更慢）
+    "agent_cap_tools": "auto",
+    # ---- Computer Use（受控浏览器）----
+    # 默认关闭：开启后模型多出 5 个浏览器工具，并且会真的弹出一个 Edge 窗口。
+    "computer_enabled": False,
+    # 允许操作的站点（host 或 *.host）。留空 = 每个新站点都先问你。
+    "computer_sites": [],
+    # 额外禁止的站点（内置的银行 / 支付 / 邮箱 / 密码管理器名单不可解除）
+    "computer_extra_block": [],
+    # 单次快照最多回灌多少字（太大费 token，太小看不清页面）
+    "computer_snapshot_chars": 4000,
+    # ---- Computer Use · 桌面（Windows UIA）----
+    # 与浏览器开关独立：桌面能碰到一切，默认关，且必须先填白名单才有窗口可用。
+    "computer_desktop_enabled": False,
+    # 允许操作的桌面程序（exe 名，如 notepad.exe；支持 *.exe）
+    "computer_apps": [],
+    # 浏览器后端：local = 独立 profile 的受控窗口；extension = 扩展桥（复用登录态）
+    "computer_backend": "local",
+    # 结构化信息不足（页面全是 canvas / 控件为 0）时自动补一张截图给视觉模型
+    "computer_auto_shot": True,
+    # 扩展桥配对密钥：首次生成后持久保存（扩展设置里粘贴一次即可）
+    "computer_bridge_key": "",
+}
+
+
+def default_config():
+    """返回一份全新的默认配置（深拷贝，调用方可随意修改）"""
+    return copy.deepcopy(DEFAULT_CONFIG)
+
+
 def load_config():
-    default = {
-        "chat_api_key": "", "chat_url": "", "chat_model": "", "chat_protocol": "", "chat_presets": {},
-        "chat_think_mode": "", "chat_think_enabled": False, "chat_think_level": "high",
-        "chat_context_limit": 128000, "chat_reserve_output": 4096,
-        "chat_balance_url": "",
-        "vision_api_key": "", "vision_url": "", "vision_model": "", "vision_protocol": "", "vision_presets": {},
-        "vision_use_chat": False, "vision_balance_url": "",
-        "search_enabled": False, "search_provider": "bocha", "search_api_key": "",
-        "search_url": "", "search_count": 5,
-        "search_rewrite": True,          # 用模型把问题改写为多个检索式
-        "search_fetch": True,            # 抓取命中网页的正文（仅注入提示，不入库）
-        "search_fetch_count": 4,         # 抓正文的条数（1–10）
-        "search_fetch_reader": "jina",   # 抓正文方式：jina（免 key）| direct
-        "learning_presets": {},
-        "speech_model_dir": "",          # 本地语音模型目录；留空则用 data/models 下的默认目录
-        "speech_polish": False,          # 语音输入结束后是否自动做一次 AI 矫正
-        "speech_denoise": False,         # 语音输入是否开启流式降噪（DPDFNet）
-        "speech_denoise_model": "",      # 降噪模型路径；留空则用 data/models/dpdfnet_baseline.onnx
-        "speech_final_model_dir": "",    # 两遍识别的精修模型目录；留空则用 data/models 下的默认目录
-        "ui_mode": "solo",               # 界面模式：solo（纯对话）| ide（左侧工作区 + 右侧对话）
-        "theme": "light",                # 默认浅色（VS Code Light+）
-        # ---- GAL 演出模式（见 docs/GAL_MODE_DESIGN.md）----
-        "gal_emotion_multi": False,      # 情绪字段是否用多标签数组（默认单值）
-        "gal_options_instant": True,     # 点选项是否立即发送（否则填回输入框）
-        "gal_tts_priority": "sprite",    # 台词发声优先级：sprite=绑定音频优先 | tts
-        # ---- GAL 演出皮肤 / 节奏 / 特效 ----
-        "gal_theme": "sakura",           # 演出主题：sakura 樱粉 | night 夜蓝 | washi 和风纸
-        "gal_typewriter": True,          # 打字机逐字显示
-        "gal_cps": 12,                   # 打字机速度（字符/秒）
-        "gal_seg_mode": "single",         # 对白展示：single 单行推进（默认，= 新世界观感）| append 逐段追加
-        "gal_auto": False,               # 单行推进时：语音播完自动切下一段
-        "gal_min_show": 0.6,             # 每段最短展示秒数（自动推进用）
-        "gal_fx": True,                  # 关键词特效（*闪光* / *震动* 等）
-        "gal_show_think": False,         # 是否显示 AI 思考过程（关闭时只显示「思考中…」，更不破坏沉浸感）
-        "gal_show_exec": True,           # 是否显示 AI 行为（搜索/工具等，以「幕间」呈现）
-        "gal_dialog_max": 46,            # 对白框最大高度（占舞台高度百分比，30–70）
-        "gal_sprite_fx": True,           # 立绘进出场 / 换人过渡动画
-        "gal_bar_auto": True,            # 顶部工具条沉浸式淡出（鼠标移入才实显）
-        # ---- GAL AI 自动写剧本 ----
-        "gal_auto_script": False,        # 总开关：由 AI 依据角色设定与用户画像自己编剧情并推进
-        "gal_auto_script_acts": 5,       # 大纲幕数（1–12）
-        "gal_auto_script_rounds": 4,     # 每幕最多回合数（1–12）
-        "gal_auto_script_replan": True,  # 允许在剧情跑偏时重新规划
-        # ---- GAL 台词朗读（TTS）----
-        "tts_enabled": False,            # 是否朗读台词
-        "tts_provider": "edge",           # edge（免费·免密钥）| openai（兼容 /v1/audio/speech）| gpt-sovits（本地 HTTP）
-        "tts_url": "",                   # edge 忽略；openai 留空用 api.openai.com；gpt-sovits 留空用 127.0.0.1:9880
-        "tts_api_key": "",
-        "tts_model": "",                 # openai 用，如 tts-1 / gpt-4o-mini-tts
-        "tts_voice": "",                 # edge: zh-CN-XiaoxiaoNeural 等；openai: alloy 等；留空用各自默认
-        "tts_speed": 1.0,
-        "tts_max_len": 80,               # 单句最大字数（按标点切句）
-    }
     data = read_json(CONFIG_FILE)
     if not isinstance(data, dict):
-        return default
+        data = {}
     # 兼容旧版 deepseek_* / dashscope_* 键名
     for old, new in (("deepseek", "chat"), ("dashscope", "vision")):
         for suf in ("api_key", "url", "model", "protocol", "presets"):
@@ -80,13 +396,25 @@ def load_config():
             nk = f"{new}_{suf}"
             if ok in data and not data.get(nk):
                 data[nk] = data[ok]
-    for key, val in default.items():
+    for key, val in DEFAULT_CONFIG.items():
         if key not in data:
-            data[key] = val
+            data[key] = copy.deepcopy(val)
     return data
 
 
+# 已废弃的配置键：保存时顺手清掉，避免前端回填旧 config 时又写回来。
+_OBSOLETE_KEYS = {
+    "search_rewrite",            # 检索式改写已取消（主模型自己给关键词）
+    "profile_inject_enabled",    # 画像读取已改为会话级 session.use_profile
+    "hall_ai_count",             # 大厅改用 hall_ai_enabled（按人开关）
+    "gal_auto_script_replan",    # 从未被读取
+    "chat_protocol",             # 聊天侧协议由地址自动判断，不再单独配置
+}
+
+
 def save_config(config):
+    if isinstance(config, dict) and any(k in config for k in _OBSOLETE_KEYS):
+        config = {k: v for k, v in config.items() if k not in _OBSOLETE_KEYS}
     write_json(CONFIG_FILE, config)
 
 
@@ -116,15 +444,127 @@ def get_api_protocol(provider):
     p = API_PROVIDERS[provider]
     return (load_config().get(f"{provider}_protocol", "") or "").strip() or p["protocol_default"]
 
-def get_api_conf(provider):
-    cfg = load_config()
+
+def get_api_kind(provider="chat", cfg=None):
+    """协议族：openai（OpenAI 兼容）/ anthropic（原生 Messages）。
+
+    显式配置优先；否则按接口地址判断——这样用户只换 URL 也能自动走对协议。
+    """
+    from app import providers
+    cfg = cfg or load_config()
+    url = cfg.get(f"{provider}_url", "").strip() \
+        or API_PROVIDERS.get(provider, {}).get("url_default", "")
+    return providers.kind_of(url, cfg.get(f"{provider}_kind") or "")
+
+
+def get_api_conf(provider, cfg=None):
+    cfg = cfg or load_config()
     p = API_PROVIDERS[provider]
     key = cfg.get(f"{provider}_api_key", "").strip()
     url = cfg.get(f"{provider}_url", "").strip() or p["url_default"]
     model = cfg.get(f"{provider}_model", "").strip() or p["model_default"]
-    if get_api_protocol(provider) == "openai":
+    # Anthropic 的地址不能补成 /v1/chat/completions，保持原样由适配层补 /messages
+    if get_api_kind(provider, cfg) == "openai":
         url = resolve_endpoint(url)
     return key, url, model
+
+# 内置的常见模型窗口（用户没显式配 model_contexts 时用）。
+# 按最长前缀匹配，所以可以把同一家的新旧模型分开写。
+# deepseek-flash / deepseek-v4 = V4 系列，官方 1M；deepseek-chat / reasoner 还是
+# V3.2 的 128K（https://api-docs.deepseek.com/zh-cn/quick_start/pricing/）。
+_BUILTIN_CONTEXTS = {
+    "deepseek-flash": 1000000, "deepseek-v4": 1000000,
+    "deepseek-chat": 128000, "deepseek-reasoner": 128000,
+    "deepseek": 1000000,
+    "claude": 200000, "gpt-4o": 128000, "gpt-4": 128000,
+    "gemini": 1000000, "qwen": 131072, "glm": 128000, "kimi": 256000,
+    "llama": 131072, "mistral": 128000,
+}
+MAX_CONTEXT_HARD = 1000000      # 再大也不按超过这个值估算（1M 是当前主流最大窗口）
+MAX_RESERVE = 32000
+
+
+def _prefix_window(table, name):
+    """在 {前缀: 窗口} 表里按最长前缀匹配，返回窗口（没匹配到返回 0）。"""
+    best_key, best_val = "", 0
+    for k, v in (table or {}).items():
+        kk = str(k or "").strip().lower()
+        if not kk or kk not in name:
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if len(kk) > len(best_key) and n > 0:
+            best_key, best_val = kk, n
+    return best_val
+
+
+def model_context_limit(model="", cfg=None):
+    """按模型名匹配上下文窗口；用户显式填写的窗口优先。
+
+    `chat_context_limit` 的语义：
+    - 0 = 自动：model_contexts → 内置表 → 能力注册表，取最匹配的那个；
+    - > 0 = 用户说了算（双向生效，既能收紧也能放宽），只受 MAX_CONTEXT_HARD
+      这个防呆上限约束 —— 填 1 亿这种值会被钳到 1M，而不是被静默忽略。
+
+    `model_contexts` 的键是前缀（如 "claude" / "deepseek"），取匹配到的最长前缀；
+    它是用户配置，优先级高于内置表（内置表只是「没配时的默认值」）。
+    """
+    cfg = cfg or load_config()
+    try:
+        base = int(cfg.get("chat_context_limit") or 0)
+    except (TypeError, ValueError):
+        base = 0
+    # 显式填写时不再被内置表单向压住：以前 min(内置值, 用户值) 只能收紧，
+    # deepseek 内置 128K 会把用户填的 1M 吃掉，参数形同虚设。
+    if base > 0:
+        return max(8000, min(base, MAX_CONTEXT_HARD))
+    name = str(model or "").lower()
+    user_tbl = cfg.get("model_contexts") or {}
+    best_val = _prefix_window(user_tbl, name)
+    if not best_val:
+        best_val = _prefix_window(_BUILTIN_CONTEXTS, name)
+    limit = best_val or 128000
+    # 能力注册表：模型名带 1m 等变体时由 model_caps 给出更准确的窗口。
+    # 用户显式配了 model_contexts 时以用户值为准，不被注册表顶掉。
+    try:
+        from app import model_caps
+        _cap_ctx = int(model_caps.caps_for(model, cfg).get("context") or 0)
+        _user_hit = any(str(k or "").strip().lower() in name for k in user_tbl)
+        if _cap_ctx and not _user_hit:
+            limit = max(limit, _cap_ctx)
+    except Exception:
+        pass
+    return max(8000, min(limit, MAX_CONTEXT_HARD))
+
+
+def provider_chain(cfg=None):
+    """可尝试的服务商链：主配置 + chat_fallback 里的预设。
+
+    返回 [(name, kind, key, url, model), ...]；只包含配置完整的项。
+    """
+    from app import providers
+    cfg = cfg or load_config()
+    out = []
+    key, url, model = get_api_conf("chat", cfg)
+    out.append(("main", get_api_kind("chat", cfg), key, url, model))
+    presets = cfg.get("chat_presets") or {}
+    for name in cfg.get("chat_fallback") or []:
+        p = presets.get(str(name)) if isinstance(presets, dict) else None
+        if not isinstance(p, dict):
+            continue
+        url = str(p.get("url") or "").strip()
+        key = str(p.get("key") or p.get("api_key") or "").strip()
+        model = str(p.get("model") or "").strip()
+        if not (url and model):
+            continue
+        kind = providers.kind_of(url, p.get("kind") or "")
+        if kind == "openai":
+            url = resolve_endpoint(url)
+        out.append((str(name), kind, key, url, model))
+    return out
+
 
 def effective_think_mode(url):
     """思考参数模式：off / openai / deepseek；配置为空时按接口地址自动判断"""
@@ -152,5 +592,12 @@ def thinking_payload(mode, enabled, level):
 
 
 def use_chat_for_vision():
-    """是否改用「聊天模型」做图像识别（聊天模型自带视觉能力时）"""
-    return bool(load_config().get("vision_use_chat"))
+    """识图走哪条通道。
+
+    默认用聊天模型识图（图片直发多模态，少一次单独调用）；只有用户勾选
+    「优先使用视觉 API」时才改走视觉 API。
+    """
+    cfg = load_config()
+    if bool(cfg.get("vision_prefer_api")):
+        return False
+    return bool(get_api_conf("chat", cfg)[0])

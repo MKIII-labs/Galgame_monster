@@ -1,0 +1,31 @@
+{
+  "id": "probability",
+  "name": "概率统计",
+  "desc": "条件概率、常见分布、极限定理与统计推断",
+  "version": 1,
+  "grade": "official",
+  "alignment": {
+    "standard": "本科概率论与数理统计",
+    "dimensions": ["概率", "随机变量", "极限定理", "统计推断"]
+  },
+  "ability_weights": {
+    "framing": 0.1,
+    "assumption": 0.3,
+    "method": 0.3,
+    "condition": 0.2,
+    "evidence": 0.1
+  },
+  "entry": { "minutes": 4, "first_unit": "prob-cond-01" },
+  "sequence": [
+    "prob-cond-01",
+    "prob-bayes-01",
+    "prob-expect-01",
+    "prob-var-01",
+    "prob-dist-01",
+    "prob-clt-01",
+    "prob-ci-01",
+    "prob-pvalue-01",
+    "prob-error-01",
+    "prob-mle-01"
+  ]
+}

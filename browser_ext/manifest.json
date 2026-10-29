@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Galgame Monster · Computer Bridge",
+  "version": "0.1.0",
+  "description": "让本机的 AI 在受控标签页上执行操作（用 chrome.debugger 转发 CDP）。仅连接 127.0.0.1。",
+  "permissions": ["debugger", "tabs", "storage", "alarms"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Computer Bridge",
+    "default_popup": "popup.html"
+  }
+}

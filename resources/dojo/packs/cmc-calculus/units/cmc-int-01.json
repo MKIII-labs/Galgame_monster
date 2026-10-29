@@ -1,0 +1,34 @@
+{
+  "id": "cmc-int-01",
+  "ability": "method",
+  "primitive": "pair",
+  "judge": "L2",
+  "minutes": 5,
+  "payload": {
+    "situation": "把每个积分和它最先应该尝试的化简手段配对。",
+    "left": [
+      { "id": "l1", "text": "∫₋ₐᵃ x³·cos x dx" },
+      { "id": "l2", "text": "∫₀²π sin²x dx" },
+      { "id": "l3", "text": "∫₀^π x·f(sin x) dx" },
+      { "id": "l4", "text": "∫₀^(π/2) sinⁿx dx" }
+    ],
+    "right": [
+      { "id": "r1", "text": "奇偶性：被积函数是奇函数，直接得 0" },
+      { "id": "r2", "text": "降幂：sin²x = (1 − cos 2x)/2" },
+      { "id": "r3", "text": "区间再现：令 x → π − x，再与原式相加" },
+      { "id": "r4", "text": "递推（华里士公式）" }
+    ]
+  },
+  "expert": {
+    "pairs": { "l1": "r1", "l2": "r2", "l3": "r3", "l4": "r4" },
+    "why": "先看对称区间，再看向上的幂次，最后看 x 与 f(sin x) 的乘积结构。l1 在对称区间上是奇函数；l2 是偶次幂，降幂最省事；l3 的 x 因子用区间再现消掉；l4 是标准的递推结构。",
+    "signals": ["对称区间优先想奇偶性", "x·f(sin x) 是区间再现的典型形状", "高次三角幂想递推"]
+  },
+  "card": {
+    "title": "积分先看区间，再看幂次",
+    "trigger": "拿到一个定积分，不知道从哪下手",
+    "first_step": "按「对称性 → 周期/降幂 → 区间再现 → 递推」的顺序扫一遍",
+    "pitfall": "直接硬算原函数，把可化简的结构算没了"
+  },
+  "source_ref": { "doc": "self-authored", "loc": "定积分·化简策略" }
+}

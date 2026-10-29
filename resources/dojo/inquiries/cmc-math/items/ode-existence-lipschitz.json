@@ -1,0 +1,209 @@
+{
+  "id": "ode-existence-lipschitz",
+  "title": "存在唯一：Lipschitz 条件到底补了什么",
+  "subject": "常微分方程",
+  "track": "本科",
+  "minutes": 32,
+  "exam": {
+    "topic": "解的存在唯一性定理",
+    "weight": "常微分方程核心",
+    "variant": "判断初值问题解是否唯一、求最大存在区间与爆破点"
+  },
+  "prerequisites": ["导数与积分", "压缩映射", "一致收敛"],
+  "brief": "只要求右端函数连续，Peano 定理只能保证解存在，不能保证唯一。Lipschitz 条件补上的正是唯一性。这一轮先看反例怎样造出两个解，再把初值问题改写成积分方程，用 Picard 迭代和压缩映射重建证明，最后算一个爆破点。",
+  "acts": [
+    {
+      "id": "ode-unique-origin",
+      "label": "它从哪来",
+      "ability": "framing",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "Peano 定理说：右端函数连续时，初值问题至少有一个局部解。但数学家仍要额外假设 Lipschitz 条件，最直接想补上的是：",
+        "options": [
+          {"key": "A", "text": "解的唯一性"},
+          {"key": "B", "text": "解的存在性"},
+          {"key": "C", "text": "解的可微性"},
+          {"key": "D", "text": "解的有界性"}
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "连续性已经给出存在性；缺的是唯一性。y'=√|y|、y(0)=0 就是连续但不唯一的标准反例，而 Lipschitz 条件恰好排除了这种「分叉」。",
+        "signals": ["先分清存在与唯一是两个结论", "反例通常卡在唯一性"],
+        "traps": {
+          "B": "存在性由 Peano 定理在连续条件下已经保证。",
+          "C": "解本身是可微的，这是方程定义的一部分，不需要额外补。",
+          "D": "有界性不是存在唯一性定理要解决的问题。"
+        }
+      },
+      "card": {
+        "title": "连续管存在，Lipschitz 管唯一",
+        "trigger": "区分 Peano 定理与 Picard–Lindelöf 定理",
+        "first_step": "先问「缺少的是存在还是唯一」",
+        "pitfall": "把两个定理的条件和结论混在一起"
+      }
+    },
+    {
+      "id": "ode-unique-guess",
+      "label": "先猜",
+      "ability": "assumption",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "考虑初值问题 y'=y，y(0)=1。先不解方程，判断下面哪些说法成立。",
+        "options": [
+          {"key": "A", "text": "y=e^x 是它的解"},
+          {"key": "B", "text": "解在全体实数上存在"},
+          {"key": "C", "text": "右端 f(x,y)=y 关于 y 满足 Lipschitz 条件"},
+          {"key": "D", "text": "把初值改成 y(0)=2，解仍然完全相同"}
+        ]
+      },
+      "expert": {
+        "choice": ["A", "B", "C"],
+        "why": "e^x 的导数等于自身且过 (0,1)；指数解对所有实数有定义；f(x,y)=y 的 Lipschitz 常数可取 1。D 错：初值变为 2 时解变为 2e^x。",
+        "signals": ["先代回验证", "Lipschitz 看 |f(y1)−f(y2)| 能否被 |y1−y2| 控制"],
+        "traps": {
+          "D": "初值决定解的唯一常数，改初值会得到不同的解。"
+        }
+      },
+      "card": {
+        "title": "先代回，再谈存在唯一",
+        "trigger": "验证一个函数是否是解",
+        "first_step": "代回方程与初值各检查一次",
+        "pitfall": "只验证了方程，忘了初值"
+      }
+    },
+    {
+      "id": "ode-unique-counter",
+      "label": "构造反例",
+      "ability": "condition",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "下列哪个初值问题在 0 的附近解不唯一？",
+        "options": [
+          {"key": "A", "text": "y'=y，y(0)=0"},
+          {"key": "B", "text": "y'=√|y|，y(0)=0"},
+          {"key": "C", "text": "y'=2x，y(0)=1"},
+          {"key": "D", "text": "y'=cos x，y(0)=0"}
+        ]
+      },
+      "expert": {
+        "choice": "B",
+        "why": "y≡0 是一个解；y=x²/4（x≥0）与 y=0（x<0）拼接也是解，所以不唯一。右端 √|y| 在 y=0 附近不满足 Lipschitz 条件，斜率变化太陡。其余三个右端都光滑，满足 Lipschitz 条件。",
+        "signals": ["找右端在初值附近不 Lipschitz 的例子", "平方根在 0 点是典型失效点"],
+        "traps": {
+          "A": "f(y)=y 是 Lipschitz 的，解唯一（零解）。",
+          "C": "f(x,y)=2x 与 y 无关，Lipschitz 常数为 0，解唯一。",
+          "D": "cos x 关于 y 也不依赖，解唯一。"
+        }
+      },
+      "card": {
+        "title": "平方根是唯一性的经典反例",
+        "trigger": "构造不唯一的初值问题",
+        "first_step": "让右端在初值附近出现 √|y−y0| 型的尖点",
+        "pitfall": "以为连续就一定有唯一解"
+      }
+    },
+    {
+      "id": "ode-unique-proof",
+      "label": "证明骨架",
+      "ability": "argument",
+      "primitive": "order",
+      "judge": "L2",
+      "minutes": 7,
+      "payload": {
+        "situation": "用 Picard 迭代证明 y'=f(x,y)、y(x0)=y0 在局部有唯一解。把证明主线排成正确顺序。",
+        "steps": [
+          {"id": "s1", "text": "把初值问题等价改写成积分方程 y(x)=y0+∫f(t,y(t))dt"},
+          {"id": "s2", "text": "在连续函数空间上定义 Picard 算子 T(y)=y0+∫f(t,y(t))dt"},
+          {"id": "s3", "text": "利用 f 的 Lipschitz 条件，证明 T 在足够小的区间上是压缩映射"},
+          {"id": "s4", "text": "由压缩映射原理，T 有唯一不动点"},
+          {"id": "s5", "text": "该不动点连续可微且满足积分方程，因此就是原初值问题的唯一解"}
+        ]
+      },
+      "expert": {
+        "order": ["s1", "s2", "s3", "s4", "s5"],
+        "why": "关键是把微分方程变成积分方程，这样才能在函数空间上做迭代。Lipschitz 条件负责让积分算子成为压缩映射；区间取得足够小，压缩常数才能小于 1。唯一性直接来自不动点唯一。",
+        "signals": ["微分方程 → 积分方程 → 压缩映射", "区间小是压缩常数小于 1 的关键"],
+        "traps": {}
+      },
+      "card": {
+        "title": "先变积分方程，再谈压缩",
+        "trigger": "证明微分方程解的存在唯一",
+        "first_step": "把 y'=f(x,y) 写成 y=y0+∫f",
+        "pitfall": "直接在函数空间上对导数做迭代"
+      }
+    },
+    {
+      "id": "ode-unique-boundary",
+      "label": "条件边界",
+      "ability": "condition",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "关于存在唯一性定理的适用范围，下面哪些说法正确？",
+        "options": [
+          {"key": "A", "text": "右端连续只能保证局部解存在，不能保证唯一"},
+          {"key": "B", "text": "右端在初值附近 Lipschitz 连续，能保证局部解唯一"},
+          {"key": "C", "text": "解的最大存在区间可能有限，并在端点爆破"},
+          {"key": "D", "text": "Lipschitz 条件也能保证解在全体实数上存在"}
+        ]
+      },
+      "expert": {
+        "choice": ["A", "B", "C"],
+        "why": "连续给出存在（Peano），Lipschitz 加强到唯一（Picard–Lindelöf），但两者都只是局部的。y'=y²、y(0)=1 的解在 x=1 爆破，说明整体存在需要额外条件。",
+        "signals": ["存在唯一定理是局部结论", "爆破是整体存在失效的典型方式"],
+        "traps": {
+          "D": "Lipschitz 只保证局部；y'=y² 满足局部 Lipschitz，却在有限点爆破。"
+        }
+      },
+      "card": {
+        "title": "存在唯一是局部结论",
+        "trigger": "使用 Picard–Lindelöf 定理",
+        "first_step": "先确认结论只在初值附近成立",
+        "pitfall": "把局部解直接当成整体解"
+      }
+    },
+    {
+      "id": "ode-unique-exam",
+      "label": "考试怎么考",
+      "ability": "method",
+      "primitive": "numeric",
+      "judge": "L1",
+      "minutes": 5,
+      "payload": {
+        "situation": "解初值问题 y'=y²，y(0)=1，求解在 x>0 一侧的爆破点（填 x 的值）。"
+      },
+      "expert": {
+        "value": 1,
+        "tolerance": 0.001,
+        "why": "分离变量得 dy/y²=dx，积分得 −1/y=x+C；由 y(0)=1 得 C=−1，所以 y=1/(1−x)。当 x→1⁻ 时 y→+∞，爆破点为 x=1。",
+        "signals": ["分离变量后解出显式解", "分母为零处就是爆破点"],
+        "traps": {}
+      },
+      "card": {
+        "title": "爆破点看分母零点",
+        "trigger": "求非线性方程的最大存在区间",
+        "first_step": "先解出显式解，再看它在哪失去定义",
+        "pitfall": "只看方程右端是否光滑，就断定整体存在"
+      }
+    }
+  ],
+  "artifact": {
+    "prompt": "用 150–300 字回答：为什么仅有连续性不足以保证唯一解？Lipschitz 条件在 Picard 迭代中具体起了什么作用？请举一个不唯一的例子。",
+    "rubric": [
+      {"id": "counter", "text": "给出连续但不唯一的例子", "keywords": ["√|y|", "sqrt", "y=x²/4", "不唯一"]},
+      {"id": "integral", "text": "把初值问题改写成积分方程", "keywords": ["积分方程", "∫", "Picard"]},
+      {"id": "contraction", "text": "说明 Lipschitz 使积分算子成为压缩映射", "keywords": ["压缩", "Lipschitz", "常数小于"]},
+      {"id": "unique", "text": "用不动点唯一得到解唯一", "keywords": ["不动点", "唯一"]},
+      {"id": "local", "text": "指出结论只是局部的", "keywords": ["局部", "小区间", "爆破"]}
+    ],
+    "expert_sample": "连续性只保证积分曲线能画出来，却不能阻止它在同一点分叉。反例是 y'=√|y|、y(0)=0：y≡0 是一个解，y=x²/4（x≥0）也是解，所以不唯一。把初值问题写成积分方程 y=y0+∫f(t,y)dt 后，可以定义 Picard 迭代。Lipschitz 条件使积分算子成为压缩映射：只要区间取得足够小，压缩常数就小于 1，于是由不动点定理得到唯一不动点，它正是原问题的唯一解。因此结论是局部的；解仍可能在最大存在区间的端点爆破，例如 y'=y²、y(0)=1 在 x=1 爆破。"
+  }
+}

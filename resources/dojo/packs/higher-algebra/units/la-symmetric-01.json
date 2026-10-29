@@ -1,0 +1,33 @@
+{
+  "id": "la-symmetric-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "关于实对称矩阵，下列哪条一定成立？",
+    "options": [
+      { "key": "A", "text": "一定可以正交对角化" },
+      { "key": "B", "text": "一定可以化为任意给定的 Jordan 形" },
+      { "key": "C", "text": "特征值一定全为正" },
+      { "key": "D", "text": "所有元素一定为正" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "实对称矩阵的特征值全为实数，且不同特征值的特征向量正交，因此存在正交矩阵 Q 使 QᵀAQ 为对角阵。正定性、元素符号都不是实对称的必然结论。",
+    "signals": ["实对称", "问一定成立", "涉及对角化"],
+    "traps": {
+      "B": "Jordan 形是相似标准形，实对称矩阵本身已经可对角化，不需要 Jordan 块。",
+      "C": "特征值可以为负或 0，只有正定矩阵才全为正。",
+      "D": "实对称只约束对称性，不约束元素符号。"
+    }
+  },
+  "card": {
+    "title": "实对称必正交对角化",
+    "trigger": "遇到实对称矩阵",
+    "first_step": "想到实特征值 + 正交特征向量",
+    "pitfall": "把对称当成正定"
+  },
+  "source_ref": { "doc": "self-authored:linear-algebra", "loc": "实对称矩阵" }
+}

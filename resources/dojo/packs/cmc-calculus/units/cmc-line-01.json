@@ -1,0 +1,33 @@
+{
+  "id": "cmc-line-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "设 P、Q 在平面区域 D 内有连续的一阶偏导数。曲线积分 ∫_L P dx + Q dy 在 D 内与路径无关的一个充分条件是：",
+    "options": [
+      { "key": "A", "text": "D 是连通区域" },
+      { "key": "B", "text": "D 是单连通区域，且 ∂P/∂y = ∂Q/∂x" },
+      { "key": "C", "text": "P、Q 都连续" },
+      { "key": "D", "text": "∂P/∂x = ∂Q/∂y" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "单连通保证区域里没有「洞」，偏导相等保证沿任意闭曲线的环量为 0（Green 公式）。两个条件缺一不可：去掉单连通，偏导相等也可能有洞绕不过去；去掉偏导条件，闭曲线积分不一定为 0。",
+    "signals": ["问的是「与路径无关」", "出现 P dx + Q dy", "选项里同时出现单连通与偏导"],
+    "traps": {
+      "A": "连通不够：区域里若有「洞」，绕洞一圈的积分仍可能不为 0。",
+      "C": "连续只能保证积分存在，不能保证与路径无关。",
+      "D": "下标写反了：条件应是 ∂P/∂y = ∂Q/∂x，不是 ∂P/∂x = ∂Q/∂y。"
+    }
+  },
+  "card": {
+    "title": "路径无关 = 单连通 + 偏导相等",
+    "trigger": "判断第二类曲线积分是否与路径无关",
+    "first_step": "先看区域有没有洞，再核对 ∂P/∂y 与 ∂Q/∂x",
+    "pitfall": "把 ∂P/∂x = ∂Q/∂y 当成条件（下标写反）"
+  },
+  "source_ref": { "doc": "self-authored", "loc": "曲线积分·路径无关" }
+}

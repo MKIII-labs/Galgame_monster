@@ -1,0 +1,32 @@
+{
+  "id": "ca-singular-01",
+  "ability": "condition",
+  "primitive": "multi_select",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "下列哪些函数在 z = 0 处是本性奇点？",
+    "options": [
+      { "key": "A", "text": "e^(1/z)" },
+      { "key": "B", "text": "sin(1/z)" },
+      { "key": "C", "text": "1/z" },
+      { "key": "D", "text": "z / sin z（补充定义前）" }
+    ]
+  },
+  "expert": {
+    "choice": ["A", "B"],
+    "why": "本性奇点的洛朗展开有无穷多个负幂项；e^(1/z) 与 sin(1/z) 都如此。1/z 是简单极点，z/sin z 在 0 的极限为 1，是可去奇点。",
+    "signals": ["z=0", "洛朗展开", "负幂项个数"],
+    "traps": {
+      "C": "1/z 只有 z⁻¹ 一项，是一阶极点。",
+      "D": "z/sin z → 1，奇点可去。"
+    }
+  },
+  "card": {
+    "title": "本性看无穷负幂",
+    "trigger": "判断奇点类型",
+    "first_step": "写洛朗展开，数负幂项",
+    "pitfall": "把极点当成本性奇点"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "奇点分类" }
+}

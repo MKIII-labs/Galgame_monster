@@ -1,0 +1,34 @@
+{
+  "id": "cmc-pre-01",
+  "test": "pre",
+  "ability": "assumption",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "求 lim(x→0) (eˣ − 1 − x)/x²。下列哪一步最直接？",
+    "options": [
+      { "key": "A", "text": "用 eˣ ~ 1 + x，只保留一阶" },
+      { "key": "B", "text": "把 eˣ 展开到二阶：1 + x + x²/2 + o(x²)" },
+      { "key": "C", "text": "先做变量替换 t = 1/x" },
+      { "key": "D", "text": "直接用一次洛必达" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "分子是 eˣ 与 1 + x 的差，一阶项必然抵消；分母是 x²，所以必须保留到二阶。展开后 (x²/2 + o(x²))/x² → 1/2。",
+    "signals": ["分子是同阶函数相减", "分母次数决定展开阶数"],
+    "traps": {
+      "A": "只保留一阶时分子变成 0，把真正的主项抹掉了。",
+      "C": "x→0 是局部展开，换成 t=1/x 会把问题变成无穷远，反而更难。",
+      "D": "一次洛必达后得到 (eˣ−1)/(2x)，还要继续做，不是「一步」。"
+    }
+  },
+  "card": {
+    "title": "相减看阶",
+    "trigger": "同阶函数相减的极限",
+    "first_step": "按分母次数决定展开到几阶",
+    "pitfall": "一阶替换导致主项抵消"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-pre-01" }
+}

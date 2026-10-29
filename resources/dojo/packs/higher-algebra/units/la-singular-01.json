@@ -1,0 +1,33 @@
+{
+  "id": "la-singular-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "设 A 为 n 阶方阵。下列哪一条是 det(A) = 0 的直接结论？",
+    "options": [
+      { "key": "A", "text": "A 不可逆" },
+      { "key": "B", "text": "A 的特征值全为 0" },
+      { "key": "C", "text": "r(A) = n" },
+      { "key": "D", "text": "对任意 b，Ax = b 都有解" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "方阵行列式为 0 等价于不可逆，也等价于秩小于 n、齐次方程组有非零解。它只说明至少有一个特征值为 0，不说明全部为 0。",
+    "signals": ["方阵", "行列式为 0", "问直接结论"],
+    "traps": {
+      "B": "det 等于特征值之积；有一个为 0 就能让 det 为 0，其余可以非零。",
+      "C": "det=0 意味着秩小于 n，不是等于 n。",
+      "D": "不可逆时 Ax=b 可能无解，也可能有无穷多解。"
+    }
+  },
+  "card": {
+    "title": "det=0 三等价",
+    "trigger": "方阵行列式为 0",
+    "first_step": "想到不可逆、秩 < n、齐次有非零解",
+    "pitfall": "误以为所有特征值都为 0"
+  },
+  "source_ref": { "doc": "self-authored:linear-algebra", "loc": "行列式与可逆性" }
+}

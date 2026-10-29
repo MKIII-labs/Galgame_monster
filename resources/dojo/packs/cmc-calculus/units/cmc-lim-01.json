@@ -1,0 +1,31 @@
+{
+  "id": "cmc-lim-01",
+  "ability": "assumption",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "求 lim(x→0) (sin x − x)/x³。三位同学给出了不同的第一步，哪一种能直接算出结果？",
+    "options": [
+      { "key": "A", "text": "直接用等价无穷小：sin x ~ x" },
+      { "key": "B", "text": "用一次洛必达法则" },
+      { "key": "C", "text": "把 sin x 泰勒展开到三阶" }
+    ]
+  },
+  "expert": {
+    "choice": "C",
+    "why": "分子出现同阶函数相减，等价无穷小只保留一阶，代入后主项互相抵消、信息全丢。分母是 x³，所以 sin x 必须展开到 x³ 项：sin x = x − x³/6 + o(x³)，结果 −1/6。",
+    "signals": ["分子是「两个同阶函数相减」", "分母的次数提示需要保留到几阶"],
+    "traps": {
+      "A": "sin x ~ x 代入后分子变成 x − x = 0，把真正的主项抹掉了。",
+      "B": "洛必达可以做，但要连做三次，计算量大且容易在中途算错；不是「直接」路径。"
+    }
+  },
+  "card": {
+    "title": "相减先看阶",
+    "trigger": "极限里出现两个同阶函数相减",
+    "first_step": "先确定分母次数，再决定分子要展开到几阶",
+    "pitfall": "一上来就用等价无穷小替换，导致主项抵消"
+  },
+  "source_ref": { "doc": "self-authored", "loc": "极限·泰勒展开" }
+}

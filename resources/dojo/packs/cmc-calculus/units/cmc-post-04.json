@@ -1,0 +1,34 @@
+{
+  "id": "cmc-post-04",
+  "test": "post",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "瑕积分 ∫₀¹ 1/x^p dx（瑕点在 0）收敛的充要条件是：",
+    "options": [
+      { "key": "A", "text": "p > 1" },
+      { "key": "B", "text": "p < 1" },
+      { "key": "C", "text": "p > 0" },
+      { "key": "D", "text": "对任意实数 p 都收敛" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "瑕点附近的 p 积分：p < 1 收敛，p ≥ 1 发散（p=1 时是 ln x，在 0 处发散）。",
+    "signals": ["积分下限是瑕点 0", "被积函数 1/x^p"],
+    "traps": {
+      "A": "p > 1 是无穷区间 ∫₁^∞ 的收敛条件，这里正好相反。",
+      "C": "p 在 [1,∞) 时发散，例如 p=1。",
+      "D": "p ≥ 1 时发散。"
+    }
+  },
+  "card": {
+    "title": "瑕积分 p<1",
+    "trigger": "∫₀¹ 1/x^p",
+    "first_step": "确认瑕点在 0 还是无穷",
+    "pitfall": "与无穷区间的条件记混"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-post-04" }
+}

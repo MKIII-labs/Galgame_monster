@@ -1,0 +1,31 @@
+{
+  "id": "ode",
+  "name": "常微分方程",
+  "desc": "一阶方程、线性方程与稳定性判断",
+  "version": 1,
+  "grade": "official",
+  "alignment": {
+    "standard": "本科常微分方程（数学系）",
+    "dimensions": ["一阶方程", "线性方程", "存在唯一性", "稳定性"]
+  },
+  "ability_weights": {
+    "framing": 0.2,
+    "assumption": 0.2,
+    "method": 0.35,
+    "condition": 0.2,
+    "evidence": 0.05
+  },
+  "entry": { "minutes": 4, "first_unit": "ode-separable-01" },
+  "sequence": [
+    "ode-separable-01",
+    "ode-linear-01",
+    "ode-bernoulli-01",
+    "ode-exact-01",
+    "ode-homog-01",
+    "ode-const-01",
+    "ode-resonance-01",
+    "ode-existence-01",
+    "ode-stability-01",
+    "ode-order-01"
+  ]
+}

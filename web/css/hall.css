@@ -1,0 +1,453 @@
+/* ============================================================
+   功能大厅（Hall）—— 各类 AI 互动玩法的统一入口
+   颜色 / 圆角 / 动效全部走 base.css 的 token，跟着界面主题自动适配
+   ============================================================ */
+
+#main.hall-mode .chat-col { display: none; }          /* 大厅是整屏页面，不要右侧对话列 */
+
+/* min-height:0 不能少：否则本面板会被内容顶高，把整个页面（连左侧会话栏）
+   一起撑出视口去滚动，而不是让下面的 .hall-body 自己滚 */
+.hall-panel {
+  flex: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+}
+.hall-head {
+  flex: none; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 14px 22px; border-bottom: 1px solid var(--border);
+}
+.hall-back {
+  flex: none; display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 11px; border: 1px solid var(--border); border-radius: 8px;
+  background: transparent; color: var(--text-dim); font-size: 12.5px; cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.hall-back:hover { background: var(--bg-hover); color: var(--text); }
+/* min-width:0 是关键：flex 子项默认按内容撑开，窄视口下会被压成一字一行 */
+.hall-titles { flex: 1 1 auto; min-width: 0; }
+.hall-title {
+  font-size: 15px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hall-sub {
+  margin-top: 2px; font-size: 12px; color: var(--text-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hall-head-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.hall-badge {
+  padding: 3px 9px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 11.5px; white-space: nowrap;
+}
+
+.hall-body { flex: 1; min-height: 0; overflow: auto; padding: 22px; }
+/* min-height（而不是 height）是关键：内容比窗口高时让 .hall-body 真的能滚，
+   用 height:100% 会把内部溢出藏起来 —— 外层看不到高度差，就没有滚动条 */
+.hall-feature { min-height: 100%; display: flex; flex-direction: column; }
+
+/* ---------- 卡片网格 ---------- */
+.hall-grid {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
+}
+.hall-card {
+  position: relative; display: flex; flex-direction: column; gap: 8px;
+  box-sizing: border-box;
+  padding: 16px; text-align: left; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg); color: var(--text); font-family: var(--font);
+  transition: transform var(--t) var(--ease), box-shadow var(--t) var(--ease),
+              border-color var(--t) var(--ease);
+}
+.hall-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow);
+}
+.hall-card:active { transform: translateY(0); }
+.hall-card-ico {
+  width: 38px; height: 38px; border-radius: 11px;
+  display: grid; place-items: center;
+  background: var(--accent-soft); color: var(--accent);
+}
+.hall-card-ico .ic { width: 21px; height: 21px; }
+.hall-card-name { font-size: 14.5px; font-weight: 600; }
+.hall-card-desc { font-size: 12.5px; line-height: 1.65; color: var(--text-dim); }
+.hall-card-foot {
+  margin-top: auto; padding-top: 6px;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11.5px; color: var(--text-dim);
+}
+.hall-card-go {
+  margin-left: auto; padding: 0; border: 0; background: transparent;
+  color: var(--accent); font: inherit; font-weight: 600; cursor: pointer;
+}
+.hall-card-go:hover { text-decoration: underline; }
+.hall-card-tag {
+  position: absolute; top: 14px; right: 14px;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg-side);
+  font-size: 11px; color: var(--text-dim);
+}
+.hall-card.soon { opacity: .62; cursor: default; }
+.hall-card.soon:hover { transform: none; box-shadow: none; border-color: var(--border); }
+
+/* 大厅模块内部的 AI 开关（图寻 / 模拟股市共用） */
+.hall-ai-switch {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 8px 2px 4px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg); color: var(--text-dim);
+  font: inherit; font-size: 11.5px; cursor: pointer; white-space: nowrap;
+}
+.hall-ai-switch:hover { border-color: var(--border-strong); }
+.hall-ai-switch.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.hall-ai-switch-track {
+  position: relative; flex: none;
+  width: 24px; height: 14px; border-radius: 999px;
+  background: var(--border);
+  transition: background var(--t-fast) var(--ease);
+}
+.hall-ai-switch-knob {
+  position: absolute; top: 2px; left: 2px;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--text-dim);
+  transition: left var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.hall-ai-switch.on .hall-ai-switch-track {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.hall-ai-switch.on .hall-ai-switch-knob { left: 12px; background: var(--accent); }
+.hall-ai-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hall-ai-switch-label { line-height: 1; }
+.hall-empty {
+  padding: 40px 0; text-align: center;
+  font-size: 13px; color: var(--text-dim);
+}
+
+/* ============================================================
+   图寻游戏
+   ============================================================ */
+/* flex-basis:auto + min-height:0：让 .geo-root 的高度由两列内容决定，
+   窗口装不下时把高度「顶」给外层 .hall-body 去滚动，而不是自己缩到 0 再把内容裁掉 */
+.geo-root { flex: 1 1 auto; min-height: 0; display: flex; gap: 14px; }
+.geo-photo-col, .geo-side-col {
+  min-width: 0; display: flex; flex-direction: column; gap: 10px;
+}
+.geo-photo-col { flex: 1.15; }
+.geo-side-col { flex: 1; }
+
+.geo-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; position: relative; }
+.geo-pill {
+  padding: 3px 10px; border-radius: 999px;
+  background: var(--bg-side); border: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-dim); white-space: nowrap;
+}
+.geo-pill.accent { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+.geo-bar-spacer { flex: 1; }
+
+/* AI 选手选择：一个按钮 + 展开面板（面板里每位选手带一句风格介绍） */
+.geo-ai-pick {
+  margin-left: 4px; padding: 1px 7px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: 11px;
+  cursor: pointer;
+}
+.geo-ai-pick:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.geo-ai-pick:disabled { opacity: .55; cursor: default; }
+.geo-ai-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+  width: min(360px, 92vw); padding: 10px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
+  background: var(--bg); box-shadow: 0 12px 32px rgba(0, 0, 0, .28);
+}
+.geo-ai-head {
+  margin-bottom: 4px; font-size: 11px; color: var(--text-dim);
+}
+.geo-ai-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 4px; border-radius: 8px; cursor: pointer;
+}
+.geo-ai-row:hover { background: var(--bg-hover); }
+.geo-ai-row input {
+  flex: none; margin: 2px 0 0; accent-color: var(--accent);
+}
+.geo-ai-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.geo-ai-name {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--text);
+}
+.geo-ai-desc { font-size: 11px; line-height: 1.55; color: var(--text-dim); }
+.geo-ai-foot {
+  margin-top: 6px; padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-size: 10.5px; color: var(--text-dim);
+}
+
+/* 高度交给图片自身的宽高比决定（img height:auto）：
+   以前用 flex:1 撑满整列，一张横图会被框在一整列高的黑底里，看起来「占满窗口」 */
+.geo-photo-box {
+  flex: none; position: relative;
+  border-radius: var(--radius-lg); overflow: hidden;
+  background: #0d0e11;
+}
+.geo-photo-box img {
+  display: block; width: 100%; height: auto;
+  max-height: 56vh;                  /* 竖构图 / 矮窗口下别让照片长到没边 */
+  object-fit: contain;
+  background: #0d0e11;
+}
+.geo-photo-msg {
+  min-height: 200px; display: grid; place-items: center;
+  padding: 20px; text-align: center;
+  font-size: 13px; line-height: 1.7; color: #c9ccd4;
+}
+.geo-photo-msg .geo-retry {
+  margin-top: 10px; padding: 5px 12px;
+  border: 1px solid rgba(255, 255, 255, .3); border-radius: 8px;
+  background: transparent; color: #e7e9ee; font-size: 12.5px; cursor: pointer;
+}
+.geo-photo-msg .geo-retry:hover { background: rgba(255, 255, 255, .12); }
+.geo-credit { font-size: 11px; color: var(--text-dim); }
+
+/* 识图辅助：玩家点按钮才请求，只列画面特征，不给地点结论 */
+.geo-assist-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.geo-assist-note { font-size: 11px; color: var(--text-dim); }
+.geo-assist-result {
+  padding: 9px 11px;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg-side);
+}
+.geo-assist-title { margin-bottom: 5px; font-size: 11.5px; color: var(--text-dim); }
+.geo-assist-list { margin: 0; padding-left: 16px; font-size: 12.5px; line-height: 1.65; }
+.geo-assist-list li { margin: 2px 0; }
+.geo-assist-loading { font-size: 12.5px; line-height: 1.6; color: var(--text-dim); }
+.geo-assist-err { font-size: 12.5px; line-height: 1.6; color: #d9534f; }
+
+/* ---------- 题面放大：点照片开全屏大图 ---------- */
+.geo-photo-box.can-zoom { cursor: zoom-in; }
+.geo-zoom-btn {
+  position: absolute; right: 8px; top: 8px; z-index: 2;
+  width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
+  border: 1px solid rgba(255, 255, 255, .3); border-radius: 8px;
+  background: rgba(0, 0, 0, .45); color: #fff; cursor: zoom-in;
+  transition: background var(--t-fast) var(--ease);
+}
+.geo-zoom-btn:hover { background: rgba(0, 0, 0, .75); }
+.geo-zoom-btn .ic { width: 16px; height: 16px; }
+
+.geo-zoom {
+  position: fixed; inset: 0; z-index: 90;      /* 高过弹窗(50)，低于 toast(100) */
+  display: flex; flex-direction: column;
+  background: rgba(8, 9, 12, .95);
+  animation: overlayIn var(--t) var(--ease);
+}
+.geo-zoom-bar {
+  flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 14px; font-size: 12.5px; color: #e7e9ee;
+}
+.geo-zoom-pct {
+  min-width: 54px; color: #b9bec9; font-variant-numeric: tabular-nums;
+}
+.geo-zoom-bar button {
+  padding: 5px 11px; border: 1px solid rgba(255, 255, 255, .24); border-radius: 8px;
+  background: transparent; color: #e7e9ee; font-size: 12.5px; cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.geo-zoom-bar button:hover { background: rgba(255, 255, 255, .16); }
+.geo-zoom-spacer { flex: 1; }
+.geo-zoom-stage {
+  flex: 1; min-height: 0; position: relative; overflow: hidden;
+  cursor: grab;
+  touch-action: none;                          /* 避免拖动被当页面滚动/手势吞掉 */
+}
+.geo-zoom-stage.dragging { cursor: grabbing; }
+/* 图片按原始像素渲染、绝对定位到舞台中心：
+   不能用 grid/flex 的 center 居中 —— 图比舞台大时，overflow:hidden 会让居中对齐
+   退化成「贴起始边」，缩放后整张图就被推到可视区之外了 */
+.geo-zoom-stage img {
+  position: absolute; left: 50%; top: 50%;
+  max-width: none; max-height: none;
+  transform-origin: center center;
+  user-select: none; -webkit-user-drag: none;
+}
+.geo-zoom-hint {
+  flex: none; padding: 8px 14px 12px; text-align: center;
+  font-size: 11.5px; color: #8f949f;
+}
+
+/* ---------- 参与者 ---------- */
+/* flex:1 让名单吃掉左列剩余的高度（照片是按自身比例排下来的，不占满整列），
+   人多 / 依据文字长时再在名单内部滚动；横向一律不出滚动条 */
+.geo-players {
+  flex: 1 1 auto; min-height: 132px;
+  display: flex; flex-direction: column; gap: 6px;
+  overflow-y: auto; overflow-x: hidden;
+}
+.geo-pblock { display: flex; flex-direction: column; gap: 2px; }
+.geo-player {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 11px; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg); font-size: 12.5px;
+  transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.geo-player.done { border-color: var(--ok-line); }
+.geo-player.win { border-color: var(--accent); background: var(--accent-soft); }
+.geo-dot {
+  flex: none; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--c, var(--accent)); box-shadow: 0 0 0 2px var(--bg);
+}
+.geo-pname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.geo-pstate { flex: none; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.geo-player.win .geo-pstate { color: var(--accent); font-weight: 600; }
+.geo-ptag {
+  flex: none; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--border); font-size: 10.5px; color: var(--text-dim);
+}
+.geo-follow {
+  flex: none; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--text-dim); font: inherit; font-size: 10.5px; cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              background var(--t-fast) var(--ease);
+}
+.geo-follow:hover { border-color: var(--accent); color: var(--accent); }
+.geo-pnote {
+  margin: -2px 0 2px 29px; font-size: 11.5px; line-height: 1.5; color: var(--text-dim);
+}
+.geo-preason {
+  margin: 0 0 4px 29px; font-size: 11.5px; color: var(--text-dim);
+}
+.geo-preason summary {
+  cursor: pointer; font-size: 11px; color: var(--text-dim); list-style: none;
+}
+.geo-preason summary::-webkit-details-marker { display: none; }
+.geo-preason summary::before { content: '▸ '; }
+.geo-preason[open] summary::before { content: '▾ '; }
+.geo-preason ul { margin: 3px 0 0; padding-left: 16px; line-height: 1.65; }
+.geo-preason li { margin: 1px 0; }
+
+/* ---------- 地图 ---------- */
+/* 右列只有地图会伸缩：整列高度都给地图，标注才有地方看。
+   position+z-index:0 是为了**自己建立层叠上下文**：Leaflet 内部 pane 用了
+   200~1000 的 z-index（瓦片 200 / 覆盖物 400 / 标记 600 / 控件 800~1000），
+   不圈住的话它们会参与根层叠上下文，把全屏大图浮层（z-index 90）压在下面 ——
+   表现就是「放大的图被世界地图挡住一块」。圈住之后地图内部的层级只在自己内部生效。 */
+.geo-map {
+  flex: 1 1 auto; min-height: 260px;
+  position: relative; z-index: 0;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  overflow: hidden; background: var(--bg-side);
+}
+.geo-map .leaflet-container { background: var(--bg-side); font-family: var(--font); }
+.geo-map-hint {
+  padding: 6px 10px; border-radius: var(--radius-md);
+  background: var(--bg-side); font-size: 11.5px; color: var(--text-dim);
+}
+.geo-loading-map {
+  height: 100%; display: grid; place-items: center;
+  font-size: 12.5px; color: var(--text-dim); text-align: center; padding: 16px;
+}
+
+/* 标点：一律用 divIcon（不依赖 Leaflet 自带 PNG，避免图片 404 就成了空白方块）。
+   iconSize/iconAnchor 与 .geo-pin 同尺寸（22×22 / 圆心），否则标点会整体偏半个边长。 */
+.geo-pin-wrap { background: none; border: 0; pointer-events: none; }   /* 已落地的标点不抢地图的点击与拖拽 */
+.geo-pin-wrap.draggable { pointer-events: auto; cursor: grab; }
+.geo-pin-wrap.draggable:active { cursor: grabbing; }
+/* 可点击定位的标点：只有标点与标签接收点击，地图空白处照常落点 */
+.geo-pin-wrap.followable, .geo-pin-wrap.followable .geo-pin-label {
+  pointer-events: auto; cursor: pointer;
+}
+.geo-pin {
+  display: block; box-sizing: border-box;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--c, var(--accent));
+  border: 3px solid #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, .45);
+}
+/* 真值点靠「同色外环」区分，而不是改尺寸 —— 尺寸一致锚点才落在圆心 */
+.geo-pin.truth { box-shadow: 0 0 0 2.5px var(--c, #f14c4c), 0 1px 8px rgba(0, 0, 0, .5); }
+.geo-pin.pending { outline: 3px solid rgba(255, 255, 255, .55); outline-offset: 2px; }
+
+/* 标点上方的名字 / 距离 / 拍摄点标签。
+   做成图标根节点的绝对定位子节点：脱离文档流 + 不参与标点布局，
+   改文字只重排它自己；位置由 Leaflet 对根节点的那次 translate3d 带着走，
+   所以「平移缩放时重算标签位置」这件事根本不需要写代码。 */
+.geo-pin-label {
+  position: absolute; left: 50%; bottom: 100%; margin-bottom: 4px;
+  transform: translateX(-50%);
+  padding: 2px 7px; border-radius: 999px;
+  background: rgba(18, 20, 26, .84); color: #fff;
+  border: 1px solid var(--c, var(--accent));
+  font-size: 11px; line-height: 1.5; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .35);
+  pointer-events: none;                 /* 别挡住地图拖拽 / 点选 */
+}
+.geo-pin-label:empty { display: none; }
+.geo-pin-label.truth { border-color: #f14c4c; }
+/* 真值标签挂到标点**下方**：猜得准的标点几乎和真值重合（正是最该看清的场景），
+   两个标签都朝上就会互相压住 —— 一上一下才都读得到 */
+.geo-pin-label.below { bottom: auto; top: 100%; margin-bottom: 0; margin-top: 4px; }
+
+/* ---------- 操作区 ---------- */
+.geo-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.geo-btn {
+  padding: 7px 14px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); font-size: 12.5px; cursor: pointer;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
+              color var(--t-fast) var(--ease);
+}
+.geo-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
+.geo-btn:disabled { opacity: .45; cursor: default; }
+.geo-btn.primary {
+  background: var(--accent); border-color: transparent; color: var(--on-accent); font-weight: 600;
+}
+.geo-btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
+.geo-btn.ghost { border-color: transparent; color: var(--text-dim); }
+.geo-btn.ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.geo-msg { min-height: 18px; font-size: 12.5px; line-height: 1.6; color: var(--text-dim); }
+.geo-msg.err { color: var(--danger); }
+.geo-msg.ok { color: var(--ok); }
+
+/* ---------- 结算 ---------- */
+.geo-result {
+  border: 1px solid var(--accent); border-radius: var(--radius-md);
+  background: var(--accent-soft); padding: 10px 12px;
+  font-size: 12.5px; line-height: 1.65;
+}
+.geo-result b { color: var(--accent); }
+.geo-result .geo-truth { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+/* 视口窄于 1160 时（侧栏占 268，剩下的宽度撑不起两栏）改为上下堆叠，整页滚动 */
+@media (max-width: 1160px) {
+  .geo-root { flex-direction: column; }
+  .geo-photo-col, .geo-side-col { flex: 0 0 auto; }
+  .geo-players { flex: 0 1 auto; max-height: 46vh; }
+  .geo-map { flex: 0 0 auto; height: 52vh; min-height: 320px; }
+}
+
+/* ---------- GAL 剧场（大厅入口） ---------- */
+.gal-hall {
+  max-width: 760px; display: flex; flex-direction: column; gap: 18px;
+  padding: 8px 0 24px;
+}
+.gal-hall-hero {
+  box-sizing: border-box; padding: 20px 22px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-lg);
+}
+.gal-hall-title { margin-bottom: 8px; font-size: 20px; font-weight: 600; }
+.gal-hall-hero p { margin: 0; color: var(--text-dim); font-size: 12.5px; line-height: 1.7; }
+.gal-hall-label { font-size: 12.5px; color: var(--text-dim); letter-spacing: .04em; }
+.gal-hall-list { display: flex; flex-direction: column; gap: 8px; }
+.gal-hall-session {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-side); color: var(--text); cursor: pointer; text-align: left;
+}
+.gal-hall-session:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+.gal-hall-session.active { border-color: var(--accent); background: var(--accent-soft); }
+.gal-hall-session-name { font-size: 13.5px; font-weight: 600; }
+.gal-hall-session-meta { font-size: 12px; color: var(--text-dim); }
+.gal-hall-opts { display: flex; flex-direction: column; gap: 2px; }
+.gal-hall-actions { display: flex; gap: 10px; flex-wrap: wrap; }

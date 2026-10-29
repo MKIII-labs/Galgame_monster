@@ -1,0 +1,33 @@
+{
+  "id": "ode-linear-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "方程 y′ + 2y = x 的积分因子是：",
+    "options": [
+      { "key": "A", "text": "e^(2x)" },
+      { "key": "B", "text": "e^(−2x)" },
+      { "key": "C", "text": "2x" },
+      { "key": "D", "text": "x²" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "标准形 y′ + P(x)y = Q(x) 中 P=2，积分因子 μ = e^(∫P dx) = e^(2x)。乘上后左边变成 (e^(2x)y)′。",
+    "signals": ["一阶线性标准形", "P(x) 是常数 2"],
+    "traps": {
+      "B": "符号反了，e^(−2x) 对应 P=−2。",
+      "C": "2x 不是指数形式。",
+      "D": "x² 没有依据。"
+    }
+  },
+  "card": {
+    "title": "积分因子 e^∫P",
+    "trigger": "y′ + P(x)y = Q(x)",
+    "first_step": "先化标准形，读出 P",
+    "pitfall": "把 P 的符号抄反"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "一阶线性方程" }
+}

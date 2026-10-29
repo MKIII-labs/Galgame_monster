@@ -1,0 +1,29 @@
+{
+  "id": "ode-order-01",
+  "ability": "method",
+  "primitive": "order",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "用积分因子法求一阶线性方程。请把步骤排成合理顺序。",
+    "steps": [
+      { "id": "s1", "text": "化为标准形 y′ + P(x)y = Q(x)" },
+      { "id": "s2", "text": "计算积分因子 μ = e^(∫P dx)" },
+      { "id": "s3", "text": "两边乘 μ，左边写成 (μy)′" },
+      { "id": "s4", "text": "两边对 x 积分" },
+      { "id": "s5", "text": "解出 y，并加上任意常数 C" }
+    ]
+  },
+  "expert": {
+    "why": "积分因子法的关键是把左边凑成乘积的导数：先化标准形读出 P，再算 μ，乘上去把左边合并，最后积分并解出 y。",
+    "signals": ["一阶线性", "积分因子"],
+    "order": ["s1", "s2", "s3", "s4", "s5"]
+  },
+  "card": {
+    "title": "积分因子五步",
+    "trigger": "一阶线性方程",
+    "first_step": "先化标准形",
+    "pitfall": "没化标准形就读 P"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "一阶线性方程" }
+}

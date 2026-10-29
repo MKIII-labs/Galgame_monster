@@ -1,0 +1,33 @@
+{
+  "id": "ha-poly-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "在实数域上，多项式 x² + 1 是：",
+    "options": [
+      { "key": "A", "text": "可约，因为可以分解为 (x + i)(x − i)" },
+      { "key": "B", "text": "不可约，因为它在实数域内没有根" },
+      { "key": "C", "text": "可约，因为次数是 2" },
+      { "key": "D", "text": "无法判断，要看在哪个域上" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "在实数域 R 上，二次多项式不可约当且仅当判别式小于 0；x²+1 的判别式是 −4，所以不可约。i 不属于 R，因此 (x+i)(x−i) 不是 R 上的分解。",
+    "signals": ["限定在实数域", "二次多项式", "没有实根"],
+    "traps": {
+      "A": "i 不在实数域内，这个分解在 R 上不成立。",
+      "C": "次数为 2 只说明可能分解成两个一次因子，不代表一定能。",
+      "D": "题目已经限定在实数域上，域是明确的。"
+    }
+  },
+  "card": {
+    "title": "不可约要看所在域",
+    "trigger": "判断多项式是否可约",
+    "first_step": "先确认系数域，再看有没有该域内的根",
+    "pitfall": "把复数域上的分解搬到实数域"
+  },
+  "source_ref": { "doc": "self-authored:higher-algebra", "loc": "多项式" }
+}

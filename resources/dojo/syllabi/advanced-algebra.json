@@ -1,0 +1,102 @@
+{
+  "id": "advanced-algebra",
+  "item_prefix": "aga",
+  "course": "高等代数",
+  "textbook": "谢启鸿、姚慕生、吴泉水《高等代数学》第四版",
+  "publisher": "复旦大学出版社",
+  "level": "chapter",
+  "note": "按章生成；小节为范围提示。共 10 章。",
+  "chapters": [
+    {"id": "ch01", "title": "行列式", "sections": [
+      {"id": "ch01-s01", "title": "二阶行列式"},
+      {"id": "ch01-s02", "title": "三阶行列式"},
+      {"id": "ch01-s03", "title": "n 阶行列式"},
+      {"id": "ch01-s04", "title": "行列式的展开和转置"},
+      {"id": "ch01-s05", "title": "行列式的计算"},
+      {"id": "ch01-s06", "title": "行列式的等价定义"},
+      {"id": "ch01-s07", "title": "Laplace 定理", "optional": true}
+    ]},
+    {"id": "ch02", "title": "矩阵", "sections": [
+      {"id": "ch02-s01", "title": "矩阵的概念"},
+      {"id": "ch02-s02", "title": "矩阵的运算"},
+      {"id": "ch02-s03", "title": "方阵的逆阵"},
+      {"id": "ch02-s04", "title": "矩阵的初等变换与初等矩阵"},
+      {"id": "ch02-s05", "title": "矩阵乘积的行列式与初等变换法求逆阵"},
+      {"id": "ch02-s06", "title": "分块矩阵"},
+      {"id": "ch02-s07", "title": "Cauchy-Binet 公式", "optional": true}
+    ]},
+    {"id": "ch03", "title": "线性空间", "sections": [
+      {"id": "ch03-s01", "title": "数域"},
+      {"id": "ch03-s02", "title": "行向量和列向量"},
+      {"id": "ch03-s03", "title": "线性空间"},
+      {"id": "ch03-s04", "title": "向量的线性关系"},
+      {"id": "ch03-s05", "title": "向量组的秩"},
+      {"id": "ch03-s06", "title": "矩阵的秩"},
+      {"id": "ch03-s07", "title": "坐标向量"},
+      {"id": "ch03-s08", "title": "基变换与过渡矩阵"},
+      {"id": "ch03-s09", "title": "子空间"},
+      {"id": "ch03-s10", "title": "线性方程组的解"}
+    ]},
+    {"id": "ch04", "title": "线性映射", "sections": [
+      {"id": "ch04-s01", "title": "线性映射的概念"},
+      {"id": "ch04-s02", "title": "线性映射的运算"},
+      {"id": "ch04-s03", "title": "线性映射与矩阵"},
+      {"id": "ch04-s04", "title": "线性映射的像与核"},
+      {"id": "ch04-s05", "title": "不变子空间"}
+    ]},
+    {"id": "ch05", "title": "多项式", "sections": [
+      {"id": "ch05-s01", "title": "一元多项式代数"},
+      {"id": "ch05-s02", "title": "整除"},
+      {"id": "ch05-s03", "title": "最大公因式"},
+      {"id": "ch05-s04", "title": "因式分解"},
+      {"id": "ch05-s05", "title": "多项式函数"},
+      {"id": "ch05-s06", "title": "复系数多项式"},
+      {"id": "ch05-s07", "title": "实系数多项式和有理系数多项式"},
+      {"id": "ch05-s08", "title": "多元多项式"},
+      {"id": "ch05-s09", "title": "对称多项式"},
+      {"id": "ch05-s10", "title": "结式和判别式"}
+    ]},
+    {"id": "ch06", "title": "特征值", "sections": [
+      {"id": "ch06-s01", "title": "特征值和特征向量"},
+      {"id": "ch06-s02", "title": "对角化"},
+      {"id": "ch06-s03", "title": "极小多项式与 Cayley-Hamilton 定理"},
+      {"id": "ch06-s04", "title": "特征值的估计", "optional": true}
+    ]},
+    {"id": "ch07", "title": "相似标准型", "sections": [
+      {"id": "ch07-s01", "title": "多项式矩阵"},
+      {"id": "ch07-s02", "title": "矩阵的法式"},
+      {"id": "ch07-s03", "title": "不变因子"},
+      {"id": "ch07-s04", "title": "有理标准型"},
+      {"id": "ch07-s05", "title": "初等因子"},
+      {"id": "ch07-s06", "title": "Jordan 标准型"},
+      {"id": "ch07-s07", "title": "Jordan 标准型的进一步讨论和应用"},
+      {"id": "ch07-s08", "title": "矩阵函数", "optional": true}
+    ]},
+    {"id": "ch08", "title": "二次型", "sections": [
+      {"id": "ch08-s01", "title": "二次型的化简与矩阵的合同"},
+      {"id": "ch08-s02", "title": "二次型的化简"},
+      {"id": "ch08-s03", "title": "惯性定理"},
+      {"id": "ch08-s04", "title": "正定型与正定矩阵"},
+      {"id": "ch08-s05", "title": "Hermite 型", "optional": true}
+    ]},
+    {"id": "ch09", "title": "内积空间", "sections": [
+      {"id": "ch09-s01", "title": "内积空间的概念"},
+      {"id": "ch09-s02", "title": "内积的表示和正交基"},
+      {"id": "ch09-s03", "title": "伴随"},
+      {"id": "ch09-s04", "title": "内积空间的同构，正交变换和酉变换"},
+      {"id": "ch09-s05", "title": "自伴随算子"},
+      {"id": "ch09-s06", "title": "复正规算子"},
+      {"id": "ch09-s07", "title": "实正规矩阵", "optional": true},
+      {"id": "ch09-s08", "title": "谱", "optional": true},
+      {"id": "ch09-s09", "title": "奇异值分解", "optional": true},
+      {"id": "ch09-s10", "title": "最小二乘解", "optional": true}
+    ]},
+    {"id": "ch10", "title": "双线性型", "optional": true, "sections": [
+      {"id": "ch10-s01", "title": "对偶空间"},
+      {"id": "ch10-s02", "title": "双线性型"},
+      {"id": "ch10-s03", "title": "纯量积"},
+      {"id": "ch10-s04", "title": "交错型与辛空间"},
+      {"id": "ch10-s05", "title": "对称型与正交几何"}
+    ]}
+  ]
+}

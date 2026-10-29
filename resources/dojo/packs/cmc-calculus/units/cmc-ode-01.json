@@ -1,0 +1,34 @@
+{
+  "id": "cmc-ode-01",
+  "ability": "framing",
+  "primitive": "pair",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "先认方程的类型，再谈解法。把每个方程和它的类型配对。",
+    "left": [
+      { "id": "l1", "text": "y′ + 2xy = x" },
+      { "id": "l2", "text": "y′ = x/y" },
+      { "id": "l3", "text": "y′ + y = y²" },
+      { "id": "l4", "text": "y″ − 3y′ + 2y = 0" }
+    ],
+    "right": [
+      { "id": "r1", "text": "一阶线性（积分因子）" },
+      { "id": "r2", "text": "可分离变量" },
+      { "id": "r3", "text": "伯努利方程（n = 2）" },
+      { "id": "r4", "text": "二阶常系数齐次线性" }
+    ]
+  },
+  "expert": {
+    "pairs": { "l1": "r1", "l2": "r2", "l3": "r3", "l4": "r4" },
+    "why": "先看阶数，再看未知函数及其导数是否都是一次。l1 对 y 与 y′ 都是线性的；l2 能把 y 与 x 分到两边；l3 右边出现 y²，是伯努利；l4 是二阶、常系数、右端为 0。",
+    "signals": ["先数阶", "再看 y 的最高次幂", "能写成 g(y)dy = f(x)dx 就是可分离"]
+  },
+  "card": {
+    "title": "认类型比套公式重要",
+    "trigger": "拿到一个微分方程",
+    "first_step": "数阶 → 看线性 → 看是否可分离 → 看是否伯努利",
+    "pitfall": "不管类型直接套某个公式，做到一半发现走不通"
+  },
+  "source_ref": { "doc": "self-authored", "loc": "微分方程·类型识别" }
+}

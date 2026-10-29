@@ -1,0 +1,364 @@
+{
+  "id": "cmc2019b-q5",
+  "title": "对合矩阵的秩关系、对角化与同时对角化",
+  "subject": "高等代数",
+  "track": "竞赛",
+  "minutes": 30,
+  "source": {
+    "contest": "CMC",
+    "year": 2019,
+    "paper": "数学B类",
+    "problem": "5",
+    "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十一届全国大学生数学竞赛初赛（数学B类）试题及参考答案.pdf",
+    "note": "改编自官方真题，题干为教学改写"
+  },
+  "exam": {
+    "topic": "对合矩阵的秩与对角化",
+    "weight": "CMC 数学类初赛",
+    "variant": "常见考法"
+  },
+  "prerequisites": [
+    "矩阵的秩与秩-零化度定理",
+    "特征值与特征子空间",
+    "最小多项式与可对角化",
+    "直和分解"
+  ],
+  "brief": "这道题以 A^2=I 为出发点，要求把可对角化、秩关系与同时对角化串成一条线。表面是矩阵恒等式，实质是特征子空间分解与最小多项式。研究它能训练从条件推出结构、用反例检查条件边界，并把方法迁移到幂等矩阵。",
+  "acts": [
+    {
+      "id": "cmc2019b-q5-a1",
+      "label": "原题在问什么",
+      "ability": "framing",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "设 A∈R^{n×n} 满足 A^2=I，且 B∈R^{n×n} 满足 B^2=I 与 AB=BA。题目关注 rank(I-A)+rank(I+A)=n、A 可对角化，以及 A 与 B 可同时对角化。解决这条线时，第一步应抓住的核心结构是什么？",
+        "options": [
+          {
+            "key": "A",
+            "text": "把 R^n 分解为 A 的 +1 与 -1 特征子空间的直和；秩关系、可对角化和同时对角化都由这个分解或最小多项式 x^2-1 推出。"
+          },
+          {
+            "key": "B",
+            "text": "先求 A^{-1}，因为由 A^2=I 得 A^{-1}=A，之后矩阵问题都转化为求逆问题。"
+          },
+          {
+            "key": "C",
+            "text": "先由 det(A^2)=det(I) 推出 det(A)=±1，再围绕行列式讨论秩与对角化。"
+          },
+          {
+            "key": "D",
+            "text": "先证明满足 A^2=I 的矩阵只能是 I 或 -I，再讨论它们的共同性质。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "A^2=I 说明 A 的最小多项式整除 x^2-1=(x-1)(x+1)，其根为互不相同的 ±1，故空间可分解为两个特征子空间；秩关系、可对角化和同时对角化本质上都在研究这两个子空间及其在交换矩阵下的不变性。",
+        "signals": [
+          "看到 A^2=I 立即联想 x^2-1 与 ±1 特征子空间",
+          "题目同时出现秩关系、可对角化、同时对角化，提示用同一个分解串联"
+        ],
+        "traps": {
+          "B": "A^{-1}=A 只是直接推论，不能解释秩关系与同时对角化的结构。",
+          "C": "det(A)=±1 成立但信息太弱，不能推出秩关系或可对角化。",
+          "D": "A=diag(1,-1) 已满足 A^2=I 却不等于 I 或 -I。"
+        }
+      },
+      "card": {
+        "title": "对合矩阵先看特征子空间",
+        "trigger": "遇到 A^2=I 或更一般的 f(A)=0",
+        "first_step": "写出最小多项式整除 x^2-1，并考察 ker(I-A) 与 ker(I+A)",
+        "pitfall": "不要把 A^2=I 误读为 A=±I，也不要只停留在 det(A)=±1"
+      }
+    },
+    {
+      "id": "cmc2019b-q5-a2",
+      "label": "先用具体矩阵猜秩关系",
+      "ability": "evidence",
+      "primitive": "numeric",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "取 A=[[0,1,0],[1,0,0],[0,0,1]]，则 A^2=I。请计算 rank(I-A)+rank(I+A)。",
+        "question": "填一个整数。"
+      },
+      "expert": {
+        "value": 3,
+        "tolerance": 0,
+        "why": "A 交换 e1,e2 并固定 e3，特征值 +1 的重数为 2，-1 的重数为 1；于是 nullity(I-A)=2、nullity(I+A)=1，所以 rank(I-A)=1、rank(I+A)=2，和为 3。",
+        "signals": [
+          "先求 A 的特征值或直接写 I±A",
+          "秩关系应与两个特征子空间维数相加为 n 对应"
+        ]
+      },
+      "card": {
+        "title": "具体例子数特征子空间",
+        "trigger": "验证秩关系或寻找规律",
+        "first_step": "把 I-A 与 I+A 写到同一组基下",
+        "pitfall": "不要用行列式代替秩，也不要把 rank(I-A) 与 rank(I+A) 的和误当成 2n"
+      }
+    },
+    {
+      "id": "cmc2019b-q5-a3",
+      "label": "删去 B^2=I 会怎样",
+      "ability": "condition",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "在命题“若 A^2=I、B^2=I 且 AB=BA，则 A 与 B 可同时对角化”中，若删去 B^2=I，下列哪个例子说明结论可能失效？",
+        "options": [
+          {
+            "key": "A",
+            "text": "A=I_2，B=[[1,1],[0,1]]"
+          },
+          {
+            "key": "B",
+            "text": "A=diag(1,-1)，B=diag(-1,1)"
+          },
+          {
+            "key": "C",
+            "text": "A=diag(1,1)，B=diag(1,-1)"
+          },
+          {
+            "key": "D",
+            "text": "A=diag(1,-1)，B=diag(1,1)"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "A=I 满足 A^2=I，且与任意 B 交换；所给 B 不可对角化，因此更不可能与 A 同时对角化。这说明 B^2=I（或至少 B 可对角化）不能省。",
+        "signals": [
+          "寻找不可对角化但幂等条件缺失的 B",
+          "同时对角化首先要求每个矩阵自身可对角化"
+        ],
+        "traps": {
+          "B": "两个矩阵都是对角矩阵，当然可同时对角化。",
+          "C": "两个矩阵都是对角矩阵，当然可同时对角化。",
+          "D": "两个矩阵都是对角矩阵，当然可同时对角化。"
+        }
+      },
+      "card": {
+        "title": "同时对角化先查各自可对角化",
+        "trigger": "两个交换矩阵同时对角化",
+        "first_step": "检查每个矩阵自身是否可对角化，再检查交换性",
+        "pitfall": "只验证 AB=BA 就断言同时对角化"
+      }
+    },
+    {
+      "id": "cmc2019b-q5-a4",
+      "label": "排列秩关系证明主线",
+      "ability": "argument",
+      "primitive": "order",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "situation": "下面把 A^2=I 下 rank(I-A)+rank(I+A)=n 的证明拆成若干步。请按逻辑顺序排列。",
+        "steps": [
+          {
+            "id": "s1",
+            "text": "由 A^2=I 得 (I-A)(I+A)=0。"
+          },
+          {
+            "id": "s2",
+            "text": "因此对任意 y，有 (I-A)(I+A)y=0，即 Im(I+A)⊆ker(I-A)。"
+          },
+          {
+            "id": "s3",
+            "text": "反之，若 x∈ker(I-A)，则 Ax=x，从而 x=(I+A)(x/2)。"
+          },
+          {
+            "id": "s4",
+            "text": "所以 ker(I-A)⊆Im(I+A)，结合 s2 得 Im(I+A)=ker(I-A)。"
+          },
+          {
+            "id": "s5",
+            "text": "取维数得 rank(I+A)=dim ker(I-A)。"
+          },
+          {
+            "id": "s6",
+            "text": "对 I-A 用秩-零化度定理：rank(I-A)+dim ker(I-A)=n。"
+          },
+          {
+            "id": "s7",
+            "text": "代入得 rank(I-A)+rank(I+A)=n。"
+          }
+        ]
+      },
+      "expert": {
+        "order": [
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5",
+          "s6",
+          "s7"
+        ],
+        "why": "证明的核心是先由零乘积得到 Im(I+A)⊆ker(I-A)，再利用 A^2=I 构造反向表示，得到两个子空间相等，最后用秩-零化度定理把维数关系翻译成秩关系。",
+        "signals": [
+          "先找包含关系，再证反向包含",
+          "最后一步应出现秩-零化度定理"
+        ]
+      },
+      "card": {
+        "title": "零乘积→包含关系→维数",
+        "trigger": "证明形如 rank(f(A))+rank(g(A))=n 且 fg=0",
+        "first_step": "由 (I-A)(I+A)=0 得 Im(I+A)⊆ker(I-A)",
+        "pitfall": "忘记证明反包含，或把 Im 与 ker 的包含方向写反"
+      }
+    },
+    {
+      "id": "cmc2019b-q5-a5",
+      "label": "检查条件边界",
+      "ability": "robustness",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "围绕实矩阵 A 的条件 A^2=I，判断下列哪些说法正确。",
+        "options": [
+          {
+            "key": "A",
+            "text": "A^2=I 推出最小多项式整除 x^2-1=(x-1)(x+1)，因此 A 可对角化。"
+          },
+          {
+            "key": "B",
+            "text": "若 A^2=I，则 A 只能是 I 或 -I。"
+          },
+          {
+            "key": "C",
+            "text": "在 A^2=I 下，rank(I-A)+rank(I+A)=n，且 rank(I-A) 等于 -1 特征子空间的维数。"
+          },
+          {
+            "key": "D",
+            "text": "若 A^2 可逆，则 A 必可对角化。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": [
+          "A",
+          "C"
+        ],
+        "why": "A 正确是因为最小多项式无重根。C 正确是因为 I-A 在 +1 特征子空间上为零、在 -1 特征子空间上为可逆的 2 倍，故秩恰为 -1 特征子空间维数。B 被 diag(1,-1) 否定；D 被 Jordan 块 [[1,1],[0,1]] 否定，它满足 A^2 可逆却不可对角化。",
+        "signals": [
+          "检查最小多项式是否有重根",
+          "把秩与特征子空间维数对应起来",
+          "对弱条件寻找不可对角化的反例"
+        ]
+      },
+      "card": {
+        "title": "条件强弱要分清",
+        "trigger": "判断一个矩阵恒等式能推出哪些结构",
+        "first_step": "先看最小多项式是否有重根",
+        "pitfall": "把 A^2 可逆、det(A)=±1 等弱条件误当成 A^2=I"
+      }
+    },
+    {
+      "id": "cmc2019b-q5-a6",
+      "label": "换对象：从对合到投影",
+      "ability": "reflection",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "situation": "把 A^2=I 换为幂等条件 P^2=P，并保留“两个交换对象可同时对角化”的思路。下列类比判断正确的是？",
+        "options": [
+          {
+            "key": "A",
+            "text": "P^2=P 时 P 可对角化，且 rank(P)+rank(I-P)=n；若 Q^2=Q 且 PQ=QP，则 P,Q 可同时对角化。"
+          },
+          {
+            "key": "B",
+            "text": "P^2=P 时 P 一定可逆，所以 rank(P)=n。"
+          },
+          {
+            "key": "C",
+            "text": "P^2=P 时 P 只能是 I 或 0。"
+          },
+          {
+            "key": "D",
+            "text": "P^2=P 时 rank(P)+rank(I-P)=2n。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "幂等矩阵的最小多项式整除 x(x-1)，根互异，故可对角化；其空间分解为 Im(P) 与 ker(P) 的直和，因此两个秩相加为 n。两个交换的幂等矩阵在每个共同不变子空间上可继续对角化，故可同时对角化。",
+        "signals": [
+          "把 x^2-1 换为 x(x-1)",
+          "把 +1/-1 特征子空间换为 Im(P) 与 ker(P)",
+          "交换的对角化矩阵可同时对角化"
+        ],
+        "traps": {
+          "B": "零矩阵满足 P^2=P 但不可逆。",
+          "C": "diag(1,0) 满足 P^2=P 却不等于 I 或 0。",
+          "D": "rank(P)+rank(I-P)=n，不是 2n。"
+        }
+      },
+      "card": {
+        "title": "幂等矩阵是 0-1 投影",
+        "trigger": "遇到 P^2=P",
+        "first_step": "分解 V=ker P⊕Im P，并注意 P 在 Im P 上为恒等",
+        "pitfall": "把幂等矩阵误认为可逆或只能是 I、0"
+      }
+    }
+  ],
+  "artifact": {
+    "prompt": "用 150–300 字总结这道题的研究结论：条件是什么，关键步骤是什么，反例说明哪个条件不可省，方法如何迁移到投影矩阵 P^2=P 或两个交换对合矩阵。",
+    "rubric": [
+      {
+        "id": "r1",
+        "text": "说明 A^2=I 给出 +1 与 -1 特征子空间的直和分解，核心恒等式为 (I-A)(I+A)=0。",
+        "keywords": [
+          "A^2=I",
+          "特征子空间",
+          "直和"
+        ]
+      },
+      {
+        "id": "r2",
+        "text": "秩关系证明先证 Im(I+A)=ker(I-A)，再用秩-零化度定理得到 rank(I-A)+rank(I+A)=n。",
+        "keywords": [
+          "Im(I+A)=ker(I-A)",
+          "秩-零化度",
+          "rank(I-A)+rank(I+A)=n"
+        ]
+      },
+      {
+        "id": "r3",
+        "text": "可对角化由最小多项式整除 x^2-1 且无重根推出。",
+        "keywords": [
+          "最小多项式",
+          "无重根",
+          "可对角化"
+        ]
+      },
+      {
+        "id": "r4",
+        "text": "同时对角化需要 B^2=I 与 AB=BA；反例 A=I、B=[[1,1],[0,1]] 说明去掉 B^2=I 会失败。",
+        "keywords": [
+          "同时对角化",
+          "B^2=I",
+          "交换",
+          "反例"
+        ]
+      },
+      {
+        "id": "r5",
+        "text": "迁移到 P^2=P：幂等矩阵可对角化，rank(P)+rank(I-P)=n，交换幂等矩阵可同时对角化。",
+        "keywords": [
+          "P^2=P",
+          "投影",
+          "幂等",
+          "rank(P)+rank(I-P)=n"
+        ]
+      }
+    ],
+    "expert_sample": "A^2=I 的关键是 (I-A)(I+A)=0，并把空间分成 +1 与 -1 特征子空间的直和。证明秩关系时先证 Im(I+A)=ker(I-A)，再用秩-零化度定理得 rank(I-A)+rank(I+A)=n。由于最小多项式整除 x^2-1 且无重根，A 可对角化。两个对合矩阵的同时对角化需要 B^2=I 与 AB=BA；反例 A=I、B=[[1,1],[0,1]] 只满足交换而不满足 B^2=I，故不能同时对角化。方法可迁移到投影 P^2=P：它是幂等矩阵，有 rank(P)+rank(I-P)=n，交换幂等矩阵也可同时对角化。"
+  }
+}

@@ -1,0 +1,62 @@
+/* 提醒任务 / 主动聊天 —— 设置面板「提醒与主动」页 */
+
+.remind-list {
+  margin-top: 8px;
+}
+
+.remind-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  background: var(--panel, rgba(127, 127, 127, .08));
+  border: 1px solid var(--border, rgba(127, 127, 127, .2));
+  border-radius: var(--radius, 8px);
+}
+
+.remind-row.off {
+  opacity: .5;
+}
+
+.remind-when {
+  flex: none;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.remind-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remind-rep {
+  flex: none;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border: 1px solid var(--border, rgba(127, 127, 127, .2));
+  border-radius: var(--radius-sm, 4px);
+}
+
+.remind-del {
+  flex: none;
+  padding: 0 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+}
+
+.remind-del:hover {
+  color: var(--danger);
+}
+
+.remind-empty {
+  padding: 6px 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}

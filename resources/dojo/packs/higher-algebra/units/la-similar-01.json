@@ -1,0 +1,31 @@
+{
+  "id": "la-similar-01",
+  "ability": "condition",
+  "primitive": "multi_select",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "若 n 阶矩阵 A 与 B 相似（存在可逆 P 使 B = P⁻¹AP），下列哪些一定相同？",
+    "options": [
+      { "key": "A", "text": "特征值" },
+      { "key": "B", "text": "行列式" },
+      { "key": "C", "text": "迹" },
+      { "key": "D", "text": "特征向量" }
+    ]
+  },
+  "expert": {
+    "choice": ["A", "B", "C"],
+    "why": "相似矩阵有相同的特征多项式，因此特征值、行列式（特征值之积）、迹（特征值之和）都相同。特征向量会随基变换改变，一般不相等。",
+    "signals": ["相似", "B = P⁻¹AP", "问不变量"],
+    "traps": {
+      "D": "特征向量在换基后会变，只有特征值保持不变。"
+    }
+  },
+  "card": {
+    "title": "相似三不变",
+    "trigger": "A 与 B 相似",
+    "first_step": "特征值 → 行列式、迹",
+    "pitfall": "把特征向量也当成不变量"
+  },
+  "source_ref": { "doc": "self-authored:linear-algebra", "loc": "相似矩阵" }
+}

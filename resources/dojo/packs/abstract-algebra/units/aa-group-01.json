@@ -1,0 +1,32 @@
+{
+  "id": "aa-group-01",
+  "ability": "condition",
+  "primitive": "multi_select",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "下列哪些条件能保证非空子集 H ⊆ G 是子群？",
+    "options": [
+      { "key": "A", "text": "对任意 a,b ∈ H，都有 ab⁻¹ ∈ H" },
+      { "key": "B", "text": "H 对乘法封闭，且对任意 a ∈ H 有 a⁻¹ ∈ H" },
+      { "key": "C", "text": "H 含有单位元，且对乘法封闭" },
+      { "key": "D", "text": "H 是有限集" }
+    ]
+  },
+  "expert": {
+    "choice": ["A", "B"],
+    "why": "A 是标准判定定理，B 是它的展开写法，两者等价。C 缺少逆元封闭，无限子集可能只构成含单位元的半群；D 与子群无关。",
+    "signals": ["子群判定", "非空子集", "封闭性"],
+    "traps": {
+      "C": "只含单位元并对乘法封闭，不保证逆元存在。",
+      "D": "有限性不是子群条件。"
+    }
+  },
+  "card": {
+    "title": "子群看 ab⁻¹",
+    "trigger": "判断子集是否为子群",
+    "first_step": "验证非空 + 对 ab⁻¹ 封闭",
+    "pitfall": "只验证乘法封闭"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "群" }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "aa-cyclic-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "若有限群 G 的阶为素数 p，则：",
+    "options": [
+      { "key": "A", "text": "G 必为循环群" },
+      { "key": "B", "text": "G 必为平凡群" },
+      { "key": "C", "text": "G 没有非平凡子群，但不必循环" },
+      { "key": "D", "text": "G 必为非交换群" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "取非单位元 g，其生成的循环子群阶整除 p 且大于 1，只能是 p，所以 G=⟨g⟩ 是循环群；素数阶群也必然交换。",
+    "signals": ["群阶为素数", "问结构"],
+    "traps": {
+      "B": "素数阶至少含 p 个元素，p≥2 时不是平凡群。",
+      "C": "没有非平凡子群与循环是同一结论的两面，这里把两者对立了。",
+      "D": "素数阶群一定是交换群。"
+    }
+  },
+  "card": {
+    "title": "素数阶群必循环",
+    "trigger": "|G| 为素数",
+    "first_step": "取非单位元生成循环子群",
+    "pitfall": "以为素数阶群可能非交换"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "循环群" }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "ode-bernoulli-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "方程 y′ + y = y² 属于伯努利方程。最合适的代换是：",
+    "options": [
+      { "key": "A", "text": "z = y²" },
+      { "key": "B", "text": "z = y⁻¹" },
+      { "key": "C", "text": "z = ln y" },
+      { "key": "D", "text": "z = y′" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "伯努利方程 y′ + P y = Q yⁿ 的标准代换是 z = y^(1−n)。这里 n=2，所以 z=y⁻¹，代入后化为线性方程 z′ − z = −1。",
+    "signals": ["伯努利形式", "右边含 y 的幂次", "n=2"],
+    "traps": {
+      "A": "z=y² 不会把非线性项消掉，反而更复杂。",
+      "C": "对数代换适用于其他结构，对伯努利无效。",
+      "D": "把导数当新变量会让阶数升高。"
+    }
+  },
+  "card": {
+    "title": "伯努利令 z=y^(1−n)",
+    "trigger": "y′ + P y = Q yⁿ",
+    "first_step": "读出 n，令 z=y^(1−n)",
+    "pitfall": "代换指数写错"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "伯努利方程" }
+}

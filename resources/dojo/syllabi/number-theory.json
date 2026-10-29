@@ -1,0 +1,73 @@
+{
+  "id": "number-theory",
+  "item_prefix": "nt",
+  "course": "初等数论",
+  "textbook": "《初等数论（第四版）》",
+  "level": "chapter",
+  "note": "按章生成；小节为范围提示。共 9 章。以本地 PDF 目录为准。",
+  "chapters": [
+    {"id": "ch01", "title": "整数的可除性", "sections": [
+      {"id": "ch01-s01", "title": "整除的概念 · 带余除法"},
+      {"id": "ch01-s02", "title": "最大公因数与辗转相除法"},
+      {"id": "ch01-s03", "title": "整除的进一步性质及最小公倍数"},
+      {"id": "ch01-s04", "title": "素数 · 算术基本定理"},
+      {"id": "ch01-s05", "title": "函数 [x], {x} 及其在数论中的一个应用"}
+    ]},
+    {"id": "ch02", "title": "不定方程", "sections": [
+      {"id": "ch02-s01", "title": "二元一次不定方程"},
+      {"id": "ch02-s02", "title": "多元一次不定方程"},
+      {"id": "ch02-s03", "title": "勾股数"},
+      {"id": "ch02-s04", "title": "费马问题的介绍", "optional": true}
+    ]},
+    {"id": "ch03", "title": "同余", "sections": [
+      {"id": "ch03-s01", "title": "同余的概念及其基本性质"},
+      {"id": "ch03-s02", "title": "剩余类及完全剩余系"},
+      {"id": "ch03-s03", "title": "既约剩余系与欧拉函数"},
+      {"id": "ch03-s04", "title": "欧拉定理 · 费马定理及其对循环小数的应用"},
+      {"id": "ch03-s05", "title": "公开密钥——RSA 体制"},
+      {"id": "ch03-s06", "title": "三角和的概念", "optional": true}
+    ]},
+    {"id": "ch04", "title": "同余式", "sections": [
+      {"id": "ch04-s01", "title": "基本概念及一次同余式"},
+      {"id": "ch04-s02", "title": "孙子定理"},
+      {"id": "ch04-s03", "title": "高次同余式的解数及解法"},
+      {"id": "ch04-s04", "title": "素数模的同余式"}
+    ]},
+    {"id": "ch05", "title": "二次同余式与平方剩余", "sections": [
+      {"id": "ch05-s01", "title": "一般二次同余式"},
+      {"id": "ch05-s02", "title": "奇素数的平方剩余与平方非剩余"},
+      {"id": "ch05-s03", "title": "勒让德符号"},
+      {"id": "ch05-s04", "title": "前节定理的证明"},
+      {"id": "ch05-s05", "title": "雅可比符号"},
+      {"id": "ch05-s06", "title": "合数模的情形"},
+      {"id": "ch05-s07", "title": "把奇素数表成二数平方和", "optional": true},
+      {"id": "ch05-s08", "title": "把正整数表成平方和", "optional": true}
+    ]},
+    {"id": "ch06", "title": "原根与指标", "sections": [
+      {"id": "ch06-s01", "title": "指数及其基本性质"},
+      {"id": "ch06-s02", "title": "原根存在的条件"},
+      {"id": "ch06-s03", "title": "指标及 n 次剩余"},
+      {"id": "ch06-s04", "title": "模 2 的 α 次及合数模的指标组"},
+      {"id": "ch06-s05", "title": "特征函数"}
+    ]},
+    {"id": "ch07", "title": "连分数", "sections": [
+      {"id": "ch07-s01", "title": "连分数的基本性质"},
+      {"id": "ch07-s02", "title": "把实数表成连分数"},
+      {"id": "ch07-s03", "title": "循环连分数"},
+      {"id": "ch07-s04", "title": "二次不定方程", "optional": true}
+    ]},
+    {"id": "ch08", "title": "代数数与超越数", "sections": [
+      {"id": "ch08-s01", "title": "二次代数数"},
+      {"id": "ch08-s02", "title": "二次代数整数的分解"},
+      {"id": "ch08-s03", "title": "n 次代数数与超越数"},
+      {"id": "ch08-s04", "title": "e 的超越性"},
+      {"id": "ch08-s05", "title": "π 的超越性", "optional": true}
+    ]},
+    {"id": "ch09", "title": "数论函数与素数分布", "sections": [
+      {"id": "ch09-s01", "title": "可乘函数"},
+      {"id": "ch09-s02", "title": "π(x) 的估值"},
+      {"id": "ch09-s03", "title": "除数问题与圆内格点问题的介绍", "optional": true},
+      {"id": "ch09-s04", "title": "有关素数的其他问题"}
+    ]}
+  ]
+}

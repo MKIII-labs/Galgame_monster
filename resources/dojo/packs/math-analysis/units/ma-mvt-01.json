@@ -1,0 +1,33 @@
+{
+  "id": "ma-mvt-01",
+  "ability": "assumption",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "拉格朗日中值定理成立的条件是：",
+    "options": [
+      { "key": "A", "text": "f 在 [a,b] 上连续，在 (a,b) 内可导" },
+      { "key": "B", "text": "f 在 [a,b] 上可导" },
+      { "key": "C", "text": "f 在 [a,b] 上单调" },
+      { "key": "D", "text": "f 在 [a,b] 上有界" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "定理只要求闭区间连续、开区间可导：端点处只需要连续，不需要可导；单调与有界都不是定理的条件。",
+    "signals": ["中值定理", "问条件", "闭区间与开区间"],
+    "traps": {
+      "B": "端点可导是多余要求，定理只要求开区间可导。",
+      "C": "单调不是中值定理的条件。",
+      "D": "有界也不是定理条件。"
+    }
+  },
+  "card": {
+    "title": "闭连续、开可导",
+    "trigger": "用拉格朗日中值定理",
+    "first_step": "先核对两个区间条件",
+    "pitfall": "要求端点也可导"
+  },
+  "source_ref": { "doc": "self-authored:math-analysis", "loc": "微分中值定理" }
+}

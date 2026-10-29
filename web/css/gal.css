@@ -1,0 +1,1145 @@
+/* ============================================================
+   GAL 演出模式（见 docs/GAL_MODE_DESIGN.md）
+   ============================================================ */
+.gal-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; position: relative; }
+.gal-panel.hidden { display: none; }
+#main.gal-mode #chat { display: none; }
+#main.gal-mode #btn-bottom { display: none; }
+
+.gal-stage {
+  position: relative; flex: 1; min-height: 0; overflow: hidden;
+  display: flex; flex-direction: column; background: transparent;   /* 背景交给 #gal-bg（铺满整列） */
+}
+/* 背景层：铺满「舞台 + 输入区」整列，只在 GAL 模式显示。
+   用 z-index:0 + 内容 z-index:1 —— 不要用负 z-index：负 z 层会掉到 body 的不透明
+   底色之下（body 背景属于块级层，比负 z 层更靠上），整层背景会被盖没。 */
+#gal-bg, #gal-bg-next { display: none; }
+#main.gal-mode #gal-bg, #main.gal-mode #gal-bg-next {
+  display: block; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-color: var(--bg-side);
+}
+/* 内容抬到背景层之上 */
+#main.gal-mode .gal-panel { position: relative; z-index: 1; }
+#main.gal-mode .composer { position: relative; z-index: 1; }
+.gal-sprites {
+  /* 铺满舞台，但底边止于对白框顶边（--gal-sprite-lift 由 JS 实时同步）→ 立绘永不被压住 */
+  position: absolute; top: 0; right: 0; left: 0; bottom: var(--gal-sprite-lift, 0px);
+  z-index: 6; pointer-events: none;   /* 高于「幕间」工具卡(2)/状态栏(4) → 立绘不被它们遮挡；仍低于对白框(8) */
+}
+.gal-sprite {
+  position: absolute; bottom: 0; left: auto; right: 3%;
+  max-height: 66%; max-width: 28%;
+  object-fit: contain; object-position: bottom center;
+  filter: drop-shadow(0 10px 30px rgba(0, 0, 0, .35));
+  transition: opacity var(--t-slow) var(--ease), transform var(--t-slow) var(--ease),
+              filter var(--t-slow) var(--ease);
+  will-change: opacity, transform, filter;
+}
+/* 多立绘：由 JS 用 left% + translateX(-50%) 定位；不说话的自动变暗 */
+.gal-sprite.gal-dim {
+  filter: brightness(.5) saturate(.55) drop-shadow(0 8px 20px rgba(0, 0, 0, .3));
+  opacity: .92;
+}
+.gal-sprite.gal-active { filter: drop-shadow(0 10px 30px rgba(0, 0, 0, .35)); opacity: 1; }
+.gal-bar {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 12;
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, .28), transparent);
+  opacity: .5; transition: opacity var(--t) var(--ease);
+}
+.gal-bar:hover, .gal-bar:focus-within { opacity: 1; }   /* 沉浸：默认半透，移入实显 */
+html.gal-bar-static .gal-bar { opacity: 1; }            /* 关闭「沉浸淡出」时：始终实显 */
+html.gal-no-sprite-fx .gal-sprite { transition: none; } /* 关闭立绘过渡动画 */
+.gal-bar-label { font-size: 12px; color: var(--text-dim); }
+.gal-select {
+  max-width: 220px; padding: 4px 8px; font-size: 13px;
+  background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.gal-role { font-size: 12.5px; color: var(--text-dim); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.gal-dialog {
+  /* 浮层：绝对定位在舞台底部，浮在立绘之上（新世界范式） */
+  position: absolute; left: 0; right: 0; bottom: 14px; z-index: 8;
+  margin: 0 auto; padding: 14px 16px;
+  min-height: 96px; max-height: 46%;
+  /* 内容滚动交给内层 .gal-dialog-body —— 这样「名牌」才能骑到上边框外侧而不被裁掉 */
+  display: flex; flex-direction: column; overflow: visible;
+  border-radius: var(--radius-lg); border: 1px solid var(--border-strong);
+  /* 半透明 + 磨砂：立绘能透出来，文字仍清楚 */
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  box-shadow: var(--shadow); color: var(--text);
+}
+.gal-dialog-body {
+  flex: 1; min-height: 0; overflow: auto;
+  overscroll-behavior: contain; scrollbar-width: thin;
+}
+/* 细滚动条：贴合对白框的克制观感 */
+.gal-dialog-body::-webkit-scrollbar { width: 8px; }
+.gal-dialog-body::-webkit-scrollbar-track { background: transparent; }
+.gal-dialog-body::-webkit-scrollbar-thumb {
+  background: var(--scroll); border-radius: 999px; border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.gal-dialog-body::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover); background-clip: padding-box; }
+.gal-name { font-weight: 700; font-size: 14px; color: var(--accent); margin-bottom: 6px; }
+.gal-text {
+  display: block;                    /* 防止通用 .typing(inline-flex) 污染布局 */
+  font-size: 15px; line-height: 1.88; letter-spacing: .012em; min-height: 1.9em;
+  white-space: pre-wrap; word-break: break-word;
+}
+/* 收尾用 renderMarkdown 渲染后改用普通排版（块级元素 + 公式 + 代码块） */
+.gal-text.md { white-space: normal; }
+.gal-text.md p { margin: 0 0 8px; }
+.gal-text.md p:last-child { margin-bottom: 0; }
+.gal-text.md :first-child { margin-top: 0; }
+.gal-text.md h1, .gal-text.md h2, .gal-text.md h3,
+.gal-text.md h4, .gal-text.md h5, .gal-text.md h6 { margin: 8px 0 6px; font-size: 1.05em; }
+.gal-text.md ul, .gal-text.md ol { margin: 4px 0 8px; padding-left: 1.4em; }
+/* 逐段对白：每段一个块 */
+.gal-seg { margin: 0 0 6px; white-space: pre-wrap; word-break: break-word; }
+.gal-seg:last-child { margin-bottom: 0; }
+.gal-seg.narr { color: var(--text-dim); font-size: 13.5px; opacity: .85; padding-left: 8px; }
+.gal-divider { text-align: center; margin: 10px 0; opacity: .72; letter-spacing: .08em; }
+html[data-gal-theme] .gal-divider { color: var(--gx-text-dim); }
+.gal-seg-who { color: var(--gal-char-color, var(--accent)); font-weight: 600; margin-right: 2px; }
+
+/* ===== GAL 演出主题（自研 3 套，纯 CSS）—— GAL 模式下作用于全部 UI =====
+   主题挂在 <html> 上，核心 token 就地覆盖，因此 #app 之外的弹窗 / 提示也会跟随 */
+html[data-gal-theme] {
+  --gx-accent: #7c9cff; --gx-accent-hover: #6a8bf0;
+  --gx-bg: var(--bg); --gx-bg-side: var(--bg-side); --gx-bg-hover: var(--bg-hover);
+  --gx-bg-active: var(--bg-active); --gx-bg-input: var(--bg-input);
+  --gx-border: var(--border); --gx-border-strong: var(--border-strong);
+  --gx-text: var(--text); --gx-text-dim: var(--text-dim);
+  --gx-scroll: var(--scroll); --gx-scroll-hover: var(--scroll-hover);
+  --gx-stage: var(--bg-side);
+  --gx-bar: linear-gradient(to bottom, rgba(0, 0, 0, .28), transparent);
+  --gx-dialog-bg: var(--bg); --gx-dialog-border: var(--border-strong); --gx-dialog-color: var(--text);
+  --gx-dialog-radius: 18px; --gx-dialog-shadow: var(--shadow);
+  --gx-dialog-font: inherit; --gx-text-size: 15px; --gx-text-weight: 400; --gx-text-shadow: none;
+  --gx-dialog-w: 92%; --gx-dialog-minh: 96px; --gx-dialog-pad: 14px 16px;
+  --gx-name-bg: linear-gradient(100deg, rgba(124,156,255,.95), rgba(84,110,200,.95));
+  --gx-name-color: #fff; --gx-name-radius: 8px; --gx-name-shadow: var(--shadow); --gx-name-size: 14px;
+  --gx-opt-bg: var(--bg); --gx-opt-border: var(--accent); --gx-opt-color: var(--text);
+  --gx-opt-radius: 999px; --gx-opt-shadow: none;
+  --gx-opt-hover-bg: var(--accent); --gx-opt-hover-color: #fff; --gx-opt-size: 14px;
+  /* --- 装饰层（galgame 味的通用零件）---
+     --gx-deco       : 角标 / 名牌三角 / 推进指示的装饰色
+     --gx-corner     : 对话框四角 L 形角标的臂长（0 = 关闭角标）
+     --gx-corner-w   : 角标线宽
+     --gx-blur       : 对话框磨砂强度
+     --gx-opt-shift  : 选项 hover 时左移像素数 */
+  --gx-deco: var(--gx-accent);
+  --gx-corner: 11px; --gx-corner-w: 2px;
+  --gx-blur: 14px; --gx-sat: 1.12;
+  --gx-opt-shift: 4px;
+}
+/* 舞台 / 工具条 */
+html[data-gal-theme] #main.gal-mode #gal-bg,
+html[data-gal-theme] #main.gal-mode #gal-bg-next { background-image: var(--gx-stage); }
+html[data-gal-theme] .gal-bar { background: var(--gx-bar); }
+/* 输入框（对话框下方）：背景图透出，只在底部垫一层渐变遮罩保证可读 */
+html[data-gal-theme] .composer {
+  background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--bg) 62%, transparent) 46%);
+}
+/* .composer-box 的 GAL 覆盖统一放在文件末尾的「GAL 输入区沉浸化」一节，这里不再重复 */
+/* 樱粉（浅·衬线） */
+html[data-gal-theme="sakura"] {
+  --gx-accent: #d4788e; --gx-accent-hover: #c3697f;
+  --gx-bg: #fff8fb; --gx-bg-side: #fdeef4; --gx-bg-hover: #f9e2ea; --gx-bg-active: #f6d6e0; --gx-bg-input: #fffdfe;
+  --gx-border: #f2d6e0; --gx-border-strong: #e6bacb; --gx-text: #4a2b38; --gx-text-dim: #9a6a7c;
+  --gx-scroll: #e8c4d3; --gx-scroll-hover: #d9a8bd;
+  --gx-stage: radial-gradient(circle at 18% 12%, rgba(212,120,142,.20), transparent 55%),
+              radial-gradient(circle at 84% 78%, rgba(255,183,197,.26), transparent 60%),
+              linear-gradient(160deg, #fff3f7, #ffe6ef 58%, #ffdfe9);
+  --gx-bar: linear-gradient(to bottom, rgba(212,120,142,.18), transparent);
+  --gx-dialog-bg: linear-gradient(135deg, rgba(255,244,248,.94), rgba(255,232,241,.92));
+  --gx-dialog-border: rgba(212,120,142,.55); --gx-dialog-color: #40202d; --gx-dialog-radius: 22px;
+  --gx-dialog-shadow: 0 18px 46px rgba(122,50,78,.18);
+  --gx-dialog-font: "Noto Serif SC","Source Han Serif SC","Songti SC",Georgia,serif;
+  --gx-text-size: 15.5px; --gx-text-weight: 500; --gx-text-shadow: 0 1px 2px rgba(255,255,255,.5);
+  --gx-dialog-w: 80%; --gx-dialog-minh: 130px; --gx-dialog-pad: 20px 22px;
+  --gx-name-bg: linear-gradient(100deg,#e493a8,#b85f86); --gx-name-radius: 999px; --gx-name-size: 15px;
+  --gx-opt-bg: linear-gradient(100deg, rgba(255,240,246,.95), rgba(255,226,238,.92));
+  --gx-opt-border: #e493a8; --gx-opt-color: #6b3a4c; --gx-opt-radius: 16px; --gx-opt-size: 14.5px;
+  --gx-opt-hover-bg: linear-gradient(100deg,#e493a8,#b85f86);
+}
+/* 夜蓝（深） */
+html[data-gal-theme="night"] {
+  --gx-accent: #6ea8fe; --gx-accent-hover: #5c97ee;
+  --gx-bg: #111725; --gx-bg-side: #0d1320; --gx-bg-hover: #1b2438; --gx-bg-active: #24304a; --gx-bg-input: #1a2333;
+  --gx-border: #223049; --gx-border-strong: #2d4060; --gx-text: #eef3ff; --gx-text-dim: #a6bad9;
+  --gx-scroll: #2b3a56; --gx-scroll-hover: #3c5075;
+  --gx-stage: radial-gradient(circle at 18% 10%, rgba(110,168,254,.20), transparent 55%),
+              radial-gradient(circle at 86% 80%, rgba(80,120,220,.18), transparent 60%),
+              linear-gradient(160deg, #0d1320, #141c2e 58%, #0b101c);
+  --gx-bar: linear-gradient(to bottom, rgba(0, 0, 0, .45), transparent);
+  --gx-dialog-bg: linear-gradient(135deg, rgba(17,23,38,.94), rgba(11,15,26,.92));
+  --gx-dialog-border: rgba(120,170,255,.5); --gx-dialog-color: #eef3ff; --gx-dialog-radius: 14px;
+  --gx-dialog-shadow: 0 18px 46px rgba(0,8,24,.5), inset 0 1px 0 rgba(255,255,255,.08);
+  --gx-dialog-font: system-ui,"Microsoft YaHei",sans-serif;
+  --gx-text-shadow: 0 1px 6px rgba(0,8,24,.6);
+  --gx-dialog-w: 80%; --gx-dialog-minh: 118px; --gx-dialog-pad: 18px 20px;
+  --gx-name-bg: linear-gradient(100deg,#3f6fd8,#25407f); --gx-name-color: #eaf1ff; --gx-name-radius: 10px;
+  --gx-opt-bg: linear-gradient(100deg, rgba(24,33,54,.94), rgba(15,20,34,.9));
+  --gx-opt-border: #4d7ad6; --gx-opt-color: #dbe6ff; --gx-opt-radius: 10px;
+  --gx-opt-hover-bg: linear-gradient(100deg,#4b7ee0,#2c4a99);
+}
+/* 和风纸（浅·衬线） */
+html[data-gal-theme="washi"] {
+  --gx-accent: #a8825a; --gx-accent-hover: #96744e;
+  --gx-bg: #fcf8f0; --gx-bg-side: #f5efe2; --gx-bg-hover: #efe6d5; --gx-bg-active: #e8dcc6; --gx-bg-input: #fffdf8;
+  --gx-border: #e0d3bd; --gx-border-strong: #cbb99c; --gx-text: #332c1e; --gx-text-dim: #6f6250;
+  --gx-scroll: #ddd0b8; --gx-scroll-hover: #cbb99c;
+  --gx-stage: radial-gradient(circle at 16% 10%, rgba(168,130,90,.14), transparent 55%),
+              radial-gradient(circle at 84% 82%, rgba(200,170,120,.16), transparent 60%),
+              linear-gradient(160deg, #fdfaf4, #f6efe0 58%, #f1e8d6);
+  --gx-bar: linear-gradient(to bottom, rgba(168,130,90,.18), transparent);
+  --gx-dialog-bg: linear-gradient(135deg, rgba(252,248,240,.95), rgba(243,235,220,.93));
+  --gx-dialog-border: #bfa987; --gx-dialog-color: #332c1e; --gx-dialog-radius: 8px;
+  --gx-dialog-shadow: 0 12px 30px rgba(90,74,50,.18);
+  --gx-dialog-font: "Noto Serif SC","Songti SC","Hiragino Mincho ProN",Georgia,serif;
+  --gx-text-size: 16px;
+  --gx-dialog-w: 78%; --gx-dialog-minh: 132px; --gx-dialog-pad: 18px 22px;
+  --gx-name-bg: linear-gradient(100deg,#8a6b4a,#6a5136); --gx-name-color: #fff8ec; --gx-name-radius: 4px;
+  --gx-opt-bg: rgba(250,244,232,.96); --gx-opt-border: #bfa987; --gx-opt-color: #463c2c;
+  --gx-opt-radius: 6px; --gx-opt-hover-bg: #8a6b4a; --gx-opt-hover-color: #fff8ec;
+}
+/* 极简黑白（浅·无衬线） */
+html[data-gal-theme="mono"] {
+  --gx-accent: #8a8f98; --gx-accent-hover: #75797f;
+  --gx-bg: #f7f7f8; --gx-bg-side: #ededf0; --gx-bg-hover: #e2e2e6; --gx-bg-active: #d6d6dc; --gx-bg-input: #fcfcfd;
+  --gx-border: #d6d6dc; --gx-border-strong: #b0b0b8; --gx-text: #14151a; --gx-text-dim: #5b5f66;
+  --gx-scroll: #c6c6cc; --gx-scroll-hover: #a8a8b0;
+  --gx-stage: radial-gradient(circle at 20% 12%, rgba(120,124,132,.10), transparent 55%),
+              radial-gradient(circle at 82% 80%, rgba(150,155,165,.12), transparent 60%),
+              linear-gradient(160deg, #f4f4f6, #e8e8ec 60%, #e0e0e5);
+  --gx-bar: linear-gradient(to bottom, rgba(0,0,0,.12), transparent);
+  --gx-dialog-bg: linear-gradient(135deg, rgba(252,252,253,.96), rgba(240,240,243,.95));
+  --gx-dialog-border: #a8a8b0; --gx-dialog-color: #14151a; --gx-dialog-radius: 10px;
+  --gx-dialog-shadow: 0 14px 36px rgba(20,21,26,.18);
+  --gx-dialog-font: system-ui,"Microsoft YaHei",sans-serif;
+  --gx-text-size: 15px; --gx-text-weight: 500;
+  --gx-dialog-w: 80%; --gx-dialog-minh: 122px; --gx-dialog-pad: 18px 20px;
+  --gx-name-bg: linear-gradient(100deg,#4b4f57,#2c2f35); --gx-name-color: #fff; --gx-name-radius: 6px;
+  --gx-opt-bg: rgba(250,250,252,.97); --gx-opt-border: #9a9ea6; --gx-opt-color: #22242a;
+  --gx-opt-radius: 8px; --gx-opt-hover-bg: #2c2f35; --gx-opt-hover-color: #fff;
+}
+/* 霓虹夜景（深） */
+html[data-gal-theme="cyber"] {
+  --gx-accent: #00e0ff; --gx-accent-hover: #35e9ff;
+  --gx-bg: #0a0e1a; --gx-bg-side: #070a13; --gx-bg-hover: #141c2e; --gx-bg-active: #1b2740; --gx-bg-input: #101728;
+  --gx-border: #1b2740; --gx-border-strong: #2a3d63; --gx-text: #dff6ff; --gx-text-dim: #8fb2ce;
+  --gx-scroll: #23324f; --gx-scroll-hover: #35496f;
+  --gx-stage: radial-gradient(circle at 18% 10%, rgba(0,224,255,.22), transparent 55%),
+              radial-gradient(circle at 84% 82%, rgba(255,0,190,.20), transparent 60%),
+              linear-gradient(160deg, #070a13, #0d1424 58%, #060911);
+  --gx-bar: linear-gradient(to bottom, rgba(0,0,0,.5), transparent);
+  --gx-dialog-bg: linear-gradient(135deg, rgba(10,14,26,.95), rgba(6,9,17,.94));
+  --gx-dialog-border: rgba(0,224,255,.45); --gx-dialog-color: #e6fbff; --gx-dialog-radius: 6px;
+  --gx-dialog-shadow: 0 18px 46px rgba(0,0,0,.6), 0 0 22px rgba(0,224,255,.18);
+  --gx-dialog-font: system-ui,"Microsoft YaHei",sans-serif;
+  --gx-text-size: 15px; --gx-text-shadow: 0 0 10px rgba(0,224,255,.25);
+  --gx-dialog-w: 82%; --gx-dialog-minh: 118px; --gx-dialog-pad: 18px 20px;
+  --gx-name-bg: linear-gradient(100deg,#00b8d9,#7a00ff); --gx-name-color: #f2ffff; --gx-name-radius: 4px;
+  --gx-opt-bg: linear-gradient(100deg, rgba(16,23,40,.96), rgba(10,14,26,.95));
+  --gx-opt-border: #00c4e0; --gx-opt-color: #dcf8ff; --gx-opt-radius: 6px;
+  --gx-opt-hover-bg: linear-gradient(100deg,#00e0ff,#00a3cc); --gx-opt-hover-color: #04121a;
+}
+/* 像素复古（深·硬边·点阵）—— 90 年代日式 AVG / PC-98 观感：
+   直角、双层窗框描边、琥珀点缀、宋体/点阵字；配色整体压低饱和，只让点缀跳出来 */
+html[data-gal-theme="pixel"] {
+  --gx-accent: #ffd166; --gx-accent-hover: #ffdc85;
+  --gx-bg: #0d1030; --gx-bg-side: #080a20; --gx-bg-hover: #182052; --gx-bg-active: #1f2a68; --gx-bg-input: #111641;
+  --gx-border: #2b3a7a; --gx-border-strong: #4a5cae; --gx-text: #e6ebff; --gx-text-dim: #93a2d8;
+  --gx-scroll: #2b3a7a; --gx-scroll-hover: #4a5cae;
+  --gx-stage: repeating-linear-gradient(0deg, rgba(0, 0, 0, .16) 0 1px, transparent 1px 3px),
+              radial-gradient(circle at 50% 118%, rgba(255, 209, 102, .10), transparent 62%),
+              linear-gradient(180deg, #0a0d26, #101538 60%, #070a1c);
+  --gx-bar: linear-gradient(to bottom, rgba(0, 0, 0, .62), transparent);
+  --gx-dialog-bg: linear-gradient(180deg, rgba(13, 16, 48, .95), rgba(7, 10, 32, .95));
+  --gx-dialog-border: #7f8ff0; --gx-dialog-color: #eef2ff; --gx-dialog-radius: 0;
+  /* 像素窗框：内描深色 + 外描亮色，两层硬边 */
+  --gx-dialog-shadow: 0 0 0 2px #0a0d26, 0 0 0 4px #4a5cae, 0 14px 34px rgba(0, 0, 0, .6);
+  --gx-dialog-font: "DotGothic16", "MS Gothic", "SimSun", "宋体", monospace;
+  --gx-text-size: 16px; --gx-text-weight: 400; --gx-text-shadow: 0 1px 0 rgba(0, 0, 0, .85);
+  --gx-dialog-w: 84%; --gx-dialog-minh: 128px; --gx-dialog-pad: 16px 18px;
+  --gx-name-bg: #ffd166; --gx-name-color: #12142e; --gx-name-radius: 0; --gx-name-size: 14px;
+  --gx-name-shadow: 0 0 0 2px #0a0d26;
+  --gx-opt-bg: rgba(16, 22, 62, .94); --gx-opt-border: #7f8ff0; --gx-opt-color: #e8edff;
+  --gx-opt-radius: 0; --gx-opt-shadow: 0 0 0 2px #0a0d26;
+  --gx-opt-hover-bg: #ffd166; --gx-opt-hover-color: #12142e;
+  --gx-deco: #ffd166; --gx-corner: 12px; --gx-corner-w: 3px;
+  --gx-blur: 8px; --gx-sat: 1; --gx-opt-shift: 6px;
+}
+/* 核心 token 映射（放在三套主题之后 → 就地覆盖明暗主题，作用于全部 UI，
+   包括 #app 之外的设置 / 知识库 / 笔记 / 用量弹窗与 toast） */
+html[data-gal-theme] {
+  --accent: var(--gx-accent); --accent-hover: var(--gx-accent-hover);
+  --bg: var(--gx-bg); --bg-side: var(--gx-bg-side); --bg-hover: var(--gx-bg-hover);
+  --bg-active: var(--gx-bg-active); --bg-input: var(--gx-bg-input);
+  --border: var(--gx-border); --border-strong: var(--gx-border-strong);
+  --text: var(--gx-text); --text-dim: var(--gx-text-dim);
+  --scroll: var(--gx-scroll); --scroll-hover: var(--gx-scroll-hover);
+  --code-bg: var(--gx-bg-side); --code-head: var(--gx-bg-hover); --inline-bg: var(--gx-bg-hover);
+  --quote-bar: var(--gx-border-strong); --bubble-user: var(--gx-accent);
+  --shadow: 0 8px 30px rgba(0, 0, 0, .20);
+  /* 图谱配色也跟着 GAL 主题走（知识库 / 笔记 / 关系图共用） */
+  --kb-graph-bg: var(--gx-bg-side);
+  --kb-graph-dot: color-mix(in srgb, var(--gx-border) 75%, transparent);
+  --kb-node-bg: var(--gx-bg-hover);
+  --kb-node-border: color-mix(in srgb, var(--gx-text-dim) 62%, var(--gx-bg));
+  --kb-node-shadow: rgba(0, 0, 0, .28);
+  --kb-edge: color-mix(in srgb, var(--gx-text-dim) 85%, transparent);
+  --kb-label-bg: var(--gx-bg-side);
+}
+/* 组件套用主题变量 */
+html[data-gal-theme] .gal-dialog {
+  width: var(--gx-dialog-w); margin: 0 auto;
+  min-height: var(--gx-dialog-minh); padding: var(--gx-dialog-pad);
+  background: var(--gx-dialog-bg); border-color: var(--gx-dialog-border); color: var(--gx-dialog-color);
+  border-radius: var(--gx-dialog-radius); box-shadow: var(--gx-dialog-shadow);
+  font-family: var(--gx-dialog-font); font-size: var(--gx-text-size);
+  font-weight: var(--gx-text-weight); text-shadow: var(--gx-text-shadow);
+  /* 磨砂加强：立绘透出来更柔，文字仍清晰 */
+  -webkit-backdrop-filter: blur(var(--gx-blur)) saturate(var(--gx-sat));
+  backdrop-filter: blur(var(--gx-blur)) saturate(var(--gx-sat));
+}
+html[data-gal-theme] .gal-name {
+  /* 传统日式 galgame：名牌**骑在对话框上边框外侧**（对话框已改 overflow: visible 才不会被裁） */
+  position: absolute; top: -15px; left: 14px; z-index: 3;
+  display: inline-block; margin: 0; padding: 4px 16px;
+  background: var(--gx-name-bg); color: var(--gx-name-color);
+  border-radius: var(--gx-name-radius); font-size: var(--gx-name-size);
+  box-shadow: var(--gx-name-shadow); font-weight: 700;
+  max-width: calc(100% - 28px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+html[data-gal-theme] .gal-name:empty { display: none; }   /* 旁白段没有名字 → 不占位 */
+html[data-gal-theme] .gal-option {
+  background: var(--gx-opt-bg); border-color: var(--gx-opt-border); color: var(--gx-opt-color);
+  border-radius: var(--gx-opt-radius); box-shadow: var(--gx-opt-shadow); font-size: var(--gx-opt-size);
+}
+html[data-gal-theme] .gal-option:hover {
+  background: var(--gx-opt-hover-bg); color: var(--gx-opt-hover-color);
+}
+html[data-gal-theme] .gal-seg-who { color: var(--gx-accent); }
+html[data-gal-theme] .gal-tools::before,
+html[data-gal-theme] .gal-role,
+html[data-gal-theme] .gal-bar-label,
+html[data-gal-theme] .gal-status,
+html[data-gal-theme] .gal-seg.narr { color: var(--gx-text-dim); }
+
+/* 对话回顾（覆盖在舞台上，可滚动查看整段对话记录） */
+.gal-review {
+  position: absolute; inset: 44px 16px 14px; z-index: 20;
+  display: flex; flex-direction: column; min-height: 0;
+  padding: 12px 14px; border-radius: var(--radius-lg);
+  border: 1px solid var(--border-strong); background: var(--bg);
+  box-shadow: var(--shadow);
+}
+.gal-review-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.gal-review-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.gal-review-count { font-size: 12px; color: var(--text-dim); }
+.gal-review-list { flex: 1; min-height: 0; overflow: auto; padding-right: 4px; }
+.gal-review-row { margin: 0 0 12px; }
+.gal-review-who {
+  display: inline-block; margin-bottom: 3px; padding: 1px 9px;
+  font-size: 11.5px; border-radius: 999px;
+  background: var(--bg-side); color: var(--text-dim); border: 1px solid var(--border);
+}
+.gal-review-row.me .gal-review-who { color: var(--accent); border-color: var(--accent); }
+.gal-review-body { font-size: 13.5px; line-height: 1.75; color: var(--text); word-break: break-word; }
+.gal-review-body p { margin: 0 0 6px; }
+.gal-review-body p:last-child { margin-bottom: 0; }
+.gal-review-seg { margin: 0 0 3px; }
+.gal-review-seg.narr { color: var(--text-dim); }
+.gal-review-empty { padding: 22px; text-align: center; font-size: 13px; color: var(--text-dim); }
+
+/* 剧情档案：方位图（平面俯视图） + 分栏列表 */
+.gal-map {
+  margin: 0 0 14px; padding: 10px 12px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--bg-side);
+}
+.gal-map-place { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+/* 俯视图画布：等宽高 + 网格 + 四向罗盘标注 */
+.gal-map-board {
+  position: relative; width: 100%; max-width: 320px; aspect-ratio: 1 / 1;
+  margin: 0 auto; border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(to right, var(--border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 1px, transparent 1px);
+  background-size: 25% 25%;
+}
+.gal-map-compass {
+  position: absolute; font-size: 10px; font-weight: 600; color: var(--text-dim);
+  letter-spacing: .05em; pointer-events: none;
+}
+.gal-map-c-n { top: 3px; left: 50%; transform: translateX(-50%); }
+.gal-map-c-s { bottom: 3px; left: 50%; transform: translateX(-50%); }
+.gal-map-c-w { left: 4px; top: 50%; transform: translateY(-50%); }
+.gal-map-c-e { right: 4px; top: 50%; transform: translateY(-50%); }
+/* 关系连线（百分比坐标 → 不随容器缩放变形） */
+.gal-map-links { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.gal-map-links line { stroke: var(--accent); stroke-width: 1.2; stroke-dasharray: 4 3; opacity: .75; }
+.gal-map-links text { fill: var(--text-dim); font-size: 10px; text-anchor: middle; dominant-baseline: middle; }
+.gal-map-mark {
+  position: absolute; transform: translate(-50%, -50%); white-space: nowrap;
+  font-size: 12px; font-weight: 600; color: var(--text);
+  padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+}
+.gal-map-mark.is-self { color: #fff; background: var(--accent); border-color: var(--accent); }
+
+.gal-journal-group { margin: 0 0 14px; }
+.gal-journal-cat {
+  font-size: 12.5px; font-weight: 700; color: var(--accent);
+  margin: 0 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+}
+.gal-journal-item {
+  padding: 7px 10px; margin: 0 0 6px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg-side);
+}
+.gal-journal-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.gal-journal-tag {
+  display: inline-block; font-size: 10.5px; font-weight: 500; color: var(--text-dim);
+  border: 1px solid var(--border-strong); border-radius: 999px; padding: 0 6px; margin-left: 4px;
+}
+.gal-journal-body { font-size: 12.5px; line-height: 1.7; color: var(--text-dim); margin-top: 3px; word-break: break-word; }
+.gal-journal-body p { margin: 0 0 4px; }
+.gal-journal-body p:last-child { margin-bottom: 0; }
+.gal-journal-empty { padding: 22px; text-align: center; font-size: 13px; color: var(--text-dim); }
+/* 档案两种视图的切换卡 */
+.gal-journal-tabs { display: flex; gap: 6px; margin: 0 0 12px; }
+.gal-journal-tabs .gal-tbtn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* 关系图容器（vis-network 需要明确高度） */
+.gal-journal-graph { height: 52vh; min-height: 300px; }
+html[data-gal-theme] .gal-map { background: var(--gx-bg-side); border-color: var(--gx-border); }
+html[data-gal-theme] .gal-journal-item { background: var(--gx-bg-side); border-color: var(--gx-border); }
+html[data-gal-theme] .gal-review { background: var(--gx-bg); border-color: var(--gx-border-strong); }
+html[data-gal-theme] .gal-review-who { background: var(--gx-bg-side); border-color: var(--gx-border); color: var(--gx-text-dim); }
+
+/* 快速克隆音色（复用 .gal-review 面板外壳） */
+.gal-clone-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 9px; padding-right: 4px; }
+.gal-clone-body .hint { margin: 0; }
+.gal-clone-row { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; }
+.gal-clone-row > span { flex: 0 0 68px; padding-top: 6px; color: var(--text-dim); }
+.gal-clone-row select, .gal-clone-row input, .gal-clone-row textarea {
+  flex: 1; min-width: 0; padding: 6px 9px; font: inherit; font-size: 13px;
+  color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px); resize: vertical;
+}
+.gal-clone-row select:focus, .gal-clone-row input:focus, .gal-clone-row textarea:focus {
+  outline: none; border-color: var(--accent);
+}
+.gal-clone-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+.gal-clone-audio { width: 100%; margin-top: 6px; }
+
+/* 你上一句的回显（暗淡色，方便对照 AI 的回复） */
+.gal-user-echo {
+  margin: 0 0 10px; padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-dim); font-size: 12.5px; line-height: 1.65;
+  max-height: 5.4em; overflow: auto;
+  white-space: pre-wrap; word-break: break-word; opacity: .78;
+}
+.gal-user-echo-who { font-weight: 600; opacity: .85; margin-right: 2px; }
+html[data-gal-theme] .gal-user-echo {
+  border-left-color: var(--gx-border-strong); color: var(--gx-text-dim);
+}
+/* 立绘区域上移 / 进出场过渡已在 .gal-sprites / .gal-sprite 主规则中定义 */
+
+/* ===== 背景交叉淡入 + 特效层 ===== */
+.gal-bg, #gal-bg-next { background-size: cover; background-position: center; background-repeat: no-repeat; }
+#gal-bg-next { position: absolute; inset: 0; opacity: 0; transition: opacity .45s ease; }
+/* 特效遮罩：铺满整个对话列（含底部输入区），所以「闪光 / 黑屏」能盖到输入框那一块。
+   默认 display:none，只在 GAL 模式显示（它已不在舞台内部，需要自己把门）。 */
+#gal-fx-layer { display: none; }
+#main.gal-mode #gal-fx-layer {
+  display: block; position: absolute; inset: 0; z-index: 10;
+  pointer-events: none; opacity: 0;
+}
+#gal-fx-layer.fx-flash { background: #fff; animation: galFlash .45s ease-out; }
+#gal-fx-layer.fx-blackout { background: #000; animation: galBlackout 1.1s ease-in-out; }
+/* 「震动 / 淡入」：通用类——同时加在「舞台」与「输入区」上，整列一起动 */
+.fx-shake { animation: galShake .5s ease-in-out; }
+.fx-fade { animation: galFade .55s ease-out; }
+@keyframes galFlash { 0% { opacity: 0 } 12% { opacity: .95 } 100% { opacity: 0 } }
+@keyframes galBlackout { 0% { opacity: 0 } 35% { opacity: .96 } 70% { opacity: .96 } 100% { opacity: 0 } }
+@keyframes galShake {
+  0%, 100% { transform: translateX(0) }
+  15% { transform: translateX(-9px) } 35% { transform: translateX(8px) }
+  55% { transform: translateX(-6px) } 75% { transform: translateX(4px) }
+}
+@keyframes galFade { from { opacity: 0 } to { opacity: 1 } }
+.gal-options {
+  /* 传统日式 galgame：选项浮在**画面中部**（覆盖立绘区），对话框保持贴底、不被顶起 */
+  position: absolute; inset: 0; z-index: 9;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 56px 16px 24px;          /* 上留出工具条高度 */
+  pointer-events: none;                        /* 空白处穿透 → 仍可点舞台推进 */
+  overflow: auto;
+}
+.gal-option {
+  flex: none;
+  width: min(560px, 72%);                      /* 比对话框窄一点，居中成为视觉焦点 */
+  text-align: left; padding: 9px 14px; font-size: 14px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  border: 1px solid var(--accent);
+  border-radius: 999px; color: var(--text);
+  cursor: pointer;                             /* 传统 galgame：能点的地方就是手型 */
+  pointer-events: auto;                        /* 容器是 none，按钮自己收回事件 */
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease);
+  animation: galOptIn .3s var(--ease) both;   /* 逐条淡入上移 */
+}
+/* hover：实色底 + 白字（键盘光标 .kb-sel 在文件末尾按主题统一处理，保证两种操作观感一致） */
+.gal-option:hover {
+  background: var(--accent); color: #fff;
+  border-color: var(--accent);
+}
+.gal-option:disabled:hover,
+.gal-option.disabled:hover {
+  background: color-mix(in srgb, var(--bg) 70%, transparent); color: var(--text);
+}
+/* 带标签 / 提示的选项：换成可换行的圆角矩形（无标签时仍是上面的胶囊样式） */
+.gal-option.has-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  border-radius: var(--radius-md); text-align: left;
+}
+.gal-option-text { flex: 1; min-width: 0; }
+.gal-option-tag {
+  flex: none; font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.gal-option.has-meta:hover .gal-option-tag {
+  color: #fff; border-color: rgba(255, 255, 255, .65); background: rgba(255, 255, 255, .18);
+}
+.gal-option-hint { flex-basis: 100%; font-size: 11px; opacity: .72; }
+/* 条件不满足：置灰、不可点 */
+.gal-option:disabled, .gal-option.disabled { opacity: .45; cursor: not-allowed; }
+.gal-option:disabled:hover { background: color-mix(in srgb, var(--bg) 72%, transparent); color: var(--text); }
+/* 掷骰 / 判定结果：比普通幕间行更醒目一点 */
+.gal-roll { font-variant-numeric: tabular-nums; }
+@keyframes galOptIn { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+/* 选定选项后整体淡出（时长由全局 prefers-reduced-motion 降级为 ~0）；淡出期间禁点，防连点重复发送 */
+.gal-options-out { animation: galOptOut .18s var(--ease) forwards; pointer-events: none; }
+@keyframes galOptOut { from { opacity: 1; } to { opacity: 0; transform: translateY(6px); } }
+
+.gal-bar-spacer { flex: 1; }
+.gal-tbtn {
+  padding: 4px 9px; font-size: 12.5px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.gal-tbtn:hover { background: var(--bg-hover); }
+.gal-tbtn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* 右上角「⋯」抽屉：把低频操作收起来，保持舞台干净 */
+.gal-more-btn { font-weight: 700; letter-spacing: 2px; padding: 4px 11px; }
+.gal-menu {
+  position: absolute; top: calc(100% + 6px); right: 12px; z-index: 9;
+  display: flex; flex-direction: column; gap: 4px; min-width: 172px;
+  padding: 6px; border-radius: var(--radius-md, 12px);
+  border: 1px solid var(--border-strong); background: var(--bg);
+  box-shadow: var(--shadow);
+}
+.gal-menu .gal-tbtn {
+  width: 100%; text-align: left; padding: 7px 10px;
+  display: flex; align-items: center; gap: 8px;
+}
+
+/* 舞台上的工具 / 提问卡片（Agent 在 GAL 模式下同样可见） */
+.gal-tools {
+  position: relative; z-index: 7; margin: 44px 16px 8px;
+  max-height: 42%; overflow: auto;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.gal-tools:empty { display: none; }
+/* 执行区标题（仅在有内容时随 ::before 出现；:empty 不受伪元素影响） */
+.gal-tools::before {
+  content: '幕间'; display: block; margin-bottom: 2px;
+  font-size: 11px; letter-spacing: .06em; color: var(--text-dim);
+}
+/* 执行区里的一行状态（搜索 / 工具 / 记忆 / 用量 / 报错） */
+.gal-exec-line {
+  font-size: 12px; color: var(--text-dim);
+  padding: 3px 9px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 68%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+}
+.gal-exec-line.err { color: var(--danger); border-color: var(--danger-line); }
+.gal-exec-line.ok { color: var(--ok); border-color: var(--ok-line); }
+.gal-tools .tool-list { margin: 0; }
+.gal-tools .ask-card { margin: 0; }
+
+/* 舞台状态参数（stats）：AI 依角色设定生成的临时数值 HUD
+   放左上角（顶栏下方）：避开右上角「⋯」菜单的展开区，也更像游戏 HUD */
+.gal-stats {
+  position: absolute; top: 46px; left: 12px; z-index: 7;
+  width: 212px;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px;
+  border-radius: var(--radius-lg); border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow);
+  pointer-events: none;              /* 纯展示：不挡舞台点击推进 */
+  animation: galStatsIn .28s var(--ease);
+}
+/* 状态栏显示时，「幕间」工具卡右移让位，避免二者重叠 */
+.gal-stage.gal-has-stats .gal-tools { margin-left: 236px; }
+.gal-stat {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 4px; border-radius: var(--radius-sm);
+  font-size: 12px; color: var(--text);
+}
+.gal-stat-icon { flex: none; font-size: 13px; line-height: 1; }
+.gal-stat-label {
+  flex: none; max-width: 62px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-dim);
+}
+.gal-stat-bar {
+  flex: 1; min-width: 34px; height: 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 13%, transparent);
+  overflow: hidden;
+}
+.gal-stat-bar > i {
+  display: block; height: 100%; border-radius: 999px;
+  transition: width .45s var(--ease);
+}
+.gal-stat-val { flex: none; font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+.gal-stat.nolimit { justify-content: space-between; }
+.gal-stat-badge {
+  margin-left: auto; padding: 1px 7px; border-radius: 999px;
+  font-size: 11.5px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+/* 数值变化：整行闪一下 + 数值变色（涨绿 / 跌红） */
+.gal-stat.flash { animation: galStatFlash 1s var(--ease); }
+.gal-stat.flash.up .gal-stat-val { color: var(--ok); }
+.gal-stat.flash.down .gal-stat-val { color: var(--danger); }
+@keyframes galStatsIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@keyframes galStatFlash {
+  0% { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  100% { background: transparent; }
+}
+
+/* 思考中 / 生成中提示 */
+.gal-status { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--text-dim); font-size: 12.5px; }
+.gal-status.hidden { display: none; }
+
+/* 「轮到你了」提示：本轮没有选项时，在最后一段对白末尾轻轻邀请玩家开口。
+   刻意压得很低（小字 + 低对比度 + 慢闪三角），既能看见又不抢戏。 */
+.gal-nudge {
+  display: flex; align-items: baseline; gap: 6px;
+  margin-top: 10px; padding: 2px 0 0;
+  font-size: 12.5px; line-height: 1.6; color: var(--text-dim);
+  opacity: .78; cursor: pointer;
+  animation: galNudgeIn .45s var(--ease) both;
+  transition: opacity var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.gal-nudge.hidden { display: none; }
+.gal-nudge:hover { opacity: 1; color: var(--text); }
+.gal-nudge:focus-visible { outline: 2px solid var(--gx-deco, var(--accent)); outline-offset: 2px; }
+.gal-nudge-tri {
+  flex: none; font-size: 10px; line-height: 1;
+  color: var(--gx-deco, var(--accent));
+  animation: galNudgeBlink 1.6s steps(2, start) infinite;
+}
+@keyframes galNudgeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: .78; transform: none; } }
+@keyframes galNudgeBlink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) {
+  .gal-nudge, .gal-nudge-tri { animation: none; }
+}
+/* 深度思考的实时内容（GAL 舞台上也给出可见进展） */
+.gal-think {
+  margin-bottom: 8px; padding: 4px 0 4px 8px;
+  border-left: 2px solid var(--border);
+  color: var(--text-dim); font-size: 12.5px; line-height: 1.6;
+  white-space: pre-wrap; max-height: 5.2em; overflow: auto;
+}
+.gal-think.hidden { display: none; }
+.gal-dots { display: inline-flex; gap: 4px; }
+.gal-dots i {
+  width: 5px; height: 5px; border-radius: 50%; background: var(--text-dim);
+  animation: dot 1.25s var(--ease) infinite;
+}
+.gal-dots i:nth-child(2) { animation-delay: .18s; }
+.gal-dots i:nth-child(3) { animation-delay: .36s; }
+/* .typing 是聊天区「呼吸点」的样式（inline-flex），会污染对白区：生成时文字被挤成竖列。
+   这里显式还原为块级布局，光标仍由 ::after 提供 */
+.gal-text.typing { display: block; }
+.gal-text.typing::after {
+  content: '▌'; color: var(--accent); margin-left: 2px;
+  animation: blink 1s steps(2, start) infinite;
+}
+
+/* 角色编辑器：立绘行 */
+.gal-ed-sprites { display: flex; flex-direction: column; gap: 8px; }
+.gal-ed-row {
+  display: flex; gap: 6px; align-items: center; padding: 8px;
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-side);
+}
+.gal-ed-row .gal-ed-path { flex: 1.2; min-width: 0; }
+.gal-ed-row .gal-ed-tags { flex: 1; min-width: 0; }
+.gal-ed-row .gal-ed-voice { flex: 1; min-width: 0; }
+.gal-ed-row .gal-ed-idx { flex: none; width: 18px; text-align: center; color: var(--text-dim); font-size: 12px; }
+.gal-ed-row .gal-ed-del { flex: none; }
+.gal-ed-actions { display: flex; gap: 8px; margin-top: 8px; }
+.gal-ed-upload-label { display: inline-flex; align-items: center; cursor: pointer; padding: 9px 14px; }
+.gal-ed-thumb { width: 34px; height: 34px; object-fit: cover; border-radius: var(--radius-sm); border: 1px solid var(--border); flex: none; cursor: zoom-in; }
+.gal-ed-row .gal-ed-move { flex: none; padding: 2px 6px; }
+
+/* 角色选择按钮 + 卡片面板 */
+.gal-char-btn {
+  display: inline-flex; align-items: center; gap: 7px; max-width: 220px;
+  padding: 3px 9px 3px 4px; font-size: 13px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 999px;
+}
+.gal-char-btn:hover { background: var(--bg-hover); border-color: var(--gal-char-color, var(--accent)); }
+.gal-char-btn-avatar {
+  width: 22px; height: 22px; border-radius: 50%; object-fit: cover; flex: none;
+  background: var(--bg-side); border: 1px solid var(--gal-char-color, var(--accent));
+}
+.gal-char-btn-name, #gal-char-btn-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gal-caret { font-size: 10px; color: var(--text-dim); }
+
+.gal-chars {
+  position: absolute; top: 44px; left: 12px; right: 12px; z-index: 20;
+  padding: 10px; border-radius: var(--radius-lg); border: 1px solid var(--border-strong);
+  background: var(--bg); box-shadow: var(--shadow);
+}
+.gal-chars-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.gal-chars-search {
+  flex: 1; padding: 6px 10px; font-size: 13px;
+  background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.gal-chars-count { font-size: 12px; color: var(--text-dim); }
+.gal-chars-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px; max-height: 40vh; overflow: auto;
+}
+.gal-char-card {
+  display: flex; align-items: center; gap: 8px; text-align: left;
+  padding: 6px; background: var(--bg-side); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+}
+.gal-char-wrap { position: relative; display: flex; }
+.gal-char-wrap .gal-char-card { flex: 1; min-width: 0; }
+.gal-char-edit {
+  position: absolute; top: 4px; right: 4px; width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+  border-radius: 6px; border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  color: var(--text-dim); opacity: 0;
+  transition: opacity .15s ease, color .15s ease;
+}
+.gal-char-edit .ic { width: 12px; height: 12px; }
+.gal-char-wrap:hover .gal-char-edit,
+.gal-char-wrap:focus-within .gal-char-edit,
+.gal-char-edit:focus-visible { opacity: 1; }
+.gal-char-edit:hover { color: var(--accent); border-color: var(--accent); }
+@media (hover: none) { .gal-char-edit { opacity: 1; } }
+.gal-char-card:hover { background: var(--bg-hover); }
+.gal-char-card.active { border-color: var(--gal-char-color, var(--accent)); }
+.gal-char-thumb {
+  width: 44px; height: 56px; object-fit: cover; object-position: top center;
+  border-radius: var(--radius-sm); flex: none; background: var(--bg-input);
+}
+.gal-char-thumb.empty { opacity: .3; }
+.gal-char-meta { min-width: 0; }
+.gal-char-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gal-char-sub { font-size: 11px; color: var(--text-dim); }
+.gal-chars-empty { grid-column: 1 / -1; padding: 18px; text-align: center; font-size: 13px; color: var(--text-dim); }
+.gal-chars-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+/* 背景管理：横向缩略图 + 分类标签编辑 */
+.gal-bg-thumb { width: 72px; height: 44px; object-position: center; }
+/* 音乐管理：用音符图标代替缩略图 */
+.gal-bgm-icon {
+  width: 44px; height: 44px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; border-radius: var(--radius-sm); background: var(--bg-input);
+}
+.gal-bgm-card.active .gal-bgm-icon { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.gal-bg-editor {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-bottom: 8px; padding: 8px;
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-side);
+}
+.gal-bg-ed-tags { display: flex; flex-direction: column; gap: 6px; }
+.gal-bg-ed-row { display: flex; align-items: center; gap: 8px; }
+.gal-bg-ed-row > label { width: 34px; flex: none; font-size: 12px; color: var(--text-dim); }
+.gal-bg-ed-row > .field-input { flex: 1; min-width: 0; }
+.gal-bg-ed-actions { display: flex; gap: 6px; justify-content: flex-end; }
+/* 角色介绍：卡片里两行截断（悬停看完整） */
+.gal-char-intro {
+  margin-top: 2px; font-size: 11px; line-height: 1.35; color: var(--text-dim);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+/* 舞台序章：当前会话还没有对白时，把「角色介绍」当开场文字 */
+.gal-intro { font-size: 14px; line-height: 1.75; color: var(--text); white-space: pre-wrap; opacity: .92; }
+/* 选中角色时的开场卡（头像 + 介绍 + 开始对话） */
+.gal-intro-card {
+  position: fixed; inset: 0; z-index: 45;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: rgba(0, 0, 0, .38);
+}
+.gal-intro-card-box {
+  width: min(420px, 92%); max-height: 84%; overflow: auto;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 18px 18px 14px;
+  border-radius: var(--radius-lg); border: 1px solid var(--border-strong);
+  background: var(--bg); box-shadow: var(--shadow);
+  animation: cardIn .24s var(--ease);
+}
+.gal-intro-avatar {
+  width: 84px; height: 104px; object-fit: cover; object-position: top center;
+  border-radius: var(--radius-md); background: var(--bg-input);
+}
+.gal-intro-name { font-size: 15px; font-weight: 600; color: var(--text); }
+.gal-intro-body {
+  width: 100%; text-align: left; font-size: 13.5px; line-height: 1.7;
+  color: var(--text-dim); white-space: pre-wrap;
+}
+.gal-intro-card-actions { display: flex; gap: 8px; margin-top: 2px; }
+/* 首次进入 GAL 的引导气泡：贴在右上角工具条下方，小三角指向「⋯」 */
+.gal-tip {
+  position: absolute; top: 52px; right: 12px; z-index: 30;
+  width: min(330px, calc(100% - 24px));
+  padding: 12px 14px 10px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--gx-dialog-border, var(--border-strong));
+  background: color-mix(in srgb, var(--gx-bg, var(--bg)) 90%, transparent);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-lg);
+  color: var(--gx-text, var(--text));
+  font-family: var(--gx-dialog-font, inherit);
+  font-size: 12.5px; line-height: 1.8;
+  animation: galTipIn .32s var(--ease);
+}
+.gal-tip.hidden { display: none; }
+.gal-tip::before {                       /* 指向工具条「⋯」的小三角 */
+  content: ''; position: absolute; top: -7px; right: 22px;
+  width: 12px; height: 12px; transform: rotate(45deg);
+  background: inherit;
+  border-left: 1px solid var(--gx-dialog-border, var(--border-strong));
+  border-top: 1px solid var(--gx-dialog-border, var(--border-strong));
+}
+.gal-tip-title { font-weight: 700; margin-bottom: 4px; color: var(--gx-deco, var(--accent)); }
+.gal-tip-body b { color: var(--gx-deco, var(--accent)); font-weight: 600; }
+.gal-tip-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+@keyframes galTipIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .gal-tip { animation: none; } }
+
+/* 沉浸阅读：鼠标停在舞台上不动一会 → 隐藏指针（动一下立刻恢复） */
+.gal-panel.gal-cursor-off, .gal-panel.gal-cursor-off * { cursor: none !important; }
+.gal-tbtn.danger { color: var(--danger, #e5484d); }
+.gal-tbtn.danger:hover { background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent); }
+
+/* 角色编辑器：分区 */
+.gal-sec { border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 10px; }
+.gal-sec > summary {
+  cursor: pointer; padding: 9px 12px; font-size: 13px; font-weight: 600;
+  color: var(--text); list-style: none;
+}
+.gal-sec > summary::-webkit-details-marker { display: none; }
+.gal-sec > summary::before { content: '▸ '; color: var(--text-dim); }
+.gal-sec[open] > summary::before { content: '▾ '; }
+.gal-sec-body { padding: 4px 12px 12px; }
+.gal-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.gal-label-row .field-label { margin: 0; }
+.gal-three { align-items: flex-end; }
+.gal-field { flex: 1; min-width: 0; }
+.gal-field .field-label { margin-top: 0; }
+.gal-field-color { flex: none; }
+.gal-field-scale { flex: none; width: 96px; }
+.gal-color {
+  width: 40px; height: 32px; padding: 0; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+
+/* ============================================================
+   galgame 视觉层：对话框角标 / 名牌三角 / 推进指示 / 选项反馈 / 工具条质感
+   —— 全部挂在 html[data-gal-theme] 下，6 套主题共用（形状由 --gx-corner / --gx-deco 控）
+   ============================================================ */
+
+/* ---- 对话框四角装饰角标（L 形：左上 + 右下）----
+   用伪元素绝对定位，完全不参与布局；--gx-corner 为 0 时自然消失 */
+html[data-gal-theme] .gal-dialog::before,
+html[data-gal-theme] .gal-dialog::after {
+  content: ''; position: absolute; width: var(--gx-corner); height: var(--gx-corner);
+  pointer-events: none; opacity: .9;
+}
+html[data-gal-theme] .gal-dialog::before {
+  top: 4px; left: 4px;
+  border-top: var(--gx-corner-w) solid var(--gx-deco);
+  border-left: var(--gx-corner-w) solid var(--gx-deco);
+}
+html[data-gal-theme] .gal-dialog::after {
+  right: 4px; bottom: 4px;
+  border-bottom: var(--gx-corner-w) solid var(--gx-deco);
+  border-right: var(--gx-corner-w) solid var(--gx-deco);
+}
+/* 像素主题：角标换成实心方块，更贴点阵窗框 */
+html[data-gal-theme="pixel"] .gal-dialog::before,
+html[data-gal-theme="pixel"] .gal-dialog::after {
+  width: 8px; height: 8px; background: var(--gx-deco); border: none;
+}
+html[data-gal-theme="pixel"] .gal-text { line-height: 2.05; letter-spacing: .02em; }
+html[data-gal-theme="pixel"] .gal-name,
+html[data-gal-theme="pixel"] .gal-option { font-family: var(--gx-dialog-font); }
+html[data-gal-theme="pixel"] .gal-name { letter-spacing: .08em; }
+
+/* ---- 说话人名牌：左侧指向小三角（位置由上面的主题规则决定：骑上边框） ---- */
+html[data-gal-theme] .gal-name::before {
+  content: ''; position: absolute; left: -5px; top: 50%; margin-top: -5px;
+  width: 0; height: 0; pointer-events: none;
+  border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+  border-right: 5px solid var(--gx-deco);
+}
+
+/* ---- 推进指示器（对话框右下角）----
+   默认不显示；JS 在「可推进」时加 .show，打字中再加 .is-typing（文案切成「补全」） */
+.gal-adv-hint {
+  position: absolute; right: 10px; bottom: 5px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 4px;
+  margin: 0; padding: 3px 6px; border: none; background: transparent;
+  color: var(--gx-deco, var(--accent));
+  font-size: 11px; line-height: 1; letter-spacing: .04em;
+  cursor: pointer; opacity: 0; pointer-events: none;
+  transition: opacity var(--t) var(--ease);
+}
+.gal-adv-hint.show { opacity: .85; pointer-events: auto; }
+.gal-adv-hint:hover { opacity: 1; }
+.gal-adv-tri { display: inline-block; animation: galAdvBlink 1.15s steps(2, start) infinite; }
+.gal-adv-tip { display: none; white-space: nowrap; }
+.gal-adv-hint.is-typing .gal-adv-tri { animation: none; }
+.gal-adv-hint.is-typing .gal-adv-tip { display: inline; }
+@keyframes galAdvBlink { 0%, 100% { opacity: 1; } 50% { opacity: .18; } }
+
+/* ---- 选项：悬停左移 + 左侧竖条点亮 + 点击反馈 ---- */
+html[data-gal-theme] .gal-option {
+  position: relative;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease), margin var(--t-fast) var(--ease),
+              filter var(--t-fast) var(--ease);
+}
+/* 竖条用伪元素：绝对定位，不动布局（选项有 galOptIn 动画占着 transform，别用 transform 做位移） */
+html[data-gal-theme] .gal-option::before {
+  content: ''; position: absolute; left: 0; top: 50%;
+  width: 3px; height: 0; margin-top: 0;
+  border-radius: 2px; background: var(--gx-deco);
+  transform: translateY(-50%);
+  transition: height var(--t-fast) var(--ease);
+}
+html[data-gal-theme] .gal-option:hover {
+  margin-left: var(--gx-opt-shift);
+  margin-right: calc(-1 * var(--gx-opt-shift));
+}
+html[data-gal-theme] .gal-option:not(:disabled):not(.disabled):hover::before { height: 62%; }
+html[data-gal-theme] .gal-option:not(:disabled):not(.disabled):active { filter: brightness(.9); }
+html[data-gal-theme] .gal-option:focus-visible {
+  outline: 2px solid var(--gx-deco); outline-offset: 2px;
+}
+html[data-gal-theme] .gal-option:disabled::before,
+html[data-gal-theme] .gal-option.disabled::before { display: none; }
+
+/* ---- 工具条按钮：悬停上浮 / 按下回落 ---- */
+html[data-gal-theme] .gal-tbtn {
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
+              color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+html[data-gal-theme] .gal-tbtn:hover { transform: translateY(-1px); border-color: var(--gx-border-strong); }
+html[data-gal-theme] .gal-tbtn:active { transform: translateY(1px); }
+html[data-gal-theme] .gal-char-btn { transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease); }
+
+/* ---- 尊重系统「减少动态效果」 ---- */
+@media (prefers-reduced-motion: reduce) {
+  .gal-adv-tri { animation: none; }
+  html[data-gal-theme] .gal-option,
+  html[data-gal-theme] .gal-tbtn { transition: none; }
+}
+
+/* ============================================================
+   窄屏 / 移动端适配（只覆盖，不改桌面默认）
+   ============================================================ */
+/* 中窄屏（≤1040px）：工具条按钮收起文字、只留图标，
+   否则右上角「自动播放 / 回顾对话 / 档案 / ⋯」会被挤出或压叠 */
+@media (max-width: 1040px) {
+  .gal-bar { gap: 5px; padding: 6px 10px; }
+  .gal-bar > .gal-tbtn:not(.gal-more-btn) { font-size: 0; gap: 0; padding: 6px 8px; min-height: 32px; }
+  .gal-bar > .gal-tbtn:not(.gal-more-btn) .ic { width: 16px; height: 16px; }
+  #gal-char-btn-name { display: none; }        /* 角色按钮只留头像 */
+  .gal-char-btn { max-width: none; padding: 3px 8px 3px 4px; }
+  .gal-select { max-width: 104px; }
+  .gal-role { max-width: 90px; }
+}
+
+@media (max-width: 860px) {
+  html[data-gal-theme] {
+    --gx-dialog-w: 94%; --gx-text-size: 14.5px;
+    --gx-dialog-pad: 12px 14px; --gx-dialog-minh: 104px;
+    --gx-corner: 9px; --gx-opt-shift: 3px;
+  }
+  /* 工具条：可横向滚动，按钮只留图标（「⋯」是纯文字按钮，排除在外） */
+  .gal-bar { padding: 6px 8px; gap: 5px; overflow-x: auto; scrollbar-width: none; }
+  .gal-bar::-webkit-scrollbar { display: none; }
+  .gal-bar > .gal-tbtn:not(.gal-more-btn) { font-size: 0; gap: 0; padding: 6px 8px; min-height: 32px; }
+  .gal-bar > .gal-tbtn:not(.gal-more-btn) .ic { width: 16px; height: 16px; }
+  .gal-char-btn { max-width: 118px; }
+  .gal-select { max-width: 118px; }
+  .gal-role { display: none; }
+  /* 选项：触控热区够大 */
+  .gal-option { padding: 12px 14px; font-size: 14.5px; }
+  .gal-option.has-meta { padding: 11px 14px; }
+  /* 状态栏收窄，避让「幕间」工具卡 */
+  .gal-stats { width: 168px; top: 42px; left: 8px; }
+  .gal-stage.gal-has-stats .gal-tools { margin-left: 186px; }
+  .gal-chars { top: 40px; left: 8px; right: 8px; }
+  .gal-chars-list { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); }
+  .gal-review { inset: 40px 8px 8px; }
+  .gal-menu { right: 8px; min-width: 156px; }
+  .gal-adv-hint { right: 8px; }
+}
+@media (max-width: 520px) {
+  html[data-gal-theme] { --gx-dialog-w: 96%; }
+  .gal-bar > .gal-tbtn:not(.gal-more-btn) { padding: 6px 7px; }
+  .gal-chars-actions .gal-tbtn { font-size: 0; gap: 0; padding: 7px 9px; }
+  .gal-chars-actions .gal-tbtn .ic { width: 15px; height: 15px; }
+}
+/* 横屏矮窗口：对白框别占太满，把舞台留给立绘 */
+@media (max-height: 560px) {
+  .gal-dialog { max-height: 62% !important; bottom: 8px; }
+  .gal-options { padding: 44px 12px 14px; gap: 7px; }
+}
+
+/* ============================================================
+   全主题统一：对话框 / 选项一律「半透明 + 磨砂」
+   —— 放在文件最末，且**直接写 background**（不引用各主题的 --gx-dialog-bg / --gx-opt-bg），
+      因此 6 套主题（含「像素复古」原本的实色窗框）都会被拉到同一透度，不随主题切换而变。
+      :not(:hover):not(.kb-sel) 是为了把高亮态让给下面那两条规则。
+   ============================================================ */
+html[data-gal-theme] .gal-dialog,
+html[data-gal-theme] .gal-option:not(:hover):not(.kb-sel) {
+  background: color-mix(in srgb, var(--gx-bg) 70%, transparent);
+}
+html[data-gal-theme] .gal-dialog {
+  -webkit-backdrop-filter: blur(12px) saturate(1.1);
+  backdrop-filter: blur(12px) saturate(1.1);
+}
+/* 键盘光标态：与主题的 hover 用同一套高亮，鼠标 / 键盘观感一致 */
+html[data-gal-theme] .gal-option.kb-sel {
+  background: var(--gx-opt-hover-bg);
+  color: var(--gx-opt-hover-color);
+}
+html[data-gal-theme] .gal-option.kb-sel.disabled,
+html[data-gal-theme] .gal-option.kb-sel:disabled {
+  background: color-mix(in srgb, var(--gx-bg) 70%, transparent);
+  color: var(--gx-opt-color);
+}
+
+/* ============================================================
+   GAL 输入区沉浸化：与对白框同源 / 去掉组件感 / 叙事联动
+   —— 全部挂在 html[data-gal-theme] 下，只覆盖 GAL 模式，Solo 与 IDE 完全不受影响
+   ============================================================ */
+
+/* ---- L0 · 视觉与主题同源：输入框说「和对白框同一种语言」---- */
+html[data-gal-theme] .composer-box {
+  /* 边框几乎隐去（只留一丝），让输入框像从舞台底部「长出来」而不是贴上去的组件 */
+  border-color: color-mix(in srgb, var(--gx-dialog-border) 40%, transparent);
+  border-radius: var(--gx-dialog-radius);
+  background: color-mix(in srgb, var(--gx-bg) 70%, transparent);
+  -webkit-backdrop-filter: blur(var(--gx-blur, 12px)) saturate(var(--gx-sat, 1.1));
+  backdrop-filter: blur(var(--gx-blur, 12px)) saturate(var(--gx-sat, 1.1));
+  font-family: var(--gx-dialog-font);      /* 与对白框同字体（衬线 / 点阵主题也不再是通用 UI 字体） */
+  transition: border-color var(--t) var(--ease), box-shadow var(--t) var(--ease),
+              background var(--t) var(--ease), opacity var(--t) var(--ease);
+}
+html[data-gal-theme] .composer-box:focus-within {
+  border-color: var(--gx-deco);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--gx-deco) 20%, transparent);
+}
+html[data-gal-theme] #input {
+  font-family: var(--gx-dialog-font);
+  font-size: var(--gx-text-size);
+  line-height: 1.75;
+  caret-color: var(--gx-deco);             /* 光标用主题装饰色 */
+}
+html[data-gal-theme] #input::placeholder { color: var(--gx-text-dim); opacity: .85; }
+html[data-gal-theme] .composer-hint { font-family: var(--gx-dialog-font); }
+/* 收起按钮跟随舞台语言：半透明底 + 与对白框同源的边框 */
+html[data-gal-theme] .composer-toggle {
+  background: color-mix(in srgb, var(--gx-bg) 70%, transparent);
+  border-color: color-mix(in srgb, var(--gx-dialog-border) 40%, transparent);
+  -webkit-backdrop-filter: blur(var(--gx-blur, 12px));
+  backdrop-filter: blur(var(--gx-blur, 12px));
+}
+
+/* ---- L0 · 工具条默认收起：只留「⋯ / 附件或停止 / 麦克风 / 发送」----
+   （停止生成必须留着 —— 生成到一半无法打断是最糟的体验） */
+#btn-more { display: none; }
+html[data-gal-theme] #btn-more { display: flex; }
+html[data-gal-theme] .composer-toolbar .toolbar-left,
+html[data-gal-theme] #btn-improve,
+html[data-gal-theme] .swap-slot > #btn-attach { display: none; }
+html[data-gal-theme] .composer-box.gal-tools-open .composer-toolbar .toolbar-left {
+  /* 展开的功能条必须排到右侧按钮**下方**（order: 1 + 独占一行）：
+     否则它会把 .toolbar-right 挤到第二行，麦克风 / 发送位置整体下移 —— 就是「展开后错位」的根因。 */
+  display: flex; order: 1; flex: 1 1 100%;
+}
+html[data-gal-theme] .composer-box.gal-tools-open .composer-toolbar .toolbar-right { order: 0; }
+html[data-gal-theme] .composer-box.gal-tools-open #btn-improve,
+html[data-gal-theme] .composer-box.gal-tools-open .swap-slot > #btn-attach { display: flex; }
+html[data-gal-theme] .composer-box.gal-tools-open #btn-more {
+  color: var(--gx-deco);
+  background: color-mix(in srgb, var(--gx-deco) 16%, transparent);
+}
+
+/* ---- L1 · 草稿实时变「剧中台词」----
+   输入过程中，你打的字会出现在对白区顶部（复用「上一句回显」的位置），
+   以主角台词 + 闪烁光标呈现，让玩家看到「我说的话正在进入故事」。 */
+html[data-gal-theme] .gal-user-echo.draft {
+  opacity: 1;
+  color: var(--gx-dialog-color);
+  border-left-color: var(--gx-deco);
+}
+html[data-gal-theme] .gal-user-echo.draft .gal-user-echo-who { color: var(--gx-deco); }
+html[data-gal-theme] .gal-user-echo.draft::after {
+  content: '▌'; margin-left: 2px; color: var(--gx-deco);
+  animation: blink 1s steps(2, start) infinite;
+}
+
+/* ---- L1 · 「说出口」的确认反馈（发送后立刻发生，满足 200ms 规则）---- */
+.gal-dialog.gal-intake { animation: galIntake .44s var(--ease); }
+@keyframes galIntake {
+  0% { transform: scale(.988); opacity: .72; }
+  55% { transform: scale(1.005); opacity: 1; }
+  100% { transform: none; opacity: 1; }
+}
+
+/* ---- L1 · 立绘微反应：你在打字时，立绘轻轻「凑近」一点 ---- */
+.gal-sprites { transition: transform .4s var(--ease); }
+html.gal-input-focus .gal-sprites { transform: scale(1.012) translateY(-3px); }
+html.gal-no-sprite-fx .gal-sprites { transition: none; }   /* 关掉立绘过渡时一起关 */
+
+/* ---- L2 · 生成中：输入区进入「等待」态（只降权，不锁死 —— 仍可提前打字）---- */
+html[data-gal-theme] .composer-box.gal-waiting { opacity: .6; }
+html[data-gal-theme] .composer-box.gal-waiting:focus-within { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .gal-dialog.gal-intake { animation: none; }
+  .gal-sprites { transition: none; }
+  html.gal-input-focus .gal-sprites { transform: none; }
+}

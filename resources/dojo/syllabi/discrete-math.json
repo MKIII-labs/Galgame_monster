@@ -1,0 +1,71 @@
+{
+  "id": "discrete-math",
+  "item_prefix": "dm",
+  "course": "离散数学",
+  "textbook": "耿素云、屈婉玲、张立昂《离散数学》第六版",
+  "publisher": "清华大学出版社",
+  "level": "chapter",
+  "note": "按章生成；小节为范围提示。共 10 章。",
+  "chapters": [
+    {"id": "ch01", "title": "命题逻辑", "sections": [
+      {"id": "ch01-s01", "title": "命题符号化及联结词"},
+      {"id": "ch01-s02", "title": "命题公式及分类"},
+      {"id": "ch01-s03", "title": "等值演算"},
+      {"id": "ch01-s04", "title": "范式"},
+      {"id": "ch01-s05", "title": "联结词全功能集"},
+      {"id": "ch01-s06", "title": "组合电路"},
+      {"id": "ch01-s07", "title": "推理理论"}
+    ]},
+    {"id": "ch02", "title": "一阶逻辑", "sections": [
+      {"id": "ch02-s01", "title": "一阶逻辑基本概念"},
+      {"id": "ch02-s02", "title": "一阶逻辑合式公式及解释"},
+      {"id": "ch02-s03", "title": "一阶逻辑等值式与前束范式"}
+    ]},
+    {"id": "ch03", "title": "集合的基本概念和运算", "sections": [
+      {"id": "ch03-s01", "title": "集合的基本概念"},
+      {"id": "ch03-s02", "title": "集合的基本运算"},
+      {"id": "ch03-s03", "title": "集合中元素的计数"}
+    ]},
+    {"id": "ch04", "title": "二元关系和函数", "sections": [
+      {"id": "ch04-s01", "title": "集合的笛卡儿积与二元关系"},
+      {"id": "ch04-s02", "title": "关系的运算"},
+      {"id": "ch04-s03", "title": "关系的性质"},
+      {"id": "ch04-s04", "title": "关系的闭包"},
+      {"id": "ch04-s05", "title": "等价关系和偏序关系"},
+      {"id": "ch04-s06", "title": "函数的定义和性质"},
+      {"id": "ch04-s07", "title": "函数的复合和反函数"}
+    ]},
+    {"id": "ch05", "title": "图的基本概念", "sections": [
+      {"id": "ch05-s01", "title": "无向图及有向图"},
+      {"id": "ch05-s02", "title": "通路、回路和图的连通性"},
+      {"id": "ch05-s03", "title": "图的矩阵表示"},
+      {"id": "ch05-s04", "title": "最短路径、关键路径和着色"}
+    ]},
+    {"id": "ch06", "title": "特殊的图", "sections": [
+      {"id": "ch06-s01", "title": "二部图"},
+      {"id": "ch06-s02", "title": "欧拉图"},
+      {"id": "ch06-s03", "title": "哈密顿图"},
+      {"id": "ch06-s04", "title": "平面图"}
+    ]},
+    {"id": "ch07", "title": "树", "sections": [
+      {"id": "ch07-s01", "title": "无向树及生成树"},
+      {"id": "ch07-s02", "title": "根树及其应用"}
+    ]},
+    {"id": "ch08", "title": "组合分析初步", "sections": [
+      {"id": "ch08-s01", "title": "加法法则和乘法法则"},
+      {"id": "ch08-s02", "title": "基本排列组合的计数方法"},
+      {"id": "ch08-s03", "title": "递推方程的求解与应用"}
+    ]},
+    {"id": "ch09", "title": "代数系统简介", "sections": [
+      {"id": "ch09-s01", "title": "二元运算及其性质"},
+      {"id": "ch09-s02", "title": "代数系统"},
+      {"id": "ch09-s03", "title": "几个典型的代数系统"}
+    ]},
+    {"id": "ch10", "title": "形式语言和自动机初步", "sections": [
+      {"id": "ch10-s01", "title": "形式语言和形式文法"},
+      {"id": "ch10-s02", "title": "有穷自动机"},
+      {"id": "ch10-s03", "title": "正则表达式"},
+      {"id": "ch10-s04", "title": "图灵机"}
+    ]}
+  ]
+}

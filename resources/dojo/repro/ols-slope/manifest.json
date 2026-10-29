@@ -1,0 +1,12 @@
+{
+  "id": "ols-slope",
+  "title": "复现最小二乘斜率",
+  "source": "示例：简单线性回归（论文表 1）",
+  "question": "用 data.csv 拟合 y = a·x + b，求出斜率 a，并把结果打印成一行 JSON。论文报告值为 2.003。",
+  "data": ["data.csv"],
+  "starter": "starter.py",
+  "time_limit": 10,
+  "expected": {
+    "slope": { "value": 2.003, "tolerance": 0.01 }
+  }
+}

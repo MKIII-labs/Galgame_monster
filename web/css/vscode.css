@@ -1,0 +1,31 @@
+/* ============================================================
+   精修层（在 base.css 之后加载）
+   ------------------------------------------------------------
+   原先这一层是「VS Code 风格覆盖」：用 !important 把全站圆角压平、
+   弹窗改成方角灰头、列表项改成直角高亮 —— 全局生效（并不只 IDE），
+   是整体观感偏"工程感"的主因。现已改为与新设计语言一致：
+   层级用「背景色差 + 柔和阴影」表达，而不是满屏硬边框。
+   IDE 模式自己的密集风格在 ide.css 里，与本层无关。
+   ============================================================ */
+
+/* --- 滚动条：细窄、无轨道底色 --- */
+* { scrollbar-width: thin; scrollbar-color: var(--scroll) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--scroll);
+  border: 3px solid transparent; border-radius: 999px; background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* --- 输入类控件：聚焦时用强调色描边（清晰的焦点反馈） --- */
+.field-input:focus, .ta:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* --- 设置里的次级标签：靠字重分层，不靠线 --- */
+.side-label { letter-spacing: .02em; }
+.field-label { color: var(--text-dim); }

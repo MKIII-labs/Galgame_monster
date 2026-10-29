@@ -1,0 +1,33 @@
+{
+  "id": "ca-residue-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "计算 ∮_C f(z)dz（C 为简单闭曲线，内部可能有奇点），最直接的工具是：",
+    "options": [
+      { "key": "A", "text": "留数定理：2πi 乘以内部奇点留数之和" },
+      { "key": "B", "text": "柯西积分定理" },
+      { "key": "C", "text": "在每一点展开洛朗级数再逐项积分" },
+      { "key": "D", "text": "解析延拓" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "留数定理把围道积分归结为内部奇点的留数和，是处理含奇点围道积分的标准工具。柯西定理只适用于内部无奇点的情况。",
+    "signals": ["闭曲线积分", "内部有奇点", "求积分值"],
+    "traps": {
+      "B": "柯西定理要求内部解析，有奇点时不能用。",
+      "C": "逐点展开可行但极其繁琐，不是直接工具。",
+      "D": "解析延拓解决的是定义域扩展，不是积分计算。"
+    }
+  },
+  "card": {
+    "title": "有奇点用留数",
+    "trigger": "闭曲线内有奇点",
+    "first_step": "找内部奇点并算留数",
+    "pitfall": "对含奇点的围道硬套柯西定理"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "留数定理" }
+}

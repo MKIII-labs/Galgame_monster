@@ -1,0 +1,28 @@
+{
+  "id": "cmc-improper-01",
+  "ability": "condition",
+  "primitive": "multi_select",
+  "judge": "L2",
+  "minutes": 5,
+  "payload": {
+    "situation": "下列反常积分中，能直接用比较判别法判定为「收敛」的有哪些？（多选）",
+    "options": [
+      { "key": "A", "text": "∫₁^∞ (sin x)/x² dx" },
+      { "key": "B", "text": "∫₁^∞ 1/(x·√(x²+1)) dx" },
+      { "key": "C", "text": "∫₁^∞ 1/ln x dx" },
+      { "key": "D", "text": "∫₀¹ 1/x² dx" }
+    ]
+  },
+  "expert": {
+    "choice": ["A", "B"],
+    "why": "A 取绝对值后被 1/x² 控制，绝对收敛；B 在无穷远处与 1/x² 同阶，收敛。C 在 x > e 时 ln x < x，所以 1/ln x > 1/x，而 ∫1/x 发散，故 C 发散。D 是 p = 2 ≥ 1 的瑕积分，发散。",
+    "signals": ["比较判别法要找一个已知敛散性的「标尺」", "先看无穷远处或瑕点附近的阶", "带 sin/cos 的先取绝对值"]
+  },
+  "card": {
+    "title": "比较法先找标尺",
+    "trigger": "判断反常积分敛散性",
+    "first_step": "看无穷远处（或瑕点附近）的通项阶，再找 p 积分作标尺",
+    "pitfall": "只因为被积函数趋于 0 就判收敛"
+  },
+  "source_ref": { "doc": "self-authored", "loc": "反常积分·比较判别法" }
+}

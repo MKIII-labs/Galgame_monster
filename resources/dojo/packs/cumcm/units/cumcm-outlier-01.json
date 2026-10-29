@@ -1,0 +1,32 @@
+{
+  "id": "cumcm-outlier-01",
+  "ability": "condition",
+  "primitive": "multi_select",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "下面哪些情况更适合用 IQR（箱线图）而不是 3σ 来识别异常值？",
+    "options": [
+      { "key": "A", "text": "数据明显右偏，存在长尾" },
+      { "key": "B", "text": "数据近似正态、样本量很大" },
+      { "key": "C", "text": "样本量较小，均值与标准差本身不稳定" },
+      { "key": "D", "text": "已经做过严格的正态性检验且通过" }
+    ]
+  },
+  "expert": {
+    "choice": ["A", "C"],
+    "why": "3σ 依赖均值与标准差，二者都受极端值影响，前提是近似正态；IQR 基于分位数，对偏态和小样本更稳健。B、D 恰好是 3σ 更合适的场景。",
+    "signals": ["分布偏态或长尾", "样本小", "均值与标准差不可靠"],
+    "traps": {
+      "B": "近似正态、大样本正是 3σ 的适用条件。",
+      "D": "正态性检验通过说明 3σ 的前提成立，不是 IQR 的理由。"
+    }
+  },
+  "card": {
+    "title": "偏态小样本用 IQR",
+    "trigger": "要识别异常值",
+    "first_step": "先看分布形态与样本量",
+    "pitfall": "对偏态数据硬套 3σ"
+  },
+  "source_ref": { "doc": "self-authored:cumcm", "loc": "异常值处理" }
+}

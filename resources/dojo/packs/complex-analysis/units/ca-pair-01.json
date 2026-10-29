@@ -1,0 +1,34 @@
+{
+  "id": "ca-pair-01",
+  "ability": "method",
+  "primitive": "pair",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "把函数与它在指定点处的奇点类型配对。",
+    "left": [
+      { "id": "l1", "text": "e^(1/z) 在 z = 0" },
+      { "id": "l2", "text": "1/z 在 z = 0" },
+      { "id": "l3", "text": "sin z / z 在 z = 0" },
+      { "id": "l4", "text": "1/(z−1)² 在 z = 1" }
+    ],
+    "right": [
+      { "id": "r1", "text": "本性奇点" },
+      { "id": "r2", "text": "可去奇点" },
+      { "id": "r3", "text": "一阶极点" },
+      { "id": "r4", "text": "二阶极点" }
+    ]
+  },
+  "expert": {
+    "why": "e^(1/z) 的洛朗展开有无穷负幂项，是本性问题；1/z 是简单极点；sin z / z → 1，奇点可去；1/(z−1)² 是二阶极点。",
+    "signals": ["奇点分类", "看洛朗展开或极限"],
+    "pairs": { "l1": "r1", "l2": "r3", "l3": "r2", "l4": "r4" }
+  },
+  "card": {
+    "title": "奇点四分类",
+    "trigger": "给函数与奇点",
+    "first_step": "先算极限，再看负幂项",
+    "pitfall": "把可去奇点当极点"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "奇点分类" }
+}

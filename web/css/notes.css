@@ -1,0 +1,78 @@
+/* ============================================================
+   内置笔记库（Obsidian 核心版）
+   ============================================================ */
+.notes-card { width: min(1360px, 96vw); height: min(860px, 90vh); }
+.notes-head-title { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; }
+.notes-head-title .hint { font-size: 12px; font-weight: 400; }
+.notes-body { flex: 1; min-height: 0; display: flex; }
+
+.notes-left {
+  width: 252px; flex: none; display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 12px; border-right: 1px solid var(--border); overflow: hidden;
+}
+.notes-left-btns { display: flex; gap: 6px; }
+.notes-left-btns button { flex: 1; }
+.notes-tree { flex: 1; overflow-y: auto; margin: 0 -4px; }
+.nt-row {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 13.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.nt-row:hover { background: var(--bg-hover); }
+.nt-row.active { background: var(--bg-active); color: var(--accent); font-weight: 600; }
+.nt-row.missing { color: var(--warn); }
+.nt-caret { width: 12px; flex: none; color: var(--text-dim); font-size: 11px; }
+.nt-row .nt-num { margin-left: auto; font-size: 11px; color: var(--text-dim); }
+.nt-del { opacity: 0; margin-left: 4px; font-size: 12px; color: var(--text-dim); }
+.nt-row:hover .nt-del { opacity: .85; }
+.nt-del:hover { color: var(--danger); }
+
+.notes-hits { max-height: 190px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 5px; }
+.notes-hits .hit { padding: 5px 7px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
+.notes-hits .hit:hover { background: var(--bg-hover); }
+.notes-hits .hit b { display: block; font-weight: 600; }
+.notes-hits .hit span { color: var(--text-dim); }
+
+.notes-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.notes-editor-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px; border-bottom: 1px solid var(--border);
+}
+.notes-path { flex: 1; min-width: 0; font-size: 13px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notes-actions { display: flex; gap: 6px; flex: none; }
+.notes-actions button.active { color: var(--accent); border-color: var(--accent); }
+.notes-textarea {
+  flex: 1; width: 100%; padding: 16px 18px; border: 0; outline: none; resize: none;
+  background: transparent; color: var(--text); line-height: 1.75;
+  font-family: ui-monospace, "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
+  font-size: 14px;
+}
+.notes-preview { overflow-y: auto; padding: 16px 22px; }
+.notes-empty { padding: 26px; }
+
+.notes-right {
+  width: 336px; flex: none; display: flex; flex-direction: column;
+  border-left: 1px solid var(--border); overflow: hidden;
+}
+.notes-tabs { display: flex; gap: 2px; padding: 8px 10px 0; flex: none; }
+.ntab { padding: 6px 12px; font-size: 13px; color: var(--text-dim);
+  border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.ntab:hover { color: var(--text); }
+.ntab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.notes-graph { flex: 1; min-height: 0; }
+.notes-backlinks { flex: 1; overflow-y: auto; padding: 12px 14px; }
+.notes-backlinks .bl {
+  padding: 8px 10px; margin-bottom: 8px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.notes-backlinks .bl:hover { background: var(--bg-hover); }
+.notes-backlinks .bl b { font-size: 13.5px; }
+.notes-backlinks .bl div { margin-top: 4px; font-size: 12px; color: var(--text-dim); }
+
+/* 预览中的双链 */
+.content a.wikilink {
+  cursor: pointer; text-decoration: none;
+  border-bottom: 1px dashed var(--accent);
+}
+.content a.wikilink.missing { color: var(--warn); border-bottom-style: dotted; }

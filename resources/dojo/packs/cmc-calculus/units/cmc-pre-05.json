@@ -1,0 +1,34 @@
+{
+  "id": "cmc-pre-05",
+  "test": "pre",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "级数 ∑(n=1→∞) (−1)ⁿ/n 的敛散性是：",
+    "options": [
+      { "key": "A", "text": "绝对收敛" },
+      { "key": "B", "text": "条件收敛" },
+      { "key": "C", "text": "发散" },
+      { "key": "D", "text": "现有信息无法判断" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "原级数是交错级数，1/n 单调递减趋于 0，由莱布尼茨判别法收敛；但绝对值级数 ∑1/n 是调和级数，发散，所以是条件收敛。",
+    "signals": ["带 (−1)ⁿ", "通项单调递减趋于 0", "绝对值是 p=1 的 p 级数"],
+    "traps": {
+      "A": "绝对值级数是调和级数，发散，不满足绝对收敛。",
+      "C": "莱布尼茨条件满足，原级数收敛。",
+      "D": "交错级数与 p 级数判别法已经足够判断。"
+    }
+  },
+  "card": {
+    "title": "交错题查两步",
+    "trigger": "级数带 (−1)ⁿ",
+    "first_step": "先判原级数，再判绝对值级数",
+    "pitfall": "只答收敛，不区分绝对/条件"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-pre-05" }
+}

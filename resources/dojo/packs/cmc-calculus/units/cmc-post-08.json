@@ -1,0 +1,34 @@
+{
+  "id": "cmc-post-08",
+  "test": "post",
+  "ability": "framing",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "方程 y′ = y/x 属于哪种类型？",
+    "options": [
+      { "key": "A", "text": "可分离变量" },
+      { "key": "B", "text": "伯努利方程" },
+      { "key": "C", "text": "二阶线性方程" },
+      { "key": "D", "text": "全微分方程" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "改写成 dy/y = dx/x，两边分别积分即可；它没有 y 的幂次，不是伯努利，也只有一阶导数。",
+    "signals": ["右边只含 x，左边只含 y 的导数", "能写成 g(y)dy = f(x)dx"],
+    "traps": {
+      "B": "伯努利要求出现 y 的幂次（如 y²），这里没有。",
+      "C": "只有一阶导数。",
+      "D": "全微分方程形如 P dx + Q dy = 0 且满足偏导条件，这里不是标准形式。"
+    }
+  },
+  "card": {
+    "title": "能分离就先分离",
+    "trigger": "y′ = f(x)/g(y)",
+    "first_step": "把 y 与 x 分到两边再积分",
+    "pitfall": "一阶方程一律套线性公式"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-post-08" }
+}

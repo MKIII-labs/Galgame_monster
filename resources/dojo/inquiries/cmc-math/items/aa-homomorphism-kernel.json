@@ -1,0 +1,209 @@
+{
+  "id": "aa-homomorphism-kernel",
+  "title": "群同态的核：到底丢掉了什么信息",
+  "subject": "抽象代数",
+  "track": "本科",
+  "minutes": 32,
+  "exam": {
+    "topic": "群同态与同态基本定理",
+    "weight": "抽象代数核心",
+    "variant": "判断映射是否为同态、求核、用同态基本定理算商群"
+  },
+  "prerequisites": ["群的定义", "子群", "正规子群", "陪集"],
+  "brief": "同态是「保持运算」的映射，核是「被映射到单位元的那部分」。这一轮不从定义背起，而是先问为什么需要核，再用 Z→Z_6 亲手算一遍，接着证明核为什么必须正规，最后用同态基本定理把商群和像接起来。",
+  "acts": [
+    {
+      "id": "aa-kernel-origin",
+      "label": "它从哪来",
+      "ability": "framing",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "群同态 φ: G→G' 保持运算，但通常不是单射。数学家引入核 ker φ，最直接想刻画的是：",
+        "options": [
+          {"key": "A", "text": "同态在哪些元素上「丢失了信息」，即哪些元素被压到单位元"},
+          {"key": "B", "text": "G 中元素的总个数"},
+          {"key": "C", "text": "G' 中元素的乘法表"},
+          {"key": "D", "text": "G 的生成元个数"}
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "核收集的是被 φ 压成单位元的元素。它们正是「φ 分辨不出来」的部分；核越大，丢失的信息越多，所以核能衡量同态离单射有多远。",
+        "signals": ["先问这个对象在刻画什么失效", "核与「压成单位元」直接相关"],
+        "traps": {
+          "B": "元素总数是群的阶，不是核要刻画的东西。",
+          "C": "G' 的乘法表是陪域结构，与核的定义无关。",
+          "D": "生成元个数是另一类不变量，核不负责它。"
+        }
+      },
+      "card": {
+        "title": "核衡量「丢失的信息」",
+        "trigger": "第一次见到同态的核",
+        "first_step": "把核理解成被压到单位元的那部分元素",
+        "pitfall": "只背 ker φ={g|φ(g)=e'}，不知道它在说什么"
+      }
+    },
+    {
+      "id": "aa-kernel-guess",
+      "label": "先猜",
+      "ability": "assumption",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "取 φ: Z→Z_6，φ(k)=k mod 6（Z 与 Z_6 都按加法）。先不查定理，判断下面哪些说法成立。",
+        "options": [
+          {"key": "A", "text": "φ 是群同态"},
+          {"key": "B", "text": "ker φ = 6Z"},
+          {"key": "C", "text": "im φ = Z_6"},
+          {"key": "D", "text": "φ 是单射"}
+        ]
+      },
+      "expert": {
+        "choice": ["A", "B", "C"],
+        "why": "φ(a+b)=(a+b) mod 6=(a mod 6)+(b mod 6)，所以是同态；被压到 0 的正是 6 的倍数；每个剩余类都有原像，像是整个 Z_6。φ 不是单射：0 与 6 都映到 0。",
+        "signals": ["先验证 φ(a+b)=φ(a)+φ(b)", "核 = 映到单位元的元素集合"],
+        "traps": {
+          "D": "0 与 6 是不同的整数，却映到同一个元素，因此不单射。"
+        }
+      },
+      "card": {
+        "title": "先算核，再看单射",
+        "trigger": "判断一个同态是否单射",
+        "first_step": "求核；核只有单位元才单射",
+        "pitfall": "只看几个元素的值就断言单射"
+      }
+    },
+    {
+      "id": "aa-kernel-counter",
+      "label": "构造反例",
+      "ability": "condition",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "下列哪个映射不是群同态？",
+        "options": [
+          {"key": "A", "text": "φ: Z→Z，φ(n)=2n（加法群）"},
+          {"key": "B", "text": "φ: Z→Z，φ(n)=n+1（加法群）"},
+          {"key": "C", "text": "det: GL_2(R)→R*（乘法群）"},
+          {"key": "D", "text": "sgn: S_n→{±1}（乘法群）"}
+        ]
+      },
+      "expert": {
+        "choice": "B",
+        "why": "同态必须把单位元送到单位元：Z 的单位元是 0，但 φ(0)=1≠0，所以 B 立刻失败。A 满足 2(m+n)=2m+2n；行列式与符号映射都是经典同态。",
+        "signals": ["先检查单位元是否被送到单位元", "这是最快排除法"],
+        "traps": {
+          "A": "φ(m+n)=2(m+n)=2m+2n=φ(m)+φ(n)，是同态。",
+          "C": "det(AB)=det A·det B，是乘法群同态。",
+          "D": "sgn(στ)=sgn(σ)sgn(τ)，是符号同态。"
+        }
+      },
+      "card": {
+        "title": "同态先过单位元这一关",
+        "trigger": "判断映射是否为群同态",
+        "first_step": "先算 φ(e) 是否等于 e'",
+        "pitfall": "只验证一两个元素就下结论"
+      }
+    },
+    {
+      "id": "aa-kernel-proof",
+      "label": "证明骨架",
+      "ability": "argument",
+      "primitive": "order",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "situation": "证明：群同态 φ: G→G' 的核 ker φ 是 G 的正规子群。把证明排成正确顺序。",
+        "steps": [
+          {"id": "s1", "text": "先证核非空：φ(e)=e'，所以 e∈ker φ"},
+          {"id": "s2", "text": "再证对运算与逆封闭：若 φ(a)=φ(b)=e'，则 φ(ab)=e'、φ(a⁻¹)=e'，所以核是子群"},
+          {"id": "s3", "text": "取任意 g∈G、k∈ker φ，计算 φ(gkg⁻¹)=φ(g)φ(k)φ(g)⁻¹"},
+          {"id": "s4", "text": "因为 φ(k)=e'，上式等于 φ(g)e'φ(g)⁻¹=e'，所以 gkg⁻¹∈ker φ"},
+          {"id": "s5", "text": "由 g(ker φ)g⁻¹⊆ker φ 对任意 g 成立，得核是正规子群"}
+        ]
+      },
+      "expert": {
+        "order": ["s1", "s2", "s3", "s4", "s5"],
+        "why": "证明分两层：先用同态性质说明核是子群，再用共轭计算说明它对所有 g 稳定。关键一步是 φ(gkg⁻¹) 拆成三段的乘积，而中间那段正好是单位元。",
+        "signals": ["子群 + 共轭稳定 = 正规", "把 φ(gkg⁻¹) 拆开算"],
+        "traps": {}
+      },
+      "card": {
+        "title": "正规性靠共轭计算",
+        "trigger": "证明某个子群正规",
+        "first_step": "取 g 与 k，算 φ(gkg⁻¹) 或 gkg⁻¹ 是否仍在子群内",
+        "pitfall": "只证了子群，忘了对共轭封闭"
+      }
+    },
+    {
+      "id": "aa-kernel-boundary",
+      "label": "条件边界",
+      "ability": "condition",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "关于群同态基本定理及其条件，下面哪些说法正确？",
+        "options": [
+          {"key": "A", "text": "G/ker φ 与 im φ 同构"},
+          {"key": "B", "text": "φ 是单射，当且仅当 ker φ 只含单位元"},
+          {"key": "C", "text": "im φ 是 G' 的子群"},
+          {"key": "D", "text": "ker φ 只需要是子群，不必是正规子群"}
+        ]
+      },
+      "expert": {
+        "choice": ["A", "B", "C"],
+        "why": "同态基本定理给出 G/ker φ≅im φ；单射等价于核平凡；像当然是陪域的子群。D 错：核必须是正规子群，否则 G/ker φ 根本不是商群。",
+        "signals": ["商群要求子群正规", "单射与核平凡等价"],
+        "traps": {
+          "D": "核若不是正规子群，左陪集与右陪集不一致，无法定义商群运算。"
+        }
+      },
+      "card": {
+        "title": "商群的前提是正规",
+        "trigger": "想写 G/H 或使用同态基本定理",
+        "first_step": "先确认 H 是正规子群",
+        "pitfall": "对任意子群都写商群"
+      }
+    },
+    {
+      "id": "aa-kernel-exam",
+      "label": "考试怎么考",
+      "ability": "method",
+      "primitive": "numeric",
+      "judge": "L1",
+      "minutes": 5,
+      "payload": {
+        "situation": "定义 φ: Z_12→Z_4，φ(k mod 12)=k mod 4。求核 ker φ 的元素个数。"
+      },
+      "expert": {
+        "value": 3,
+        "tolerance": 0.001,
+        "why": "核是模 12 下被映到 0 的元素，即 12 个元素中满足 k≡0 (mod 4) 的：0、4、8，共 3 个。也可用 |ker φ|=|G|/|im φ|=12/4=3。",
+        "signals": ["核的大小 = 定义域阶 / 像的阶", "直接列出被映到 0 的剩余类"],
+        "traps": {}
+      },
+      "card": {
+        "title": "核的大小用第一同构定理",
+        "trigger": "求有限群同态的核的大小",
+        "first_step": "算 |G|/|im φ|，或直接列出映到单位元的元素",
+        "pitfall": "把核当成整个定义域"
+      }
+    }
+  ],
+  "artifact": {
+    "prompt": "用 150–300 字回答：核在同态中扮演什么角色？为什么它必须是正规子群？请用 Z→Z_6 的例子说明同态基本定理在说什么。",
+    "rubric": [
+      {"id": "kernel", "text": "说明核是被映到单位元的元素集合", "keywords": ["核", "ker", "单位元"]},
+      {"id": "injective", "text": "指出核平凡等价于单射", "keywords": ["单射", "平凡", "只有一个"]},
+      {"id": "normal", "text": "说明核对共轭稳定因此正规", "keywords": ["正规", "共轭", "gkg"]},
+      {"id": "quotient", "text": "写出商群与像同构", "keywords": ["商群", "同构", "像"]},
+      {"id": "example", "text": "用 Z→Z_6 说明核是 6Z", "keywords": ["6Z", "Z_6", "模6", "6 的倍数"]}
+    ],
+    "expert_sample": "核 ker φ 是所有被同态映到单位元的元素，它衡量同态丢失了多少信息：核越大，φ 越不单射；核只含单位元时 φ 才是单射。核一定是正规子群，因为对任意 g 与 k∈ker φ，φ(gkg⁻¹)=φ(g)φ(k)φ(g)⁻¹=e'，所以共轭仍在核内，商群 G/ker φ 才有意义。以 φ: Z→Z_6、φ(k)=k mod 6 为例，核是 6 的倍数 6Z，像是整个 Z_6；同态基本定理说 Z/6Z 与 Z_6 同构，也就是「先模掉核，再同构于像」。"
+  }
+}

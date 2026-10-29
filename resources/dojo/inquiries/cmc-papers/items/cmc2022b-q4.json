@@ -1,0 +1,338 @@
+{
+  "id": "cmc2022b-q4",
+  "title": "相同 Jordan 标准型下的参数条件：从 J3(0) 到秩条件",
+  "subject": "高等代数",
+  "track": "竞赛",
+  "minutes": 30,
+  "source": {
+    "contest": "CMC",
+    "year": 2022,
+    "paper": "数学B类",
+    "problem": "4",
+    "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十四届全国大学生数学竞赛初赛（数学B类）试题及参考答案.pdf",
+    "note": "改编自官方真题，题干为教学改写"
+  },
+  "exam": {
+    "topic": "相同 Jordan 标准型",
+    "weight": "CMC 数学类初赛",
+    "variant": "常见考法"
+  },
+  "prerequisites": [
+    "特征值与特征多项式",
+    "幂零矩阵",
+    "Jordan 标准型与 Jordan 块",
+    "矩阵的秩与相似不变量"
+  ],
+  "brief": "本题围绕同一个 Jordan 标准型问题：给定单个幂零 Jordan 块 J3(0)，通过带参数严格上三角矩阵 B(a,b) 的各次幂秩，反推参数条件。它值得研究，因为特征多项式只能定谱，真正区分 Jordan 块的是 M−λI 的幂次秩；这一思路还能迁移到非零特征值和不同块型。",
+  "acts": [
+    {
+      "id": "cmc2022b-q4-a1",
+      "label": "原题在问什么",
+      "ability": "framing",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "研究 A=J3(0)=[[0,1,0],[0,0,1],[0,0,0]] 与 B(a,b)=[[0,a,0],[0,0,b],[0,0,0]]。题目要判断 B(a,b) 何时与 A 具有相同 Jordan 标准型。这个问题的核心应抓住什么？",
+        "options": [
+          {
+            "key": "A",
+            "text": "对每个特征值比较各阶 Jordan 块大小，可由 rank((M−λI)^k) 判断。"
+          },
+          {
+            "key": "B",
+            "text": "只比较两个矩阵的特征多项式。"
+          },
+          {
+            "key": "C",
+            "text": "只比较两个矩阵的迹和行列式。"
+          },
+          {
+            "key": "D",
+            "text": "只比较两个矩阵的秩。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "相同 Jordan 标准型等价于对每个特征值，其 Jordan 块的大小分布相同；特征多项式只给代数重数，迹、行列式和单个秩都不足以区分块结构。",
+        "signals": [
+          "看到相同 Jordan 标准型",
+          "想到逐特征值比较块大小",
+          "可用 rank((M−λI)^k) 作判别"
+        ],
+        "traps": {
+          "B": "特征多项式相同只保证特征值及代数重数一致，不能区分 Jordan 块大小。",
+          "C": "迹和行列式只提供部分相似不变量，远不足以确定 Jordan 标准型。",
+          "D": "秩只反映一个层次的信息，不能单独判定每个特征值的 Jordan 块结构。"
+        }
+      },
+      "card": {
+        "title": "先定位 Jordan 块",
+        "trigger": "题目出现相同 Jordan 标准型或相似标准形",
+        "first_step": "先求特征多项式定谱，再对每个特征值考虑 M−λI 的幂次秩。",
+        "pitfall": "不要把特征多项式相同误当成 Jordan 标准型相同。"
+      }
+    },
+    {
+      "id": "cmc2022b-q4-a2",
+      "label": "先猜：必要不变量有哪些",
+      "ability": "assumption",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "先不看 a,b 的具体数值。对 A=J3(0) 和 B(a,b) 这一对矩阵，为了确认相同 Jordan 标准型，下列哪些条件是必要的？",
+        "options": [
+          {
+            "key": "A",
+            "text": "B(a,b) 的特征多项式为 λ^3，即 B(a,b) 幂零。"
+          },
+          {
+            "key": "B",
+            "text": "rank B(a,b)=2。"
+          },
+          {
+            "key": "C",
+            "text": "rank B(a,b)^2=1。"
+          },
+          {
+            "key": "D",
+            "text": "B(a,b) 可对角化。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": [
+          "A",
+          "B",
+          "C"
+        ],
+        "why": "A=J3(0) 是幂零矩阵，且 rank A=2、rank A^2=1，且它不可对角化。与 A 有相同 Jordan 标准型的矩阵必须在这些相似不变量上保持一致。",
+        "signals": [
+          "先抓幂零性",
+          "比较 rank M 与 rank M^2",
+          "排除可对角化"
+        ]
+      },
+      "card": {
+        "title": "先列必要不变量",
+        "trigger": "需要猜测相同 Jordan 标准型的判别条件",
+        "first_step": "写出目标矩阵各次幂的秩与最小多项式信息。",
+        "pitfall": "只检查一个不变量就下结论。"
+      }
+    },
+    {
+      "id": "cmc2022b-q4-a3",
+      "label": "先算一个数值信号",
+      "ability": "evidence",
+      "primitive": "numeric",
+      "judge": "L1",
+      "minutes": 4,
+      "payload": {
+        "situation": "取 a=2，b=3。计算 B(a,b)^2 的秩。这个数值能提示 B(a,b)^2 是否具有与 J3(0)^2 相同的秩 1。"
+      },
+      "expert": {
+        "value": 1,
+        "tolerance": 0,
+        "why": "B(2,3)^2 只有 (1,3) 元 2·3=6 非零，因此秩为 1，与 A^2 的秩一致。但单个数值不能代替一般参数讨论。",
+        "signals": [
+          "先写出 B^2",
+          "数非零行或非零列",
+          "注意还需一般条件"
+        ]
+      },
+      "card": {
+        "title": "先算 B^2 的秩",
+        "trigger": "遇到幂零矩阵先看低次幂",
+        "first_step": "写出 B(a,b)^2，再看非零元个数。",
+        "pitfall": "不要用一次数值代替完整参数讨论。"
+      }
+    },
+    {
+      "id": "cmc2022b-q4-a4",
+      "label": "证明骨架：秩条件推出参数",
+      "ability": "argument",
+      "primitive": "order",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "situation": "把下面的证明主线排成合理顺序，说明 B(a,b) 与 A=J3(0) 具有相同 Jordan 标准型当且仅当 a,b 均非零。",
+        "steps": [
+          {
+            "id": "s1",
+            "text": "A=J3(0) 满足 A^3=0、rank A=2、rank A^2=1，故它的零特征值只有一个 3 阶 Jordan 块。"
+          },
+          {
+            "id": "s2",
+            "text": "对任意 a,b，B(a,b) 是严格上三角矩阵，故 B^3=0，特征值全为 0。"
+          },
+          {
+            "id": "s3",
+            "text": "直接计算得 rank B(a,b)=2 当且仅当 a≠0 且 b≠0。"
+          },
+          {
+            "id": "s4",
+            "text": "直接计算得 B(a,b)^2 的 (1,3) 元为 ab，其余可能位置为 0，因此 rank B^2=1 当且仅当 ab≠0。"
+          },
+          {
+            "id": "s5",
+            "text": "在 3 阶幂零矩阵中，rank B=2（等价地 rank B^2=1）迫使 Jordan 块为单个 3 阶块 J3(0)。"
+          },
+          {
+            "id": "s6",
+            "text": "所以 B(a,b) 与 A 具有相同 Jordan 标准型当且仅当 a≠0 且 b≠0。"
+          }
+        ]
+      },
+      "expert": {
+        "order": [
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5",
+          "s6"
+        ],
+        "why": "先用目标矩阵 A 的 Jordan 块与幂次秩作为标准，再计算 B(a,b) 的幂次秩，最后由 3 阶幂零矩阵的块型唯一性得到参数条件。",
+        "signals": [
+          "先建立标准",
+          "再计算 B 的幂次秩",
+          "最后回扣 Jordan 块大小"
+        ]
+      },
+      "card": {
+        "title": "用幂次秩锁定块型",
+        "trigger": "幂零矩阵与 Jordan 标准型参数问题",
+        "first_step": "写出目标矩阵和参数矩阵的 M、M^2。",
+        "pitfall": "不要跳过 rank B^2 而只看 rank B。"
+      }
+    },
+    {
+      "id": "cmc2022b-q4-a5",
+      "label": "条件边界：特征多项式不够",
+      "ability": "condition",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "situation": "下列哪个矩阵与 A=J3(0) 有相同的特征多项式，但不具有相同的 Jordan 标准型？",
+        "options": [
+          {
+            "key": "A",
+            "text": "C1=[[0,1,0],[0,0,0],[0,0,0]]，即 J2(0)⊕J1(0)。"
+          },
+          {
+            "key": "B",
+            "text": "C2=[[0,1,0],[0,0,1],[0,0,0]]，即 J3(0)。"
+          },
+          {
+            "key": "C",
+            "text": "C3=diag(1,0,0)。"
+          },
+          {
+            "key": "D",
+            "text": "C4=diag(1,1,1)。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "C1 的特征多项式为 λ^3，与 A 相同；但它的 Jordan 块大小为 2+1，不是单个 3 阶块，因此 Jordan 标准型不同。",
+        "signals": [
+          "找相同特征多项式",
+          "比较 Jordan 块大小",
+          "识别 J2⊕J1"
+        ],
+        "traps": {
+          "B": "C2 的特征多项式同为 λ^3，但它就是 J3(0)，与 A 有相同 Jordan 标准型，不是反例。",
+          "C": "C3 的特征多项式是 λ^2(λ−1)，与 A 不同。",
+          "D": "C4 的特征多项式是 (λ−1)^3，与 A 不同。"
+        }
+      },
+      "card": {
+        "title": "特征多项式只定谱",
+        "trigger": "需要说明为什么不能只看特征多项式",
+        "first_step": "比较特征多项式，再比较 Jordan 块大小。",
+        "pitfall": "漏掉 J2⊕J1 这种同特征多项式但不同标准型的例子。"
+      }
+    },
+    {
+      "id": "cmc2022b-q4-a6",
+      "label": "同类变式：换特征值与目标块型",
+      "ability": "reflection",
+      "primitive": "expr",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "situation": "令 T=[[2,1,0],[0,2,0],[0,0,2]]=J2(2)⊕J1(2)，C(a,b)=[[2,a,0],[0,2,b],[0,0,2]]。求所有使 C(a,b) 与 T 具有相同 Jordan 标准型的参数条件，并把条件写成关于 a,b 的表达式。"
+      },
+      "expert": {
+        "expr": "ab=0 且 a^2+b^2≠0",
+        "why": "C(a,b)−2I=[[0,a,0],[0,0,b],[0,0,0]]，T−2I 的幂零标准型是 J2(0)⊕J1(0)。相同 Jordan 标准型等价于 rank(C−2I)=1（此时平方为零），即 ab=0 且 (a,b)≠(0,0)。",
+        "signals": [
+          "令 N=C−2I",
+          "比较 rank N",
+          "排除 a=b=0"
+        ]
+      },
+      "card": {
+        "title": "平移到零特征值再比较",
+        "trigger": "非零特征值相同，需比较 M−λI 的幂零块型",
+        "first_step": "令 N=C−λI，写出 N 与 N^2。",
+        "pitfall": "不要漏掉 a=b=0 时块型变化的情形。"
+      }
+    }
+  ],
+  "artifact": {
+    "prompt": "用 150–300 字回答：本题为何不能只用特征多项式；如何用 rank B 和 rank B^2 得到参数条件；并举一个相同特征多项式但 Jordan 标准型不同的反例；最后说明把零特征值换成 2、把目标块型换成 J2(2)⊕J1(2) 后方法如何迁移。",
+    "rubric": [
+      {
+        "id": "r1",
+        "text": "明确相同 Jordan 标准型需比较各特征值的 Jordan 块大小，可由 rank((M−λI)^k) 判断，不能只依赖特征多项式。",
+        "keywords": [
+          "Jordan 块",
+          "秩",
+          "特征多项式"
+        ]
+      },
+      {
+        "id": "r2",
+        "text": "对 A=J3(0) 与 B(a,b)，计算 rank B=2 与 rank B^2=1，等价得到 ab≠0。",
+        "keywords": [
+          "rank B=2",
+          "rank B^2=1",
+          "ab≠0"
+        ]
+      },
+      {
+        "id": "r3",
+        "text": "给出反例：J2(0)⊕J1(0) 与 J3(0) 的特征多项式同为 λ^3，但 Jordan 块大小不同。",
+        "keywords": [
+          "J2(0)⊕J1(0)",
+          "λ^3",
+          "反例"
+        ]
+      },
+      {
+        "id": "r4",
+        "text": "变式中令 N=C−2I，目标对应 J2(0)⊕J1(0)，需 rank N=1，得到 a=0 或 b=0 且 a,b 不全为 0。",
+        "keywords": [
+          "C−2I",
+          "rank N=1",
+          "a=0 或 b=0"
+        ]
+      },
+      {
+        "id": "r5",
+        "text": "总结可迁移方法：先用特征多项式定谱，再逐特征值比较各次幂秩；并注意 a=b=0 的边界情形。",
+        "keywords": [
+          "特征多项式定谱",
+          "各次幂秩",
+          "边界情形"
+        ]
+      }
+    ],
+    "expert_sample": "相同 Jordan 标准型不能只由特征多项式判定，必须比较同一特征值的 Jordan 块大小，这可由秩条件 rank((M−λI)^k) 反映。对 A=J3(0)，B(a,b) 已幂零，计算得 rank B=2 且 rank B^2=1，等价于 ab≠0。反例方面，J2(0)⊕J1(0) 与 J3(0) 的特征多项式同为 λ^3，但 Jordan 块为 2+1 而非 3，故 JNF 不同。变式中令 N=C−2I，目标 T 对应 J2(0)⊕J1(0)，需 rank N=1（且 N^2=0），得到 a=0 或 b=0 且 a,b 不全为 0；要单独排除 a=b=0 的边界情形。可迁移方法是：先用特征多项式定谱，再逐特征值比较各次幂秩。"
+  }
+}

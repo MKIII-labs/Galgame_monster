@@ -1,0 +1,33 @@
+{
+  "id": "prob-expect-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "E(X + Y) = E(X) + E(Y) 成立的条件是：",
+    "options": [
+      { "key": "A", "text": "X 与 Y 必须独立" },
+      { "key": "B", "text": "只要 E(X)、E(Y) 存在" },
+      { "key": "C", "text": "X 与 Y 必须同分布" },
+      { "key": "D", "text": "X 与 Y 必须不相关" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "期望的线性性是无条件的：只要两个期望存在，无论是否独立、是否相关，E(X+Y)=E(X)+E(Y) 都成立。独立性与不相关是方差可加性的条件。",
+    "signals": ["期望的加法", "是否要求独立"],
+    "traps": {
+      "A": "独立性是方差可加的充分条件，不是期望可加的条件。",
+      "C": "同分布完全不需要。",
+      "D": "不相关也不是期望可加的前提。"
+    }
+  },
+  "card": {
+    "title": "期望可加无条件",
+    "trigger": "E(X+Y)",
+    "first_step": "直接拆成 E(X)+E(Y)",
+    "pitfall": "把方差的条件套到期望上"
+  },
+  "source_ref": { "doc": "self-authored:probability", "loc": "数学期望" }
+}

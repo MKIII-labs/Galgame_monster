@@ -2,9 +2,12 @@
 """路径常量、共享锁与带 mtime 缓存的 JSON 读写"""
 import json
 import os
+import random
 import threading
+import time
 import uuid
 
+APP_VERSION = "2.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(ROOT, "web")
 DATA_DIR = os.path.join(ROOT, "data")             # 运行时数据（整目录 gitignore）
@@ -17,6 +20,8 @@ PROFILE_FILE = os.path.join(DATA_DIR, "user_profile.json")
 SESSION_FILE = os.path.join(DATA_DIR, "sessions.json")
 LEGACY_HISTORY = os.path.join(DATA_DIR, "chat_history.txt")
 USAGE_FILE = os.path.join(DATA_DIR, "token_usage.jsonl")   # 用量流水（每行一条 JSON）
+TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")          # 定时提醒 / 主动聊天任务
+NOTIFY_DIR = os.path.join(DATA_DIR, "notify")              # 系统通知的载荷文件（中文走文件，避开命令行编码坑）
 
 _lock = threading.Lock()
 ACTIVE_STREAMS = {}  # session_id -> threading.Event
@@ -45,9 +50,36 @@ def read_json(path, default=None):
     return data
 
 
-def write_json(path, obj):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+def write_json(path, obj, indent=2):
+    """写 JSON。先落临时文件再 os.replace —— 中途崩溃/断电不会把原文件写坏
+    （os.replace 在同一分区上是原子的）。
+    indent=None 写紧凑格式，用于「只有程序读」的文件（sessions / 用量之类）。
+
+    tmp 用唯一名 + replace 失败重试：sessions.json 已经到十几 MB，写入窗口里
+    很容易撞上杀软扫描或另一个读句柄，Windows 会直接抛 WinError 5（拒绝访问）。
+    以前共用 `path + ".tmp"` 且不重试，一次失败就丢掉整份进度快照（NOTE 43.168）。"""
+    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), random.randrange(1 << 30))
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=indent)
+        last = None
+        for i in range(3):
+            try:
+                os.replace(tmp, path)
+                last = None
+                break
+            except OSError as e:
+                last = e
+                time.sleep(0.1 * (3 ** i))     # 0.1 / 0.3 / 0.9 秒
+        if last is not None:
+            raise last
+    except OSError as e:
+        print(f"[存储] 写入失败 {os.path.basename(path)}：{e}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return
     try:
         _json_cache[path] = (os.path.getmtime(path), obj)
     except OSError:

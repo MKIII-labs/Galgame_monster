@@ -1,0 +1,34 @@
+{
+  "id": "cmc-pre-04",
+  "test": "pre",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "反常积分 ∫₁^∞ 1/x^p dx 收敛的充要条件是：",
+    "options": [
+      { "key": "A", "text": "p > 0" },
+      { "key": "B", "text": "p > 1" },
+      { "key": "C", "text": "p < 1" },
+      { "key": "D", "text": "对任意实数 p 都收敛" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "无穷区间上的 p 积分：p > 1 收敛，p ≤ 1 发散（p = 1 时是 ln x，发散）。",
+    "signals": ["积分上限是无穷", "被积函数是 1/x^p"],
+    "traps": {
+      "A": "p 在 (0,1] 时仍然发散，例如 p=1 得 ln x。",
+      "C": "p < 1 是瑕积分 ∫₀¹ 1/x^p 的收敛条件，与无穷区间相反。",
+      "D": "p ≤ 1 时发散，不是任意 p。"
+    }
+  },
+  "card": {
+    "title": "无穷区间 p 积分：p>1",
+    "trigger": "∫₁^∞ 1/x^p",
+    "first_step": "先分清是无穷区间还是瑕点",
+    "pitfall": "把无穷区间与瑕积分的条件记反"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-pre-04" }
+}

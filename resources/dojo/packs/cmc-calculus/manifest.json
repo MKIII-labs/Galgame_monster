@@ -1,0 +1,56 @@
+{
+  "id": "cmc-calculus",
+  "name": "CMC 非数学类（基础诊断）",
+  "desc": "全国大学生数学竞赛（非数学类）初赛的基础判断诊断；深度研究请去「深度研究」的 CMC 数学 A/B。",
+  "version": 1,
+  "grade": "official",
+  "alignment": {
+    "standard": "CMC 非数学类初赛（高等数学）",
+    "dimensions": ["极限", "一元微分", "一元积分", "级数", "多元微积分", "微分方程"]
+  },
+  "ability_weights": {
+    "framing": 0.15,
+    "assumption": 0.2,
+    "method": 0.25,
+    "condition": 0.25,
+    "evidence": 0.1,
+    "reflection": 0.05
+  },
+  "entry": { "minutes": 6, "first_unit": "cmc-lim-01" },
+  "sequence": [
+    "cmc-lim-01",
+    "cmc-lim-02",
+    "cmc-mvt-01",
+    "cmc-deriv-01",
+    "cmc-int-01",
+    "cmc-improper-01",
+    "cmc-series-01",
+    "cmc-series-02",
+    "cmc-implicit-01",
+    "cmc-double-01",
+    "cmc-line-01",
+    "cmc-ode-01"
+  ],
+  "assessment": {
+    "pre": [
+      "cmc-pre-01",
+      "cmc-pre-02",
+      "cmc-pre-03",
+      "cmc-pre-04",
+      "cmc-pre-05",
+      "cmc-pre-06",
+      "cmc-pre-07",
+      "cmc-pre-08"
+    ],
+    "post": [
+      "cmc-post-01",
+      "cmc-post-02",
+      "cmc-post-03",
+      "cmc-post-04",
+      "cmc-post-05",
+      "cmc-post-06",
+      "cmc-post-07",
+      "cmc-post-08"
+    ]
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "id": "cmc-post-05",
+  "test": "post",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "级数 ∑(n=1→∞) 1/n² 的敛散性是：",
+    "options": [
+      { "key": "A", "text": "收敛" },
+      { "key": "B", "text": "发散" },
+      { "key": "C", "text": "条件收敛" },
+      { "key": "D", "text": "现有信息无法判断" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "这是 p = 2 的 p 级数，p > 1 所以收敛；它是正项级数，收敛就是绝对收敛，不存在条件收敛。",
+    "signals": ["通项是 1/n^p", "p = 2"],
+    "traps": {
+      "B": "p 级数在 p ≤ 1 时发散，p=2 不属于。",
+      "C": "正项级数只有收敛/发散，不存在条件收敛。",
+      "D": "p 级数判别法已经足够。"
+    }
+  },
+  "card": {
+    "title": "p 级数看 p",
+    "trigger": "∑1/n^p",
+    "first_step": "读出 p，与 1 比较",
+    "pitfall": "把正项级数说成条件收敛"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-post-05" }
+}

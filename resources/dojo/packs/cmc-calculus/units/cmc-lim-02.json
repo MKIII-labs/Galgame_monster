@@ -1,0 +1,28 @@
+{
+  "id": "cmc-lim-02",
+  "ability": "method",
+  "primitive": "order",
+  "judge": "L2",
+  "minutes": 5,
+  "payload": {
+    "situation": "求 lim(x→0⁺) xˣ。把下面的步骤排成一条可执行的路线。",
+    "steps": [
+      { "id": "s1", "text": "先判断类型：这是 0⁰ 型不定式" },
+      { "id": "s2", "text": "取对数，把 xˣ 写成 e^(x·ln x)" },
+      { "id": "s3", "text": "求 lim(x→0⁺) x·ln x = 0（令 t = 1/x 或洛必达）" },
+      { "id": "s4", "text": "回代得到 e⁰ = 1" }
+    ]
+  },
+  "expert": {
+    "order": ["s1", "s2", "s3", "s4"],
+    "why": "幂指函数先定型，再取对数降成乘积；x·ln x 是 0·(−∞) 型，化为 t 的分式后用洛必达。最后一定要回代，停在指数上会丢掉 e 这一层。",
+    "signals": ["底数和指数都在变", "出现 0⁰ 或 1^∞", "乘积里带 ln 且趋于 0·∞"]
+  },
+  "card": {
+    "title": "幂指函数先取对数",
+    "trigger": "底数与指数都含自变量",
+    "first_step": "写成 e^(指数·ln 底数)，把幂指型降成乘积型",
+    "pitfall": "算出指数极限就交卷，忘记回代 e"
+  },
+  "source_ref": { "doc": "self-authored", "loc": "极限·幂指函数" }
+}

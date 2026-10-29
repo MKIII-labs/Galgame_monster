@@ -1,0 +1,30 @@
+{
+  "id": "cumcm-series-01",
+  "ability": "method",
+  "primitive": "order",
+  "judge": "L2",
+  "minutes": 5,
+  "payload": {
+    "situation": "要对一条时间序列建立 ARIMA 模型。请把下面的步骤排成合理顺序。",
+    "steps": [
+      { "id": "s1", "text": "画时序图，观察趋势与季节性" },
+      { "id": "s2", "text": "做平稳性检验（如 ADF）" },
+      { "id": "s3", "text": "不平稳则差分，直到通过平稳性检验" },
+      { "id": "s4", "text": "用 ACF / PACF 或信息准则确定阶数" },
+      { "id": "s5", "text": "拟合模型并做残差白噪声检验" },
+      { "id": "s6", "text": "用通过检验的模型做预测并评估误差" }
+    ]
+  },
+  "expert": {
+    "why": "先看图判断趋势与季节，再检验平稳性；不平稳先差分，平稳后定阶，拟合后必须检查残差是否白噪声，最后才预测。残差没通过就回去改阶数或差分。",
+    "signals": ["ARIMA", "时间序列", "需要定阶"],
+    "order": ["s1", "s2", "s3", "s4", "s5", "s6"]
+  },
+  "card": {
+    "title": "ARIMA 六步",
+    "trigger": "时间序列建模",
+    "first_step": "画图 + 平稳性检验",
+    "pitfall": "跳过残差检验直接预测"
+  },
+  "source_ref": { "doc": "self-authored:cumcm", "loc": "时间序列" }
+}

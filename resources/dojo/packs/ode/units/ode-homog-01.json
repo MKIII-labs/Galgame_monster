@@ -1,0 +1,33 @@
+{
+  "id": "ode-homog-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "方程 y′ = (x + y)/x 的常用解法是：",
+    "options": [
+      { "key": "A", "text": "令 u = y/x，化为可分离方程" },
+      { "key": "B", "text": "令 u = x + y" },
+      { "key": "C", "text": "直接分离变量" },
+      { "key": "D", "text": "两边对 x 求导" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "右边可写成 1 + y/x，是齐次方程。令 u=y/x（即 y=ux，y′=u+xu′），代入得 xu′=1，变成可分离方程。",
+    "signals": ["右边只依赖 y/x", "形如 f(y/x)"],
+    "traps": {
+      "B": "令 u=x+y 后导数关系更复杂，不会简化。",
+      "C": "x+y 不能拆成 x 的函数乘 y 的函数。",
+      "D": "对已含 y′ 的方程再求导会升阶。"
+    }
+  },
+  "card": {
+    "title": "齐次方程令 u=y/x",
+    "trigger": "y′ = f(y/x)",
+    "first_step": "把右边整理成 y/x 的函数",
+    "pitfall": "试图直接分离变量"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "齐次方程" }
+}

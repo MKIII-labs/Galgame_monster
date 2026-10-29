@@ -1,0 +1,28 @@
+{
+  "id": "cmc-double-01",
+  "ability": "condition",
+  "primitive": "multi_select",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "把二重积分化成极坐标时，下列哪些是必须同时做到的？（多选）",
+    "options": [
+      { "key": "A", "text": "用极坐标不等式表示积分区域" },
+      { "key": "B", "text": "把被积函数改写成 r、θ 的形式" },
+      { "key": "C", "text": "把面积元 dxdy 换成 r·dr·dθ" },
+      { "key": "D", "text": "两个积分限都必须是常数" }
+    ]
+  },
+  "expert": {
+    "choice": ["A", "B", "C"],
+    "why": "换元三件事：区域、被积函数、面积元，缺一不可。雅可比行列式是 r，所以面积元多出一个 r——这是最容易漏的一步。积分限不必都是常数：r 的上限常常是 θ 的函数。",
+    "signals": ["区域是圆/扇形/圆环", "被积函数含 x²+y²", "换元后面积元要乘雅可比"]
+  },
+  "card": {
+    "title": "换元三件套：区域、函数、面积元",
+    "trigger": "二重积分区域是圆或扇形",
+    "first_step": "先写区域不等式，再换被积函数，最后乘雅可比 r",
+    "pitfall": "漏掉面积元里的 r，或以为积分限必须全是常数"
+  },
+  "source_ref": { "doc": "self-authored", "loc": "重积分·极坐标" }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "prob-pvalue-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "某检验得到 p = 0.03。最准确的解释是：",
+    "options": [
+      { "key": "A", "text": "原假设为真的概率是 3%" },
+      { "key": "B", "text": "在原假设为真的前提下，观察到当前或更极端结果的概率是 3%" },
+      { "key": "C", "text": "备择假设为真的概率是 97%" },
+      { "key": "D", "text": "效应量很大" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "p 值是在 H0 成立时，出现当前或更极端结果的概率。它不是 H0 为真的概率，也不是 H1 为真的概率，更不衡量效应大小。",
+    "signals": ["p 值", "假设检验", "问解释"],
+    "traps": {
+      "A": "p 值不是 H0 的后验概率。",
+      "C": "1−p 也不是 H1 的概率。",
+      "D": "p 值小可能来自大样本下的微小效应，与效应量无关。"
+    }
+  },
+  "card": {
+    "title": "p 值是条件概率",
+    "trigger": "解释 p 值",
+    "first_step": "固定 H0，问极端结果出现的概率",
+    "pitfall": "说成 H0 为真的概率"
+  },
+  "source_ref": { "doc": "self-authored:probability", "loc": "假设检验" }
+}

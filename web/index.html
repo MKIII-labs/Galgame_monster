@@ -1,20 +1,64 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="light" data-theme-mode="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- color-scheme 让原生控件/滚动条跟随主题；theme-color 给 Edge/Chrome 应用窗口的标题栏上色 -->
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" id="theme-color" content="#ffffff">
+<link rel="icon" type="image/png" href="/static/icons/app-64.png">
 <title>Galgame_monster</title>
-<link rel="stylesheet" href="/static/style.css">
+<script>
+  /* Electron 壳里 preload 已注入 window.gmWin：根节点挂标记，自绘标题栏随之出现。
+     用 --app 回退时这里什么都不做，仍由系统标题栏负责。 */
+  if (window.gmWin) document.documentElement.classList.add('electron');
+  /* 开屏前先恢复上次主题：避免「深色用户先看到白底再整体变黑」。
+     主题清单与 core.js 的 THEME_META 保持一致；非法值忽略。 */
+  (function () {
+    try {
+      var t = localStorage.getItem('gm.theme') || '';
+      var known = { light: 0, dark: 1, 'high-contrast': 1, midnight: 1, forest: 1, sepia: 0 };
+      if (Object.prototype.hasOwnProperty.call(known, t)) {
+        var dark = !!known[t];
+        document.documentElement.setAttribute('data-theme', t);
+        document.documentElement.setAttribute('data-theme-mode', dark ? 'dark' : 'light');
+        document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+        var tc = document.querySelector('meta[name="theme-color"]');
+        if (tc) tc.setAttribute('content', dark ? '#14161a' : '#f7f8fa');
+      }
+    } catch (e) { /* 隐私模式禁用 localStorage：退回 media query */ }
+  })();
+</script>
+<!-- 样式按功能拆分，按顺序加载（顺序即层叠顺序，等价于原来的单文件） -->
+<link rel="stylesheet" href="/static/css/base.css">
+<link rel="stylesheet" href="/static/css/notes.css">
+<link rel="stylesheet" href="/static/css/vscode.css">
+<link rel="stylesheet" href="/static/css/ide.css">
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
+<link rel="stylesheet" href="/static/css/polish.css">
+<link rel="stylesheet" href="/static/css/gal.css">
+<link rel="stylesheet" href="/static/css/search.css">
+<link rel="stylesheet" href="/static/css/remind.css">
+<link rel="stylesheet" href="/static/css/skills.css">
+<link rel="stylesheet" href="/static/css/hall.css">
+<link rel="stylesheet" href="/static/css/hall-stock.css">
+<link rel="stylesheet" href="/static/css/hall-math.css">
+<link rel="stylesheet" href="/static/css/hall-dojo.css">
+<link rel="stylesheet" href="/static/css/hall-interview.css">
+<link rel="stylesheet" href="/static/css/work.css">
+<link rel="stylesheet" href="/static/css/turndots.css">
+<!-- 复古像素主题用的点阵字体：只有 pixel 主题会引用这个字体族，因此 woff2 实际是「用到才下载」；
+     非阻塞加载，失败即移除并回退到系统宋体 / 等宽（保证离线可用） -->
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/dotgothic16/index.css"
+      media="print" onload="this.media='all'" onerror="this.remove()">
 <!-- 第三方样式非阻塞加载（否则慢 CDN 会拖住首屏）；加载后由 app.js 补齐渲染 -->
 <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-light"
       media="print" onload="this.media='all'"
       onerror="__fbc(this,'https://cdn.staticfile.org/highlight.js/11.9.0/styles/github.min.css')">
 <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-dark" disabled
       media="print" onload="this.media='all'">
-<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.css"
+<link rel="stylesheet" href="/static/vendor/katex/katex.min.css"
       media="print" onload="this.media='all'"
       onerror="__fbc(this,'https://cdn.staticfile.org/KaTeX/0.16.9/katex.min.css')">
 <script>
@@ -37,48 +81,189 @@
     s.onload = function () { window.__libReady(name); };
     document.head.appendChild(s);
   };
+  /* 可选三方库改为「首屏之后空闲时」再拉：
+     highlight / echarts / vis-network 只在用到时才需要，放在这里能少掉 3s 的 load 等待 */
+  window.__lazyLibs = {
+    hljs: ['https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/highlight.min.js',
+           'https://cdn.staticfile.org/highlight.js/11.9.0/highlight.min.js'],
+    echarts: ['https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js',
+              'https://cdn.staticfile.org/echarts/5.5.0/echarts.min.js'],
+    /* 图谱库内置在本地：断网也能画关系图；CDN 仅作为文件缺失时的兜底 */
+    vis: ['/static/vendor/vis-network/vis-network.min.js',
+          'https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js',
+          'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js'],
+    /* mermaid 只在实际出现 ```mermaid 块时按需拉取（体积较大，不做空闲预加载） */
+    mermaid: ['https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js',
+              'https://unpkg.com/mermaid@11/dist/mermaid.min.js']
+  };
+  window.__lazyBusy = {};
+  window.loadLazyLib = function (name) {
+    if (!name || window.__libs[name] || window.__lazyBusy[name]) return;
+    var urls = window.__lazyLibs[name] || [];
+    var i = 0;
+    window.__lazyBusy[name] = true;
+    function next() {
+      if (i >= urls.length) { window.__lazyBusy[name] = false; return; }
+      var s = document.createElement('script');
+      s.async = true;
+      s.src = urls[i++];
+      s.onload = function () { window.__lazyBusy[name] = false; window.__libReady(name); };
+      s.onerror = next;
+      document.head.appendChild(s);
+    }
+    next();
+  };
+  window.addEventListener('load', function () {
+    var kick = function () {
+      ['hljs', 'echarts', 'vis'].forEach(function (n) { window.loadLazyLib(n); });
+    };
+    if (window.requestIdleCallback) requestIdleCallback(kick, { timeout: 2000 });
+    else setTimeout(kick, 300);
+  });
 </script>
 </head>
 <body>
+<!-- 图标库（SVG sprite）：24×24 线性图标，笔画与配色全部由 .ic 类控制（currentColor 跟随主题） -->
+<svg id="icon-sprite" xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-attach" viewBox="0 0 24 24"><path d="M20.5 11.7l-8.2 8.2a5.1 5.1 0 01-7.2-7.2l8.7-8.7a3.4 3.4 0 014.8 4.8l-8.7 8.7a1.7 1.7 0 01-2.4-2.4l8-8"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><circle cx="8.5" cy="10" r="1.6"/><path d="M3.6 17.4l4.9-4.9 3.4 3.4 3-3 5.5 5.5"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="10.5" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0013 0M12 18v3"/></symbol>
+  <symbol id="i-record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M7.5 10l2.6 2.6-2.6 2.6M13 15.2h3.6"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 015.5 5h3.2l2 2.4h7.8A2.5 2.5 0 0121 9.9v7.6a2.5 2.5 0 01-2.5 2.5h-13A2.5 2.5 0 013 17.5z"/></symbol>
+  <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 015.5 5h3.2l2 2.4h7.8A2.5 2.5 0 0121 9.9v7.6a2.5 2.5 0 01-2.5 2.5h-13A2.5 2.5 0 013 17.5z"/><path d="M12 12v5M9.5 14.5h5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.2"/><path d="M20 20l-4.3-4.3"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.5v13M5.5 12h13"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20h4.2L19 9.2a1.6 1.6 0 000-2.3l-1.9-1.9a1.6 1.6 0 00-2.3 0L4 15.8z"/><path d="M13.8 6.5l3.7 3.7"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15M9.5 7V5.2A1.2 1.2 0 0110.7 4h2.6a1.2 1.2 0 011.2 1.2V7M6.5 7l.9 12.1a1.5 1.5 0 001.5 1.4h6.2a1.5 1.5 0 001.5-1.4L17.5 7"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4.5h6M10.2 4.5l-.7 5.1L6.5 12h11l-3-2.4-.7-5.1M12 12v7.5"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 01-13.7 5.6M4 12a8 8 0 0113.7-5.6"/><path d="M18 3.5v3.2h-3.2M6 20.5v-3.2h3.2"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4.5 20V11.5M9.75 20V5M15 20v-6.5M20.25 20V8.5"/></symbol>
+  <symbol id="i-brain" viewBox="0 0 24 24"><circle cx="6" cy="6.5" r="2.4"/><circle cx="18" cy="7.5" r="2.4"/><circle cx="11" cy="18" r="2.4"/><path d="M8 7.5l7.6 1.2M7.4 8.6l2.4 7M16.9 9.7l-4 6.2"/></symbol>
+  <symbol id="i-note" viewBox="0 0 24 24"><path d="M6 3.5h8l4.5 4.5v12a1.5 1.5 0 01-1.5 1.5H6A1.5 1.5 0 014.5 20V5A1.5 1.5 0 016 3.5z"/><path d="M14 3.7V8h4.3M8.5 12.5h7M8.5 16h4.5"/></symbol>
+  <symbol id="i-file-plus" viewBox="0 0 24 24"><path d="M6.5 3.5h6.5l4.5 4.5v12a1.5 1.5 0 01-1.5 1.5H6.5A1.5 1.5 0 015 20V5a1.5 1.5 0 011.5-1.5z"/><path d="M13 3.7V8h4.3M12 12.5v6M9 15.5h6"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 108.5-8.5A8.5 8.5 0 005 7.2"/><path d="M3.4 3.6v3.9h3.9M12 8.2V12l2.8 1.7"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M4.9 7.5l1.9 1.1M17.2 15.4l1.9 1.1M4.9 16.5l1.9-1.1M17.2 8.6l1.9-1.1"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 24 24"><path d="M20.5 14.6A8.6 8.6 0 019.4 3.5a8.6 8.6 0 1011.1 11.1z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8.5 5.5l10 6.5-10 6.5z"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.2"/><path d="M3 9.2h18M8 5v4.2M16 5v4.2M8 14.8h8"/></symbol>
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 17.5V6.2l10-2v11.3"/><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="16.5" cy="15.5" r="2.5"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9.5h3.2L11.5 6v12L7.2 14.5H4z"/><path d="M15 9.5a3.6 3.6 0 010 5M17.8 7a7.5 7.5 0 010 10"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4.5 5.5h15a1.5 1.5 0 011.5 1.5v8a1.5 1.5 0 01-1.5 1.5H9.8L5 20v-3.5H4.5A1.5 1.5 0 013 15V7a1.5 1.5 0 011.5-1.5z"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15.5V4M8 8l4-4 4 4M4.5 15.5V19a1.5 1.5 0 001.5 1.5h12a1.5 1.5 0 001.5-1.5v-3.5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11.5M8 11.5l4 4 4-4M4.5 15.5V19a1.5 1.5 0 001.5 1.5h12a1.5 1.5 0 001.5-1.5v-3.5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5l8.5 15H3.5z"/><path d="M12 10v4M12 17v.01"/></symbol>
+  <symbol id="i-cross" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></symbol>
+  <symbol id="i-question" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 114 2c-.9.7-1.6 1.2-1.6 2.4M12 17v.01"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M12 3.5l8 4v9l-8 4-8-4v-9z"/><path d="M4 7.5l8 4 8-4M12 11.5v9"/></symbol>
+  <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/></symbol>
+  <symbol id="i-bulb" viewBox="0 0 24 24"><path d="M9.5 18.5h5M10.5 21h3"/><path d="M12 3.5a5.5 5.5 0 00-3.2 9.9c.5.4.7.9.7 1.5v.6h5v-.6c0-.6.2-1.1.7-1.5A5.5 5.5 0 0012 3.5z"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M9.5 7.5L5 12l4.5 4.5M14.5 7.5L19 12l-4.5 4.5"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h16M4 17.5h10"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M6 3.5h11a1.5 1.5 0 011.5 1.5v14a1.5 1.5 0 01-1.5 1.5H6a2 2 0 01-2-2v-13a2 2 0 012-2z"/><path d="M4.5 17.5h14M8 7.5h7M8 11h5"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-2.3-5.6"/><path d="M20 4v4.2h-4.2"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.2"/></symbol>
+  <symbol id="i-graph" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.2"/><circle cx="5" cy="17.5" r="2.2"/><circle cx="19" cy="17.5" r="2.2"/><path d="M10.6 7l-4 8.4M13.4 7l4 8.4M7.2 17.5h9.6"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 3.5h11l3.5 3.5v13a1.5 1.5 0 01-1.5 1.5H5A1.5 1.5 0 013.5 20V5A1.5 1.5 0 015 3.5z"/><path d="M7.5 3.5v5h8v-5M7.5 20.5v-6h9v6"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="3.5" width="12" height="14" rx="2"/><path d="M15.5 20.5h-9a2 2 0 01-2-2V7"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></symbol>
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3.4"/><path d="M9 4.8v14.4"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="7" r="2.2"/><path d="M6 7.2v9.6"/><path d="M6 13c0-3 3-6 6-6h3.8"/></symbol>
+  <symbol id="i-select" viewBox="0 0 24 24"><path d="M8 4H6.5A2.5 2.5 0 004 6.5V8M16 4h1.5A2.5 2.5 0 0120 6.5V8M20 16v1.5a2.5 2.5 0 01-2.5 2.5H16M8 20H6.5A2.5 2.5 0 014 17.5V16"/><path d="M12 8v8M14.5 8h-5"/></symbol>
+  <symbol id="i-skip" viewBox="0 0 24 24"><path d="M6 5.8l9 6.2-9 6.2z"/><path d="M17.5 5.5v13"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.6 2.6 2.6 14.4 0 17M12 3.5c-2.6 2.6-2.6 14.4 0 17"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/></symbol>
+  <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></symbol>
+  <symbol id="i-check-square" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M7.5 12.2l3.1 3.1 6-6.2"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M3.5 7.5L12 3l8.5 4.5v9L12 21l-8.5-4.5z"/><path d="M3.5 7.5L12 12l8.5-4.5M12 12v9"/></symbol>
+  <!-- 自绘标题栏的窗口按钮（Electron 壳） -->
+  <symbol id="i-win-min" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-win-max" viewBox="0 0 24 24"><rect x="5.5" y="5.5" width="13" height="13" rx="1.6"/></symbol>
+  <symbol id="i-win-restore" viewBox="0 0 24 24"><rect x="5" y="8.5" width="10.5" height="10.5" rx="1.6"/><path d="M8.6 8.5V6.6A1.6 1.6 0 0110.2 5h7.2a1.6 1.6 0 011.6 1.6v7.2a1.6 1.6 0 01-1.6 1.6h-1.9"/></symbol>
+  <symbol id="i-win-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+</svg>
+<!-- 自绘标题栏：只在 Electron 壳里显示（html.electron）；回退到 Edge --app 时整条隐藏 -->
+<header id="titlebar">
+  <div class="tb-brand">
+    <!-- 图标用矢量绘制（形状/配色按 app.ico 复刻：蓝 #4d6bfe 圆角方块 + 白色四角星）；
+         位图在 16px 缩放下尖角会糊，矢量在任意 DPI 都清晰 -->
+    <svg class="tb-logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <rect x="0.75" y="0.75" width="30.5" height="30.5" rx="5.6" fill="#4d6bfe"/>
+      <path d="M16 5 L18 13.88 L27 16 L18.12 17.88 L16 27 L13.88 18 L5 16 L13.75 14 Z" fill="#fff"/>
+    </svg>
+    <span class="tb-name">Galgame_monster</span>
+  </div>
+  <div class="tb-grip" title="拖动窗口"></div>
+  <div class="tb-actions">
+    <button id="tb-min" class="tb-btn" type="button" title="最小化" aria-label="最小化"><svg class="ic"><use href="#i-win-min"/></svg></button>
+    <button id="tb-max" class="tb-btn" type="button" title="最大化" aria-label="最大化"><svg class="ic"><use href="#i-win-max"/></svg></button>
+    <button id="tb-close" class="tb-btn tb-close" type="button" title="关闭" aria-label="关闭"><svg class="ic"><use href="#i-win-close"/></svg></button>
+  </div>
+</header>
 <div id="app">
   <!-- 侧栏 -->
   <aside id="sidebar">
+    <button id="sidebar-toggle" class="sidebar-toggle" type="button" title="收起侧栏"
+            aria-label="收起侧栏" aria-controls="sidebar" aria-expanded="true">
+      <svg class="ic"><use href="#i-sidebar"/></svg>
+    </button>
+    <button id="session-search-btn" class="sidebar-icon-btn" type="button" title="搜索会话"
+            aria-label="搜索会话" aria-controls="session-search-modal" aria-expanded="false">
+      <svg class="ic"><use href="#i-search"/></svg>
+    </button>
+    <div class="sidebar-body">
     <div class="side-top">
-      <button id="btn-new" class="new-chat">＋ 新建对话</button>
-      <div id="mode-switch" class="mode-switch" title="在「Solo 对话」「IDE 工作区」「GAL 演出」之间切换">
+      <button id="btn-new" class="new-chat"><svg class="ic"><use href="#i-plus"/></svg>新建对话</button>
+      <div id="mode-switch" class="mode-switch" title="在「Solo 对话」「IDE 工作区」「GAL 演出」「功能大厅」之间切换">
         <button class="ms-btn active" data-mode="solo">Solo</button>
         <button class="ms-btn" data-mode="ide">IDE</button>
-        <button class="ms-btn" data-mode="gal">GAL</button>
+        <button class="ms-btn" data-mode="hall">大厅</button>
+        <button class="ms-btn" data-mode="work">工作台</button>
       </div>
     </div>
     <div class="side-label">会话记录</div>
     <div id="session-list" class="session-list"></div>
     <div class="side-foot">
-      <button id="btn-usage" class="ghost wide" title="Token 用量统计">📊 用量统计</button>
-      <button id="btn-kb" class="ghost wide" title="知识库 / 记忆图谱">🧠 知识库</button>
-      <button id="btn-notes" class="ghost wide" title="内置笔记库（Markdown + 双链 + 关系图谱）">📝 笔记</button>
-      <button id="btn-theme" class="ghost" title="切换主题">◐ 主题</button>
-      <button id="btn-settings" class="ghost" title="设置">⚙ 设置</button>
+      <button id="btn-usage" class="ghost wide" title="Token 用量统计"><svg class="ic"><use href="#i-chart"/></svg>用量统计</button>
+      <button id="btn-observe" class="ghost wide" title="学习观测：查看对话 / 竞技场 / 模拟卷留下的学习行为"><svg class="ic"><use href="#i-check-square"/></svg>学习观测</button>
+      <button id="btn-skills" class="ghost wide" title="Skill：可插拔的流程包，按需展开"><svg class="ic"><use href="#i-sparkle"/></svg>Skill</button>
+      <button id="btn-saves" class="ghost wide" title="会话存档 / 倒带：回退到旧存档点，或从旧点分叉出新线"><svg class="ic"><use href="#i-history"/></svg>存档</button>
+      <button id="btn-kb" class="ghost wide" title="知识库 / 记忆图谱"><svg class="ic"><use href="#i-brain"/></svg>知识库</button>
+      <button id="btn-notes" class="ghost wide" title="内置笔记库（Markdown + 双链 + 关系图谱）"><svg class="ic"><use href="#i-note"/></svg>笔记</button>
+      <button id="btn-theme" class="ghost" title="切换主题"><svg class="ic"><use href="#i-theme"/></svg>主题</button>
+      <button id="btn-settings" class="ghost" title="设置"><svg class="ic"><use href="#i-gear"/></svg>设置</button>
     </div>
-    <div id="status-line" class="status-line">加载中…</div>
+    <div id="status-line" class="status-line" aria-live="polite">加载中…</div>
+    </div><!-- /.sidebar-body -->
   </aside>
 
   <!-- 主区 -->
   <main id="main">
+    <!-- 侧栏收起后：左上角悬浮的圆形展开按钮 -->
+    <button id="sidebar-expand" class="sidebar-expand" type="button" title="展开侧栏"
+            aria-label="展开侧栏" aria-controls="sidebar" aria-expanded="false">
+      <svg class="ic"><use href="#i-sidebar"/></svg>
+    </button>
     <!-- IDE 模式：以「当前会话的沙箱」为根的工作区（Solo 模式下隐藏） -->
     <section id="ide-panel" class="ide-panel hidden">
       <!-- 顶部提示条：说明原生 IDE 的定位 -->
       <div id="ide-notice" class="ide-notice">
-        <span class="ide-notice-text">💡 本 IDE 仅用于临时直观查看文件改动；需要更强大的编辑与插件能力，请点左栏 🧩 用 VS Code 打开当前沙箱。</span>
+        <span class="ide-notice-text"><svg class="ic"><use href="#i-bulb"/></svg> 内置 IDE：查看与编辑当前沙箱的文件，并可直接在下方终端里跑命令。需要完整插件生态时，点左栏 <svg class="ic"><use href="#i-code"/></svg> 用 VS Code 打开同一目录。</span>
         <button id="ide-notice-close" class="ide-notice-x" title="不再提示">✕</button>
       </div>
       <div class="ide-body">
       <!-- 活动栏 -->
       <div class="ide-activity">
-        <button class="act-btn active" data-act="explorer" title="资源管理器">🗂</button>
-        <button class="act-btn" data-act="search" title="在沙箱内搜索">🔍</button>
+        <button class="act-btn active" data-act="explorer" title="资源管理器"><svg class="ic"><use href="#i-folder"/></svg></button>
+        <button class="act-btn" data-act="search" title="在沙箱内搜索"><svg class="ic"><use href="#i-search"/></svg></button>
+        <button class="act-btn" data-act="git" title="源代码管理">
+          <svg class="ic"><use href="#i-branch"/></svg>
+          <span id="ide-git-badge" class="act-badge hidden">0</span>
+        </button>
+        <button class="act-btn" id="ide-term-act" title="终端（Ctrl+`）"><svg class="ic"><use href="#i-terminal"/></svg></button>
         <span class="act-spacer"></span>
-        <button class="act-btn" id="ide-open-vscode" title="在 VS Code 中打开当前沙箱">🧩</button>
+        <button class="act-btn" id="ide-open-vscode" title="在 VS Code 中打开当前沙箱"><svg class="ic"><use href="#i-code"/></svg></button>
       </div>
 
       <!-- 侧边栏：资源管理器 -->
@@ -86,14 +271,21 @@
         <div class="ide-side-head">
           <span class="ide-side-title">资源管理器</span>
           <span class="ide-side-actions">
-            <button id="ide-newfile" class="ico-btn" title="新建文件">＋</button>
-            <button id="ide-newdir" class="ico-btn" title="新建文件夹">⊕</button>
-            <button id="ide-rename" class="ico-btn" title="重命名当前文件">✎</button>
-            <button id="ide-deldir" class="ico-btn" title="删除当前文件">🗑</button>
-            <button id="ide-refresh" class="ico-btn" title="刷新目录树">⟳</button>
+            <button id="ide-newfile" class="ico-btn" title="新建文件"><svg class="ic"><use href="#i-file-plus"/></svg></button>
+            <button id="ide-newdir" class="ico-btn" title="新建文件夹"><svg class="ic"><use href="#i-folder-plus"/></svg></button>
+            <button id="ide-rename" class="ico-btn" title="重命名当前文件"><svg class="ic"><use href="#i-pencil"/></svg></button>
+            <button id="ide-deldir" class="ico-btn" title="删除当前文件"><svg class="ic"><use href="#i-trash"/></svg></button>
+            <button id="ide-refresh" class="ico-btn" title="刷新目录树"><svg class="ic"><use href="#i-refresh"/></svg></button>
           </span>
         </div>
-        <div id="ide-root" class="ide-root" title="当前会话的沙箱目录"></div>
+        <div id="ide-workspace" class="ide-workspace" role="button" tabindex="0"
+             aria-expanded="true" title="折叠 / 展开工作区">
+          <span class="ide-ws-caret"><svg class="ic"><use href="#i-chevron"/></svg></span>
+          <span class="ide-ws-main">
+            <span class="ide-ws-name">工作区</span>
+            <span id="ide-root" class="ide-root"></span>
+          </span>
+        </div>
         <div id="ide-tree" class="ide-tree"></div>
       </div>
 
@@ -106,11 +298,55 @@
         </div>
       </div>
 
+      <!-- 侧边栏：源代码管理（Git） -->
+      <div class="ide-side hidden" id="ide-side-git">
+        <div class="ide-side-head">
+          <span class="ide-side-title">源代码管理</span>
+          <span class="ide-side-actions">
+            <button id="ide-git-refresh" class="ico-btn" title="刷新状态"><svg class="ic"><use href="#i-refresh"/></svg></button>
+          </span>
+        </div>
+        <div id="ide-git-body" class="ide-git">
+          <div id="ide-git-branch" class="ide-git-branch" title="点击管理分支">—</div>
+          <div id="ide-git-branch-menu" class="ide-git-branch-menu hidden"></div>
+          <div class="ide-git-tabs">
+            <button class="ide-git-tab active" data-git-tab="changes" type="button">更改</button>
+            <button class="ide-git-tab" data-git-tab="history" type="button">历史</button>
+            <button class="ide-git-tab" data-git-tab="ops" type="button">AI 操作</button>
+          </div>
+          <div class="ide-git-pane" id="ide-git-pane-changes">
+            <div id="ide-git-files" class="ide-git-files"></div>
+            <div class="ide-git-commit">
+              <textarea id="ide-git-msg" class="ide-git-msg" rows="3"
+                        placeholder="提交信息（Ctrl+Enter 提交）"></textarea>
+              <label class="check-row ide-git-amend"
+                     title="有暂存改动时会一起并入上次提交">
+                <input type="checkbox" id="ide-git-amend"> 修改上次提交信息（amend）
+              </label>
+              <div class="ide-git-actions">
+                <button id="ide-git-stage-all" class="ico-btn" title="全部暂存">＋</button>
+                <button id="ide-git-commit-btn" class="review-btn primary" type="button">提交</button>
+              </div>
+            </div>
+          </div>
+          <div class="ide-git-pane hidden" id="ide-git-pane-history">
+            <div id="ide-git-history" class="ide-git-files"></div>
+          </div>
+          <div class="ide-git-pane hidden" id="ide-git-pane-ops">
+            <div id="ide-git-ops" class="ide-git-files"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 侧栏宽度拖拽条（双击恢复 260px） -->
+      <div id="ide-side-resizer" class="ide-side-resizer" title="拖动调整侧栏宽度（双击恢复默认）"></div>
+
       <!-- 编辑区 -->
       <div class="ide-main">
         <div class="ide-tabsbar">
           <div id="ide-tabs" class="ide-tabs"></div>
-          <button id="ide-save" class="ico-btn" title="保存（Ctrl+S）">💾</button>
+          <button id="ide-diff-btn" class="ico-btn hidden" title="查看 AI 变更审阅"><svg class="ic"><use href="#i-history"/></svg></button>
+          <button id="ide-save" class="ico-btn" title="保存（Ctrl+S）"><svg class="ic"><use href="#i-save"/></svg></button>
         </div>
         <div class="ide-editor-wrap">
           <div id="ide-editor" class="ide-editor-area"></div>
@@ -121,8 +357,68 @@
           <div id="ide-image" class="ide-image hidden">
             <img id="ide-image-img" alt="">
           </div>
+          <div id="ide-diff" class="ide-diff hidden">
+            <div class="review-bar">
+              <div class="review-info">
+                <span class="review-title">变更完成，请确认是否接纳</span>
+                <span id="ide-review-file" class="review-file"></span>
+              </div>
+              <div class="review-actions">
+                <span id="ide-review-idx" class="review-idx"></span>
+                <button id="ide-review-prev" class="ico-btn" title="上一个文件">‹</button>
+                <button id="ide-review-next" class="ico-btn" title="下一个文件">›</button>
+                <button id="ide-review-undo" class="review-btn ghost" type="button">撤销 <kbd>Ctrl</kbd><kbd>Backspace</kbd></button>
+                <button id="ide-review-keep" class="review-btn primary" type="button">保留 <kbd>Ctrl</kbd><kbd>Enter</kbd></button>
+              </div>
+            </div>
+            <div id="ide-diff-editor" class="review-editor"></div>
+          </div>
+          <!-- Git 改动对比（只读）：点源代码管理里的文件时打开 -->
+          <div id="ide-git-diff" class="ide-diff hidden">
+            <div class="review-bar">
+              <div class="review-info">
+                <span class="review-title">Git 改动</span>
+                <span id="ide-git-diff-file" class="review-file"></span>
+              </div>
+              <div class="review-actions">
+                <span id="ide-git-diff-stat" class="review-idx"></span>
+                <button id="ide-git-diff-close" class="ico-btn" title="关闭（Esc）">✕</button>
+              </div>
+            </div>
+            <div id="ide-git-diff-editor" class="review-editor"></div>
+          </div>
+          <!-- 没有打开文件时的欢迎页（最近打开 + 常用快捷键） -->
+          <div id="ide-welcome" class="ide-welcome">
+            <div class="ide-welcome-inner">
+              <div class="ide-welcome-title">工作区</div>
+              <div class="ide-welcome-sub">从左侧选择一个文件开始，或按 Ctrl+P 快速打开</div>
+              <div class="ide-welcome-keys">
+                <div class="ide-welcome-key"><span>快速打开文件</span><kbd>Ctrl</kbd><kbd>P</kbd></div>
+                <div class="ide-welcome-key"><span>命令面板</span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></div>
+                <div class="ide-welcome-key"><span>保存</span><kbd>Ctrl</kbd><kbd>S</kbd></div>
+                <div class="ide-welcome-key"><span>收起 / 展开侧栏</span><kbd>Ctrl</kbd><kbd>B</kbd></div>
+              </div>
+              <div id="ide-welcome-recent" class="ide-welcome-recent"></div>
+            </div>
+          </div>
         </div>
-        <div class="ide-status">
+        <!-- 内置终端：ConPTY 会话，等于 VS Code 的集成终端（Ctrl+` 开关） -->
+        <div id="ide-term-resizer" class="ide-term-resizer hidden" title="拖动调整终端高度（双击恢复）"></div>
+        <section id="ide-term" class="ide-term hidden">
+          <div class="ide-term-head">
+            <span class="ide-term-title"><svg class="ic"><use href="#i-terminal"/></svg>终端</span>
+            <span id="ide-term-cwd" class="ide-term-cwd">PowerShell</span>
+            <span class="ide-term-actions">
+              <button id="ide-term-interrupt" class="ico-btn" title="中断（Ctrl+C）">■</button>
+              <button id="ide-term-restart" class="ico-btn" title="重启终端"><svg class="ic"><use href="#i-refresh"/></svg></button>
+              <button id="ide-term-clear" class="ico-btn" title="清屏"><svg class="ic"><use href="#i-trash"/></svg></button>
+              <button id="ide-term-close" class="ico-btn" title="关闭终端">✕</button>
+            </span>
+          </div>
+          <div id="ide-term-host" class="ide-term-host"></div>
+          <div id="ide-term-hint" class="ide-term-hint hidden"></div>
+        </section>
+        <div class="ide-status hidden">
           <span id="ide-status-path" class="ide-status-path">—</span>
           <span class="ide-status-right">
             <span id="ide-status-enc"></span>
@@ -153,14 +449,111 @@
       </div>
     </section>
 
+    <!-- IDE 模式：拖动它调整右侧聊天栏宽度 -->
+    <div id="ide-resizer" class="ide-resizer" title="拖动调整右侧聊天栏宽度（双击恢复默认）"></div>
+
+    <!-- 功能大厅：各类 AI 互动玩法的入口（卡片清单由 web/hall.js 的注册表生成） -->
+    <section id="hall-panel" class="hall-panel hidden">
+      <div class="hall-head">
+        <button id="hall-back" class="hall-back hidden" title="返回功能大厅">‹ 返回大厅</button>
+        <div class="hall-titles">
+          <div id="hall-title" class="hall-title">功能大厅</div>
+          <div id="hall-sub" class="hall-sub">AI 可以陪你一起玩的互动玩法</div>
+        </div>
+        <div class="hall-head-right"><span id="hall-badge" class="hall-badge"></span></div>
+      </div>
+      <div id="hall-body" class="hall-body"></div>
+    </section>
+
+    <!-- 工作台：个人日程 / 任务执行 / 产物（前端逻辑见 web/work.js） -->
+    <section id="work-panel" class="work-panel hidden">
+      <div class="work-head">
+        <div class="work-titles">
+          <div class="work-title">工作台</div>
+          <div class="work-sub" id="work-sub">日程 · 任务执行 · 产物</div>
+        </div>
+        <div class="work-head-right">
+          <select id="work-scene" class="work-select" title="场景包：办公 / 学习 / 生活"></select>
+          <button id="work-workflows" class="work-btn ghost" title="工作流：触发器 → 动作">工作流</button>
+          <button id="work-memory" class="work-btn ghost" title="统一记忆：检索与手动记录">记忆</button>
+          <button id="work-backup" class="work-btn ghost" title="导出 / 预检 / 恢复全量数据">备份</button>
+          <button id="work-refresh" class="work-btn ghost" title="刷新">刷新</button>
+        </div>
+      </div>
+      <div class="work-cols">
+        <section class="work-col" id="work-today">
+          <div class="work-col-head">
+            <span>日程</span>
+            <div class="work-col-tools">
+              <button id="work-range" class="work-btn small ghost" title="切换「今天」与「未来 7 天」">今天</button>
+              <span class="work-count" id="work-today-count"></span>
+              <button id="work-clean-events" class="work-btn small" title="清理已结束的一次性日程" aria-label="清理过期日程">清理</button>
+              <button id="work-new-event" class="work-btn small primary" title="新建日程" aria-label="新建日程">＋</button>
+            </div>
+          </div>
+          <div class="work-filter-row">
+            <input id="work-quick" class="work-input" placeholder="快速添加：明天 10 点 开会">
+            <button id="work-quick-add" class="work-btn small primary" title="按自然语言创建日程">＋</button>
+          </div>
+          <div class="work-col-body" id="work-today-body"></div>
+        </section>
+        <section class="work-col" id="work-tasks">
+          <div class="work-col-head">
+            <span>任务</span>
+            <div class="work-col-tools">
+              <span class="work-count" id="work-task-count"></span>
+              <button id="work-new-task" class="work-btn small" title="新建任务" aria-label="新建任务">＋</button>
+            </div>
+          </div>
+          <div class="work-filter-row">
+            <input id="work-task-search" class="work-input" placeholder="搜索标题 / 标签…">
+            <select id="work-task-filter" class="work-input" title="按状态筛选">
+              <option value="">全部</option>
+              <option value="running">进行中</option>
+              <option value="pending">待开始</option>
+              <option value="paused">已暂停</option>
+              <option value="failed">失败</option>
+              <option value="done">已完成</option>
+            </select>
+          </div>
+          <div class="work-col-body" id="work-task-body"></div>
+        </section>
+        <section class="work-col" id="work-artifacts">
+          <div class="work-col-head">
+            <span>产物</span>
+            <div class="work-col-tools">
+              <button id="work-artifact-toggle" class="work-btn small ghost" title="显示 / 隐藏工作区临时文件">交付物</button>
+              <span class="work-count" id="work-artifact-count"></span>
+            </div>
+          </div>
+          <div class="work-col-body" id="work-artifact-body"></div>
+        </section>
+      </div>
+      <div id="work-modal" class="work-modal hidden">
+        <div class="work-dialog" role="dialog" aria-modal="true">
+          <div class="work-dialog-head">
+            <span id="work-dialog-title">新建</span>
+            <button id="work-dialog-close" class="work-icon-btn" title="关闭">✕</button>
+          </div>
+          <div class="work-dialog-body" id="work-dialog-body"></div>
+          <div class="work-dialog-foot">
+            <button id="work-dialog-cancel" class="work-btn ghost">取消</button>
+            <button id="work-dialog-ok" class="work-btn primary">保存</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <div class="chat-col">
-    <!-- GAL 演出模式：舞台分层（背景 / 立绘 / 对白 / 选项） -->
+    <!-- GAL 舞台背景层：铺满整个对话列（含底部输入区），避免被输入框切出色块 -->
+    <div id="gal-bg" class="gal-bg"></div>
+    <div id="gal-bg-next" class="gal-bg"></div>
+    <!-- 特效遮罩层：与背景层同级，铺满整个对话列（含底部输入区）——闪光 / 黑屏才能盖到输入框 -->
+    <div id="gal-fx-layer"></div>
+    <!-- GAL 演出模式：舞台分层（立绘 / 对白 / 选项） -->
     <section id="gal-panel" class="gal-panel hidden">
       <div class="gal-stage">
-        <div id="gal-bg" class="gal-bg"></div>
-        <div id="gal-bg-next" class="gal-bg"></div>
         <div id="gal-sprites" class="gal-sprites"></div>
-        <div id="gal-fx-layer"></div>
         <div id="gal-bar" class="gal-bar">
           <button id="gal-char-btn" class="gal-char-btn" title="选择 / 管理角色">
             <img id="gal-char-btn-avatar" class="gal-char-btn-avatar" alt="">
@@ -170,16 +563,46 @@
           <select id="gal-tts-preset" class="gal-select" title="该角色的配音预设（「跟随全局」表示不用预设）"></select>
           <span id="gal-role-name" class="gal-role"></span>
           <span class="gal-bar-spacer"></span>
-          <button id="gal-skip" class="gal-tbtn gal-skip hidden" title="跳过当前朗读">⏭</button>
+          <button id="gal-auto-btn" class="gal-tbtn" title="自动播放（快捷键 A）"><svg class="ic"><use href="#i-play"/></svg>自动播放</button>
+          <button id="gal-review" class="gal-tbtn" title="回顾对话记录（快捷键 ↑）"><svg class="ic"><use href="#i-list"/></svg>回顾对话</button>
+          <button id="gal-journal-top" class="gal-tbtn" title="剧情档案：翻看已掌握的人物、势力与线索，以及当前方位"><svg class="ic"><use href="#i-book"/></svg>档案</button>
+          <button id="gal-skip" class="gal-tbtn gal-skip hidden" title="跳过当前朗读"><svg class="ic"><use href="#i-skip"/></svg></button>
           <button id="gal-more" class="gal-tbtn gal-more-btn" title="更多">⋯</button>
           <div id="gal-menu" class="gal-menu hidden">
-            <button id="gal-auto-btn" class="gal-tbtn" title="自动播放（快捷键 A）">▶ 自动播放</button>
-            <button id="gal-review" class="gal-tbtn" title="回顾对话记录">📜 回顾对话</button>
-            <button id="gal-script" class="gal-tbtn" title="AI 剧本：查看大纲 / 生成 / 重新生成">🎬 剧本</button>
-            <button id="gal-clone" class="gal-tbtn" title="快速克隆：用参考音频克隆角色音色（需本地 GPT-SoVITS 服务）">🎙 快速克隆</button>
-            <button id="gal-tts" class="gal-tbtn" title="朗读台词（TTS）：需在设置里配置语音合成">🔊 朗读开关</button>
-            <button id="gal-manage" class="gal-tbtn" title="角色管理：新建 / 编辑 / 导入 / 导出 / 删除">⚙ 角色管理</button>
-            <button id="gal-refresh" class="gal-tbtn" title="刷新角色列表（角色放在 data/gal/characters/）">⟳ 刷新角色</button>
+            <button id="gal-journal" class="gal-tbtn" title="剧情档案：翻看已掌握的人物、势力与线索，以及当前方位"><svg class="ic"><use href="#i-book"/></svg>剧情档案</button>
+            <button id="gal-save-btn" class="gal-tbtn" title="存档 / 倒带：回退到旧存档点，或从旧点分叉出新线"><svg class="ic"><use href="#i-history"/></svg>存档 / 倒带</button>
+            <button id="gal-script" class="gal-tbtn" title="AI 剧本：查看大纲 / 生成 / 重新生成"><svg class="ic"><use href="#i-film"/></svg>剧本</button>
+            <button id="gal-clone" class="gal-tbtn" title="快速克隆：用参考音频克隆角色音色（需本地 GPT-SoVITS 服务）"><svg class="ic"><use href="#i-mic"/></svg>快速克隆</button>
+            <button id="gal-tts" class="gal-tbtn" title="朗读台词（TTS）：需在设置里配置语音合成"><svg class="ic"><use href="#i-volume"/></svg>朗读开关</button>
+            <button id="gal-manage" class="gal-tbtn" title="角色管理：新建 / 编辑 / 导入 / 导出 / 删除"><svg class="ic"><use href="#i-gear"/></svg>角色管理</button>
+            <button id="gal-bg-btn" class="gal-tbtn" title="背景管理：上传 / 编辑标签 / 设为当前舞台背景"><svg class="ic"><use href="#i-image"/></svg>背景管理</button>
+            <button id="gal-bgm-btn" class="gal-tbtn" title="音乐管理：上传 / 编辑标签 / 设为当前舞台 BGM"><svg class="ic"><use href="#i-music"/></svg>音乐</button>
+            <button id="gal-stats-btn" class="gal-tbtn" title="显示 / 隐藏舞台状态参数（好感度、饥饿…）"><svg class="ic"><use href="#i-chart"/></svg>状态栏</button>
+            <button id="gal-stats-reset" class="gal-tbtn" title="清空本会话的全部状态参数"><svg class="ic"><use href="#i-reset"/></svg>重置状态</button>
+            <button id="gal-refresh" class="gal-tbtn" title="刷新角色列表（角色放在 data/gal/characters/）"><svg class="ic"><use href="#i-refresh"/></svg>刷新角色</button>
+          </div>
+        </div>
+        <div id="gal-stats" class="gal-stats hidden"></div>
+        <!-- 首次进入 GAL 的引导气泡（右上角，指向工具条「⋯」）；看过一次就不再出现 -->
+        <div id="gal-tip" class="gal-tip hidden" role="note" aria-label="GAL 模式新手引导">
+          <div class="gal-tip-title">✦ 第一次来？</div>
+          <div class="gal-tip-body">
+            想让剧情走下去，可以点右上 <b>⋯ → 剧本</b>，让 AI 生成一段大纲再一路演下去；<br>
+            不想设剧本也行 —— 直接和角色说说话就好，AI 会照着你填写的角色设定回应你。
+          </div>
+          <div class="gal-tip-actions">
+            <button id="gal-tip-ok" class="gal-tbtn" type="button">知道了</button>
+          </div>
+        </div>
+        <div id="gal-intro-card" class="gal-intro-card hidden">
+          <div class="gal-intro-card-box">
+            <img id="gal-intro-avatar" class="gal-intro-avatar" alt="">
+            <div id="gal-intro-name" class="gal-intro-name"></div>
+            <div id="gal-intro-body" class="gal-intro-body"></div>
+            <div class="gal-intro-card-actions">
+              <button id="gal-intro-start" class="gal-tbtn">开始对话</button>
+              <button id="gal-intro-close" class="gal-tbtn">关闭</button>
+            </div>
           </div>
         </div>
         <div id="gal-chars" class="gal-chars hidden">
@@ -189,26 +612,99 @@
           </div>
           <div id="gal-chars-list" class="gal-chars-list"></div>
           <div class="gal-chars-actions">
-            <button id="gal-new-char" class="gal-tbtn" title="新建角色">＋ 新建</button>
-            <button id="gal-import" class="gal-tbtn" title="导入 .char / zip 角色包（兼容 Shinsekai）">📦 导入文件</button>
-            <button id="gal-import-dir" class="gal-tbtn" title="批量导入 data/gal/packs/ 下的角色包">📂 导入 packs 目录</button>
-            <button id="gal-export" class="gal-tbtn" title="导出当前角色为 .char">⬇ 导出</button>
-            <button id="gal-edit" class="gal-tbtn" title="编辑当前角色 / 立绘 / 剧本">✎ 编辑</button>
-            <button id="gal-del-char" class="gal-tbtn danger" title="删除当前角色（不可恢复）">🗑 删除</button>
+            <button id="gal-new-char" class="gal-tbtn" title="新建角色"><svg class="ic"><use href="#i-plus"/></svg>新建</button>
+            <button id="gal-import" class="gal-tbtn" title="导入 .char / zip 角色包（兼容 Shinsekai）"><svg class="ic"><use href="#i-box"/></svg>导入文件</button>
+            <button id="gal-import-dir" class="gal-tbtn" title="批量导入 data/gal/packs/ 下的角色包"><svg class="ic"><use href="#i-folder"/></svg>导入 packs 目录</button>
+            <button id="gal-export" class="gal-tbtn" title="导出当前角色为 .char"><svg class="ic"><use href="#i-download"/></svg>导出</button>
+            <button id="gal-edit" class="gal-tbtn" title="编辑当前角色 / 立绘 / 剧本"><svg class="ic"><use href="#i-pencil"/></svg>编辑</button>
+            <button id="gal-del-char" class="gal-tbtn danger" title="删除当前角色（不可恢复）"><svg class="ic"><use href="#i-trash"/></svg>删除</button>
             <input id="gal-import-file" type="file" accept=".char,.zip,application/zip" multiple hidden>
           </div>
           <p id="gal-packs-hint" class="hint"></p>
         </div>
+        <div id="gal-bgs" class="gal-chars hidden">
+          <div class="gal-chars-head">
+            <input id="gal-bgs-search" class="gal-chars-search" type="text" placeholder="搜索背景（名称 / 标签）…">
+            <span id="gal-bgs-count" class="gal-chars-count"></span>
+          </div>
+          <div id="gal-bg-editor" class="gal-bg-editor hidden">
+            <div class="gal-bg-ed-row">
+              <label>名称</label>
+              <input id="gal-bg-ed-name" class="field-input" type="text" placeholder="如 夜晚的海边">
+            </div>
+            <div id="gal-bg-ed-tags" class="gal-bg-ed-tags"></div>
+            <div class="gal-bg-ed-row">
+              <label>其它</label>
+              <input id="gal-bg-ed-extra" class="field-input" type="text" placeholder="自由标签，用逗号分隔">
+            </div>
+            <div class="gal-bg-ed-actions">
+              <button id="gal-bg-ed-save" class="gal-tbtn"><svg class="ic"><use href="#i-save"/></svg>保存</button>
+              <button id="gal-bg-ed-cancel" class="gal-tbtn">取消</button>
+            </div>
+          </div>
+          <div id="gal-bgs-list" class="gal-chars-list"></div>
+          <div class="gal-chars-actions">
+            <button id="gal-bg-add" class="gal-tbtn" title="添加背景图（可多选）"><svg class="ic"><use href="#i-plus"/></svg>添加背景</button>
+            <button id="gal-bg-edit" class="gal-tbtn" title="编辑选中背景的名称 / 标签"><svg class="ic"><use href="#i-pencil"/></svg>编辑</button>
+            <button id="gal-bg-use" class="gal-tbtn" title="把选中的背景设为当前舞台背景"><svg class="ic"><use href="#i-image"/></svg>设为当前</button>
+            <button id="gal-bg-del" class="gal-tbtn danger" title="删除选中背景（不可恢复）"><svg class="ic"><use href="#i-trash"/></svg>删除</button>
+            <input id="gal-bg-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" multiple hidden>
+          </div>
+        </div>
+        <div id="gal-bgms" class="gal-chars hidden">
+          <div class="gal-chars-head">
+            <input id="gal-bgms-search" class="gal-chars-search" type="text" placeholder="搜索音乐（名称 / 标签）…">
+            <span id="gal-bgms-count" class="gal-chars-count"></span>
+          </div>
+          <div id="gal-bgm-editor" class="gal-bg-editor hidden">
+            <div class="gal-bg-ed-row">
+              <label>名称</label>
+              <input id="gal-bgm-ed-name" class="field-input" type="text" placeholder="如 紧张追逐">
+            </div>
+            <div id="gal-bgm-ed-tags" class="gal-bg-ed-tags"></div>
+            <div class="gal-bg-ed-row">
+              <label>其它</label>
+              <input id="gal-bgm-ed-extra" class="field-input" type="text" placeholder="自由标签，用逗号分隔">
+            </div>
+            <div class="gal-bg-ed-actions">
+              <button id="gal-bgm-ed-save" class="gal-tbtn"><svg class="ic"><use href="#i-save"/></svg>保存</button>
+              <button id="gal-bgm-ed-cancel" class="gal-tbtn">取消</button>
+            </div>
+          </div>
+          <div id="gal-bgms-list" class="gal-chars-list"></div>
+          <div class="gal-chars-actions">
+            <button id="gal-bgm-add" class="gal-tbtn" title="添加 BGM 音频（可多选）"><svg class="ic"><use href="#i-plus"/></svg>添加音乐</button>
+            <button id="gal-bgm-edit" class="gal-tbtn" title="编辑选中音乐的名称 / 标签"><svg class="ic"><use href="#i-pencil"/></svg>编辑</button>
+            <button id="gal-bgm-play" class="gal-tbtn" title="试听选中的音乐"><svg class="ic"><use href="#i-play"/></svg>试听</button>
+            <button id="gal-bgm-use" class="gal-tbtn" title="把选中的音乐设为当前舞台 BGM"><svg class="ic"><use href="#i-music"/></svg>设为当前</button>
+            <button id="gal-bgm-stop" class="gal-tbtn" title="停止当前 BGM"><svg class="ic"><use href="#i-stop"/></svg>停止</button>
+            <button id="gal-bgm-del" class="gal-tbtn danger" title="删除选中音乐（不可恢复）"><svg class="ic"><use href="#i-trash"/></svg>删除</button>
+            <input id="gal-bgm-file" type="file" accept="audio/*" multiple hidden>
+          </div>
+        </div>
         <div id="gal-tools" class="gal-tools"></div>
         <div id="gal-dialog" class="gal-dialog">
           <div id="gal-name" class="gal-name"></div>
-          <div id="gal-think" class="gal-think hidden"></div>
-          <div id="gal-user-echo" class="gal-user-echo hidden"></div>
-          <div id="gal-text" class="gal-text"></div>
-          <div id="gal-status" class="gal-status hidden">
-            <span class="gal-dots"><i></i><i></i><i></i></span>
-            <span id="gal-status-text">思考中…</span>
+          <!-- 可滚动内容区：让「名牌」能绝对定位骑到对话框上边框外侧（overflow 从 .gal-dialog 挪到这里） -->
+          <div class="gal-dialog-body">
+            <div id="gal-think" class="gal-think hidden"></div>
+            <div id="gal-user-echo" class="gal-user-echo hidden"></div>
+            <div id="gal-text" class="gal-text" aria-live="polite"></div>
+            <div id="gal-intro" class="gal-intro hidden"></div>
+            <div id="gal-status" class="gal-status hidden" role="status" aria-live="polite">
+              <span class="gal-dots"><i></i><i></i><i></i></span>
+              <span id="gal-status-text">思考中…</span>
+            </div>
+            <!-- 本轮没有选项时，在段末邀请玩家开口（文案由 AI 按当前场景 / 角色口吻生成） -->
+            <div id="gal-nudge" class="gal-nudge hidden" role="button" tabindex="0"
+                 title="点这里聚焦输入框，直接说点什么">
+              <span class="gal-nudge-tri" aria-hidden="true">▸</span>
+              <span id="gal-nudge-text"></span>
+            </div>
           </div>
+          <!-- 推进指示器：闪烁 ▼；打字中变成「补全」，点它等同按空格推进 -->
+          <button id="gal-adv-hint" class="gal-adv-hint" type="button" title="推进对话（空格 / 回车）"
+                  aria-label="推进对话"><span class="gal-adv-tri">▼</span><span class="gal-adv-tip">点击推进</span></button>
         </div>
         <div id="gal-options" class="gal-options"></div>
         <div id="gal-review-panel" class="gal-review hidden">
@@ -229,6 +725,23 @@
             <button id="gal-script-close" class="gal-tbtn" title="关闭">✕</button>
           </div>
           <div id="gal-script-list" class="gal-review-list"></div>
+        </div>
+        <div id="gal-journal-panel" class="gal-review hidden">
+          <div class="gal-review-head">
+            <span class="gal-review-title">剧情档案</span>
+            <span id="gal-journal-count" class="gal-review-count"></span>
+            <span class="gal-bar-spacer"></span>
+            <button id="gal-journal-close" class="gal-tbtn" title="关闭">✕</button>
+          </div>
+          <div class="gal-review-list">
+            <div id="gal-map" class="gal-map hidden"></div>
+            <div class="gal-journal-tabs">
+              <button id="gal-jview-list" class="gal-tbtn active" title="按类别翻看条目"><svg class="ic"><use href="#i-list"/></svg>列表</button>
+              <button id="gal-jview-graph" class="gal-tbtn" title="把已掌握的人物 / 势力 / 线索之间的关系画成图谱"><svg class="ic"><use href="#i-graph"/></svg>关系图</button>
+            </div>
+            <div id="gal-journal-list" class="gal-journal-list"></div>
+            <div id="gal-journal-graph" class="gal-journal-graph hidden"></div>
+          </div>
         </div>
         <div id="gal-clone-panel" class="gal-review hidden">
           <div class="gal-review-head">
@@ -262,79 +775,259 @@
               <input id="gal-clone-name" type="text" value="克隆音色">
             </label>
             <div class="gal-clone-actions">
-              <button id="gal-clone-test" class="gal-tbtn" title="用当前参数合成一句试听">🔊 试听</button>
-              <button id="gal-clone-save" class="gal-tbtn" title="把参数存为当前角色的配音预设">💾 存为预设</button>
+              <button id="gal-clone-test" class="gal-tbtn" title="用当前参数合成一句试听"><svg class="ic"><use href="#i-volume"/></svg>试听</button>
+              <button id="gal-clone-save" class="gal-tbtn" title="把参数存为当前角色的配音预设"><svg class="ic"><use href="#i-save"/></svg>存为预设</button>
             </div>
             <audio id="gal-clone-audio" class="gal-clone-audio hidden" controls></audio>
           </div>
         </div>
       </div>
     </section>
-    <div id="chat" class="chat">
+    <div id="find-bar" class="find-bar hidden">
+      <input id="find-input" class="find-input" placeholder="在对话中查找…">
+      <span id="find-count" class="find-count"></span>
+      <button id="find-prev" class="find-nav" title="上一个（Shift+Enter）">↑</button>
+      <button id="find-next" class="find-nav" title="下一个（Enter）">↓</button>
+      <button id="find-close" class="find-nav" title="关闭（Esc）">✕</button>
+    </div>
+    <div id="chat" class="chat" role="log" aria-live="polite" aria-label="对话消息">
       <div id="empty" class="empty">
-        <div class="empty-logo">✦</div>
+        <div class="empty-mark" aria-hidden="true">✦</div>
+        <div class="empty-status"><span class="empty-status-dot"></span>SOLO ENGINE · READY</div>
         <h1>有什么可以帮你的？</h1>
-        <p class="empty-sub">支持 Markdown、LaTeX 公式、图片识别与用户画像</p>
+        <div class="empty-caps" aria-label="已接入的能力">
+          <span>Markdown</span>
+          <span>LaTeX</span>
+          <span>视觉识别</span>
+          <span>语音</span>
+          <span>知识库</span>
+          <span>Agent 沙箱</span>
+          <span>存档倒带</span>
+        </div>
+        <div class="empty-modes">
+          <button type="button" class="mode-card" data-mode="solo" title="多轮对话 · 联网 · 工具调用">
+            <svg class="ic"><use href="#i-chat"/></svg>
+            <span class="mode-card-title">Solo 对话</span>
+          </button>
+          <button type="button" class="mode-card" data-mode="ide" title="Monaco 编辑器 · 沙箱文件树">
+            <svg class="ic"><use href="#i-code"/></svg>
+            <span class="mode-card-title">IDE 工作区</span>
+          </button>
+          <button type="button" class="mode-card" data-mode="hall" title="GAL 演出 · 模拟面试 · 股市 · 数学">
+            <svg class="ic"><use href="#i-grid"/></svg>
+            <span class="mode-card-title">功能大厅</span>
+          </button>
+          <button type="button" class="mode-card" data-mode="work" title="日程 · 任务执行 · 产物">
+            <svg class="ic"><use href="#i-calendar"/></svg>
+            <span class="mode-card-title">工作台</span>
+          </button>
+        </div>
         <div class="chips">
           <button class="chip" data-prompt="用简单的语言解释一下量子纠缠">解释量子纠缠</button>
-          <button class="chip" data-prompt="帮我写一个 Python 快速排序，并解释思路">写个快速排序</button>
           <button class="chip" data-prompt="用一句话总结一下相对论">总结相对论</button>
+          <button class="chip" data-prompt="帮我写一个 Python 快速排序，并解释思路">写个快速排序</button>
+          <button class="chip" data-prompt="帮我写一个 Python 脚本，按修改时间整理下载目录">整理下载目录</button>
+          <button class="chip" data-prompt="帮我建一个读书笔记模板，支持双链和标签">建一个笔记模板</button>
+          <button class="chip" data-prompt="用末日题材演出一段 Galgame 开场">演一段 GAL 开场</button>
+        </div>
+        <div class="empty-hint">
+          <kbd>Ctrl</kbd><kbd>I</kbd> 润色输入
+          <span class="empty-hint-sep">·</span>
+          <kbd>Ctrl</kbd><kbd>F</kbd> 对话内查找
         </div>
       </div>
     </div>
 
     <button id="btn-bottom" class="to-bottom t-fade off" title="回到底部">↓</button>
 
-    <div class="composer">
-      <div id="ctx-bar" class="ctx-bar hidden" title="当前会话的「对话上限」占用（估算值）；达到上限时 AI 会自动把较早的对话历史压缩成摘要">
-        <span class="ctx-label">对话上限</span>
-        <div class="ctx-track"><div id="ctx-fill" class="ctx-fill"></div></div>
-        <div id="ctx-text" class="ctx-text"></div>
-        <button id="btn-compress" class="ctx-btn" title="立即把较早的对话历史压缩成摘要（保留最近 8 条原文）">压缩历史</button>
+    <!-- 对话记录：左缘悬浮圆点导轨，悬停展开最近 12 条提问 -->
+    <div id="turn-dots" class="turn-dots hidden" aria-label="对话记录">
+      <div id="td-rail" class="td-rail"></div>
+      <div id="td-panel" class="td-panel hidden">
+        <div class="td-panel-head">提问记录<span id="td-count" class="td-count"></span></div>
+        <div id="td-list" class="td-list"></div>
       </div>
+    </div>
+
+    <!-- 自动化看板：回合跑在服务端，这里显示实时阶段 / 工具 / 验收进度 -->
+    <div id="ap-live" class="ap-live hidden" aria-label="自动化运行看板">
+      <div class="ap-live-bar">
+        <button id="ap-live-head" class="ap-live-main" type="button" aria-expanded="false"
+                title="展开自动化看板：完成定义、计划、最近回合">
+          <span class="ap-live-dot"></span>
+          <span id="ap-live-phase" class="ap-live-phase">自动化</span>
+          <span id="ap-live-act" class="ap-live-act"></span>
+          <span class="ap-live-gap"></span>
+          <span id="ap-live-meta" class="ap-live-meta"></span>
+          <span id="ap-live-chev" class="ap-live-chev">▴</span>
+        </button>
+        <button id="ap-live-x" class="ap-live-x" type="button" title="收起看板">✕</button>
+      </div>
+      <div id="ap-live-body" class="ap-live-body hidden"></div>
+    </div>
+    <div class="composer">
+      <button id="composer-handle" class="composer-toggle tip" type="button"
+              data-tip="收起输入框" aria-label="收起输入框" aria-expanded="true">
+        <svg class="ic"><use href="#i-chevron"/></svg>
+      </button>
+      <div class="composer-body"><div class="composer-body-inner">
+      <div id="queue-bar" class="queue-bar hidden">
+        <div id="queue-list" class="queue-list hidden"></div>
+        <div class="queue-head">
+          <button id="queue-toggle" class="queue-toggle hidden" type="button"
+                  aria-expanded="false" title="向上展开 / 收起排队消息">▴</button>
+          <span id="queue-text" class="queue-text"></span>
+          <span id="queue-inline" class="queue-inline"></span>
+          <button id="queue-cancel" class="queue-cancel hidden" type="button" title="清空本会话的排队消息">全部取消</button>
+        </div>
+      </div>
+      <div id="quote-bar" class="quote-bar hidden"></div>
       <div id="attach-bar" class="attach-bar hidden">
-        <img id="attach-thumb" class="attach-thumb" alt="待发送图片">
-        <span class="attach-text">已附带 1 张图片 · 可继续输入文字后一起发送</span>
-        <button id="attach-remove" class="attach-remove" title="移除图片">✕</button>
+        <div id="attach-thumbs" class="attach-thumbs hidden"></div>
+        <span id="attach-doc" class="attach-doc hidden"></span>
+        <span id="attach-text" class="attach-text">已附带图片 · 可继续输入文字后一起发送</span>
+        <button id="attach-remove" class="attach-remove" title="移除附件">✕</button>
+      </div>
+      <!-- 变更审阅提示栏：一轮改完、还有文件没处理时出现在输入框上方 -->
+      <div id="review-tip" class="review-tip hidden">
+        <button id="rt-tasks" class="rt-ico" type="button" title="展开任务项" aria-label="展开任务项">
+          <svg class="ic"><use href="#i-check-square"/></svg>
+        </button>
+        <button id="rt-files" class="rt-ico" type="button" title="待审查文件" aria-label="待审查文件">
+          <svg class="ic"><use href="#i-history"/></svg>
+          <span id="rt-files-n" class="rt-badge"></span>
+        </button>
+        <span class="rt-sep"></span>
+        <span class="rt-text"><svg class="ic"><use href="#i-check"/></svg><span class="rt-label">任务已完成，文件需要审查</span></span>
+        <button id="rt-close" class="rt-x" type="button" title="稍后处理">✕</button>
+        <span class="rt-actions">
+          <button id="rt-undo" class="rt-btn" type="button">全部撤销</button>
+          <button id="rt-keep" class="rt-btn primary" type="button">全部保留</button>
+        </span>
+        <div id="rt-panel" class="rt-panel hidden"></div>
       </div>
       <div class="composer-box">
-        <textarea id="input" rows="1" placeholder="给 AI 发送消息…（Enter 发送，Shift+Enter 换行；可附图片后一起提问）"></textarea>
+        <div id="composer-pop" class="composer-pop hidden" role="listbox" aria-label="输入建议"></div>
+        <textarea id="input" rows="1" placeholder="给 AI 发送消息…（/plan 先出计划）"
+                  role="combobox" aria-expanded="false" aria-autocomplete="list"
+                  aria-controls="composer-pop" aria-label="给 AI 发送消息"></textarea>
+        <button id="btn-clear-input" class="composer-clear hidden" type="button" title="清空输入" aria-label="清空输入">✕</button>
         <div class="composer-toolbar">
           <div class="toolbar-left">
-            <button id="btn-think" class="pill" title="开启 / 关闭深度思考">
-              <span class="pill-dot">✦</span>深度思考
-            </button>
-            <select id="think-level" class="think-level hidden" title="思考档位">
-              <option value="low">低</option>
-              <option value="medium">中</option>
-              <option value="high">高</option>
-              <option value="max">最高</option>
-            </select>
+            <span class="think-wrap">
+              <button id="btn-think" class="pill" title="开启 / 关闭深度思考">
+                <svg class="ic"><use href="#i-sparkle"/></svg>深度思考
+              </button>
+              <button id="btn-think-more" class="think-more hidden" type="button"
+                      title="思考档位：低 / 中 / 高 / 最高" aria-label="思考档位" aria-expanded="false">
+                <svg class="ic"><use href="#i-chevron"/></svg>
+              </button>
+              <div id="think-menu" class="think-menu hidden">
+                <div class="agent-approval-cap">思考档位</div>
+                <button class="approve-opt think-opt" type="button" data-level="low">
+                  <span class="approve-opt-text"><b>低</b><i>想得少，最快</i></span>
+                  <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                </button>
+                <button class="approve-opt think-opt" type="button" data-level="medium">
+                  <span class="approve-opt-text"><b>中</b><i>速度与质量的折中</i></span>
+                  <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                </button>
+                <button class="approve-opt think-opt" type="button" data-level="high">
+                  <span class="approve-opt-text"><b>高</b><i>默认档，适合大多数推理与代码任务</i></span>
+                  <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                </button>
+                <button class="approve-opt think-opt" type="button" data-level="max">
+                  <span class="approve-opt-text"><b>最高</b><i>想得最久，最慢也最贵</i></span>
+                  <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                </button>
+              </div>
+            </span>
             <button id="btn-search" class="pill" title="开启 / 关闭联网搜索">
-              <span class="pill-dot">🔍</span>联网搜索
+              <svg class="ic"><use href="#i-search"/></svg>联网搜索
             </button>
-            <button id="btn-mic" class="pill" title="语音输入：点一下开始，边说边出字；再点一下停止">
-              <span class="pill-dot">🎤</span><span id="mic-label">语音输入</span>
-            </button>
-            <button id="btn-denoise" class="pill" title="语音输入降噪：开启后先在本机对音频做流式去噪再识别（适用于嘈杂环境）">
-              <span class="pill-dot">🎛</span>降噪
-            </button>
-            <button id="btn-agent" class="pill" title="开启 / 关闭 Agent 沙箱：模型可在指定目录内自主读写文件（不提供命令行工具）">
-              <span class="pill-dot">🛠</span>Agent
-            </button>
-            <button id="btn-sandbox" class="pill hidden" title="选择 Agent 沙箱目录">
-              <span class="pill-dot">📁</span><span id="sandbox-name">选择目录</span>
-            </button>
-            <button id="btn-outside-read" class="pill hidden" title="允许 Agent 读取沙箱外的文件（只读）：开启后，只有当你明确要求时才会读沙箱外的绝对路径；写入仍只能在沙箱内">
-              <span class="pill-dot">📤</span>读沙箱外
+            <span class="agent-wrap">
+              <button id="btn-agent" class="pill" title="开启 / 关闭 Agent 沙箱：模型可在指定目录内自主读写文件，并执行白名单内的命令">
+                <svg class="ic"><use href="#i-terminal"/></svg>Agent
+              </button>
+              <button id="btn-agent-more" class="agent-more hidden" type="button"
+                      title="Agent 设置：沙箱目录 / 沙箱外只读" aria-label="Agent 设置" aria-expanded="false">
+                <svg class="ic"><use href="#i-chevron"/></svg>
+              </button>
+              <div id="agent-menu" class="agent-menu hidden">
+                <button id="btn-sandbox" class="pill hidden" title="选择 Agent 沙箱目录">
+                  <svg class="ic"><use href="#i-folder"/></svg><span id="sandbox-name">目录</span>
+                </button>
+                <button id="btn-sandbox-path" class="pill hidden" title="直接输入 / 粘贴沙箱目录路径（路径不存在会提示）">路径</button>
+                <button id="btn-outside-read" class="pill hidden" title="允许 Agent 读取沙箱外的文件（只读）：开启后，只有当你明确要求时才会读沙箱外的绝对路径；写入仍只能在沙箱内">
+                  <svg class="ic"><use href="#i-upload"/></svg>沙箱外
+                </button>
+                <div class="agent-approval">
+                  <div class="agent-approval-cap">写入与命令审批</div>
+                  <button class="approve-opt" type="button" data-mode="ask" title="每次写入 / 执行命令前都让你确认">
+                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-question"/></svg></span>
+                    <span class="approve-opt-text"><b>手动审批</b><i>写入、命令前都由你确认</i></span>
+                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                  </button>
+                  <button class="approve-opt" type="button" data-mode="ai" title="先过本地审核：只读与普通命令放行，安装 / 联网 / 改历史类才问你">
+                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-sparkle"/></svg></span>
+                    <span class="approve-opt-text"><b>自动审批</b><i>本地审核，高风险才问你</i></span>
+                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                  </button>
+                  <button class="approve-opt danger" type="button" data-mode="full" title="完全不拦截：命令白名单、内联执行、管道限制、站点授权都不再生效（高危 Git 命令如 checkout / reset 仍会确认；仍限在沙箱内，银行 / 支付 / 邮箱等禁区仍拒绝）">
+                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-alert"/></svg></span>
+                    <span class="approve-opt-text"><b>完全访问</b><i>不拦截，直接执行</i></span>
+                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                  </button>
+                  <button class="approve-opt" type="button" data-mode="custom" title="按沙箱内 .gm/agent-rules.json 的规则判定（支持 commands 段）">
+                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-gear"/></svg></span>
+                    <span class="approve-opt-text"><b>自定义</b><i>按 .gm/agent-rules.json</i></span>
+                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                  </button>
+                </div>
+                <div class="agent-approval">
+                  <div class="agent-approval-cap">自动续跑（任务没做完时自己继续）</div>
+                  <button class="approve-opt continue-opt" type="button" data-continue="0" title="关闭：每轮结束就停，需要你先说「继续」">
+                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-alert"/></svg></span>
+                    <span class="approve-opt-text"><b>关闭</b><i>每轮结束就停</i></span>
+                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                  </button>
+                  <button class="approve-opt continue-opt" type="button" data-continue="3" title="计划没做完、或结尾在问「要不要」时自动继续，最多 3 次">
+                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-refresh"/></svg></span>
+                    <span class="approve-opt-text"><b>最多 3 次</b><i>推荐：连续开发</i></span>
+                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                  </button>
+                  <button class="approve-opt continue-opt" type="button" data-continue="5" title="长任务：自动继续最多 5 次">
+                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-refresh"/></svg></span>
+                    <span class="approve-opt-text"><b>最多 5 次</b><i>长任务</i></span>
+                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                  </button>
+                  <button class="approve-opt continue-opt" type="button" data-continue="-1" title="无上限：一直推到任务做完或达到「单轮最多调用轮次」；连续 3 次续跑都没执行工具会自动停">
+                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-refresh"/></svg></span>
+                    <span class="approve-opt-text"><b>无上限</b><i>一直推到做完</i></span>
+                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
+                  </button>
+                </div>
+              </div>
+            </span>
+            <button id="btn-autochat" class="autochat-toggle" aria-pressed="false"
+                    title="自动化：输入框写目标后点这里。它会自己规划、执行、验收；中断会自动续跑。运行中再点一次暂停；显示「需要你 / 已暂停」时点此恢复">
+              <span class="autochat-dot"></span><svg class="ic"><use href="#i-refresh"/></svg>
+              <span class="autochat-text">自动化</span>
             </button>
           </div>
           <div class="toolbar-right">
+            <button id="btn-more" class="icon" title="更多输入选项" aria-label="更多输入选项">⋯</button>
+            <button id="btn-improve" class="icon" title="AI 优化输入（Ctrl+I）：润色 / 精简 / 扩写" aria-label="AI 优化输入"><svg class="ic"><use href="#i-sparkle"/></svg></button>
             <div class="swap-slot">
-              <button id="btn-image" class="icon" title="上传图片（也可直接 Ctrl+V 粘贴图片）">🖼</button>
+              <button id="btn-attach" class="icon" title="添加附件：图片 / 文档（PDF、Word、Excel、txt/md/csv…；也可直接 Ctrl+V 粘贴或拖入文件）"><svg class="ic"><use href="#i-attach"/></svg></button>
               <button id="btn-stop" class="icon stop off" title="停止生成">■</button>
             </div>
+            <button id="btn-mic" class="icon" title="语音输入：点一下开始，边说边出字；再点一下停止"><svg class="ic"><use href="#i-mic"/></svg></button>
             <button id="btn-send" class="send" title="发送">↑</button>
+            <div id="attach-menu" class="attach-menu hidden">
+              <button type="button" data-attach="image"><svg class="ic"><use href="#i-image"/></svg>上传图片</button>
+              <button type="button" data-attach="doc"><svg class="ic"><use href="#i-attach"/></svg>上传文档</button>
+            </div>
           </div>
         </div>
       </div>
@@ -342,10 +1035,24 @@
         <span class="stt-chip-tag">✨ AI 已矫正</span>
         <button id="stt-revert" class="stt-revert" type="button">撤回原文</button>
       </div>
-      <div class="composer-tip">内容由 AI 生成，请自行甄别 · 图片可粘贴/拖入，附上后能继续打字</div>
+      <div id="composer-hint" class="composer-hint" aria-live="polite"></div>
+      </div></div><!-- /.composer-body -->
     </div>
     </div><!-- /.chat-col -->
   </main>
+</div>
+
+<!-- 会话搜索浮层（点侧栏搜索图标打开） -->
+<div id="session-search-modal" class="ss-modal hidden" role="presentation">
+  <div class="ss-panel" role="dialog" aria-modal="true" aria-label="搜索会话">
+    <div class="ss-bar">
+      <svg class="ic"><use href="#i-search"/></svg>
+      <input id="ss-input" class="ss-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="搜索会话…（标题与对话内容）" aria-label="搜索会话">
+      <button id="ss-close" class="ss-close" type="button" title="关闭" aria-label="关闭搜索">✕</button>
+    </div>
+    <div id="ss-results" class="ss-results"></div>
+  </div>
 </div>
 
 <!-- 设置弹窗 -->
@@ -363,90 +1070,251 @@
           <div id="settings-search-list" class="settings-search-list hidden"></div>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">接入与密钥</div>
-          <button class="snav-btn active" data-tab="chat" data-search="api 密钥 key 模型 接口 预设">聊天模型</button>
-          <button class="snav-btn" data-tab="vision" data-search="图片 识图 视觉 api 密钥">视觉模型</button>
-          <button class="snav-btn" data-tab="search" data-search="联网 检索 搜索 bocha 密钥">联网搜索</button>
+          <div class="snav-group-title">模型与接入</div>
+          <button class="snav-btn active" data-tab="chat" data-search="api 密钥 key 模型 接口 预设 轻量 深度思考 推理 reasoning 图片 识图 视觉 vision">模型接入</button>
+          <button class="snav-btn" data-tab="search" data-search="联网 检索 搜索 bocha b站 bilibili 视频 评论 字幕 ai总结 sessdata cookie 数据">联网与数据源</button>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">对话行为</div>
+          <div class="snav-group-title">对话与主动</div>
           <button class="snav-btn" data-tab="context" data-search="token 上限 压缩 上下文 预留">上下文与压缩</button>
-          <button class="snav-btn" data-tab="think" data-search="思考 cot 思维链 档位">深度思考</button>
+          <button class="snav-btn" data-tab="agent" data-search="agent 轮次 续跑 自动继续 重复拦截 审批 写入 超时 工具调用 上限">Agent 执行</button>
+          <button class="snav-btn" data-tab="remind" data-search="提醒 定时 reminder 闹钟 通知 主动聊天 自主">主动与提醒</button>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">记忆与学习</div>
-          <button class="snav-btn" data-tab="profile" data-search="画像 偏好 记忆 自动记录">用户画像</button>
-          <button class="snav-btn" data-tab="learning" data-search="学习 指令 预设 记录准则">学习指令</button>
+          <div class="snav-group-title">记忆与能力</div>
+          <button class="snav-btn" data-tab="profile" data-search="画像 偏好 记忆 自动记录 学习 指令 预设 记录准则">用户画像与学习</button>
+          <button class="snav-btn" data-tab="skills" data-search="skill 技能 能力包 流程 按需展开">Skill</button>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">外观与演出</div>
+          <div class="snav-group-title">外观与声音</div>
           <button class="snav-btn" data-tab="appearance" data-search="主题 深色 浅色 外观">主题与外观</button>
           <button class="snav-btn" data-tab="gal" data-search="gal 演出 立绘 打字机 tts 剧本 特效">GAL 演出</button>
           <button class="snav-btn" data-tab="speech" data-search="语音 识别 朗读 tts 音色 降噪">语音与朗读</button>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">操作</div>
+          <div class="snav-group-title">系统</div>
           <button class="snav-btn" data-tab="keys" data-search="快捷键 按键 操作 esc ctrl">快捷键</button>
-        </div>
-        <div class="snav-group">
-          <div class="snav-group-title">说明</div>
+          <button class="snav-btn" data-tab="data" data-search="数据 目录 备份 恢复 版本 关于 重置 高级">数据与高级</button>
           <button class="snav-btn" data-tab="help" data-search="帮助 说明 文档 faq">功能说明</button>
         </div>
       </nav>
       <div class="modal-body settings-content">
+        <div class="set-page-head">
+          <div class="set-page-head-main">
+            <h3 id="settings-page-title" class="set-page-title">模型接入</h3>
+            <p id="settings-page-desc" class="set-page-desc"></p>
+          </div>
+          <button id="settings-page-reset" class="ghost set-page-reset" type="button">恢复本页默认</button>
+        </div>
         <section class="pane" data-pane="chat"></section>
-        <section class="pane hidden" data-pane="vision"></section>
         <section class="pane hidden" data-pane="search"></section>
         <section class="pane hidden" data-pane="context"></section>
-        <section class="pane hidden" data-pane="think"></section>
-        <section class="pane hidden" data-pane="profile">
-          <h4 class="set-group">手动偏好</h4>
-          <label class="field-label" data-search="手动偏好 规则 回答方式">手动偏好（你主动设置的规则）</label>
-          <textarea id="profile-manual" class="ta" rows="5" placeholder="例如：回答数学题时先给结论再给证明"></textarea>
+        <section class="pane hidden" data-pane="agent"></section>
+        <section class="pane hidden" data-pane="remind">
+          <h4 class="set-group">定时提醒（新提醒进入工作台）</h4>
+          <p class="hint" id="remind-syshint">系统通知：检查中…</p>
+          <label class="field-label">时间</label>
+          <input id="remind-at" class="field-input" type="datetime-local">
+          <label class="field-label">内容</label>
+          <input id="remind-text" class="field-input" type="text" placeholder="例如：交作业">
+          <label class="field-label">重复</label>
+          <select id="remind-repeat" class="field-input">
+            <option value="">一次性</option>
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+          </select>
+          <button id="remind-add" class="ghost wide"><svg class="ic"><use href="#i-plus"/></svg>添加提醒</button>
+          <div id="remind-list" class="remind-list"></div>
+          <p class="hint">新提醒会直接进入工作台「日程」（到点弹 Windows 系统通知，<strong>即使本程序已关闭</strong>，由系统计划任务负责），并在会话里留一条消息。也可以在工作台用<strong>快速添加</strong>（如「明天 10 点 开会」）或「＋ 日程」创建；点已有日程可改时间 / 地点 / 重复规则与提醒。这里保留未迁移/停用的旧提醒与主动聊天。</p>
 
-          <h4 class="set-group">自动记录</h4>
+          <h4 class="set-group">主动聊天</h4>
+          <p class="hint">开启后 AI 会隔一段时间主动找你说话（仅在程序运行时；连续 2 次没得到回应会自动暂停）。<strong>开启后约 20 秒会先发一条</strong>，让你立刻看到效果，之后才按下面的间隔。</p>
+          <label class="check-row">
+            <input type="checkbox" id="autochat-on"> 为当前会话开启主动聊天
+          </label>
+          <label class="field-label">最短间隔（分钟）</label>
+          <input id="autochat-min" class="field-input" type="number" min="1" value="40">
+          <label class="field-label">最长间隔（分钟）</label>
+          <input id="autochat-max" class="field-input" type="number" min="1" value="120">
+          <p class="hint">改完间隔<strong>立刻生效</strong>，不用关掉再开。</p>
+          <button id="autochat-test" class="ghost wide"><svg class="ic"><use href="#i-play"/></svg>立即发一条试试</button>
+          <div id="autochat-list" class="remind-list"></div>
+        </section>
+        <section class="pane hidden" data-pane="profile">
+          <h4 class="set-group" data-search="全局规则 手动偏好 规则 回答方式">全局规则</h4>
+          <textarea id="profile-manual" class="ta" rows="5" placeholder="例如：你是我的老师。每次先指出我最核心的问题，再给证据和下一步。"></textarea>
+          <p class="hint">对每个对话都生效。建议写法：角色与目标 / 判定标准 / 每轮必做 / 禁止。留空则保持默认行为。</p>
+
+          <h4 class="set-group" data-search="AI 记录 画像 自动 记忆">自动记录</h4>
           <label class="check-row" data-search="AI 记录 画像 自动 记忆">
             <input type="checkbox" id="profile-auto-learn"> 允许 AI 记录用户画像（从对话中自主增删改偏好）
           </label>
-          <p class="hint">AI 会在对话中自主增删改偏好，写入「用户画像」知识库，可在知识图谱中查看与编辑；每条偏好即一个节点。写入后回复下方有「已更新记忆」标记，可撤销。判断准则可在左侧「学习指令」中自定义。</p>
-          <button id="profile-open-kb" class="ghost wide">🧠 打开用户画像知识库</button>
-        </section>
-        <section class="pane hidden" data-pane="learning">
-          <h4 class="set-group">预设</h4>
-          <label class="field-label" data-search="学习指令 预设 记录准则">学习指令预设</label>
+          <p class="hint">AI 会在对话中自主增删改偏好，写入「用户画像」知识库，可在知识图谱中查看与编辑；每条偏好即一个节点。写入后回复下方有「已更新记忆」标记，可撤销。判断准则可在下方「学习指令」中自定义。</p>
+          <button id="profile-open-kb" class="ghost wide"><svg class="ic"><use href="#i-brain"/></svg>打开用户画像知识库</button>
+
+          <h4 class="set-group" data-search="学习指令 预设 记录准则">学习指令预设</h4>
           <div class="preset-row">
             <select id="learning-preset"></select>
             <button id="learning-preset-save">另存为预设</button>
             <button id="learning-preset-del">删除预设</button>
           </div>
 
-          <h4 class="set-group">自定义指令</h4>
+          <h4 class="set-group" data-search="学习指令 自定义 占位符">自定义指令</h4>
           <label class="field-label" data-search="学习指令 自定义 占位符">自定义学习指令（留空使用内置默认；支持 {current_auto} {user_input} {ai_reply}）</label>
           <textarea id="learning-prompt" class="ta" rows="6"></textarea>
           <p class="hint">决定 AI 在对话中如何判断「该记什么、改什么、删什么」，以及写入用户画像时的准则。详见「功能说明 → 学习指令」。</p>
         </section>
+        <section class="pane hidden" data-pane="skills">
+          <h4 class="set-group">Skill 列表</h4>
+          <p class="hint" data-search="skill 技能 能力包 按需 展开">每个 Skill 是 <code>data/skills/&lt;id&gt;/SKILL.md</code>。平时只把「名称 + 一句话描述」放进提示词，任务对口时模型才调用 <code>skill.read</code> 读全文；正文只当文本用，不会执行脚本。</p>
+          <div id="skill-list" class="skill-list"></div>
+
+          <h4 class="set-group">编辑</h4>
+          <div id="skill-current" class="skill-meta">当前：新 Skill</div>
+          <div class="skill-actions">
+            <button id="skill-new" class="ghost">新建</button>
+            <button id="skill-save" class="ghost">保存</button>
+            <button id="skill-del" class="ghost">删除</button>
+          </div>
+          <textarea id="skill-text" class="ta" rows="16"
+                    placeholder="---&#10;name: 数学老师&#10;description: 讲题时先指出最核心的错因，再给一步可执行的练习&#10;---&#10;&#10;## 每轮必做&#10;1. ..."></textarea>
+          <p class="hint" id="skill-dir"></p>
+        </section>
         <section class="pane hidden" data-pane="appearance">
-          <h4 class="set-group">主题</h4>
-          <label class="field-label" data-search="主题 深色 浅色 外观">主题</label>
+          <h4 class="set-group" data-search="主题 深色 浅色 外观">主题</h4>
           <div class="radio-row">
             <label><input type="radio" name="theme" value="light"> 浅色</label>
             <label><input type="radio" name="theme" value="dark"> 深色</label>
+            <label><input type="radio" name="theme" value="high-contrast"> 高对比暗</label>
+            <label><input type="radio" name="theme" value="midnight"> 暗夜紫</label>
+            <label><input type="radio" name="theme" value="forest"> 深林绿</label>
+            <label><input type="radio" name="theme" value="sepia"> 护眼纸白</label>
           </div>
-          <p class="hint">切换界面明暗；应用窗口的标题栏也会跟随。GAL 演出主题（樱粉 / 夜蓝 / 和风纸）在「GAL 演出」里单独设置，进入 GAL 模式时它会覆盖配色。详见「功能说明 → 主题与外观」。</p>
+          <p class="hint">切换界面明暗；应用窗口的标题栏也会跟随。GAL 演出主题（樱粉 / 夜蓝 / 和风纸 / 极简黑白 / 霓虹夜景 / 像素复古）在「GAL 演出」里单独设置，进入 GAL 模式时它会覆盖配色。详见「功能说明 → 主题与外观」。</p>
+
+          <h4 class="set-group" data-search="ide 编辑器 主题 vscode trae 配色 独立 解耦 语法高亮">IDE 编辑器主题</h4>
+          <label class="check-row" data-search="ide 独立主题 深色 默认 开关 跟随界面主题">
+            <input type="checkbox" id="ide-theme-enabled"> 为 IDE 单独设置主题（关闭则跟随界面主题）
+          </label>
+          <div class="ide-theme-grid" data-search="vscode trae 深色 浅色 深蓝 dark+ light+ 编辑器 配色">
+            <label class="ide-theme-card">
+              <input type="radio" name="ide-theme" value="">
+              <span class="itc-prev" data-t="inherit"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
+              <span class="itc-name">跟随界面主题</span>
+              <span class="itc-sub">不独立</span>
+            </label>
+            <label class="ide-theme-card">
+              <input type="radio" name="ide-theme" value="vscode-current">
+              <span class="itc-prev" data-t="vscode-current"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
+              <span class="itc-name">跟随 VS Code</span>
+              <span class="itc-sub">读本机当前主题</span>
+            </label>
+            <label class="ide-theme-card">
+              <input type="radio" name="ide-theme" value="vscode-modern-dark">
+              <span class="itc-prev" data-t="vscode-modern-dark"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
+              <span class="itc-name">VSCode Dark Modern</span>
+              <span class="itc-sub">深色 · 当前默认</span>
+            </label>
+            <label class="ide-theme-card">
+              <input type="radio" name="ide-theme" value="vscode-modern-light">
+              <span class="itc-prev" data-t="vscode-modern-light"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
+              <span class="itc-name">VSCode Light Modern</span>
+              <span class="itc-sub">浅色 · 当前默认</span>
+            </label>
+            <label class="ide-theme-card">
+              <input type="radio" name="ide-theme" value="vscode-dark">
+              <span class="itc-prev" data-t="vscode-dark"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
+              <span class="itc-name">VSCode Dark+</span>
+              <span class="itc-sub">深色 · 传统</span>
+            </label>
+            <label class="ide-theme-card">
+              <input type="radio" name="ide-theme" value="vscode-light">
+              <span class="itc-prev" data-t="vscode-light"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
+              <span class="itc-name">VSCode Light+</span>
+              <span class="itc-sub">浅色 · 传统</span>
+            </label>
+            <label class="ide-theme-card">
+              <input type="radio" name="ide-theme" value="trae-dark">
+              <span class="itc-prev" data-t="trae-dark"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
+              <span class="itc-name">Trae Dark</span>
+              <span class="itc-sub">深色</span>
+            </label>
+            <label class="ide-theme-card">
+              <input type="radio" name="ide-theme" value="trae-light">
+              <span class="itc-prev" data-t="trae-light"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
+              <span class="itc-name">Trae Light</span>
+              <span class="itc-sub">浅色</span>
+            </label>
+            <label class="ide-theme-card">
+              <input type="radio" name="ide-theme" value="trae-blue">
+              <span class="itc-prev" data-t="trae-blue"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
+              <span class="itc-name">Trae Deep Blue</span>
+              <span class="itc-sub">深色 · 蔚蓝</span>
+            </label>
+          </div>
+          <p class="hint">只在 IDE 模式生效，退出 IDE 立刻恢复界面主题；与上方「主题」各存各的，互不干扰。<strong>VSCode Dark Modern / Light Modern</strong> 是 VS Code 现在的出厂默认主题（Dark+ / Light+ 是更早的「传统」默认）。<strong>跟随 VS Code</strong> 会读取本机 <code>settings.json</code> 里的 <code>workbench.colorTheme</code> 并在约 5 秒内跟随切换：官方内置主题直接套用上面的预设，第三方主题则按其配色映射（映射是有损的，缺项会回落到界面主题）；<strong>语法高亮不跟随</strong>，仍用与明暗匹配的 Dark+ / Light+。</p>
+
+          <h4 class="set-group" data-search="空白 空格 中点 whitespace 可视化 制表符 缩进">空白字符</h4>
+          <select id="ide-whitespace" class="field-input" data-search="空白 空格 中点 全部 选区内 尾随 边界 关闭">
+            <option value="none">关闭</option>
+            <option value="selection">仅选区内（VS Code 原生默认）</option>
+            <option value="trailing">仅行尾</option>
+            <option value="boundary">词之间（边界）</option>
+            <option value="all">全部（每个空格都显示）</option>
+          </select>
+          <p class="hint">开启后空格渲染为浅灰中点 <code>·</code>、制表符渲染为 <code>→</code>，颜色沿用 VS Code 的标准值（深色 <code>#e3e4e229</code> / 浅色 <code>#33333333</code>），不随主题改写，观感与原生编辑器一致。</p>
         </section>
         <section class="pane hidden" data-pane="gal">
           <p class="hint">GAL 演出模式的界面与节奏。快捷键见左侧「快捷键」；台词朗读在「语音与朗读」里配置。</p>
 
-          <h4 class="set-group">演出主题</h4>
-          <label class="field-label" data-search="主题 皮肤 对话框 名字框 选项">演出主题（对话框 / 名字框 / 选项）</label>
-          <div class="radio-row">
-            <label><input type="radio" name="gal-theme" value="sakura"> 樱粉（衬线）</label>
-            <label><input type="radio" name="gal-theme" value="night"> 夜蓝</label>
-            <label><input type="radio" name="gal-theme" value="washi"> 和风纸（衬线）</label>
+          <h4 class="set-group" data-search="主题 皮肤 对话框 名字框 选项 像素 复古 樱粉 夜蓝 和风 黑白 霓虹">演出主题</h4>
+          <div class="gal-theme-grid" data-search="主题 皮肤 像素 复古 樱粉 夜蓝 和风 黑白 霓虹">
+            <label class="gal-theme-card">
+              <input type="radio" name="gal-theme" value="sakura">
+              <span class="gtc-prev" data-t="sakura"><i class="gtc-dlg"><i class="gtc-nm"></i><i class="gtc-ln"></i><i class="gtc-ln"></i></i><i class="gtc-op"></i></span>
+              <span class="gtc-name">樱粉</span>
+              <span class="gtc-sub">浅 · 衬线</span>
+            </label>
+            <label class="gal-theme-card">
+              <input type="radio" name="gal-theme" value="night">
+              <span class="gtc-prev" data-t="night"><i class="gtc-dlg"><i class="gtc-nm"></i><i class="gtc-ln"></i><i class="gtc-ln"></i></i><i class="gtc-op"></i></span>
+              <span class="gtc-name">夜蓝</span>
+              <span class="gtc-sub">深色</span>
+            </label>
+            <label class="gal-theme-card">
+              <input type="radio" name="gal-theme" value="washi">
+              <span class="gtc-prev" data-t="washi"><i class="gtc-dlg"><i class="gtc-nm"></i><i class="gtc-ln"></i><i class="gtc-ln"></i></i><i class="gtc-op"></i></span>
+              <span class="gtc-name">和风纸</span>
+              <span class="gtc-sub">浅 · 衬线</span>
+            </label>
+            <label class="gal-theme-card">
+              <input type="radio" name="gal-theme" value="mono">
+              <span class="gtc-prev" data-t="mono"><i class="gtc-dlg"><i class="gtc-nm"></i><i class="gtc-ln"></i><i class="gtc-ln"></i></i><i class="gtc-op"></i></span>
+              <span class="gtc-name">极简黑白</span>
+              <span class="gtc-sub">浅色</span>
+            </label>
+            <label class="gal-theme-card">
+              <input type="radio" name="gal-theme" value="cyber">
+              <span class="gtc-prev" data-t="cyber"><i class="gtc-dlg"><i class="gtc-nm"></i><i class="gtc-ln"></i><i class="gtc-ln"></i></i><i class="gtc-op"></i></span>
+              <span class="gtc-name">霓虹夜景</span>
+              <span class="gtc-sub">深色</span>
+            </label>
+            <label class="gal-theme-card">
+              <input type="radio" name="gal-theme" value="pixel">
+              <span class="gtc-prev" data-t="pixel"><i class="gtc-dlg"><i class="gtc-nm"></i><i class="gtc-ln"></i><i class="gtc-ln"></i></i><i class="gtc-op"></i></span>
+              <span class="gtc-name">像素复古</span>
+              <span class="gtc-sub">硬边 · 点阵</span>
+            </label>
           </div>
           <label class="field-label" data-search="对白框 高度 舞台">对白框最大高度（占舞台高度 %，30–70）</label>
           <input id="gal-dialog-max" class="field-input" type="number" min="30" max="70" step="1" value="46">
           <p class="hint">主题会同时作用于 GAL 模式的对白框、说话人名牌与选项按钮，并覆盖到全部 UI（含弹窗）。台词里的 <code>$公式$</code> 与 Markdown 仍照常排版。</p>
+
+          <h4 class="set-group">选项</h4>
+          <label class="check-row" data-search="选项 音效 悬停 确认 反馈"><input type="checkbox" id="gal-ui-sfx"> 选项音效（悬停轻响 / 确认实响，用 WebAudio 现场合成，不占用音频文件）</label>
+          <p class="hint">选项浮在画面中部，可用鼠标点、<code>↑</code>/<code>↓</code> 移动后 <code>Enter</code> 确认，或直接按数字键 <code>1</code>–<code>9</code>。</p>
+          <label class="check-row" data-search="提示 邀请 发言 输入 轮到你了 主动说话 nudge"><input type="checkbox" id="gal-nudge-on"> 没有选项时，在段末提示玩家可以主动发言</label>
+          <p class="hint">开启后，本轮若没给选项，AI 会按当前场景 / 角色口吻在最后一段末尾写一句邀请（如「（对方把杯子往前推了推，等着你开口）」）；模型没写时用一句极克制的旁白兜底。点那句提示可直接聚焦输入框。</p>
 
           <h4 class="set-group">打字机</h4>
           <label class="check-row" data-search="打字机 逐字 对白"><input type="checkbox" id="gal-typewriter"> 逐字显示对白</label>
@@ -458,6 +1326,11 @@
           <label class="check-row" data-search="立绘 过渡 换人 动画"><input type="checkbox" id="gal-sprite-fx"> 立绘进出场 / 换人过渡动画</label>
           <label class="check-row" data-search="工具条 淡出 沉浸"><input type="checkbox" id="gal-bar-auto"> 顶部工具条沉浸式淡出（鼠标移入才实显）</label>
           <p class="hint">在台词里用 <code>*关键词*</code> 或 <code>【关键词】</code> 触发（不会被朗读）。可自定义关键词、CSS 效果与音效：编辑 <code>data/gal/effects/effects.json</code>，音效放 <code>data/gal/effects/</code>；<code>mode</code> 支持 before / after / loop / stop（loop、stop 用于循环音效）。</p>
+
+          <h4 class="set-group">背景音乐（BGM）</h4>
+          <label class="field-label" data-search="bgm 背景音乐 音量">BGM 音量（0–1）</label>
+          <input id="gal-bgm-volume" class="field-input" type="number" min="0" max="1" step="0.1" value="0.5">
+          <p class="hint">AI 会按剧情氛围从「音乐」库里切换 BGM；切换时旧曲淡出、新曲淡入。在工具条 <code>⋯ → 音乐</code> 里上传与打标签。</p>
 
           <h4 class="set-group">推进与节奏</h4>
           <label class="field-label" data-search="对白展示 追加 单行 推进">对白展示</label>
@@ -471,8 +1344,12 @@
           <p class="hint">GAL 的快捷键（空格 / 回车推进 · 按住 Ctrl 快进 · A 自动播放 · ↑ 回顾 · Esc 关面板 · 点击舞台推进）见左侧「快捷键」。</p>
 
           <h4 class="set-group">沉浸</h4>
+          <label class="check-row" data-search="深度思考 推理 思考 首字 延迟 速度 token"><input type="checkbox" id="set-gal-think"> GAL 启用深度思考（默认关：实测首 token 会慢约 10 倍）</label>
           <label class="check-row" data-search="思考 显示 沉浸 思考中"><input type="checkbox" id="gal-show-think"> 显示 AI 思考过程（关闭时只显示「思考中…」，更不破坏沉浸感）</label>
           <label class="check-row" data-search="AI 行为 工具 幕间 搜索"><input type="checkbox" id="gal-show-exec"> 显示 AI 行为（搜索 / 工具等，以「幕间」呈现）</label>
+          <label class="check-row" data-search="状态 参数 好感度 饥饿 数值 进度条 HUD"><input type="checkbox" id="gal-show-stats"> 显示舞台状态参数（好感度 / 饥饿 / 时间…，由 AI 依角色设定生成）</label>
+          <label class="check-row" data-search="联网 搜索 实时 剧情 GAL"><input type="checkbox" id="gal-search"> GAL 模式允许联网（每轮会多一次「要不要搜」的判断调用、慢约 1 秒；只在想聊现实中的人和事时才需要）</label>
+          <label class="check-row" data-search="鼠标 指针 光标 隐藏 沉浸"><input type="checkbox" id="gal-hide-cursor"> 鼠标停在舞台上 3 秒不动就隐藏指针（沉浸阅读）</label>
 
           <h4 class="set-group">剧本</h4>
           <label class="check-row" data-search="自动写剧本 大纲 剧情 逐幕"><input type="checkbox" id="gal-auto-script"> 由 AI 依据「角色设定 + 用户画像」自己编剧情并逐幕推进</label>
@@ -486,14 +1363,17 @@
               <input id="gal-auto-rounds" class="field-input" type="number" min="1" max="12" step="1" value="4">
             </div>
           </div>
-          <p class="hint">开启后可在 GAL 工具条 <code>⋯ → 🎬 剧本</code> 查看大纲或重新生成。剧本<strong>按会话独立保存</strong>；生成时会读取该角色的设定与「用户画像」，之后每一幕会结合刚才的对话走向展开，最后一幕自动收束为结局。详见「功能说明 → GAL 推进与自动写剧本」。</p>
+          <p class="hint">开启后可在 GAL 工具条 <code>⋯ → 剧本</code> 查看大纲或重新生成。剧本<strong>按会话独立保存</strong>；生成时会读取该角色的设定与「用户画像」，之后每一幕会结合刚才的对话走向展开，最后一幕自动收束为结局。详见「功能说明 → GAL 推进与自动写剧本」。</p>
         </section>
         <section class="pane hidden" data-pane="speech">
           <h4 class="set-group">语音输入</h4>
           <label class="check-row" data-search="语音 矫正 标点 错别字">
             <input type="checkbox" id="speech-polish"> 语音转写结束后自动做一次 AI 矫正
           </label>
-          <p class="hint">开启后，识别出的文字会先交给「聊天模型」的模型做最小必要的校对（补标点、纠错别字、去口癖），再填入输入框；可在输入框下方点「撤回原文」恢复未矫正的文本。降噪开关在输入框上方的「🎛 降噪」按钮处；实时转写 / 两遍精修无需在此配置。详见「功能说明 → 语音输入」。</p>
+          <label class="check-row" data-search="降噪 噪声 denoise 嘈杂">
+            <input type="checkbox" id="speech-denoise"> 语音输入降噪（即时生效，嘈杂环境更准）
+          </label>
+          <p class="hint">AI 矫正：识别出的文字会先交给「聊天模型」做最小必要的校对（补标点、纠错别字、去口癖），再填入输入框；可在输入框下方点「撤回原文」恢复未矫正的文本。降噪：先在本机对音频做流式去背景噪声（DPDFNet）再识别，需先运行 <code>scripts/fetch_speech_model.py denoise</code> 下载模型。实时转写 / 两遍精修无需在此配置。详见「功能说明 → 语音输入」。</p>
 
           <h4 class="set-group">台词朗读（TTS）</h4>
           <label class="check-row" data-search="朗读 tts 自动 台词"><input type="checkbox" id="speech-tts-enabled"> 在 GAL 模式自动朗读角色台词</label>
@@ -515,13 +1395,20 @@
           </div>
           <datalist id="speech-tts-voice-list"></datalist>
           <div class="preset-row">
-            <button id="speech-tts-test" class="ghost" type="button">🔊 测试朗读</button>
+            <button id="speech-tts-test" class="ghost" type="button"><svg class="ic"><use href="#i-volume"/></svg>测试朗读</button>
             <button id="speech-tts-voices" class="ghost" type="button">查看 Edge 中文音色</button>
           </div>
-          <p class="hint">GAL 模式的台词会按标点切句后逐句合成播放；若该立绘配了「绑定音频」，默认优先播放它。Edge TTS 免费且无需密钥，但需本机能访问微软服务。工具条 <code>⋯ → 🎙 快速克隆</code> 可用参考音频克隆音色（需本地 GPT-SoVITS 服务）。详见「功能说明 → 台词朗读」。</p>
+          <p class="hint">GAL 模式的台词会按标点切句后逐句合成播放；若该立绘配了「绑定音频」，默认优先播放它。Edge TTS 免费且无需密钥，但需本机能访问微软服务。工具条 <code>⋯ → 快速克隆</code> 可用参考音频克隆音色（需本地 GPT-SoVITS 服务）。详见「功能说明 → 台词朗读」。</p>
         </section>
       <section class="pane hidden" data-pane="keys">
-          <p class="hint">下列快捷键与实际行为一一对应。标了「生效条件」的，只在满足条件时才生效。</p>
+          <h4 class="set-group">改键</h4>
+          <p class="hint">点条目右侧「<b>改键</b>」→ 按下新键即可（<code>Esc</code> 取消）。改动<b>即时生效并保存在本机</b>；与<b>同一分组内</b>已有键冲突会被拒绝，与<b>其它分组</b>撞键则允许并提示 —— 按「用户自定义优先」，你改过的那条会压过对方的默认键。灰显表示当前模式下不可用；每行可单独「重置」，底部可「全部恢复默认」。面板内的导航键（<code>↑↓</code> / <code>Tab</code> / <code>Enter</code> / <code>Esc</code>）属于控件标准交互，不开放修改。</p>
+          <input id="set-hk-search" class="field-input" type="text" placeholder="搜索功能名或按键…">
+          <div id="set-hk-groups" class="hk-groups"></div>
+          <div class="hk-foot"><button id="set-hk-reset-all" class="ghost" type="button">全部恢复默认</button></div>
+
+          <h4 class="set-group">完整说明</h4>
+          <p class="hint">下列快捷键与实际行为一一对应（含不可改的面板内导航键）。标了「生效条件」的，只在满足条件时才生效。</p>
 
           <h4 class="set-group">全局</h4>
           <table class="key-table">
@@ -550,6 +1437,25 @@
             <tr><td><kbd>Enter</kbd></td><td>执行沙箱内搜索</td><td>焦点在搜索框时</td></tr>
           </table>
 
+          <h4 class="set-group">编辑器（VS Code）</h4>
+          <p class="hint">这些动作由内置的 <b>Monaco</b>（VS Code 的编辑器本体）自己实现，<b>默认就与 VS Code 完全一致</b>（多光标、只读、查找框开着等边界场景都由它自己管）；只有你在上面改过键，才会把新键绑到同一个动作上。
+            含 <kbd>Ctrl</kbd>+<kbd>F</kbd> / <kbd>Ctrl</kbd>+<kbd>/</kbd> 这种「同一个组合键在编辑器里与在聊天区含义不同」的情况 —— 编辑器聚焦时归编辑器，否则归聊天区（这也是 VS Code 的语义）。</p>
+          <table class="key-table">
+            <tr><th>按键</th><th>作用</th></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>L</kbd></td><td>选中整行（连按可继续扩展）</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>Z</kbd></td><td>撤销</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd>（或 <kbd>Ctrl</kbd> + <kbd>Y</kbd>）</td><td>重做</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>/</kbd></td><td>切换行注释</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>K</kbd></td><td>删除当前行</td></tr>
+            <tr><td><kbd>Alt</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd></td><td>向上 / 向下移动行</td></tr>
+            <tr><td><kbd>Shift</kbd> + <kbd>Alt</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd></td><td>向上 / 向下复制行</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>Enter</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd></td><td>在下方 / 上方插入行</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>[</kbd> / <kbd>Ctrl</kbd> + <kbd>]</kbd></td><td>减少 / 增加缩进</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>D</kbd></td><td>选中下一个相同词（多光标）</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>F</kbd> / <kbd>Ctrl</kbd> + <kbd>H</kbd></td><td>编辑器内查找 / 替换</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + <kbd>G</kbd></td><td>跳转到行…</td></tr>
+          </table>
+
           <h4 class="set-group">输入框</h4>
           <table class="key-table">
             <tr><th>按键</th><th>作用</th></tr>
@@ -567,6 +1473,27 @@
             <tr><td><kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>搜索结果：选择 / 跳转 / 清空</td><td>焦点在搜索框时</td></tr>
           </table>
         </section>
+      <section class="pane hidden" data-pane="data">
+        <h4 class="set-group" data-search="版本 关于 应用信息 数据目录 环境 python">应用信息</h4>
+        <div id="appinfo-body" class="appinfo-body">加载中…</div>
+
+        <h4 class="set-group" data-search="数据 目录 打开 资源管理器 备份 恢复">数据</h4>
+        <p class="hint">所有会话、知识库、配置、附件与存档都在数据目录里。备份包含知识库、会话、笔记、记忆索引、附件、GAL 存档、任务与日程；不包含 API Key。</p>
+        <div class="preset-row">
+          <button id="app-open-data" class="ghost" type="button">打开数据目录</button>
+          <button id="app-backup" class="ghost" type="button">备份与恢复…</button>
+        </div>
+
+        <h4 class="set-group" data-search="右键菜单 资源管理器 打开 文件夹 注册 移除">资源管理器右键菜单</h4>
+        <p class="hint">注册后，右键文件夹、或在文件夹空白处右键，会出现「用 Galgame Monster 打开」：用该目录新建会话并进入 IDE（已有同目录会话时复用最近的一条）。只写当前用户注册表（HKCU），不需要管理员权限；Windows 11 默认把它折叠在「显示更多选项」里。</p>
+        <div class="preset-row">
+          <button id="app-context-menu" class="ghost" type="button">注册右键菜单</button>
+        </div>
+
+        <h4 class="set-group" data-search="重置 恢复默认 全部设置">重置</h4>
+        <p class="hint">把设置页里的可调项恢复为出厂默认值（需点「保存」生效）。API 密钥、B 站 SESSDATA 与自定义预设会保留。</p>
+        <button id="app-reset-all" class="ghost wide danger" type="button">恢复所有设置为默认</button>
+      </section>
       <section class="pane hidden" data-pane="help">
         <p class="hint">下面说明各项功能的实际作用与区别。点击标题可展开/收起；也可用左上角搜索框直接定位设置项。快捷键的完整清单见左侧「快捷键」。</p>
 
@@ -576,8 +1503,8 @@
           <summary>图像识别：独立视觉 API vs 聊天模型</summary>
           <div class="help-body">
             <ul>
-              <li>默认用「视觉模型」里配置的视觉 API。</li>
-              <li>开启「<strong>使用聊天模型识别图片</strong>」后，改由「聊天模型」的模型与密钥识图（要求聊天模型自带视觉能力，如 GPT-4o / deepseek-flash / 通义兼容模式）。</li>
+              <li>默认用「模型接入 → 视觉接口」里配置的视觉 API。</li>
+              <li>开启「<strong>使用聊天模型识别图片</strong>」后，改由「模型接入 → 聊天接口」的模型与密钥识图（要求聊天模型自带视觉能力，如 GPT-4o / deepseek-flash / 通义兼容模式）。</li>
               <li>两种视觉协议的区别：<br>
                 · <strong>DashScope 原生</strong>：图片放 <code>input.messages[].content</code> 的 <code>{"image": ...}</code>，结果取 <code>output.choices[0].message.content</code>（qwen-vl-plus / max）。<br>
                 · <strong>OpenAI 兼容</strong>：图片放 <code>messages[].content</code> 的 <code>{"type":"image_url"}</code>，结果取 <code>choices[0].message.content</code>（GPT-4o、vLLM / Ollama、deepseek-flash）。</li>
@@ -588,7 +1515,7 @@
         <details class="help-sec" data-search="余额 balance deepseek 充值 赠金">
           <summary>账户余额</summary>
           <div class="help-body">
-            <p>在「聊天模型 / 视觉模型」面板查看余额，打开设置时自动查一次，也可点「刷新」。</p>
+            <p>在「模型接入 → 聊天接口 / 视觉接口」里查看余额，打开设置时自动查一次，也可点「刷新」。</p>
             <ul>
               <li><strong>DeepSeek</strong>：按接口地址自动识别，调用官方 <code>GET /user/balance</code>。</li>
               <li><strong>其它厂商</strong>：若提供余额接口，在「余额查询地址」填写（GET + Bearer）；留空且非 DeepSeek 则显示"不支持"。</li>
@@ -601,8 +1528,8 @@
         <details class="help-sec" data-search="深度思考 档位 思维链 cot reasoning">
           <summary>深度思考：开关、档位与参数模式</summary>
           <div class="help-body">
-            <p><strong>开关</strong>（输入框左下「✦ 深度思考」）：开启后模型在给答案前先输出一段思维链（CoT），回答通常更准，但更慢、更费 token。思维链会以可折叠的「已深度思考」块展示。</p>
-            <p><strong>档位</strong>（低 / 中 / 高 / 最高）：控制"想多久"。本程序按「思考参数模式」把它作为 <code>reasoning_effort</code> 发送。<strong>DeepSeek 官方会对档位做映射</strong>（依其官方文档）：</p>
+            <p><strong>开关</strong>（输入框左下「深度思考」）：开启后模型在给答案前先输出一段思维链（CoT），回答通常更准，但更慢、更费 token。思维链会以可折叠的「已深度思考」块展示。</p>
+            <p><strong>档位</strong>（点「深度思考」右侧的小箭头选低 / 中 / 高 / 最高）：控制"想多久"。本程序按「思考参数模式」把它作为 <code>reasoning_effort</code> 发送。<strong>DeepSeek 官方会对档位做映射</strong>（依其官方文档）：</p>
             <table>
               <tr><th>本程序档位</th><th>发送值</th><th>DeepSeek 实际生效</th></tr>
               <tr><td>低</td><td>low</td><td>low</td></tr>
@@ -610,7 +1537,7 @@
               <tr><td>高</td><td>high</td><td>high</td></tr>
               <tr><td>最高</td><td>max</td><td>max</td></tr>
             </table>
-            <p><strong>参数模式</strong>（设置 →「深度思考」）决定上述开关如何传给接口，避免不支持的接口报错：</p>
+            <p><strong>参数模式</strong>（设置 → 模型接入 → 推理参数）决定上述开关如何传给接口，避免不支持的接口报错：</p>
             <ul>
               <li><strong>自动</strong>：按接口地址是否含 <code>deepseek</code> 自动判断。</li>
               <li><strong>不发送</strong>：完全不带思考参数，最通用。</li>
@@ -622,28 +1549,35 @@
           </div>
         </details>
 
-        <details class="help-sec" data-search="上下文 上限 token 压缩 进度条">
-          <summary>上下文上限（输入框上方的进度条）</summary>
+        <details class="help-sec" data-search="上下文 上限 token 压缩 圆环 进度 预压缩 恢复 明细 摘要">
+          <summary>上下文上限（回复末尾的圆环）</summary>
           <div class="help-body">
             <p>估算当前会话离模型上下文上限还有多远，避免"聊到一半突然报错"。相关设置项在「上下文与压缩」。</p>
             <ul>
+              <li><strong>两个数字是什么</strong>：<strong>模型上下文窗口</strong>是模型一次能装的 token 总量（输入 + 输出都算）；<strong>留给 AI 回答</strong>是从窗口里先划给本次回答的空间，聊天历史最多用到「窗口 − 预留」。预留不是 <code>max_tokens</code>，不会硬性截断回答，只会让压缩更早发生。</li>
+              <li><strong>怎么看</strong>：最新一条回复的右下角有一个小圆环，右侧是占用百分比，环的颜色随剩余量转黄 / 红。</li>
+              <li><strong>点圆环</strong>：直接执行「压缩历史」——把较早的对话总结成摘要，确认后才会执行；原文不会被删除。</li>
+              <li><strong>点百分比</strong>：打开「上下文与压缩」详情，可看各分项占用与摘要全文，或「恢复原文」撤销压缩。</li>
               <li><strong>单位换算</strong>（按本项目的估算口径）：1 个汉字 / 中文标点 ≈ 0.6 token，1 个英文字符 ≈ 0.3 token。即 1000 token ≈ 1700 汉字；128000 token ≈ 21 万汉字；1000000 token ≈ 170 万汉字。填写时<strong>只写数字</strong>：128K 写 <code>128000</code>，1M 写 <code>1000000</code>。</li>
-              <li><strong>已用</strong> ≈ 本地估算 × 校准系数；校准系数取最近一次接口返回的真实 <code>prompt_tokens</code> ÷ 当时估算。</li>
-              <li><strong>剩余</strong> = 上限 − 已用；剩余低于上限 10% / 5% 时进度条转黄 / 红并弹出提醒。</li>
-              <li><strong>自动压缩</strong>：达到上限时（「已用 + 为回复预留」超过上限），AI 会<strong>自动压缩你的对话历史记录</strong>——把较早的对话总结成摘要（不是删除），保留最近 8 条原文，之后照常发送。</li>
-              <li><strong>手动压缩</strong>：点进度条右侧的「压缩历史」可立即压缩一次；压缩点之后的消息不足 9 条、或未配聊天密钥时会给出提示。</li>
-              <li>上限 / 预留可在「上下文与压缩」里按所用模型填写（默认 128000 / 4096）。估算为近似值，仅供参考。</li>
+              <li><strong>已用</strong> ≈ 本地估算 × 校准系数；校准系数取最近一次接口返回的真实 <code>prompt_tokens</code> ÷ 当时估算。估算范围包含系统提示、摘要、对话正文、附件正文与图片描述。</li>
+              <li><strong>剩余</strong> = 上限 − 已用；剩余低于上限 10% / 5% 时圆环转黄 / 红并弹出提醒。</li>
+              <li><strong>预压缩（可用提示词预算）</strong>：已用达到 min(窗口的 80%，窗口 − 输出上限 − 8192) 时，后台开始把较早的对话总结成摘要；本轮请求不等待，下一轮自动生效。</li>
+              <li><strong>兜底压缩（已用 + 预留超窗口）</strong>：发送前「已用 + 预留」仍超窗口时，会同步再压一次；若压缩失败，本轮只临时省略较早消息再发送，本地原文不会被删除。</li>
+              <li><strong>保留哪些</strong>：默认保留最近约 16% 输入窗口（窗口 − 输出上限）的原文（至少 8 条，最多 60 条），更早的进入摘要；新摘要会合并旧摘要，保留未完成事项与用户明确指令。</li>
+              <li><strong>摘要用哪个模型</strong>：走「轻量模型」（设置 → 聊天 API 里的小模型配置）；未配置时自动沿用主模型。</li>
+              <li><strong>压缩前写记忆</strong>：生成摘要时会附带最多 6 条「记忆要点」，写入本会话记忆，避免摘要失真后彻底失忆。</li>
+              <li>窗口 / 预留可在「上下文与压缩」里按所用模型填写（默认 128000 / 16384，同步压缩硬上限约 111600 tokens）。填写框下方会实时算出可用提示词预算与压缩触发点；估算为近似值，仅供参考。</li>
             </ul>
           </div>
         </details>
 
-        <details class="help-sec" data-search="联网 搜索 检索 改写 抓取 来源">
-          <summary>联网搜索（改写 / 抓取 / 来源）</summary>
+        <details class="help-sec" data-search="联网 搜索 检索 抓取 来源">
+          <summary>联网搜索（判据 / 抓取 / 来源）</summary>
           <div class="help-body">
-            <p>输入框的「🔍 联网搜索」开关开启后：<strong>改写检索式 → 并行搜索 → 抓取正文 → 注入提示 → 再让模型回答</strong>；回答上方会出现可折叠的「参考来源」列表。</p>
+            <p>输入框的「联网搜索」开关开启后，会把这个能力交给模型：<strong>模型自己判断这一轮要不要查</strong>——需要时它给出关键词式检索式，程序并行搜索、抓取正文、把资料回灌给它，然后它再据此作答（回答上方会出现可折叠的「参考来源」列表）。<strong>不需要时它就不查</strong>，不会无谓地多搜一轮。</p>
             <ul>
-              <li><strong>服务商 / 密钥</strong>：在「联网搜索」设置里选服务商（内置博查 / Tavily）并填密钥；接口地址留空则用该服务商的默认地址。</li>
-              <li><strong>查询改写</strong>：用「聊天模型」把你的问题转成 2–3 个关键词式检索式，口语化长问句的召回明显更好；未配聊天密钥时自动回落用原问题。</li>
+              <li><strong>服务商 / 密钥</strong>：在「联网与数据源 → 联网搜索」里选服务商（内置博查 / 豆包搜索 / Tavily）并填密钥；接口地址留空则用该服务商的默认地址。</li>
+              <li><strong>谁来改写检索式</strong>：由模型在调用搜索时自己给 1–3 个关键词（口语化的「它 / 这个」它会自己补成具体名字），不再额外单独判断一次。</li>
               <li><strong>抓取正文</strong>：对命中的网页取正文（而不是只有摘要），信息密度更高；可设抓取条数。抓取优先走 Jina Reader（免密钥），失败回落直连抓取，再失败则保留摘要。</li>
               <li><strong>结果条数</strong>：每个检索式各取多少条。</li>
               <li><strong>注入不入库</strong>：抓到的正文只用于本轮提示，不会写进会话文件。</li>
@@ -660,7 +1594,7 @@
               <li><strong>手动偏好</strong>：你自己写的规则（如"回答数学题先给结论"），<strong>每轮都会注入</strong>，优先级最高。在「用户画像」里编辑。</li>
               <li><strong>自动学习</strong>：打开「允许 AI 记录用户画像」后，AI 在<strong>主对话里直接读写</strong>记忆——需要记录时会自己动手，它输出的写入指令用户看不到；写入后回复下方会出现「已更新记忆」标记，点「撤销」即可回滚。判断准则来自「学习指令预设」，可自定义。</li>
               <li><strong>写什么、改什么</strong>：由 AI 自主判断——明确要求「记住 / 删掉那条 / 改一下」会直接执行；新旧信息矛盾时以更晚、更明确者为准，<strong>不会让两条矛盾条目并存</strong>。</li>
-              <li><strong>查看与编辑</strong>：点「🧠 打开用户画像知识库」可跳到知识图谱里查看 / 修改每条偏好。</li>
+              <li><strong>查看与编辑</strong>：点「打开用户画像知识库」可跳到知识图谱里查看 / 修改每条偏好。</li>
             </ul>
           </div>
         </details>
@@ -677,17 +1611,24 @@
           </div>
         </details>
 
-        <details class="help-sec" data-search="知识库 记忆 图谱 检索 锁定">
-          <summary>知识库与记忆（侧栏 🧠 知识库）</summary>
+        <details class="help-sec" data-search="知识库 记忆 图谱 检索 锁定 别名 反链 批量 导出 邻居">
+          <summary>知识库与记忆（侧栏「知识库」）</summary>
           <div class="help-body">
             <ul>
               <li><strong>本会话记忆</strong>：只属于当前对话，切到别的对话就看不到。</li>
               <li><strong>通用知识库</strong>：可有多个、跨对话共享；在编辑器右侧勾选哪些库给"本会话"用（可多选）。</li>
               <li><strong>用户画像库</strong>：系统库（AI 自主写入），<strong>每轮固定注入</strong>，不允许删除 / 改名。</li>
               <li><strong>AI 可否修改</strong>：分两级——会话级「允许 AI 写本会话记忆」与库级「允许 AI 修改本库」；被<strong>锁定</strong>的节点 AI 不会改。</li>
-              <li><strong>检索方式</strong>：先按关键词从记忆 / 知识库预筛候选；候选超过 20 条时才让模型挑选相关条目，最后把选中条目注入提示。</li>
-              <li><strong>图谱编辑</strong>：拖拽移动、双击空白新增、「＋ 节点」新增、点节点改内容、连线 / 删边（画布左上角工具栏）、删除节点；节点可调<strong>大小与颜色</strong>（AI 也能设，用于区分重要度 / 分组）。</li>
-              <li><strong>图谱力学</strong>：右侧「⚙ 图谱设置」可调<strong>斥力 / 中心引力 / 弹簧强度 / 线段长度</strong>，拖动即时生效，设置随该知识库保存。</li>
+              <li><strong>检索方式</strong>：标题 / 别名权重最高，其次标签、分类、正文；再用 IDF 压低「的 / 我」这类无区分度的词，并做长度归一化，避免内容多的节点仅凭字数霸榜。候选超过 40 条且分数没有明显断层时，才让模型做一次挑选。</li>
+              <li><strong>查询扩展</strong>：你只说「继续 / 这个」这类短句时，会自动拼上一轮的话一起检索。</li>
+              <li><strong>关联扩展</strong>：命中的节点会额外带上<strong>一跳邻居</strong>（最多 4 条，标注关系），关系图谱里的边不再只是摆设。</li>
+              <li><strong>别名</strong>：节点可填别名 / 简称（最多 8 个），检索和「AI 找条目」都会匹配；合并节点时原标题会自动变成别名。</li>
+              <li><strong>关联面板</strong>：选中节点后，「关联」区列出入边 / 出边和「提及但未连线」的节点，点击可跳转。</li>
+              <li><strong>检索测试</strong>：右栏「检索测试」输入一句话，可看到本轮会注入哪些条目、分数、来源、是否邻居，以及是否触发了模型挑选。</li>
+              <li><strong>批量操作</strong>：按住 Ctrl 点选多个节点后，可移入主题、批量加标签、合并（保留第一个）、批量删除。</li>
+              <li><strong>导出</strong>：右上角「⋯」可导出 Markdown / JSON，或把当前图谱导出为 PNG。</li>
+              <li><strong>图谱编辑</strong>：拖拽移动、双击空白新增、「节点」按钮新增、点节点改内容、连线 / 删边（画布左上角工具栏）、删除节点；节点可调<strong>大小与颜色</strong>（AI 也能设，用于区分重要度 / 分组）。</li>
+              <li><strong>图谱力学</strong>：右侧「图谱设置」可调<strong>斥力 / 中心引力 / 弹簧强度 / 线段长度</strong>，拖动即时生效，设置随该知识库保存。</li>
             </ul>
           </div>
         </details>
@@ -700,19 +1641,21 @@
               <strong>双向</strong>两端都有箭头，表示互相（如相关、同义、对立这类 symmetric 关系默认画双向）。
               关系取自下面的固定词表（标注「⇄ 默认双向」的即为对称关系），图上按类型着色；AI 也只能从词表里选（写别的说法会自动归一到最近的类型）。</p>
             <ul id="help-relations"></ul>
-            <p class="hint">你可以点节点后用「＋ 连线」手动建立关系，并在表单里选择「单向 →」或「双向 ⇄」；AI 整理记忆时若发现两个已有条目之间存在明确关系，也会<strong>主动连边</strong>（方向按关系类型自动判断，也可由 AI 显式指定）。</p>
+            <p class="hint">你可以点节点后用「连线」按钮手动建立关系，并在表单里选择「单向 →」或「双向 ⇄」；AI 整理记忆时若发现两个已有条目之间存在明确关系，也会<strong>主动连边</strong>（方向按关系类型自动判断，也可由 AI 显式指定）。</p>
           </div>
         </details>
 
         <h4 class="set-group">外观与演出</h4>
 
-        <details class="help-sec" data-search="主题 深色 浅色 外观 标题栏">
-          <summary>主题与外观（浅色 / 深色 / GAL 主题）</summary>
+        <details class="help-sec" data-search="主题 深色 浅色 外观 标题栏 高对比 暗夜紫 深林绿 护眼 ide vscode trae 编辑器 空白字符 空格">
+          <summary>主题与外观（界面主题 / IDE 主题 / GAL 主题）</summary>
           <div class="help-body">
             <ul>
-              <li><strong>界面主题</strong>（设置 →「主题与外观」）：浅色 / 深色，切换后界面与应用窗口标题栏一起变。</li>
-              <li><strong>GAL 演出主题</strong>（设置 →「GAL 演出」）：樱粉 / 夜蓝 / 和风纸三套，决定对白框、名字牌与选项的观感。</li>
-              <li><strong>覆盖关系</strong>：进入 GAL 模式时，GAL 主题会<strong>覆盖到全部 UI</strong>（含设置弹窗、提示、弹窗等）；退出 GAL 模式即恢复界面主题。</li>
+              <li><strong>界面主题</strong>（设置 →「主题与外观」）：浅色 / 深色 / 高对比暗 / 暗夜紫 / 深林绿 / 护眼纸白，切换后界面与应用窗口标题栏一起变。看不清字时可换「高对比暗」或「护眼纸白」。</li>
+              <li><strong>IDE 主题</strong>（同页「IDE 编辑器主题」）：跟随界面主题 / VSCode Dark+ / VSCode Light+ / Trae Dark / Trae Light / Trae Deep Blue。它是<strong>完全独立</strong>的一套配置，只在 IDE 模式下覆盖整个 IDE 界面（含左侧会话栏与右侧对话区），退出 IDE 立即恢复界面主题；选「跟随界面主题」即两套合一。</li>
+              <li><strong>空白字符可视化</strong>（同页「空白字符」）：关闭 / 仅选区内 / 仅行尾 / 词之间 / 全部。空格显示为浅灰中点 <code>·</code>、制表符显示为 <code>→</code>，颜色采用 VS Code 标准值，与主题无关。</li>
+              <li><strong>GAL 演出主题</strong>（设置 →「GAL 演出」）：樱粉 / 夜蓝 / 和风纸（衬线）/ 极简黑白 / 霓虹夜景 / 像素复古，决定对白框、名字牌与选项的观感。</li>
+              <li><strong>覆盖关系</strong>：进入 GAL 模式时，GAL 主题会<strong>覆盖到全部 UI</strong>（含设置弹窗、提示、弹窗等）；IDE 模式下由 IDE 主题覆盖主界面与左栏（设置弹窗除外）。退出对应模式即恢复界面主题。三者各存各的配置，互不干扰。</li>
             </ul>
           </div>
         </details>
@@ -738,7 +1681,7 @@
               <li><strong>自动播放</strong>：单行推进时，语音播完自动切下一句（快捷键 <code>A</code>）；「每句最短展示」控制切换的最短间隔。</li>
               <li><strong>AI 自动写剧本</strong>：打开后由 AI 依据「角色设定 + 用户画像」先写一份<strong>分幕大纲</strong>，再<strong>逐幕展开</strong>推进剧情，最后一幕自动收束为结局。</li>
               <li><strong>总幕数 / 每幕轮数</strong>：控制大纲的规模与每幕的对话长度。</li>
-              <li><strong>剧本按会话独立保存</strong>；可在 GAL 工具条 <code>⋯ → 🎬 剧本</code> 查看大纲或重新生成。</li>
+              <li><strong>剧本按会话独立保存</strong>；可在 GAL 工具条 <code>⋯ → 剧本</code> 查看大纲或重新生成。</li>
             </ul>
           </div>
         </details>
@@ -747,9 +1690,9 @@
           <summary>语音输入（实时转写 + AI 矫正）</summary>
           <div class="help-body">
             <ul>
-              <li><strong>实时转写</strong>：点「🎤 语音输入」后<strong>边说边出字</strong>，文字实时进入输入框；再点一下停止。识别在<strong>本机</strong>完成（sherpa-onnx 流式模型），音频不出电脑。</li>
+              <li><strong>实时转写</strong>：点「语音输入」后<strong>边说边出字</strong>，文字实时进入输入框；再点一下停止。识别在<strong>本机</strong>完成（sherpa-onnx 流式模型），音频不出电脑。</li>
               <li><strong>两遍识别（更准）</strong>：说话时用流式模型出字；<strong>停止后</strong>再用离线模型（SenseVoice）对整段音频重新解码，用更准的结果覆盖实时文本。需先运行 <code>scripts/fetch_speech_model.py final</code> 下载精修模型；未下载时自动沿用流式结果。</li>
-              <li><strong>降噪</strong>（默认关闭）：点「🎛 降噪」开启后，会先在本机对音频做<strong>流式去背景噪声</strong>（DPDFNet）再识别，嘈杂环境下更准；安静环境可关掉。需先运行 <code>scripts/fetch_speech_model.py denoise</code> 下载降噪模型。</li>
+              <li><strong>降噪</strong>（默认关闭）：在「设置 → 语音与朗读」里开启「语音输入降噪」后，会先在本机对音频做<strong>流式去背景噪声</strong>（DPDFNet）再识别，嘈杂环境下更准；安静环境可关掉。需先运行 <code>scripts/fetch_speech_model.py denoise</code> 下载降噪模型。</li>
               <li><strong>AI 矫正</strong>（默认关闭）：在「设置 → 语音与朗读」里打开后，停止时会用「聊天模型」的模型对文本做最小必要校对（补标点 / 纠错别字 / 去口癖）。</li>
               <li><strong>可改可撤回</strong>：矫正后的文本可以直接编辑；输入框下方的「撤回原文」按钮可一键恢复未矫正的原始转写。</li>
               <li><strong>发送键保护</strong>：<strong>录音中、识别中、AI 矫正中</strong>发送键都会置灰不可点（Enter 也不会发送），避免"发出去的"与"随后矫正的"两段文本同时留存。</li>
@@ -765,8 +1708,8 @@
               <li><strong>三种后端</strong>：<strong>Edge TTS</strong>（免费、免密钥，推荐）/ OpenAI 兼容 <code>/v1/audio/speech</code> / 本地 <strong>GPT-SoVITS</strong>。</li>
               <li><strong>切句播放</strong>：GAL 模式的台词按标点切句后逐句合成播放；若该立绘配了「绑定音频」，默认优先播放它（可在角色设置里调优先级）。</li>
               <li><strong>音色</strong>：可直接填音色名（如 <code>zh-CN-XiaoxiaoNeural</code> / <code>alloy</code>），也可点「查看 Edge 中文音色」列出可选值。每个角色还能存多套「配音预设」，在 GAL 工具条一键切换。</li>
-              <li><strong>测试朗读</strong>：点「🔊 测试朗读」用当前填写的配置合成一句试听。</li>
-              <li><strong>音色克隆</strong>：GAL 工具条 <code>⋯ → 🎙 快速克隆</code>，给一段 5–10 秒参考音频 + 参考文本即可克隆（GPT-SoVITS 零样本）；带微调权重的角色会在合成前自动切换加载。需本机跑一个 GPT-SoVITS 服务。</li>
+              <li><strong>测试朗读</strong>：点「测试朗读」用当前填写的配置合成一句试听。</li>
+              <li><strong>音色克隆</strong>：GAL 工具条 <code>⋯ → 快速克隆</code>，给一段 5–10 秒参考音频 + 参考文本即可克隆（GPT-SoVITS 零样本）；带微调权重的角色会在合成前自动切换加载。需本机跑一个 GPT-SoVITS 服务。</li>
             </ul>
           </div>
         </details>
@@ -781,27 +1724,217 @@
               <li><strong>Solo</strong>：以对话为主。</li>
               <li><strong>IDE</strong>：VS Code 风格布局 —— 最左<strong>活动栏</strong>（资源管理器 / 搜索 / 在 VS Code 打开）、<strong>侧边栏文件树</strong>、中间<strong>多标签编辑器</strong>、底部<strong>状态栏</strong>（路径 / 编码 / 行列 / 语言），右侧仍是窄栏对话。工作区根目录 = <strong>当前会话的沙箱</strong>，切会话会自动换。</li>
               <li><strong>编辑器</strong>：内置 <strong>Monaco</strong>（VS Code 同款，<strong>本地内置、离线可用</strong>）——语法高亮、多光标、查找替换、MiniMap、代码折叠。</li>
-              <li><strong>快捷键</strong>：<code>Ctrl+S</code> 保存、<code>Ctrl+P</code> 快速打开文件、<code>Ctrl+Shift+P</code> 命令面板；完整清单见左侧「快捷键」。</li>
+              <li><strong>编辑器主题</strong>：设置 →「主题与外观」里的 <strong>IDE 主题</strong>是独立于界面主题的一套配置（<strong>跟随 VS Code</strong> / VSCode Dark Modern / Light Modern / Dark+ / Light+、Trae Dark / Light / Deep Blue，或「跟随界面主题」），只在 IDE 模式生效，界面与编辑器配色一起换。</li>
+              <li><strong>空白字符</strong>：同页「空白字符可视化」可选 关闭 / 仅选区内 / 仅行尾 / 词之间 / 全部（默认「全部」）；空格显示为浅灰中点 <code>·</code>、制表符为 <code>→</code>。</li>
+              <li><strong>文件管理区收起</strong>：点活动栏里<strong>当前已激活</strong>的图标即可收起右侧的视图区（再点任意图标展开），或按 <code>Ctrl+B</code> 切换；收起状态会被记住。命令面板里也有「收起 / 展开文件管理区」。</li>
+              <li><strong>快捷键</strong>：<code>Ctrl+S</code> 保存、<code>Ctrl+P</code> 快速打开文件、<code>Ctrl+Shift+P</code> 命令面板、<code>Ctrl+B</code> 收起 / 展开文件管理区、<code>Ctrl+`</code> 终端；完整清单见左侧「快捷键」。</li>
+              <li><strong>终端</strong>：编辑器下方可拖高度的<strong>真终端</strong>（ConPTY + xterm.js，与 VS Code / Trae 同构）——默认 PowerShell，<code>cd</code>、颜色、<code>vim</code> / <code>htop</code> 这类全屏程序和真正的 <code>Ctrl+C</code> 都支持；活动栏终端图标或 <code>Ctrl+`</code> 开关。它跑在<strong>当前会话的沙箱目录</strong>里，切换会话会自动换新 shell；进程退出后按回车重启。终端是给你手敲的，<strong>不受 Agent 命令白名单约束</strong>，也不对 Agent 开放。</li>
               <li><strong>文件操作</strong>：新建文件 / 新建文件夹 / 重命名 / 删除；可同时开多个标签，未保存的标签带 <code>●</code> 标记。</li>
               <li><strong>搜索</strong>：点活动栏放大镜，在沙箱内按内容或文件名搜索。</li>
               <li><strong>编码</strong>：读取自动识别 UTF-8 / GBK，保存时<strong>按原编码写回</strong>，中文文件不乱码。</li>
               <li><strong>AI 改动同步</strong>：AI 每次写/改/删/移动文件后，目录树自动刷新，并把改过的文件<strong>高亮</strong>；若改的正是你打开的文件且你没在编辑，会自动重载。</li>
-              <li><strong>与 VS Code 联动</strong>：点活动栏「🧩」可<strong>在本机 VS Code 中打开当前沙箱</strong>（用你自己的 VS Code 和它的全部插件）；命令面板里的「从 VS Code 导入设置与扩展清单」会<strong>只读</strong>读取你的 VS Code 设置（字号 / 缩进 / 换行 / 空白字符 / 滚轮缩放）并应用到编辑器，同时列出你已装的扩展（<strong>仅展示，不安装</strong>）。</li>
+              <li><strong>与 VS Code 联动</strong>：点活动栏的 VS Code 图标可<strong>在本机 VS Code 中打开当前沙箱</strong>（用你自己的 VS Code 和它的全部插件）；命令面板里的「从 VS Code 导入设置与扩展清单」会<strong>只读</strong>读取你的 VS Code 设置（字号 / 缩进 / 换行 / 滚轮缩放）并应用到编辑器，同时列出你已装的扩展（<strong>仅展示，不安装</strong>）。空白字符显示改由「主题与外观 → 空白字符可视化」统一控制，不跟随导入值。</li>
               <li><strong>安全</strong>：与 Agent 同一套沙箱约束——越界、<code>.git / .venv / node_modules / __pycache__</code> 与 <code>data/</code> 都不会出现在工作区里。</li>
             </ul>
           </div>
         </details>
 
-        <details class="help-sec" data-search="agent 沙箱 文件 读写 提问 撤回">
-          <summary>Agent 沙箱（文件读写）与中途提问</summary>
+        <details class="help-sec" data-search="agent 沙箱 文件 读写 命令 终端 提问 撤回 审批 自动审批 完全访问 自定义 规则 自检 渲染 render_check 截图 画面 布局 音频 声音 audio_probe">
+          <summary>Agent 沙箱（文件读写与命令）与审批</summary>
           <div class="help-body">
             <ul>
-              <li><strong>开启</strong>：点输入框上方的「🛠 Agent」开启，再点「📁」选择<strong>沙箱目录</strong>；设置按会话保存。</li>
-              <li><strong>能力</strong>：模型可在沙箱内 <code>列目录 / 读文件 / 搜索 / 写文件 / 改文件 / 建目录 / 移动 / 删除</code>；<strong>不提供命令行工具</strong>。</li>
+              <li><strong>开启</strong>：点输入框下方的「Agent」开启，再点「目录」选择<strong>沙箱目录</strong>；设置按会话保存。</li>
+              <li><strong>能力</strong>：模型可在沙箱内 <code>列目录 / 读文件 / 搜索 / 写文件 / 改文件 / 建目录 / 移动 / 删除</code>，并能<strong>执行命令</strong>（python / node / npm / git / pytest 等白名单程序），拿到退出码与输出。</li>
+              <li><strong>命令限制</strong>：默认只支持前台命令，不支持管道、重定向与后台常驻进程；白名单外的程序（cmd / powershell / curl 等）一律拒绝；<strong>python / node 只能执行沙箱内的 .py / .js</strong>，<code>-c</code> / <code>-e</code> 内联代码一律拒绝，<code>-m</code> 只放行 pytest / pip 等固定模块。以上限制在<strong>完全访问</strong>档全部解除（仍限在沙箱目录内执行）。它<strong>不是系统级沙箱</strong>——沙箱内的脚本本身仍可再起子进程，这一层靠审批档位兜底，不是操作系统级隔离。</li>
+              <li><strong>审批四档</strong>：<strong>手动审批</strong>每次写入 / 命令前都问；<strong>自动审批</strong>按风险放行——新建文件、建目录、普通编辑、只读命令、跑测试与脚本直接执行，删除 / 移动 / 语义重命名、覆盖已有文件、安装 / 联网 / 破坏性 Git（push、reset、clean）才问；<strong>完全访问</strong>不询问、不校验命令白名单，允许内联执行与管道 / 重定向，Git 提交与站点授权也不再确认（仍限在沙箱内，银行 / 支付 / 邮箱等站点除外）；<strong>自定义</strong>只看沙箱内 <code>.gm/agent-rules.json</code>。</li>
               <li><strong>安全</strong>：只接受沙箱内<strong>相对路径</strong>，越界、绝对路径直接拒绝；<code>.git / .venv / node_modules / __pycache__</code> 与本项目 <code>data/</code> 永久禁止访问。</li>
+              <li><strong>写后自检</strong>：写完会立刻做一次语法 / 结构检查，有错直接把报错回灌给模型让它自己修（成功时不额外占 token）。</li>
+              <li><strong>画面自检（render_check）</strong>：写完网页 / 小游戏 / UI，模型可以用<strong>无头浏览器真的打开</strong>这个 HTML，拿回运行时错误、零尺寸画布、元素遮挡、字号过小、对比度不足、点击区过小等结论；需要判断配色观感时可加 <code>screenshot</code>，由视觉模型描述画面（优先聊天模型，不支持图片时自动换视觉 API）。只接受沙箱内的 <code>.html / .htm</code>，不联网。<strong>手感、动效仍需你自己看。</strong></li>
+              <li><strong>声音自检（audio_probe）</strong>：写完音效 / BGM 后，模型可以真的读一遍音频（WAV / FLAC / OGG / MP3），拿回响度包络、起音、RT60 混响、频谱质心、事件密度等<strong>可复算的测量值</strong>，以及「冲击 / 压迫 / 空间 / 清晰」四个<strong>代理</strong>分数；改前改后用 <code>audio_compare</code> 对比（会先抵消整体响度差，避免「只是变响」被当成变好）。<strong>它听不出好不好听</strong>——那一步仍需你的耳朵。</li>
               <li><strong>改动可撤回</strong>：每次写操作生成一张工具卡片，点卡片上的「撤回」即可恢复该次改动。</li>
-              <li><strong>读沙箱外</strong>：输入框的「📤 读沙箱外」开关（仅 Agent 开启时显示）可让 AI 在你<strong>明确要求</strong>时读取沙箱外的文件——<strong>只读，写入仍只在沙箱内</strong>。</li>
+              <li><strong>读沙箱外</strong>：输入框的「沙箱外」开关（仅 Agent 开启时显示）可让 AI 在你<strong>明确要求</strong>时读取沙箱外的文件——<strong>只读，写入仍只在沙箱内</strong>。</li>
               <li><strong>中途提问</strong>：需要你决策时，AI 会在对话里弹出一张<strong>提问卡</strong>（可点选项或自己输入），你回答后它会<strong>原地继续</strong>，不用重新发消息。<strong>提问与 Agent 无关，不选沙箱也能用</strong>。</li>
+              <li><strong>相关设置</strong>：轮次、重复拦截、自动续跑次数、命令超时在「设置 → Agent 执行」；自动化的提问策略、重启恢复、看门狗在「设置 → Agent → 自动化（Autopilot）」。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="computer use 浏览器 操作 网页 点击 输入 截图 白名单 站点 自动化 扩展 canvas 桌面">
+          <summary>Computer Use（浏览器与桌面操作）</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>开启</strong>：设置 → Agent → 「Computer Use」，勾选后模型会多出 6 个工具（打开 / 看 / 操作 / 读 / 截图 / 列窗口）。</li>
+              <li><strong>它看到的是结构，不是像素</strong>：按钮、输入框、链接会被编成 <code>[1] [2] [3]</code> 并带上文字与位置，模型按编号操作；截图只在需要判断「看起来对不对」时调用，省 token 也更准。</li>
+              <li><strong>两种浏览器后端</strong>：默认「本地受控窗口」（独立 profile，看不到登录态）；切到「浏览器扩展」后会<strong>复用你主浏览器的登录态</strong> —— 需要先在 chrome://extensions 里加载 <code>browser_ext/</code> 目录，再把设置里的连接码填进扩展。扩展会在<strong>新标签页</strong>里操作，不动你正在看的页面。</li>
+              <li><strong>结构不足会自动截图</strong>：页面全是 canvas、或窗口没有可读控件时，自动截一张图交给视觉模型；同一目标 30 秒内最多一次，可在设置里关掉。</li>
+              <li><strong>本地窗口的隔离</strong>：本地后端使用自己配置目录里的 Edge，看不到你主浏览器的 cookie。Chrome / Edge 136 起已不允许对默认配置目录开远程调试，所以「直接接管」在技术上走不通——要复用登录态请用扩展后端，或在本地窗口里登录一次。</li>
+              <li><strong>能做什么</strong>：打开页面、点击、输入、按键、滚动、读 console 与网络请求、截图描述；可以验证「点完之后页面有没有变化」。</li>
+              <li><strong>桌面程序</strong>：另开一个「桌面程序」开关并填写 exe 白名单后，模型能列出这些程序的窗口、读控件树、按控件点击 / 输入。动作优先走 UIA Pattern（不抢前台焦点），不支持时才回退真实鼠标键盘。</li>
+              <li><strong>桌面的硬限制</strong>：白名单外的窗口连列出都不会出现；管理员权限（提权）窗口直接拒绝；密码框不读不填；<b>Ctrl+Alt+Shift+Esc</b> 是全局急停（按一次冻结，再按恢复）。</li>
+              <li><strong>P0 / P1 边界</strong>：浏览器只操作一个标签页，不处理原生弹层；桌面只做 UIA 能读到的控件（自绘界面要靠截图判断，点击精度会下降）。</li>
+              <li><strong>站点授权</strong>：白名单留空时，每个新站点第一次打开都会弹确认，且「允许」只在本次运行内有效。银行、支付、邮箱、密码管理器是内置禁区，<strong>无法解除</strong>。</li>
+              <li><strong>硬性限制</strong>：密码框不读不填；本程序自己的端口与 <code>web/</code> 目录永远拒绝（防止 AI 改自己的界面）；提交 / 支付 / 删除类按钮每次都问。</li>
+              <li><strong>提示注入</strong>：页面里的文字一律当数据。出现「忽略之前的要求」这类句子，模型不会照做，会告诉你。</li>
+              <li><strong>动作可回放</strong>：每一步都记进轨迹（<code>computer_read kind=trace</code>），失败时能看它当时点了什么。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="计划 步骤 update_plan 分步 思考 步骤上下文 卡住 失败诊断 blocked">
+          <summary>执行计划与分步思考（过程里的「步骤 2/5」）</summary>
+          <div class="help-body">
+            <p>开了 Agent 之后，长任务会先列一份执行计划再一步步做。对话里的过程按时间线排：每一步先出现一个可折叠的「步骤 N · 思考中…」，下面是这一步的工具调用，做完自动折起。</p>
+            <ul>
+              <li><strong>「步骤 2/5」是什么</strong>：斜杠前是当前第几步，后面是计划总步数。计划由模型用 <code>update_plan</code> 自己维护，做完一步更新一次；工具组的标题也会显示这一步的计划文字。</li>
+              <li><strong>为什么中间会停一下</strong>：每一步动手前它先判断「上一步的结果说明什么、接下来做什么」。这段判断会压成一小段摘要带回下一轮，让它不用重复读同一个文件。</li>
+              <li><strong>上一步摘要在哪看</strong>：不单独展示，只作为内部提示；界面上折叠的思考块是模型这一轮真实输出的思维链（要先开「深度思考」）。</li>
+              <li><strong>计划会改</strong>：计划是活文档。大型任务会按里程碑（M1 / M2…）分组，每步带验收方式；中途发现新事实、某步失败或里程碑完成时，模型用 <code>plan_patch</code> 改受影响的那几步，卡片标题会显示版本号（v2、v3…），展开底部「变更记录」能看到为什么改。</li>
+              <li><strong>先规划再动手</strong>：在输入框发 <code>/plan 你的目标</code>，这一轮会进入只读规划模式——只读文件 / 搜索 / 提问，先产出「目标 + 完成判据 + 里程碑」，等你确认后再执行。</li>
+              <li><strong>blocked 是什么意思</strong>：某一步做不了（缺权限、等你决定）时，模型会标成 blocked 而不是死磕。标了 blocked 的步骤算「已处理」，不会再触发自动续跑。</li>
+              <li><strong>失败诊断</strong>：工具报错时会附带「这类错误通常怎么解 / 不要用完全相同的参数重试」的提示，避免它一条道走到黑。</li>
+              <li><strong>预算提示</strong>：轮次快用完（还剩 3 轮）时会提醒它优先收尾，并把没做完的部分明确告诉你。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="自动化 autopilot 自主规划 完成定义 验收 独立评审 断点续跑 提问策略 auto smart ask 看门狗 需要你">
+          <summary>自动化：自主规划到完成、断了自己续、提问按策略处理</summary>
+          <div class="help-body">
+            <p>在输入框写目标，点「自动化」。它不会只做一轮：先立项（完成定义 + 粗计划），再自己执行、机检、独立评审，直到验收全部通过或需要你介入。</p>
+            <ul>
+              <li><strong>完成判定</strong>：能跑命令就跑命令（构建 / 测试 / lint / 启动检查 / HTTP 探活）；没有可机检项时，由新上下文的独立评审员只看证据判分。判定不了的项不算通过，不会靠「我觉得做完了」收工。</li>
+              <li><strong>不会交半成品</strong>：计划与验收全过才算完成；长时间没有实际进展或预算耗尽时转「需要你」，不会把半成品标成完成。</li>
+              <li><strong>断点续跑</strong>：网络 / 超时 / 空回合会自动退避重试；进程重启后会把未完成目标接回来。断点里包含上次改过的文件、上次验收，以及「执行到一半结果未知」的工具，续跑会先核对现状再动手。</li>
+              <li><strong>提问策略</strong>：设置 → Agent → 自动化里三档——<strong>auto</strong> 一律自决；<strong>smart</strong> 可逆自决、删除 / 覆盖 / 发布 / 付款 / 改凭据 / 缺外部信息时暂停问你；<strong>ask</strong> 一律问。自动化里不弹交互卡，问题会写进正文和目标，回答后点「自动化」恢复。</li>
+              <li><strong>状态与恢复</strong>：按钮显示「运行中 / 重试中 / 需要你 / 已暂停」；点「需要你 / 已暂停」会恢复原目标，不会拿输入框新建一个。</li>
+              <li><strong>无进展看门狗</strong>：连续多回合没有新的写入 / 验收变化会强制重规划，仍无进展就暂停等你。默认不设固定回合上限；需要严格控制成本时，在设置里打开「硬上限」。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="自动续跑 继续 继续输出 收尾 要不要 上限 次数">
+          <summary>自动续跑：什么时候自己继续、什么时候会停</summary>
+          <div class="help-body">
+            <p><strong>这一节是普通对话的自动续跑</strong>；目标级自动化（立项 / 验收 / 断点续跑）见上一条。</p>
+            <p>模型有时会在其实没做完的时候收尾，等你再说一遍「继续」。自动续跑就是省掉这一步：它想收尾时先检查一遍，没做完就自己推它往下做，过程流里留一条「自动续跑 1/3」的浅提示，你能看出不是卡住了。</p>
+            <ul>
+              <li><strong>三种触发</strong>：① 计划里还有没做完的步骤；② 没有计划，但结尾在问「要不要 / 需要我」；③ 是开发型任务、既没建计划也没动手，催一次让它先列计划。</li>
+              <li><strong>什么时候放行</strong>：计划全部完成（含 blocked），或它明确说了「已完成 / 改完了」，就直接结束，不会硬拖。</li>
+              <li><strong>次数上限</strong>：默认 3 次，可在工具条的 Agent 菜单或「设置 → Agent 执行」里改成关闭 / 3 / 5。到上限就正常停下，等你决定。</li>
+              <li><strong>为什么不再问「要不要继续」</strong>：提问通道收紧了——实现细节、命名、先改哪个文件都由它自己定；真要你决策时会弹「提问卡」，而不是在正文里问一句然后停下。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="多会话 并行 后台 生成 切换 未读 线程 同时">
+          <summary>多会话并行：切走不中断，可以同时跑两条</summary>
+          <div class="help-body">
+            <p>以前切换会话会直接停止当前生成。现在切走只是「把这轮放到后台继续跑」：你可以去另一个会话里发新消息，两边同时生成、互不打断。</p>
+            <ul>
+              <li><strong>会话列表的小圆点</strong>：蓝色闪动 = 正在生成；黄色常亮 = 在后台生成完了，还没切回去看。</li>
+              <li><strong>切回去看</strong>：如果它还在生成，会把它接回对话末尾继续显示；已经生成完的，直接从落盘消息重建。</li>
+              <li><strong>停止按钮只停当前会话</strong>：别的会话在后台照常跑。</li>
+              <li><strong>排队只在同一个会话里生效</strong>：当前会话正在生成时，Enter 的内容会排队；别的会话空闲就可以直接发。</li>
+              <li><strong>生成中的会话不能删</strong>：避免收尾时又把它写回来；先点停止再删。</li>
+              <li><strong>GAL 剧场例外</strong>：舞台、配音、选项都是单实例，切会话仍会停止。</li>
+              <li><strong>后台完成会发系统通知</strong>（需要通知权限）；审批卡 / 提问卡在后台会话里看不见，记得切回去处理。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="变更 diff 差异 审查 保留 撤销 提示栏 标签页 块对 绿 红">
+          <summary>变更审阅：块对 diff、标签页统计与提示栏</summary>
+          <div class="help-body">
+            <p>Agent 改完文件后，IDE 模式会把改动按「块」成对展示：同一位置先给旧内容（浅红底；真正被删的行深红），再给新内容（浅绿底；真正新增的行深绿）。中间被折叠的行用「⋯ N 个隐藏的行 ⋯」占位，点它展开。</p>
+            <ul>
+              <li><strong>为什么上下排而不是左右并排</strong>：并排 diff 在窄窗口里两侧都挤，上下排能让旧、新两边都保留完整语法高亮与行号。</li>
+              <li><strong>行号</strong>：左侧行号是真实文件行号——旧块用旧文件的行号，新块用新文件的行号，跳过的行不占号。</li>
+              <li><strong>标签页统计</strong>：工作区顶部每个文件标签右侧显示该文件待审阅的 +新增 / −删除 行数。</li>
+              <li><strong>输入框上方的提示栏</strong>：最左图标展开这一轮的任务项（✓ 完成 / ● 进行中 / ○ 待做 / ! 卡住），文件图标列出待审查文件；最右「全部保留 / 全部撤销」作用于本轮全部改动。处理完提示栏消失，对话里留一行变更记录。</li>
+              <li><strong>逐文件查看</strong>：在文件图标展开的列表里点某个文件，直接打开它的审阅视图。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="图像 图表 画图 可视化 svg 流程图 mermaid 统计 函数图像">
+          <summary>AI 输出图像 / 图表（SVG · ECharts · Mermaid）</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>三种围栏</strong>：<code>```svg</code> 矢量图（几何 / 函数 / 示意图）、<code>```chart</code> ECharts 配置（统计 / 趋势 / 分布）、<code>```mermaid</code> 流程图 / 时序图。围栏<strong>闭合后</strong>自动渲染成图片，右上角可「下载 / 源码」。</li>
+              <li><strong>沙箱图片</strong>：AI 用 <code>matplotlib</code> / <code>PIL</code> 生成 PNG 后，用 <code>![说明](相对路径)</code> 引用即可在对话里显示（路径相对沙箱根目录，需要 Agent 与沙箱）。</li>
+              <li><strong>安全</strong>：SVG 以 <code>&lt;img&gt;</code> 方式加载，里面的脚本不会执行；<code>chart</code> 只接受 JSON；<code>mermaid</code> 使用 strict 模式。</li>
+              <li><strong>离线</strong>：SVG 与沙箱图片完全离线；ECharts / Mermaid 走 CDN，离线时退回源码显示。</li>
+            </ul>
+          </div>
+        </details>
+
+        <h4 class="set-group">工作台</h4>
+
+        <details class="help-sec" data-search="工作台 日程 任务 产物 场景 三栏 办公 学习 生活">
+          <summary>工作台总览（日程 / 任务 / 产物）</summary>
+          <div class="help-body">
+            <p>侧栏模式切换的「工作台」是一屏三栏：<strong>日程</strong>、<strong>任务</strong>、<strong>产物</strong>。右上角的「场景」决定推荐哪些工作流模板（办公 / 学习 / 生活），不改变已有数据。</p>
+            <ul>
+              <li><strong>日程</strong>：今天或未来 7 天的安排；点任意一条即可编辑，右上角「＋」新建。</li>
+              <li><strong>任务</strong>：可拆步骤、可暂停恢复的执行单元；点卡片看详情。</li>
+              <li><strong>产物</strong>：任务写出的文件，按任务分组。</li>
+              <li><strong>刷新</strong>：日程与产物的变更会实时推送；任务进度本来就是实时的。断线时最多 30 秒也会自动补齐。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="任务 步骤 确认执行 暂停 恢复 重试 失败 计划 编辑 优先级 标签 断点">
+          <summary>任务：写操作确认 / 断点恢复 / 重试 / 改计划</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>写操作确认</strong>：任务里涉及写文件、建 / 改日程等<strong>写操作</strong>的步骤，第一次会停在「待确认」；打开任务详情点「确认执行」才继续。读操作（列目录、查日程、搜索）直接跑。</li>
+              <li><strong>断点恢复</strong>：状态实时落盘。进程重启后，原本在跑的任务统一转为「已暂停」，<strong>不会自动重跑</strong>，避免同一个写操作执行两次。</li>
+              <li><strong>失败重试</strong>：任务失败后点「重试失败步骤」——只把失败的步骤退回待执行（已完成的步骤不重跑），并显示已重试次数。</li>
+              <li><strong>改计划</strong>：任务处于「待开始 / 已暂停 / 失败」时，可以增删步骤、改标题、调整顺序、给步骤绑定能力或填参数。已完成的步骤不会被动；换了能力或改了参数会重新要求确认写操作。</li>
+              <li><strong>手动步骤</strong>：没有绑定能力的步骤由你自己完成，点「标记完成」推进。</li>
+              <li><strong>优先级与标签</strong>：新建或「编辑信息」里设置，P1–P3 会显示在卡片上；任务列可按状态筛选、按标题 / 标签搜索。</li>
+              <li><strong>截止时间</strong>：新建任务时填「截止时间」会同步一条截止日程并提前提醒；取消 / 完成任务会自动关掉这条日程。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="产物 交付物 临时文件 预览 markdown csv 定位 删除 分组">
+          <summary>产物：交付物 vs 临时文件</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>什么算产物</strong>：只有真正写出文件的步骤（写文件 / 改文件 / 移动文件）会登记；删除文件、建目录不算。</li>
+              <li><strong>交付物 / 临时文件</strong>：写在 <code>tmp / temp / cache / __pycache__ / .git / node_modules / build / dist</code> 等目录下，或文件名以 <code>.</code> 开头的，归为「临时文件」；默认只显示交付物，点列头「交付物 / 全部」切换。</li>
+              <li><strong>分组</strong>：按所属任务分组显示，组头就是任务标题；同一任务重复写同一个文件只保留一条，并更新大小。</li>
+              <li><strong>预览</strong>：文本、图片直接看；Markdown 会渲染，CSV 显示成表格；超过 256KB 只显示前 256KB。</li>
+              <li><strong>定位 / 移除</strong>：「定位」在资源管理器里打开所在文件夹；「✕」只从产物栏移除记录，<strong>不会删除磁盘文件</strong>。删除任务会一并清掉它的产物登记。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="日程 快速添加 明天 周几 提醒 重复 编辑 7天">
+          <summary>日程：快速添加语法 / 编辑 / 重复</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>快速添加</strong>：在日程列上方输入一句话回车即可，例如「明天 10 点 开会」「周四 15:30 交报告」「10月25日 9:00 体检」「下午 3 点 面试」。</li>
+              <li><strong>识别范围</strong>：今天 / 明天 / 后天 / 大后天 / 今晚、周X / 下周X、M月D日、<code>HH:MM</code>、<code>H点</code> / <code>H点半</code>、上午 / 下午 / 晚上 / 中午。只写日期时默认 09:00；只写时间且今天已过则算明天。</li>
+              <li><strong>默认值</strong>：快速添加的日程固定 1 小时、提前 10 分钟提醒；需要更细的设置就点「＋」或点已有日程编辑。</li>
+              <li><strong>编辑</strong>：点日程行打开编辑框，可改标题、起止时间、地点、重复规则与提醒。重复日程会提示「保存后修改整个系列」。</li>
+              <li><strong>提醒</strong>：到点弹 Windows 系统通知；由对话或设置里创建的提醒也会并入这里，程序关闭时由系统计划任务负责。</li>
+              <li><strong>今天 / 7 天</strong>：列头按钮切换；7 天视图按日期分组列出，不做时间网格。过期的一次性日程可用「清理」删除（重复日程会保留）。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="工作流 触发 定时 事件 动作 多动作 运行历史 重跑 模板">
+          <summary>工作流：触发器 / 多动作 / 运行历史</summary>
+          <div class="help-body">
+            <ul>
+              <li><strong>触发方式</strong>：<strong>手动</strong>（点「运行」）、<strong>定时</strong>（每天或指定星期 + HH:MM）、<strong>事件</strong>（任务完成 / 日程到点）。定时与事件触发都要求<strong>程序正在运行</strong>。</li>
+              <li><strong>动作</strong>：创建任务、发通知、创建日程、发消息到会话、本机朗读、调用任意能力。<strong>支持多个动作</strong>，按列表顺序执行，可增删与上下调整。</li>
+              <li><strong>模板</strong>：新建时从模板开始最快；模板会按当前场景标「推荐」。内置晨间简报 / 周复盘 / 收件箱整理 / 学习复盘 / 生活缴费提醒。</li>
+              <li><strong>占位符</strong>：<code>{{date}}</code> / <code>{{time}}</code> / <code>{{weekday}}</code>；事件触发还可用 <code>{{event.title}}</code>。</li>
+              <li><strong>编辑</strong>：列表每行的「编辑」可改触发方式、动作与启用状态，不会重建 ID。</li>
+              <li><strong>运行历史</strong>：点开一条记录可看完整输出与用时；「重跑这条工作流」按当前配置再执行一次（目前是整条重跑，不是从失败动作继续）。</li>
             </ul>
           </div>
         </details>
@@ -822,9 +1955,9 @@
         </details>
 
         <details class="help-sec" data-search="用量 统计 token 折线图">
-          <summary>用量统计（侧栏 📊 用量统计）</summary>
+          <summary>用量统计（侧栏「用量统计」）</summary>
           <div class="help-body">
-            <p>每次回复下方会显示本次消耗的 token；「用量统计」里可按近 7 天 / 近 30 天 / 近 12 个月查看按模型与按日 / 月的明细，并用折线图展示趋势。</p>
+            <p>每次回复下方会显示本次消耗的 token；「用量统计」里可按近 7 天 / 近 30 天 / 近 12 个月查看「按模型 / 按来源 / 按日或月」的明细，并用折线图展示趋势。<strong>它只统计本程序自己发起的调用</strong>（对话 + 角色设定生成 + 剧本生成 / 续幕 + 剧情节点判定），不含账户在其他客户端的消耗。</p>
           </div>
         </details>
 
@@ -834,7 +1967,7 @@
             <ul>
               <li><strong>复制</strong>：复制消息文本。</li>
               <li><strong>撤回</strong>（用户消息）：连同它后面的 AI 回复一起移除。</li>
-              <li><strong>修改</strong>（用户消息）：行内编辑后重新发送，其后的回复会被丢弃并重新生成。</li>
+              <li><strong>修改</strong>（用户消息）：把文本退回底部输入框，改完再发送；其后的回复会被丢弃并重新生成（附件需要重新添加，Esc 取消修改）。</li>
               <li><strong>删除本条</strong>：只删这一条，不影响其它消息。</li>
               <li><strong>重新发言</strong>（AI 回复）：丢弃这条回复及之后的消息，重新生成。</li>
               <li><strong>选择文本</strong>（AI 回复）：切换成源码视图，这样复制到的是 Markdown / LaTeX <strong>源码</strong>（而非渲染后的文字 / 公式）。</li>
@@ -846,8 +1979,32 @@
     </div>
     <div class="modal-foot">
       <div class="foot-note">改动保存后立即生效，无需重启（<kbd>Ctrl</kbd>+<kbd>S</kbd> 保存、<kbd>Esc</kbd> 关闭）。</div>
-      <button id="btn-save" class="primary">保存</button>
+      <span id="settings-dirty" class="foot-dirty hidden"></span>
+      <button id="btn-save" class="primary" disabled>保存</button>
       <button id="btn-cancel" class="ghost">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 变更审阅（Solo / 非 IDE 模式的 diff 弹窗） -->
+<div id="review-modal" class="modal hidden">
+  <div class="modal-card review-modal-card">
+    <div class="modal-head review-head">
+      <div class="review-info">
+        <span class="review-title">变更完成，请确认是否接纳</span>
+        <span id="review-file" class="review-file"></span>
+      </div>
+      <div class="review-actions">
+        <span id="review-idx" class="review-idx"></span>
+        <button id="review-prev" class="ico-btn" title="上一个文件" type="button">‹</button>
+        <button id="review-next" class="ico-btn" title="下一个文件" type="button">›</button>
+        <button id="review-undo" class="review-btn ghost" type="button">撤销 <kbd>Ctrl</kbd><kbd>Backspace</kbd></button>
+        <button id="review-keep" class="review-btn primary" type="button">保留 <kbd>Ctrl</kbd><kbd>Enter</kbd></button>
+        <button id="review-close" class="modal-close" title="关闭">✕</button>
+      </div>
+    </div>
+    <div class="review-body">
+      <div id="review-diff" class="review-editor"></div>
     </div>
   </div>
 </div>
@@ -864,9 +2021,93 @@
       <button id="btn-close-usage" class="modal-close" title="关闭">✕</button>
     </div>
     <div class="modal-body">
+      <div id="usage-balance" class="usage-balance">
+        <span class="ub-label">账户余额</span>
+        <span id="usage-balance-text" class="ub-text">查询中…</span>
+        <button id="usage-balance-refresh" class="ctx-btn" type="button" title="重新查询账户余额">刷新</button>
+      </div>
       <div id="usage-cards" class="usage-cards"></div>
       <div id="usage-chart" class="usage-chart"></div>
       <div id="usage-tables" class="usage-tables"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 学习观测：observations 表的用户可见入口 -->
+<div id="observe-modal" class="modal hidden">
+  <div class="modal-card wide-card">
+    <div class="modal-head">
+      <div class="modal-tabs">
+        <button class="tab active" data-observe-days="7">近 7 天</button>
+        <button class="tab" data-observe-days="30">近 30 天</button>
+        <button class="tab" data-observe-days="90">近 90 天</button>
+      </div>
+      <button id="btn-close-observe" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="observe-filterbar">
+        <span class="hint">对话、数学竞技场、模拟卷产生的学习行为都记在这里；点某一项可只看该学科。</span>
+        <button id="observe-clear-filter" class="ctx-btn hidden" type="button">查看全部</button>
+      </div>
+      <div id="observe-cards" class="usage-cards"></div>
+      <div id="observe-groups" class="observe-groups"></div>
+      <h3 class="observe-h3">明细</h3>
+      <div id="observe-items" class="observe-items"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 会话存档 / 倒带弹窗 -->
+<div id="saves-modal" class="modal hidden">
+  <div class="modal-card wide-card">
+    <div class="modal-head">
+      <div class="modal-head-title"><svg class="ic"><use href="#i-history"/></svg>存档 / 倒带
+        <span class="hint" id="saves-session"></span>
+      </div>
+      <button id="btn-close-saves" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="saves-actions">
+        <button id="saves-make" class="ghost"><svg class="ic"><use href="#i-plus"/></svg>手动存档</button>
+        <span class="hint">每轮对话后自动留档；「回退」覆盖当前会话，「分支」复制出一条新线（原会话保留）。</span>
+      </div>
+      <div id="saves-list" class="saves-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 上下文与压缩详情 -->
+<div id="ctx-modal" class="modal hidden">
+  <div class="modal-card ctx-card">
+    <div class="modal-head">
+      <div class="modal-head-title"><svg class="ic"><use href="#i-chart"/></svg>上下文与压缩</div>
+      <button id="btn-close-ctx" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="ctx-tabs" role="tablist">
+        <button class="ctx-tab active" type="button" data-ctx-tab="usage">占用明细</button>
+        <button class="ctx-tab" type="button" data-ctx-tab="input">输入明细</button>
+      </div>
+      <div id="ctx-pane-usage">
+        <p id="ctx-detail-total" class="ctx-detail-total"></p>
+        <div id="ctx-parts" class="ctx-parts"></div>
+        <p id="ctx-detail-meta" class="hint"></p>
+        <pre id="ctx-summary-text" class="ctx-summary-text"></pre>
+        <p class="hint">压缩只替换“发给模型的历史”，本地原文不会删除；点「恢复原文」即可撤销压缩。</p>
+      </div>
+      <div id="ctx-pane-input" class="hidden">
+        <p class="hint">显示最近一条有逐轮明细的回合；每行是一次模型调用，输入是该次请求的完整上下文，
+          「构成」列按类型拆开（规则 / 记忆 / 工具结果 / 历史…）。</p>
+        <p id="ctx-input-total" class="ctx-detail-total"></p>
+        <p id="ctx-input-meta" class="hint"></p>
+        <div id="ctx-input-mix" class="ctx-input-mix hidden"></div>
+        <div id="ctx-input-table" class="ctx-input-table"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button id="ctx-detail-compress" class="ghost">立即压缩</button>
+      <button id="ctx-detail-restore" class="ghost">恢复原文</button>
+      <button id="btn-close-ctx2" class="primary">关闭</button>
     </div>
   </div>
 </div>
@@ -877,32 +2118,131 @@
     <div class="modal-head kb-head">
       <div class="kb-head-left">
         <select id="kb-select" class="field-input kb-select"></select>
-        <button id="kb-new" class="ghost">＋ 新建</button>
-        <button id="kb-rename" class="ghost">重命名</button>
-        <button id="kb-del" class="ghost">删除</button>
-        <button id="kb-add-node" class="ghost">＋ 节点</button>
-        <button id="kb-add-edge" class="ghost" title="在选中的节点与另一个节点之间建立连线">＋ 连线</button>
-        <button id="kb-refresh" class="ghost" title="从磁盘重新加载当前知识库">刷新</button>
-        <label class="check-row kb-check"><input type="checkbox" id="kb-ai-write"> 允许 AI 修改本库</label>
+        <div class="kb-search-wrap">
+          <svg class="ic kb-search-ico"><use href="#i-search"/></svg>
+          <input id="kb-search" class="kb-search" placeholder="搜索节点（标题 / 标签 / 内容）" autocomplete="off">
+          <span id="kb-search-count" class="kb-search-count"></span>
+          <div id="kb-global-results" class="kb-global-results hidden"></div>
+        </div>
+        <select id="kb-search-scope" class="field-input kb-scope" title="搜索范围">
+          <option value="local">本库</option>
+          <option value="global">全部记忆</option>
+        </select>
+        <select id="kb-family" class="field-input kb-scope" title="按主题查看">
+          <option value="">全部主题</option>
+        </select>
+        <button id="kb-search-prev" class="ghost kb-nav" title="上一个匹配（Shift+Enter）">↑</button>
+        <button id="kb-search-next" class="ghost kb-nav" title="下一个匹配（Enter）">↓</button>
+        <button id="kb-add-node" class="ghost"><svg class="ic"><use href="#i-plus"/></svg>节点</button>
+        <button id="kb-add-edge" class="ghost" title="在选中的节点与另一个节点之间建立连线"><svg class="ic"><use href="#i-plus"/></svg>连线</button>
+        <div class="kb-view-switch" id="kb-view-switch">
+          <button id="kb-view-graph" class="kb-viewbtn active" title="以关系图谱查看"><svg class="ic"><use href="#i-graph"/></svg>图谱</button>
+          <button id="kb-view-list" class="kb-viewbtn" title="以列表查看（节点较多或断网时更易读）"><svg class="ic"><use href="#i-list"/></svg>列表</button>
+        </div>
+        <div class="kb-more">
+          <button id="kb-more-btn" class="ghost kb-more-btn" title="更多操作">⋯</button>
+          <div id="kb-more-menu" class="kb-more-menu hidden">
+            <button id="kb-new" class="kb-mi"><svg class="ic"><use href="#i-plus"/></svg>新建知识库</button>
+            <button id="kb-rename" class="kb-mi">重命名当前库</button>
+            <button id="kb-del" class="kb-mi">删除当前库</button>
+            <button id="kb-refresh" class="kb-mi"><svg class="ic"><use href="#i-history"/></svg>从磁盘刷新</button>
+            <button id="kb-export-md" class="kb-mi">导出 Markdown</button>
+            <button id="kb-export-json" class="kb-mi">导出 JSON</button>
+            <button id="kb-export-png" class="kb-mi">导出图谱图片</button>
+            <label class="check-row kb-mi"><input type="checkbox" id="kb-ai-write"> 允许 AI 修改本库</label>
+          </div>
+        </div>
       </div>
       <button id="btn-close-kb" class="modal-close" title="关闭">✕</button>
     </div>
     <div class="kb-body">
       <div id="kb-graph" class="kb-graph"></div>
+      <div id="kb-resizer" class="kb-resizer" title="拖动调整宽度"></div>
       <aside class="kb-side">
-        <div class="kb-bind">
-          <div class="field-label">本会话使用的通用知识库</div>
+        <div id="kb-bulk" class="kb-bulk hidden">
+          <div class="kb-bulk-head">已选 <b id="kb-bulk-count">0</b> 个节点</div>
+          <div class="kb-bulk-actions">
+            <button id="kb-bulk-family" class="ghost">移入主题</button>
+            <button id="kb-bulk-tag" class="ghost">加标签</button>
+            <button id="kb-bulk-merge" class="ghost">合并</button>
+            <button id="kb-bulk-del" class="ghost danger">删除</button>
+          </div>
+          <p class="hint">合并时保留第一个选中的节点，其余节点并入后删除。</p>
+        </div>
+        <details class="kb-sect" open>
+          <summary>本会话使用的知识库</summary>
+          <div class="kb-bind">
           <div id="kb-bind-list" class="kb-bind-list"></div>
           <p class="hint">AI 会<b>优先写入上面勾选</b>的知识库（各库还需开启「允许 AI 修改本库」）；未勾选任何库时，AI 只写本会话记忆。</p>
+          <p class="hint">侧栏「知识库」按钮右上角的<strong>红点</strong>表示本会话还没绑定任何通用库；看过这一栏后红点不再重复出现，之后可随时回来勾选。</p>
           <p class="hint kb-ai-target" id="kb-ai-target"></p>
           <label class="check-row"><input type="checkbox" id="sess-ai-write"> 允许 AI 写本会话记忆</label>
-        </div>
-        <div class="field-label">节点详情</div>
+          <div id="kb-use-profile-row">
+            <label class="check-row" data-search="用户画像 读取 开关 会话"><input type="checkbox" id="sess-use-profile"> 读取用户画像（本会话）</label>
+            <p class="hint">默认开启。关闭后本会话的提示词里不再出现画像条目（检索段与记忆工具说明都不再列出）；画像内容仍保留在「用户画像」知识库，可随时打开。</p>
+          </div>
+          <div id="kb-use-memory-row">
+            <label class="check-row" data-search="记忆 知识库 读取 开关 会话"><input type="checkbox" id="sess-use-memory"> 读取会话记忆与知识库（本会话）</label>
+            <p class="hint">默认开启。关闭后本会话的提示词里不再注入会话记忆、绑定的知识库与统一记忆检索（也不再列出记忆工具条目）；内容仍保留，可随时打开。</p>
+          </div>
+          </div>
+        </details>
+        <details class="kb-sect" id="kb-sect-recall">
+          <summary>检索测试</summary>
+          <div class="kb-recall">
+            <input id="kb-recall-q" class="field-input" placeholder="输入一句话，看看会召回哪些条目">
+            <div class="kb-node-btns">
+              <button id="kb-recall-run" class="primary">测试</button>
+              <span id="kb-recall-meta" class="hint"></span>
+            </div>
+            <div id="kb-recall-list" class="kb-recall-list"></div>
+            <p class="hint">展示本轮会注入的条目与分数；邻居条目会标注关系。不会真的发给模型。</p>
+          </div>
+        </details>
+        <details class="kb-sect" id="kb-sect-family">
+          <summary>主题</summary>
+          <div class="kb-family">
+            <input id="kf-title" class="field-input" placeholder="主题名称，例如：抽象代数">
+            <textarea id="kf-desc" class="ta" rows="2" placeholder="这组记忆的共同描述（可选）"></textarea>
+            <div class="kb-node-btns">
+              <button id="kf-save" class="primary">保存主题</button>
+              <button id="kf-add-node" class="ghost">加入选中节点</button>
+            </div>
+            <button id="kf-delete" class="ghost">删除当前主题</button>
+            <p class="hint">选中图谱里的节点后，点「加入选中节点」把它放进当前主题；在顶部下拉框切换主题查看。</p>
+          </div>
+        </details>
+        <details class="kb-sect hidden" id="kb-sect-prompt">
+          <summary>知识库写入提示词</summary>
+          <div class="kb-prompt">
+            <textarea id="kb-prompt" class="ta" rows="5" placeholder="例如：本库只写入教材原文、定理、定义与例题；不要写入个人偏好、日程或与教材无关的内容。"></textarea>
+            <div class="kb-node-btns">
+              <button id="kb-prompt-save" class="primary">保存提示词</button>
+              <span id="kb-prompt-status" class="hint"></span>
+            </div>
+            <p class="hint">AI 往这个库写内容时，会在通用记忆规则之上遵守这段提示词；留空表示不额外限制。</p>
+          </div>
+        </details>
+        <details class="kb-sect" id="kb-sect-node" open>
+          <summary>节点详情</summary>
         <div id="kb-node-form" class="kb-node-form hidden">
           <input id="kd-title" class="field-input" placeholder="标题">
           <input id="kd-category" class="field-input" placeholder="分类（如 喜好 / 禁忌 / 事实）">
           <textarea id="kd-content" class="ta" rows="4" placeholder="内容"></textarea>
           <input id="kd-tags" class="field-input" placeholder="标签（逗号分隔）">
+          <input id="kd-aliases" class="field-input" placeholder="别名（逗号分隔，用于检索与合并判断）">
+          <div class="kb-links">
+            <div class="field-label">关联</div>
+            <div id="kd-links" class="kb-links-list"></div>
+          </div>
+          <div class="kb-notes">
+            <div class="field-label">时间线追加</div>
+            <div id="kd-notes-list" class="kb-notes-list"></div>
+            <textarea id="kd-note-input" class="ta" rows="2" placeholder="补充一条后续观察…"></textarea>
+            <div class="kb-node-btns">
+              <button id="kd-note-add" class="ghost">追加</button>
+            </div>
+          </div>
           <div class="kb-knob-row">
             <span class="kb-knob-label">大小</span>
             <input type="range" id="kd-size" class="kb-range" min="8" max="60" step="1" value="16">
@@ -918,7 +2258,7 @@
             <button id="kd-del" class="ghost">删除节点</button>
           </div>
         </div>
-        <div id="kb-node-empty" class="hint">点击节点查看/编辑；双击空白处或点上方「＋ 节点」新增；用「＋ 连线」或画布左上角编辑工具连线。</div>
+        <div id="kb-node-empty" class="hint">点击节点查看/编辑；双击空白处或点上方「节点」按钮新增；用「连线」按钮或画布左上角编辑工具连线。</div>
         <div id="kb-edge-form" class="kb-node-form hidden">
           <div class="field-label">新增连线</div>
           <div class="hint" id="ke-from"></div>
@@ -933,8 +2273,9 @@
             <button id="ke-cancel" class="ghost">取消</button>
           </div>
         </div>
+        </details>
         <details class="kb-graphset">
-          <summary>⚙ 图谱设置（力与线段长度）</summary>
+          <summary><svg class="ic"><use href="#i-gear"/></svg> 图谱设置（力与线段长度）</summary>
           <div class="kb-knob-row">
             <span class="kb-knob-label">斥力</span>
             <input type="range" id="kg-repel" class="kb-range" min="1000" max="20000" step="250">
@@ -966,7 +2307,7 @@
 <div id="notes-modal" class="modal hidden">
   <div class="modal-card notes-card">
     <div class="modal-head">
-      <div class="notes-head-title">📝 笔记库
+      <div class="notes-head-title"><svg class="ic"><use href="#i-note"/></svg> 笔记库
         <span class="hint">本地 Markdown 文件（data/notes），用 <code>[[双链]]</code> 建立关系</span>
       </div>
       <button id="btn-close-notes" class="modal-close" title="关闭">✕</button>
@@ -975,8 +2316,8 @@
       <aside class="notes-left">
         <input id="nt-search" class="field-input" placeholder="搜索笔记（标题 / 全文）…">
         <div class="notes-left-btns">
-          <button id="nt-new" class="ghost">＋ 笔记</button>
-          <button id="nt-new-folder" class="ghost">＋ 文件夹</button>
+          <button id="nt-new" class="ghost"><svg class="ic"><use href="#i-plus"/></svg>笔记</button>
+          <button id="nt-new-folder" class="ghost"><svg class="ic"><use href="#i-plus"/></svg>文件夹</button>
         </div>
         <div id="nt-hits" class="notes-hits hidden"></div>
         <div id="nt-tree" class="notes-tree"></div>
@@ -995,7 +2336,7 @@
         <textarea id="nt-textarea" class="notes-textarea hidden"
                   placeholder="# 标题&#10;&#10;正文…用 [[笔记名]] 建立双链，左侧图谱会自动连起来。"></textarea>
         <div id="nt-preview-box" class="notes-preview content hidden"></div>
-        <div id="nt-empty" class="hint notes-empty">从左侧选择一篇笔记，或点「＋ 笔记」新建。</div>
+        <div id="nt-empty" class="hint notes-empty">从左侧选择一篇笔记，或点「笔记」按钮新建。</div>
       </section>
 
       <aside class="notes-right">
@@ -1006,6 +2347,24 @@
         <div id="nt-graph" class="notes-graph"></div>
         <div id="nt-backlinks" class="notes-backlinks hidden"></div>
       </aside>
+    </div>
+  </div>
+</div>
+
+<!-- 应用内文本输入（Electron 不支持 window.prompt） -->
+<div id="input-modal" class="modal hidden">
+  <div class="modal-card input-card">
+    <div class="modal-head">
+      <div class="modal-head-title">请输入</div>
+      <button id="input-cancel-x" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="modal-body input-body">
+      <label id="input-label" class="field-label" for="input-dialog">名称</label>
+      <input id="input-dialog" class="field-input" type="text" autocomplete="off">
+    </div>
+    <div class="modal-foot">
+      <button id="input-cancel" class="ghost" type="button">取消</button>
+      <button id="input-ok" class="primary" type="button">确定</button>
     </div>
   </div>
 </div>
@@ -1026,7 +2385,7 @@
           <div class="preset-row gal-three">
             <div class="gal-field">
               <label class="field-label">角色名</label>
-              <input id="gal-ed-name" class="field-input" type="text" placeholder="如 爱丽丝">
+              <input id="gal-ed-name" class="field-input" type="text" placeholder="角色名，如 小满">
             </div>
             <div class="gal-field gal-field-color">
               <label class="field-label">主题色</label>
@@ -1042,9 +2401,13 @@
           </div>
           <div class="gal-label-row">
             <label class="field-label">角色设定（注入系统提示）</label>
-            <button id="gal-ed-draft" type="button" class="ghost" title="用「设置 → 聊天模型」生成">🤖 AI 帮写</button>
+            <button id="gal-ed-draft" type="button" class="ghost" title="用「设置 → 模型接入 → 聊天接口」生成">🤖 AI 帮写</button>
           </div>
           <textarea id="gal-ed-profile" class="ta" rows="5" placeholder="性格、说话方式、背景…（可点右上「AI 帮写」）"></textarea>
+          <label class="field-label">角色介绍（只给玩家看的一段话，不会发给 AI）</label>
+          <textarea id="gal-ed-intro" class="ta" rows="3"
+                    placeholder="写给玩家看的一段话（不会发给 AI）。示例：常在雨天出门，口袋里总揣着糖 —— 你可以随意开口，聊什么都可以。"></textarea>
+          <p class="hint">提示：互动式小说建议同时在「设置 → GAL 演出」里确认<strong>关闭「允许联网」</strong>（每轮更快）；想聊现实中的人和事时再打开。</p>
         </div>
       </details>
 
@@ -1054,7 +2417,7 @@
           <div id="gal-ed-sprites" class="gal-ed-sprites"></div>
           <datalist id="gal-ed-filelist"></datalist>
           <div class="gal-ed-actions">
-            <button id="gal-ed-add-sprite" class="ghost">＋ 添加立绘</button>
+            <button id="gal-ed-add-sprite" class="ghost"><svg class="ic"><use href="#i-plus"/></svg>添加立绘</button>
             <label class="ghost gal-ed-upload-label">
               上传图片…<input id="gal-ed-upload" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" multiple hidden>
             </label>
@@ -1068,9 +2431,9 @@
         <div class="gal-sec-body">
           <div class="preset-row">
             <select id="gal-ed-tts-preset"></select>
-            <button id="gal-ed-tts-add" type="button">＋ 新建预设</button>
+            <button id="gal-ed-tts-add" type="button"><svg class="ic"><use href="#i-plus"/></svg>新建预设</button>
             <button id="gal-ed-tts-del" type="button">删除预设</button>
-            <button id="gal-ed-tts-test" type="button">🔊 试听</button>
+            <button id="gal-ed-tts-test" type="button"><svg class="ic"><use href="#i-volume"/></svg>试听</button>
           </div>
           <div class="preset-row">
             <select id="gal-ed-tts-provider" class="field-input">
@@ -1129,23 +2492,85 @@
   </div>
 </div>
 
-<div id="toast" class="toast hidden"></div>
+<!-- 快捷键实时提示（默认折叠为右下角小图标；展开后随模式与状态实时变化） -->
+<div id="hk-hud" class="hk-hud collapsed">
+  <button id="hk-hud-toggle" class="hk-hud-toggle" type="button" aria-label="快捷键提示">
+    <svg class="ic"><use href="#i-question"/></svg>
+  </button>
+  <div id="hk-hud-list" class="hk-hud-list"></div>
+</div>
+
+<!-- 快捷键清单（按 ? 或 Ctrl+/ 打开；可逐项改键） -->
+<div id="hk-panel" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head settings-head">
+      <div class="settings-title">快捷键</div>
+      <button id="hk-panel-close" class="modal-close" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <input id="hk-search" class="field-input" type="text" placeholder="搜索功能名或按键…">
+      <div id="hk-groups" class="hk-groups"></div>
+      <p class="hint">改键即时生效，存在本机浏览器里；与同组已有键冲突会被拒绝并提示。灰显项表示当前模式下不可用。</p>
+    </div>
+    <div class="modal-foot">
+      <button id="hk-reset-all" class="ghost">全部恢复默认</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 <input type="file" id="file-input" accept="image/*" hidden>
+<input type="file" id="doc-input" hidden
+       accept=".txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.log,.yaml,.yml,.py,.js,.ts,.html,.css,.xml,.docx,.xlsx,.pdf">
 
 <script>window.__TOKEN__ = "%%TOKEN%%";</script>
 <!-- 以下三方库全部异步加载：不阻塞首屏，加载完成后由 app.js 补齐渲染 -->
-<script async src="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.js"
+<script async src="/static/vendor/katex/katex.min.js"
         onload="__libReady('katex')"
         onerror="__fb(this,'https://cdn.staticfile.org/KaTeX/0.16.9/katex.min.js','katex')"></script>
-<script async src="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/highlight.min.js"
-        onload="__libReady('hljs')"
-        onerror="__fb(this,'https://cdn.staticfile.org/highlight.js/11.9.0/highlight.min.js','hljs')"></script>
-<script async src="https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js"
-        onload="__libReady('echarts')"
-        onerror="__fb(this,'https://cdn.staticfile.org/echarts/5.5.0/echarts.min.js','echarts')"></script>
-<script async src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"
-        onload="__libReady('vis')"
-        onerror="__fb(this,'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js','vis')"></script>
-<script src="/static/app.js"></script>
+<!-- highlight / echarts / vis-network 移到 window.load 之后空闲加载（见 head 里的 loadLazyLib），
+     需要时也可直接调用 window.loadLazyLib('echarts') -->
+<!-- 前端逻辑按功能拆分，按顺序加载（普通脚本，共享全局作用域；最后一个负责启动 init） -->
+<script src="/static/core.js"></script>
+<script src="/static/markdown.js"></script>
+<script src="/static/rich-media.js"></script>
+<script src="/static/chat.js"></script>
+<script src="/static/stream.js"></script>
+<script src="/static/settings.js"></script>
+<script src="/static/observe.js"></script>
+<script src="/static/skills.js"></script>
+<script src="/static/gal/gal-core.js"></script>
+<script src="/static/gal/gal-assets.js"></script>
+<script src="/static/gal/gal-stats.js"></script>
+<script src="/static/gal/gal-script.js"></script>
+<script src="/static/gal/gal-theme.js"></script>
+<script src="/static/gal/gal-stage.js"></script>
+<script src="/static/gal/gal-session.js"></script>
+<script src="/static/gal/gal-media.js"></script>
+<script src="/static/gal/gal-voice.js"></script>
+<script src="/static/gal/gal-editor.js"></script>
+<script src="/static/gal/gal-ide.js"></script>
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/addon-fit.js"></script>
+<script src="/static/ide-term.js"></script>
+<script src="/static/git.js"></script>
+<script src="/static/knowledge.js"></script>
+<script src="/static/saves.js"></script>
+<script src="/static/turndots.js"></script>
+<script src="/static/auto.js"></script>
+<script src="/static/composer.js"></script>
+<script src="/static/hk-core.js"></script>
+<script src="/static/hotkeys.js"></script>
+<script src="/static/hall.js"></script>
+<script src="/static/hall-geo.js"></script>
+<script src="/static/hall-stock.js"></script>
+<script src="/static/hall-math.js"></script>
+<script src="/static/hall-math-archive.js"></script>
+<script src="/static/hall-math-exam.js"></script>
+<script src="/static/hall-dojo.js"></script>
+<script src="/static/hall-gal.js"></script>
+<script src="/static/hall-interview.js"></script>
+<script src="/static/work.js"></script>
+<script src="/static/init.js"></script>
 </body>
 </html>

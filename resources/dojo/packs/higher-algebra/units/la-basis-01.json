@@ -1,0 +1,29 @@
+{
+  "id": "la-basis-01",
+  "ability": "method",
+  "primitive": "order",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "给一组列向量，要求秩与一个极大线性无关组。请把步骤排成合理顺序。",
+    "steps": [
+      { "id": "s1", "text": "把向量按列拼成矩阵 A" },
+      { "id": "s2", "text": "对 A 做初等行变换，化为阶梯形" },
+      { "id": "s3", "text": "数非零行的个数，得到秩 r" },
+      { "id": "s4", "text": "找出主元所在的列" },
+      { "id": "s5", "text": "取原向量组中对应这些列的向量，作为极大无关组" }
+    ]
+  },
+  "expert": {
+    "why": "初等行变换不改变列向量之间的线性关系，所以主元列对应的原向量构成极大无关组；注意取的是原向量，不是变换后的列。",
+    "signals": ["求秩", "求极大无关组"],
+    "order": ["s1", "s2", "s3", "s4", "s5"]
+  },
+  "card": {
+    "title": "主元列回原向量",
+    "trigger": "求极大无关组",
+    "first_step": "拼矩阵、化阶梯形",
+    "pitfall": "把变换后的列当成原向量"
+  },
+  "source_ref": { "doc": "self-authored:linear-algebra", "loc": "向量组的秩" }
+}

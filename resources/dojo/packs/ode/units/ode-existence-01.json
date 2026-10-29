@@ -1,0 +1,33 @@
+{
+  "id": "ode-existence-01",
+  "ability": "assumption",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "一阶方程 y′ = f(x,y)，初值 y(x₀)=y₀。保证局部存在唯一解的一个常用充分条件是：",
+    "options": [
+      { "key": "A", "text": "f 在区域内连续" },
+      { "key": "B", "text": "f 在区域内连续，且对 y 满足 Lipschitz 条件" },
+      { "key": "C", "text": "f 在区域内可积" },
+      { "key": "D", "text": "f 在区域内恒正" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "Peano 定理只给存在性（f 连续即可）；唯一性需要更强的 Lipschitz 条件。两者合起来才是「存在且唯一」的常用充分条件。",
+    "signals": ["初值问题", "存在唯一性", "问条件"],
+    "traps": {
+      "A": "连续只保证存在，不保证唯一（例如 y′=√|y| 在 0 附近）。",
+      "C": "可积不是常微分方程的存在性条件。",
+      "D": "恒正与存在唯一性无关。"
+    }
+  },
+  "card": {
+    "title": "唯一性要 Lipschitz",
+    "trigger": "判断初值问题解是否唯一",
+    "first_step": "先确认连续，再查对 y 的 Lipschitz",
+    "pitfall": "把连续当成存在且唯一"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "存在唯一性" }
+}

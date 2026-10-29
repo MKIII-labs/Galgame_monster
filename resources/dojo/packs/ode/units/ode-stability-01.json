@@ -1,0 +1,33 @@
+{
+  "id": "ode-stability-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "方程 y′ = a y（a < 0）的零解是：",
+    "options": [
+      { "key": "A", "text": "渐近稳定" },
+      { "key": "B", "text": "不稳定" },
+      { "key": "C", "text": "稳定但不渐近" },
+      { "key": "D", "text": "周期解" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "解为 y=C e^(at)，a<0 时 e^(at)→0，任意初值都收敛到零解，所以零解渐近稳定。a=0 时才是稳定但不渐近，a>0 不稳定。",
+    "signals": ["一维线性方程", "系数为负", "问稳定性"],
+    "traps": {
+      "B": "a>0 才不稳定。",
+      "C": "a=0 时解不衰减，才是稳定但不渐近。",
+      "D": "没有周期项。"
+    }
+  },
+  "card": {
+    "title": "a<0 渐近稳定",
+    "trigger": "y′=ay 判稳定性",
+    "first_step": "看系数 a 的符号",
+    "pitfall": "把 a=0 与 a<0 混为一谈"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "稳定性" }
+}

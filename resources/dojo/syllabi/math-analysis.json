@@ -1,0 +1,153 @@
+{
+  "id": "math-analysis",
+  "item_prefix": "ma5",
+  "course": "数学分析",
+  "textbook": "华东师范大学数学科学学院《数学分析（第五版）》",
+  "publisher": "高等教育出版社",
+  "level": "chapter",
+  "references": [
+    "陈纪修、于崇华、金路《数学分析》第三版（上、下）",
+    "Tom M. Apostol《数学分析》",
+    "Walter Rudin《数学分析原理》",
+    "Herbert Amann《Analysis I》"
+  ],
+  "note": "按章生成（一章一个研究任务，选本章核心主线）；小节只作为范围提示。上册 1–11 章，下册 12–23 章。",
+  "chapters": [
+    {"id": "ch01", "title": "实数集与函数", "sections": [
+      {"id": "ch01-s01", "title": "实数"},
+      {"id": "ch01-s02", "title": "数集 · 确界原理"},
+      {"id": "ch01-s03", "title": "函数概念"},
+      {"id": "ch01-s04", "title": "具有某些特性的函数"}
+    ]},
+    {"id": "ch02", "title": "数列极限", "sections": [
+      {"id": "ch02-s01", "title": "数列极限概念"},
+      {"id": "ch02-s02", "title": "收敛数列的性质"},
+      {"id": "ch02-s03", "title": "数列极限存在的条件"}
+    ]},
+    {"id": "ch03", "title": "函数极限", "sections": [
+      {"id": "ch03-s01", "title": "函数极限概念"},
+      {"id": "ch03-s02", "title": "函数极限的性质"},
+      {"id": "ch03-s03", "title": "函数极限存在的条件"},
+      {"id": "ch03-s04", "title": "两个重要的极限"},
+      {"id": "ch03-s05", "title": "无穷小量与无穷大量"}
+    ]},
+    {"id": "ch04", "title": "函数的连续性", "sections": [
+      {"id": "ch04-s01", "title": "连续性概念"},
+      {"id": "ch04-s02", "title": "连续函数的性质"},
+      {"id": "ch04-s03", "title": "初等函数的连续性"}
+    ]},
+    {"id": "ch05", "title": "导数和微分", "sections": [
+      {"id": "ch05-s01", "title": "导数的概念"},
+      {"id": "ch05-s02", "title": "求导法则"},
+      {"id": "ch05-s03", "title": "参变量函数的导数"},
+      {"id": "ch05-s04", "title": "高阶导数"},
+      {"id": "ch05-s05", "title": "微分"}
+    ]},
+    {"id": "ch06", "title": "微分中值定理及其应用", "sections": [
+      {"id": "ch06-s01", "title": "拉格朗日定理和函数的单调性"},
+      {"id": "ch06-s02", "title": "柯西中值定理和不定式极限"},
+      {"id": "ch06-s03", "title": "泰勒公式"},
+      {"id": "ch06-s04", "title": "函数的极值与最大(小)值"},
+      {"id": "ch06-s05", "title": "函数的凸性与拐点"},
+      {"id": "ch06-s06", "title": "函数图像的讨论"},
+      {"id": "ch06-s07", "title": "方程的近似解", "optional": true}
+    ]},
+    {"id": "ch07", "title": "实数的完备性", "sections": [
+      {"id": "ch07-s01", "title": "关于实数集完备性的基本定理"},
+      {"id": "ch07-s02", "title": "上极限和下极限", "optional": true}
+    ]},
+    {"id": "ch08", "title": "不定积分", "sections": [
+      {"id": "ch08-s01", "title": "不定积分概念与基本积分公式"},
+      {"id": "ch08-s02", "title": "换元积分法与分部积分法"},
+      {"id": "ch08-s03", "title": "有理函数和可化为有理函数的不定积分"}
+    ]},
+    {"id": "ch09", "title": "定积分", "sections": [
+      {"id": "ch09-s01", "title": "定积分概念"},
+      {"id": "ch09-s02", "title": "牛顿—莱布尼茨公式"},
+      {"id": "ch09-s03", "title": "可积条件"},
+      {"id": "ch09-s04", "title": "定积分的性质"},
+      {"id": "ch09-s05", "title": "微积分学基本定理 · 定积分计算(续)"},
+      {"id": "ch09-s06", "title": "可积性理论补叙", "optional": true}
+    ]},
+    {"id": "ch10", "title": "定积分的应用", "sections": [
+      {"id": "ch10-s01", "title": "平面图形的面积"},
+      {"id": "ch10-s02", "title": "由平行截面面积求体积"},
+      {"id": "ch10-s03", "title": "平面曲线的弧长与曲率"},
+      {"id": "ch10-s04", "title": "旋转曲面的面积"},
+      {"id": "ch10-s05", "title": "定积分在物理中的某些应用"},
+      {"id": "ch10-s06", "title": "定积分的近似计算", "optional": true}
+    ]},
+    {"id": "ch11", "title": "反常积分", "sections": [
+      {"id": "ch11-s01", "title": "反常积分概念"},
+      {"id": "ch11-s02", "title": "无穷积分的性质与敛散判别"},
+      {"id": "ch11-s03", "title": "瑕积分的性质与敛散判别"}
+    ]},
+    {"id": "ch12", "title": "数项级数", "sections": [
+      {"id": "ch12-s01", "title": "级数的敛散性"},
+      {"id": "ch12-s02", "title": "正项级数"},
+      {"id": "ch12-s03", "title": "一般项级数"}
+    ]},
+    {"id": "ch13", "title": "函数列与函数项级数", "sections": [
+      {"id": "ch13-s01", "title": "一致收敛性"},
+      {"id": "ch13-s02", "title": "一致收敛函数列与函数项级数的性质"}
+    ]},
+    {"id": "ch14", "title": "幂级数", "sections": [
+      {"id": "ch14-s01", "title": "幂级数"},
+      {"id": "ch14-s02", "title": "函数的幂级数展开"},
+      {"id": "ch14-s03", "title": "复变量的指数函数 · 欧拉公式", "optional": true}
+    ]},
+    {"id": "ch15", "title": "傅里叶级数", "sections": [
+      {"id": "ch15-s01", "title": "傅里叶级数"},
+      {"id": "ch15-s02", "title": "以 2l 为周期的函数的展开式"},
+      {"id": "ch15-s03", "title": "收敛定理的证明"}
+    ]},
+    {"id": "ch16", "title": "多元函数的极限与连续", "sections": [
+      {"id": "ch16-s01", "title": "平面点集与多元函数"},
+      {"id": "ch16-s02", "title": "二元函数的极限"},
+      {"id": "ch16-s03", "title": "二元函数的连续性"}
+    ]},
+    {"id": "ch17", "title": "多元函数微分学", "sections": [
+      {"id": "ch17-s01", "title": "可微性"},
+      {"id": "ch17-s02", "title": "复合函数微分法"},
+      {"id": "ch17-s03", "title": "方向导数与梯度"},
+      {"id": "ch17-s04", "title": "泰勒公式与极值问题"}
+    ]},
+    {"id": "ch18", "title": "隐函数定理及其应用", "sections": [
+      {"id": "ch18-s01", "title": "隐函数"},
+      {"id": "ch18-s02", "title": "隐函数组"},
+      {"id": "ch18-s03", "title": "几何应用"},
+      {"id": "ch18-s04", "title": "条件极值"}
+    ]},
+    {"id": "ch19", "title": "含参量积分", "sections": [
+      {"id": "ch19-s01", "title": "含参量正常积分"},
+      {"id": "ch19-s02", "title": "含参量反常积分"},
+      {"id": "ch19-s03", "title": "欧拉积分"}
+    ]},
+    {"id": "ch20", "title": "曲线积分", "sections": [
+      {"id": "ch20-s01", "title": "第一型曲线积分"},
+      {"id": "ch20-s02", "title": "第二型曲线积分"}
+    ]},
+    {"id": "ch21", "title": "重积分", "sections": [
+      {"id": "ch21-s01", "title": "二重积分的概念"},
+      {"id": "ch21-s02", "title": "直角坐标系下二重积分的计算"},
+      {"id": "ch21-s03", "title": "格林公式 · 曲线积分与路线的无关性"},
+      {"id": "ch21-s04", "title": "二重积分的变量变换"},
+      {"id": "ch21-s05", "title": "三重积分"},
+      {"id": "ch21-s06", "title": "重积分的应用"},
+      {"id": "ch21-s07", "title": "n 重积分", "optional": true},
+      {"id": "ch21-s08", "title": "反常二重积分", "optional": true},
+      {"id": "ch21-s09", "title": "在一般条件下重积分变量变换公式的证明", "optional": true}
+    ]},
+    {"id": "ch22", "title": "曲面积分", "sections": [
+      {"id": "ch22-s01", "title": "第一型曲面积分"},
+      {"id": "ch22-s02", "title": "第二型曲面积分"},
+      {"id": "ch22-s03", "title": "高斯公式与斯托克斯公式"},
+      {"id": "ch22-s04", "title": "场论初步", "optional": true}
+    ]},
+    {"id": "ch23", "title": "向量函数微分学", "optional": true, "sections": [
+      {"id": "ch23-s01", "title": "n 维欧氏空间与向量函数"},
+      {"id": "ch23-s02", "title": "向量函数的微分"},
+      {"id": "ch23-s03", "title": "反函数定理和隐函数定理"}
+    ]}
+  ]
+}

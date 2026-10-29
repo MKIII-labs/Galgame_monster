@@ -1,0 +1,33 @@
+{
+  "id": "ca-liouville-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "刘维尔定理说的是：",
+    "options": [
+      { "key": "A", "text": "有界整函数必为常数" },
+      { "key": "B", "text": "整函数一定有无穷多个零点" },
+      { "key": "C", "text": "解析函数一定有界" },
+      { "key": "D", "text": "有界函数一定解析" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "刘维尔定理：若 f 在整个复平面解析且有界，则 f 为常数。它常用来证明代数基本定理。",
+    "signals": ["整函数", "有界", "结论是常数"],
+    "traps": {
+      "B": "e^z 是整函数但没有零点。",
+      "C": "e^z 解析但无界。",
+      "D": "|z| 有界性另说，且并不解析。"
+    }
+  },
+  "card": {
+    "title": "有界整函数是常数",
+    "trigger": "整函数 + 有界",
+    "first_step": "直接得常数",
+    "pitfall": "把整函数与有界函数混为一谈"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "刘维尔定理" }
+}

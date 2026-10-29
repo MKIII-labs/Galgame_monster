@@ -1,0 +1,32 @@
+{
+  "id": "la-quadratic-01",
+  "ability": "method",
+  "primitive": "pair",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "把二次型的处理方式与它的关键性质配对。",
+    "left": [
+      { "id": "l1", "text": "正交变换" },
+      { "id": "l2", "text": "配方法" },
+      { "id": "l3", "text": "合同变换" }
+    ],
+    "right": [
+      { "id": "r1", "text": "保持向量长度与内积" },
+      { "id": "r2", "text": "不需要求特征值" },
+      { "id": "r3", "text": "保持二次型的秩与正负惯性指数" }
+    ]
+  },
+  "expert": {
+    "why": "正交变换是特殊的合同变换，额外保持长度与内积；配方法通过配方化标准形，不必求特征值；合同变换只保证秩与惯性指数不变，不保持特征值。",
+    "signals": ["二次型化标准形", "正交变换 / 配方法"],
+    "pairs": { "l1": "r1", "l2": "r2", "l3": "r3" }
+  },
+  "card": {
+    "title": "三种标准化各管什么",
+    "trigger": "二次型化标准形",
+    "first_step": "先问要不要保持几何性质",
+    "pitfall": "把合同变换也当成保持特征值"
+  },
+  "source_ref": { "doc": "self-authored:linear-algebra", "loc": "二次型" }
+}

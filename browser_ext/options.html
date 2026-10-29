@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Computer Bridge 设置</title>
+<style>
+  body{font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif;max-width:720px;margin:32px auto;padding:0 18px;color:#222}
+  h1{font-size:20px;margin:0 0 6px} h2{font-size:15px;margin:24px 0 8px}
+  p.hint{color:#666;margin:6px 0}
+  label{display:block;margin:12px 0 4px;font-weight:600}
+  input{width:100%;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font:inherit}
+  button{margin-top:14px;padding:8px 14px;border:0;border-radius:6px;background:#3b6cf6;color:#fff;font:inherit;cursor:pointer}
+  button.ghost{background:#eef1f6;color:#333}
+  #msg{margin-top:12px;white-space:pre-wrap}
+  code{background:#f3f4f6;padding:1px 5px;border-radius:4px}
+  ol{padding-left:20px}
+</style>
+</head>
+<body>
+  <h1>Computer Bridge</h1>
+  <p class="hint">让本机的 AI 在受控标签页上执行操作。扩展只连接 127.0.0.1，不访问外网。</p>
+
+  <h2>连接码</h2>
+  <p class="hint">在应用里打开：设置 → Agent → Computer Use → 「复制连接码」，粘贴到这里。</p>
+  <label for="pair">连接码（形如 http://127.0.0.1:59987#密钥）</label>
+  <input id="pair" placeholder="http://127.0.0.1:59987#xxxxxxxx">
+
+  <button id="save">保存</button>
+  <button id="test" class="ghost">测试连接</button>
+  <div id="msg"></div>
+
+  <h2>怎么用</h2>
+  <ol>
+    <li>在应用里把「浏览器后端」切到「扩展（复用登录态）」。</li>
+    <li>这里填好连接码并保存。扩展会自动开始轮询。</li>
+    <li>让 AI 打开一个网页：它会**新建一个标签页**并接管，不会动你正在看的页面。</li>
+    <li>第一次附加调试器时，浏览器顶部会出现「正在调试此浏览器」的提示条，这是扩展在转发命令。</li>
+  </ol>
+  <p class="hint">注意：扩展模式复用你当前浏览器的登录态，因此只能操作应用里已授权的站点；
+    银行 / 支付 / 邮箱 / 密码管理器仍被应用侧硬拦截。</p>
+
+  <script src="options.js"></script>
+</body>
+</html>

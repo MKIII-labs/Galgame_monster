@@ -1,0 +1,34 @@
+{
+  "id": "cmc-pre-03",
+  "test": "pre",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "求 ∫₀¹ x·eˣ dx，最先应该尝试哪种方法？",
+    "options": [
+      { "key": "A", "text": "换元 u = eˣ" },
+      { "key": "B", "text": "分部积分，把 x 求导" },
+      { "key": "C", "text": "区间再现" },
+      { "key": "D", "text": "比较判别法" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "x 与 eˣ 的乘积是分部积分的典型结构：让 x 求导降为 1，eˣ 积分不变，一次就能算完，结果是 1。",
+    "signals": ["多项式乘指数/三角函数", "x 的幂次可以通过求导降下来"],
+    "traps": {
+      "A": "换元后变成 ∫ ln u du，虽然可做，但比直接分部积分绕。",
+      "C": "区间再现适用于 x·f(sin x) 这类对称结构，这里没有。",
+      "D": "比较判别法用于反常积分判敛，不是求原函数。"
+    }
+  },
+  "card": {
+    "title": "多项式乘指数：分部",
+    "trigger": "x 的幂次乘 eˣ / sin x / cos x",
+    "first_step": "让多项式求导、指数或三角积分",
+    "pitfall": "先换元，把简单问题做复杂"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-pre-03" }
+}

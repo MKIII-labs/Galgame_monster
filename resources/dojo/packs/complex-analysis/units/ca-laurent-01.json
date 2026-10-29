@@ -1,0 +1,33 @@
+{
+  "id": "ca-laurent-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "若 f 在圆环 r < |z − z₀| < R 内解析，则它的洛朗级数：",
+    "options": [
+      { "key": "A", "text": "在该圆环内收敛" },
+      { "key": "B", "text": "只在 |z − z₀| < r 内收敛" },
+      { "key": "C", "text": "在整个复平面收敛" },
+      { "key": "D", "text": "一定只有有限项" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "洛朗级数的收敛域是圆环：内半径由负幂部分决定，外半径由正幂部分决定。题目已给出解析圆环，级数就在其中收敛。",
+    "signals": ["圆环区域", "洛朗级数", "问收敛域"],
+    "traps": {
+      "B": "|z−z₀|<r 是内圆盘，通常正是奇点所在，未必收敛。",
+      "C": "有奇点时不可能在整个复平面收敛。",
+      "D": "本性奇点的洛朗级数有无穷多项。"
+    }
+  },
+  "card": {
+    "title": "洛朗级数活在圆环里",
+    "trigger": "圆环内的解析函数",
+    "first_step": "先确定内半径与外半径",
+    "pitfall": "把收敛域当成整个平面"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "洛朗级数" }
+}

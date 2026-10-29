@@ -1,0 +1,33 @@
+{
+  "id": "aa-ring-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "环 R 的理想 I 满足：",
+    "options": [
+      { "key": "A", "text": "I 是加法子群，且对任意 r ∈ R，rI ⊆ I 且 Ir ⊆ I" },
+      { "key": "B", "text": "I 是乘法子群" },
+      { "key": "C", "text": "I 是 R 的子环即可" },
+      { "key": "D", "text": "I 必须含有单位元" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "理想的定义要求它是加法子群，并且对环中任意元素的左乘、右乘都封闭，这样才能保证商环 R/I 的乘法良定义。子环不要求吸收性。",
+    "signals": ["理想", "商环", "吸收性"],
+    "traps": {
+      "B": "理想首先要是加法子群，不是乘法子群。",
+      "C": "子环对乘法封闭但不要求被 R 中元素吸收。",
+      "D": "理想不必含单位元，例如 2Z。"
+    }
+  },
+  "card": {
+    "title": "理想要能吸收",
+    "trigger": "判断理想",
+    "first_step": "验证加法子群 + rI、Ir 包含于 I",
+    "pitfall": "把子环当成理想"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "环与理想" }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "ma-uniform-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "函数列 fₙ(x) = xⁿ 在 [0,1] 上的收敛情况是：",
+    "options": [
+      { "key": "A", "text": "一致收敛到 0" },
+      { "key": "B", "text": "逐点收敛，但不一致收敛" },
+      { "key": "C", "text": "处处不收敛" },
+      { "key": "D", "text": "一致收敛到 1" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "对每个固定的 x∈[0,1)，xⁿ→0；x=1 时恒为 1，所以极限函数在 1 处不连续。一致收敛会保持连续性，因此不一致收敛；也可直接算 sup|fₙ−f|=1。",
+    "signals": ["函数列", "端点处极限不同", "问一致收敛"],
+    "traps": {
+      "A": "极限函数不连续，与一致收敛矛盾。",
+      "C": "每个点都有极限，是逐点收敛的。",
+      "D": "只有 x=1 处极限为 1，不是整个区间。"
+    }
+  },
+  "card": {
+    "title": "端点不连续就不一致",
+    "trigger": "fₙ = xⁿ 在 [0,1]",
+    "first_step": "先求极限函数，再看是否连续",
+    "pitfall": "把逐点收敛当成一致收敛"
+  },
+  "source_ref": { "doc": "self-authored:math-analysis", "loc": "函数列" }
+}

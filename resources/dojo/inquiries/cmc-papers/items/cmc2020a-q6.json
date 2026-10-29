@@ -1,0 +1,354 @@
+{
+  "id": "cmc2020a-q6",
+  "title": "Lipschitz 图长与等分折线极限",
+  "subject": "数学分析",
+  "track": "竞赛",
+  "minutes": 30,
+  "source": {
+    "contest": "CMC",
+    "year": 2020,
+    "paper": "数学A类",
+    "problem": "6",
+    "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十二届全国大学生数学竞赛初赛（数学A类）试题及参考答案.pdf",
+    "note": "改编自官方真题，题干为教学改写"
+  },
+  "exam": {
+    "topic": "曲线可求长与 Lipschitz",
+    "weight": "CMC 数学类初赛",
+    "variant": "常见考法"
+  },
+  "prerequisites": [
+    "Lipschitz 条件与一致连续",
+    "分割、折线长度与上确界定义",
+    "有界变差函数的基本性质"
+  ],
+  "brief": "本题研究 Lipschitz 函数图像的长度：对区间作 n 等分，用相邻采样点连成的折线长度 L_n 逼近曲线弧长。核心是说明 L_n 有统一上界并收敛到所有分割折线长度的上确界，同时辨析 Lipschitz 是充分条件而非必要条件。",
+  "acts": [
+    {
+      "id": "cmc2020a-q6-a1",
+      "label": "原题在问什么",
+      "ability": "framing",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "设 f:[a,b]→R 满足 |f(x)-f(y)|≤L|x-y|。对 n≥1，令 h_n=(b-a)/n，x_i=a+ih_n，定义 L_n=Σ_{i=1}^n sqrt(h_n^2+(f(x_i)-f(x_{i-1}))^2)。记 ℓ 为图像 y=f(x) 的所有分割折线长度的上确界。",
+        "question": "本题真正要研究的目标是哪一个？",
+        "options": [
+          {
+            "key": "A",
+            "text": "证明 {L_n} 收敛，并把极限识别为图像长度 ℓ；Lipschitz 条件用来保证 ℓ 有限。"
+          },
+          {
+            "key": "B",
+            "text": "求出 f' 的显式公式，再逐点判断 L_n 是否收敛。"
+          },
+          {
+            "key": "C",
+            "text": "证明满足条件的 f 必须是一次函数。"
+          },
+          {
+            "key": "D",
+            "text": "证明 L_n 关于 n 单调递增。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "核心是长度上确界与等分折线逼近；A 同时点明极限对象与 Lipschitz 条件的作用。",
+        "signals": [
+          "出现所有分割长度的上确界",
+          "等分网格的步长趋于 0",
+          "Lipschitz 给出长度上界"
+        ],
+        "traps": {
+          "B": "Lipschitz 函数不必处处可导，题目也不需显式导数；逐点导数不是目标。",
+          "C": "Lipschitz 只限制振荡速度，允许 x^2、sin x 等非一次函数。",
+          "D": "等分网格彼此不嵌套，L_n 不一定单调；目标是证明它收敛到上确界。"
+        }
+      },
+      "card": {
+        "title": "先抓上确界与两面包夹",
+        "trigger": "看到折线长度随分割加密",
+        "first_step": "定义 ℓ=sup_P S(P)，先证 L_n≤ℓ",
+        "pitfall": "不要误以为等分折线长一定单调"
+      }
+    },
+    {
+      "id": "cmc2020a-q6-a2",
+      "label": "先算一个线性特例",
+      "ability": "evidence",
+      "primitive": "numeric",
+      "judge": "L1",
+      "minutes": 4,
+      "payload": {
+        "situation": "取 f(x)=3x，区间为 [0,2]。对每个 n，把区间 n 等分，连接 (x_i,f(x_i)) 得到折线，其长度记为 L_n。",
+        "question": "计算 L_4（四等分时的折线长度），保留三位小数。"
+      },
+      "expert": {
+        "value": 6.3246,
+        "tolerance": 0.01,
+        "why": "每段横向增量为 1/2，纵向增量为 3/2，段长为 sqrt((1/2)^2+(3/2)^2)=sqrt(5/2)，四段合计 4sqrt(5/2)=2sqrt(10)≈6.3246，与 n 无关。",
+        "signals": [
+          "线性函数斜率固定",
+          "每段折线等长",
+          "总和为 2sqrt(10)"
+        ]
+      },
+      "card": {
+        "title": "线性函数：折线长与步数无关",
+        "trigger": "f 为 ax+b 型线性函数",
+        "first_step": "算一段向量 (h, ah)",
+        "pitfall": "不要逐段近似累加造成不必要的舍入误差"
+      }
+    },
+    {
+      "id": "cmc2020a-q6-a3",
+      "label": "条件与反例辨析",
+      "ability": "condition",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "situation": "关于 Lipschitz 条件在“图像可求长”与“等分折线长收敛”中的作用，判断下列命题。",
+        "question": "下列判断正确的是（多选）。",
+        "options": [
+          {
+            "key": "A",
+            "text": "Lipschitz 条件给出 ℓ≤sqrt(1+L^2)(b-a)，所以图像可求长。"
+          },
+          {
+            "key": "B",
+            "text": "Lipschitz 是曲线可求长的必要条件；例如 sqrt(x) 在 [0,1] 上不 Lipschitz，因此其图像不可求长。"
+          },
+          {
+            "key": "C",
+            "text": "仅有连续性不够：f(0)=0，f(x)=x sin(1/x)（x>0）在 [0,1] 上的图像长度无穷。"
+          },
+          {
+            "key": "D",
+            "text": "若 f 在 [a,b] 上有界变差，则按本题折线长度上确界定义，其图像长度有限。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": [
+          "A",
+          "C",
+          "D"
+        ],
+        "why": "Lipschitz 是充分条件，直接给出统一长度上界；但它不是必要条件，sqrt(x) 单调可求长却不 Lipschitz。连续不足：x sin(1/x) 的全变差无穷，因而图像长度无穷；有界变差则给出长度≤(b-a)+Var(f)。",
+        "signals": [
+          "区分充分与必要",
+          "sqrt(x) 在 0 附近非 Lipschitz",
+          "x sin(1/x) 全变差无穷",
+          "有界变差给出长度上界"
+        ]
+      },
+      "card": {
+        "title": "区分充分、必要与反例",
+        "trigger": "题目说某条件保证可求长",
+        "first_step": "先检查能否给所有分割长度统一上界",
+        "pitfall": "不要因为某个不满足条件的例子可求长就否定条件"
+      }
+    },
+    {
+      "id": "cmc2020a-q6-a4",
+      "label": "证明骨架",
+      "ability": "argument",
+      "primitive": "order",
+      "judge": "L2",
+      "minutes": 10,
+      "payload": {
+        "situation": "设 M=sqrt(1+L^2)，ℓ 为所有分割折线长度的上确界。把证明 L_n→ℓ 的主线排序。",
+        "steps": [
+          {
+            "id": "s1",
+            "text": "定义 ℓ=sup_P S(P)，其中 S(P) 为任一分割 P 对应的折线长度；由 Lipschitz 得 ℓ≤M(b-a)。"
+          },
+          {
+            "id": "s2",
+            "text": "对每个 n，等分网格本身是一个分割，所以 L_n≤ℓ，故只需再证 ℓ≤liminf L_n。"
+          },
+          {
+            "id": "s3",
+            "text": "固定任一分割 P（有 m 个内点）。把 P 的分点并入 n 等分网格，得到更细分割 Q_n。"
+          },
+          {
+            "id": "s4",
+            "text": "对含 P 分点的每个 n-网格小区间，把其中所有 P 分点一次插入；该段折线长至多由 M 倍小区间长度控制，而原弦长至少为该长度，故总增量≤C_P h_n。于是 S(P)≤S(Q_n)≤L_n+C_P h_n。"
+          },
+          {
+            "id": "s5",
+            "text": "令 n→∞，得 S(P)≤liminf L_n；对所有分割 P 取上确界，得 ℓ≤liminf L_n。"
+          },
+          {
+            "id": "s6",
+            "text": "结合 L_n≤ℓ，得到 lim L_n=ℓ，即等分折线长收敛到曲线长度。"
+          }
+        ]
+      },
+      "expert": {
+        "order": [
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5",
+          "s6"
+        ],
+        "why": "证明采用两面包夹：L_n≤ℓ 由等分分割直接得到；反向固定任意分割 P，并入 n 网格，并控制插入点造成的长度增量。",
+        "signals": [
+          "固定任意分割再并入等分网格",
+          "长度增量 O(h_n)",
+          "先得 liminf 再取上确界"
+        ]
+      },
+      "card": {
+        "title": "任意分割并入等分网格",
+        "trigger": "要证等分折线长度达到上确界",
+        "first_step": "固定一个长度接近 ℓ 的分割 P",
+        "pitfall": "直接说等分网格越来越细就收敛，缺少对任意分割 P 的误差控制"
+      }
+    },
+    {
+      "id": "cmc2020a-q6-a5",
+      "label": "条件边界配对",
+      "ability": "robustness",
+      "primitive": "pair",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "把下列函数与它们在本题框架中的角色配对。",
+        "left": [
+          {
+            "id": "f1",
+            "text": "f(x)=x^2 在 [0,1] 上"
+          },
+          {
+            "id": "f2",
+            "text": "f(x)=sqrt(x) 在 [0,1] 上"
+          },
+          {
+            "id": "f3",
+            "text": "f(0)=0，f(x)=x sin(1/x)（0<x≤1）"
+          }
+        ],
+        "right": [
+          {
+            "id": "r1",
+            "text": "满足本题 Lipschitz 前提，长度有统一上界，等分折线长收敛到有限弧长"
+          },
+          {
+            "id": "r2",
+            "text": "不满足 Lipschitz，但图像仍可求长（单调）"
+          },
+          {
+            "id": "r3",
+            "text": "连续但图像长度无穷，说明连续不足以保证可求长"
+          }
+        ]
+      },
+      "expert": {
+        "pairs": {
+          "f1": "r1",
+          "f2": "r2",
+          "f3": "r3"
+        },
+        "why": "x^2 在 [0,1] 上 Lipschitz；sqrt(x) 在 0 附近不是 Lipschitz，但单调因而图像可求长；x sin(1/x) 连续但全变差无穷，图像长度无穷。",
+        "signals": [
+          "x^2 的导数有界",
+          "sqrt(x) 在 0 附近差商无界",
+          "x sin(1/x) 的全变差发散"
+        ]
+      },
+      "card": {
+        "title": "用例子检查条件边界",
+        "trigger": "遇到充分条件",
+        "first_step": "分别找满足条件的典型、破坏条件但结论仍真的典型、结论失败的典型",
+        "pitfall": "把充分条件误当必要条件"
+      }
+    },
+    {
+      "id": "cmc2020a-q6-a6",
+      "label": "同类变式迁移",
+      "ability": "reflection",
+      "primitive": "expr",
+      "judge": "L1",
+      "minutes": 4,
+      "payload": {
+        "situation": "把上一结论迁移到 f(x)=x^2 在 [0,1] 上。仍取 n 等分折线长度 L_n。",
+        "question": "lim_{n→∞} L_n 可写成哪个积分？只写积分表达式，不必计算。"
+      },
+      "expert": {
+        "expr": "\\int_{0}^{1}\\sqrt{1+4x^2}\\,dx",
+        "why": "f(x)=x^2 有连续导数 f'(x)=2x，弧长微元为 sqrt(1+(f')^2) dx = sqrt(1+4x^2) dx，故等分折线长极限为该积分。",
+        "signals": [
+          "连续可导函数的弧长积分",
+          "f'(x)=2x",
+          "平方后出现 4x^2"
+        ]
+      },
+      "card": {
+        "title": "从折线极限迁移到弧长积分",
+        "trigger": "f 有连续导数",
+        "first_step": "用 f'(x) 代入 sqrt(1+f'^2)",
+        "pitfall": "忘记平方导致写成 sqrt(1+2x)"
+      }
+    }
+  ],
+  "artifact": {
+    "prompt": "请用 150–300 字总结本任务：说明本题中 Lipschitz 条件保证了什么；写出证明 L_n 收敛到图像长度的主线（至少提到任意分割并入等分网格与长度增量估计）；举一个说明“连续不够”的反例；并指出若把对象换成 f(x)=x^2 时方法如何迁移。",
+    "rubric": [
+      {
+        "id": "r1",
+        "text": "说明 Lipschitz 条件给出统一上界，从而保证图像可求长。",
+        "keywords": [
+          "Lipschitz",
+          "统一上界",
+          "可求长"
+        ]
+      },
+      {
+        "id": "r2",
+        "text": "把极限对象定义为所有分割折线长度的上确界，并指出 L_n≤ℓ。",
+        "keywords": [
+          "上确界",
+          "L_n≤ℓ",
+          "弧长"
+        ]
+      },
+      {
+        "id": "r3",
+        "text": "说明反向估计：任意分割并入等分网格，长度增量可控，从而得到 liminf 下界。",
+        "keywords": [
+          "任意分割",
+          "并入",
+          "增量",
+          "liminf"
+        ]
+      },
+      {
+        "id": "r4",
+        "text": "举出连续不足的反例，并辨析 Lipschitz 并非必要条件。",
+        "keywords": [
+          "连续不足",
+          "x sin(1/x)",
+          "长度无穷",
+          "非必要"
+        ]
+      },
+      {
+        "id": "r5",
+        "text": "把同一结论迁移到 f(x)=x^2 的弧长积分表达式。",
+        "keywords": [
+          "x^2",
+          "∫",
+          "4x^2",
+          "迁移"
+        ]
+      }
+    ],
+    "expert_sample": "Lipschitz 条件给所有分割折线长度一个统一上界，故图像可求长。记 ℓ 为所有分割折线长度的上确界，则每个等分折线长满足 L_n≤ℓ。为证反向，固定任意分割 P，把它并入 n 等分网格；每插入一个点造成的长度增量可由 Lipschitz 控制为 O(h_n)，于是 L_n 的 liminf 不小于 P 的折线长，对所有 P 取上确界得 ℓ≤liminf L_n，故 L_n→ℓ。反例方面，仅有连续不足：f(0)=0，f(x)=x sin(1/x) 的图像长度无穷；而 sqrt(x) 可求长却不 Lipschitz，说明 Lipschitz 非必要。若换成 f(x)=x^2，同一结论把极限迁移为弧长积分 ∫_0^1 sqrt(1+4x^2) dx。"
+  }
+}

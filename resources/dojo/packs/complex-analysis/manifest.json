@@ -1,0 +1,31 @@
+{
+  "id": "complex-analysis",
+  "name": "复变函数",
+  "desc": "解析性、围道积分、奇点与留数",
+  "version": 1,
+  "grade": "official",
+  "alignment": {
+    "standard": "本科复变函数（数学系）",
+    "dimensions": ["解析函数", "复积分", "级数", "留数"]
+  },
+  "ability_weights": {
+    "framing": 0.1,
+    "assumption": 0.2,
+    "method": 0.35,
+    "condition": 0.25,
+    "evidence": 0.1
+  },
+  "entry": { "minutes": 4, "first_unit": "ca-cr-01" },
+  "sequence": [
+    "ca-cr-01",
+    "ca-harmonic-01",
+    "ca-cauchy-01",
+    "ca-formula-01",
+    "ca-singular-01",
+    "ca-residue-01",
+    "ca-laurent-01",
+    "ca-liouville-01",
+    "ca-mapping-01",
+    "ca-pair-01"
+  ]
+}

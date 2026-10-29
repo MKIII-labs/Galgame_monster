@@ -1,0 +1,33 @@
+{
+  "id": "ca-cr-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "设 f(z) = u(x,y) + i v(x,y)。f 在区域 D 内解析的等价条件是：",
+    "options": [
+      { "key": "A", "text": "u、v 可微，且满足 u_x = v_y、u_y = −v_x" },
+      { "key": "B", "text": "u、v 都连续" },
+      { "key": "C", "text": "u、v 都是调和函数" },
+      { "key": "D", "text": "f 在 D 内有界" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "解析要求 f 在每点可微，且导数与方向无关；这等价于 u、v 可微并满足 Cauchy–Riemann 方程。连续性、调和性单独都不够（调和只是 CR 的推论）。",
+    "signals": ["复变函数", "解析", "实部与虚部"],
+    "traps": {
+      "B": "连续远弱于解析，|z| 连续但不解析。",
+      "C": "调和函数不一定来自解析函数，还需要满足 CR 的共轭关系。",
+      "D": "有界与解析无关，刘维尔定理说的是「有界整函数为常数」。"
+    }
+  },
+  "card": {
+    "title": "解析看 CR",
+    "trigger": "判断复变函数是否解析",
+    "first_step": "写 u、v，验证 CR 方程",
+    "pitfall": "只验证连续性"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "解析函数" }
+}

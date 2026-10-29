@@ -1,0 +1,33 @@
+{
+  "id": "la-homog-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "n 元齐次线性方程组 Ax = 0 有非零解的充要条件是：",
+    "options": [
+      { "key": "A", "text": "r(A) = n" },
+      { "key": "B", "text": "r(A) < n" },
+      { "key": "C", "text": "r(A) = 0" },
+      { "key": "D", "text": "det(A) ≠ 0" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "齐次方程组至少有零解；有非零解等价于存在自由变量，即 r(A) 小于未知数个数 n。行列式只对方阵有定义，且 det≠0 恰恰只有零解。",
+    "signals": ["齐次方程组", "问非零解", "未知数个数 n"],
+    "traps": {
+      "A": "秩等于 n 时只有零解。",
+      "C": "秩为 0 是极端情况，不是充要条件。",
+      "D": "det≠0 说明可逆，只有零解。"
+    }
+  },
+  "card": {
+    "title": "非零解看秩与 n",
+    "trigger": "Ax=0 有没有非零解",
+    "first_step": "比较 r(A) 与未知数个数 n",
+    "pitfall": "拿行列式去判非方阵"
+  },
+  "source_ref": { "doc": "self-authored:linear-algebra", "loc": "线性方程组" }
+}

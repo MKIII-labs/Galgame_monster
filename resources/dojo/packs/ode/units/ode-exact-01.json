@@ -1,0 +1,33 @@
+{
+  "id": "ode-exact-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "方程 P(x,y)dx + Q(x,y)dy = 0 是恰当方程的充要条件是：",
+    "options": [
+      { "key": "A", "text": "P 与 Q 都连续" },
+      { "key": "B", "text": "∂P/∂y = ∂Q/∂x" },
+      { "key": "C", "text": "∂P/∂x = ∂Q/∂y" },
+      { "key": "D", "text": "P = Q" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "恰当方程存在势函数 u 使 du=Pdx+Qdy，由混合偏导相等得 ∂P/∂y=∂Q/∂x。这是判定与求势函数的入口。",
+    "signals": ["Pdx+Qdy=0", "问恰当条件"],
+    "traps": {
+      "A": "连续只是前提，不能保证恰当。",
+      "C": "偏导对象写反了，交叉偏导才是条件。",
+      "D": "P=Q 与恰当性无关。"
+    }
+  },
+  "card": {
+    "title": "恰当看交叉偏导",
+    "trigger": "Pdx+Qdy=0",
+    "first_step": "算 P 对 y、Q 对 x 的偏导",
+    "pitfall": "把偏导方向写反"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "恰当方程" }
+}

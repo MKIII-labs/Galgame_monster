@@ -1,0 +1,33 @@
+{
+  "id": "la-eigen-01",
+  "ability": "evidence",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "3 阶矩阵 A 的特征值为 1、2、3。则 det(A) 等于：",
+    "options": [
+      { "key": "A", "text": "6" },
+      { "key": "B", "text": "5" },
+      { "key": "C", "text": "0" },
+      { "key": "D", "text": "1" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "行列式等于全部特征值之积：1×2×3=6。特征值之和等于迹，对应的是 6 之外的另一个不变量。",
+    "signals": ["已知全部特征值", "求行列式"],
+    "traps": {
+      "B": "5 是把特征值相加（迹），不是行列式。",
+      "C": "没有特征值为 0，行列式不为 0。",
+      "D": "1 没有依据。"
+    }
+  },
+  "card": {
+    "title": "行列式=特征值之积",
+    "trigger": "已知特征值求 det",
+    "first_step": "把所有特征值相乘",
+    "pitfall": "与迹（和）记混"
+  },
+  "source_ref": { "doc": "self-authored:linear-algebra", "loc": "特征值" }
+}

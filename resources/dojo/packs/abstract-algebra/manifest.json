@@ -1,0 +1,31 @@
+{
+  "id": "abstract-algebra",
+  "name": "抽象代数",
+  "desc": "群、环、域与同态基本定理",
+  "version": 1,
+  "grade": "official",
+  "alignment": {
+    "standard": "本科抽象代数（数学系）",
+    "dimensions": ["群", "环", "域", "同态"]
+  },
+  "ability_weights": {
+    "framing": 0.1,
+    "assumption": 0.2,
+    "method": 0.25,
+    "condition": 0.35,
+    "evidence": 0.1
+  },
+  "entry": { "minutes": 4, "first_unit": "aa-group-01" },
+  "sequence": [
+    "aa-group-01",
+    "aa-lagrange-01",
+    "aa-normal-01",
+    "aa-hom-01",
+    "aa-cyclic-01",
+    "aa-permutation-01",
+    "aa-ring-01",
+    "aa-field-01",
+    "aa-poly-01",
+    "aa-pair-01"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "id": "cumcm-corr-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "两个变量呈明显的单调关系，但关系明显非线性（例如 y 随 x 增大而增大，增速逐渐变缓）。衡量相关性应优先选：",
+    "options": [
+      { "key": "A", "text": "Pearson 相关系数" },
+      { "key": "B", "text": "Spearman 秩相关系数" },
+      { "key": "C", "text": "协方差" },
+      { "key": "D", "text": "决定系数 R²" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "Pearson 只衡量线性关系，非线性单调关系会被低估；Spearman 用秩，能刻画任何单调关系。协方差有量纲、受尺度影响，R² 需要先拟合模型。",
+    "signals": ["关系单调但非线性", "存在明显弯曲", "不想先假设线性模型"],
+    "traps": {
+      "A": "Pearson 对非线性单调关系不敏感，可能得出「不相关」的错误结论。",
+      "C": "协方差有量纲，数值大小无法直接比较，也不能刻画单调性。",
+      "D": "R² 依赖具体回归模型，换模型就变，不是通用的相关性度量。"
+    }
+  },
+  "card": {
+    "title": "单调非线性用秩相关",
+    "trigger": "关系弯曲但方向一致",
+    "first_step": "先画散点图判断是否线性",
+    "pitfall": "只用 Pearson 就下「不相关」结论"
+  },
+  "source_ref": { "doc": "self-authored:cumcm", "loc": "相关性分析" }
+}

@@ -1,0 +1,28 @@
+{
+  "id": "cmc-implicit-01",
+  "ability": "assumption",
+  "primitive": "order",
+  "judge": "L2",
+  "minutes": 5,
+  "payload": {
+    "situation": "设 z = z(x, y) 由 x² + y² + z² = 4z 确定，求 ∂z/∂x。把步骤排成正确顺序。",
+    "steps": [
+      { "id": "s1", "text": "先确认隐函数存在：F_z = 2z − 4 ≠ 0，即 z ≠ 2" },
+      { "id": "s2", "text": "把 y 看作常数，方程两边对 x 求偏导" },
+      { "id": "s3", "text": "得到 2x + 2z·z_x = 4·z_x" },
+      { "id": "s4", "text": "解出 z_x = x/(2 − z)" }
+    ]
+  },
+  "expert": {
+    "order": ["s1", "s2", "s3", "s4"],
+    "why": "隐函数求导的前提是 F_z ≠ 0；不先确认就写 z_x，等于默认了分母不为零。求导时把 y 当常数，最后再代数解出 z_x。",
+    "signals": ["方程能写成 F(x,y,z)=0", "要求的是偏导而不是全微分", "分母会出现 F_z"]
+  },
+  "card": {
+    "title": "隐函数先验分母",
+    "trigger": "由方程确定隐函数并求偏导",
+    "first_step": "先算 F_z，确认它不为 0",
+    "pitfall": "直接求导，最后除以一个可能为 0 的表达式"
+  },
+  "source_ref": { "doc": "self-authored", "loc": "多元微分·隐函数" }
+}

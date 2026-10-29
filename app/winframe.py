@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
-"""应用窗口标题栏配色（Windows）。
+"""应用窗口标题栏配色（Windows，仅回退到 Edge/Chrome --app 窗口时使用）。
 
-Edge/Chrome 的 `--app` 应用窗口，标题栏由系统（DWM）绘制，网页的 CSS / theme-color
-改不动它。这里用 DWM API 直接给窗口设置「沉浸式深色标题栏」与标题栏颜色，
+正常启动走的是 Electron 壳（desktop/），顶栏由网页自绘，不需要这里的 DWM 调用。
+只有在壳不可用、退回浏览器应用窗口时，才用 DWM API 给系统标题栏上色，
 让它在深色模式下不再突兀。非 Windows、找不到窗口或系统不支持时静默失败。
 """
 import ctypes
+import os
 import sys
 import threading
 import time
+from ctypes import wintypes
 
 TITLE_KEYWORD = "Galgame_monster"          # 匹配应用窗口标题（见 web/index.html <title>）
+
+_BROWSER_EXES = ("msedge.exe", "chrome.exe")   # 只有这两个进程的窗口才动
 
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20        # Win10 20H1+
 _DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19    # Win10 18985+
@@ -32,8 +36,38 @@ def _to_colorref(hex_color):
     return (b << 16) | (g << 8) | r
 
 
+def _pid_exe_name(pid):
+    """PID → 可执行文件名（小写）；拿不到返回空串。"""
+    if not pid:
+        return ""
+    k32 = ctypes.windll.kernel32
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buf))
+        if not k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return ""
+        return os.path.basename(buf.value or "").lower()
+    except Exception:
+        return ""
+    finally:
+        try:
+            k32.CloseHandle(h)
+        except Exception:
+            pass
+
+
 def _find_hwnd(keyword=TITLE_KEYWORD):
-    """按标题关键字找可见的顶层窗口（返回 hwnd，找不到返回 0）"""
+    """找应用窗口的 hwnd；找不到返回 0。
+
+    两个条件都要满足，避免误伤同名的其它窗口：
+      1. 标题**完全等于** keyword（以前用「包含」，实测先命中编辑器窗口
+         「... - Galgame_monster - TRAE CN」，把编辑器的标题栏给改了）；
+      2. 窗口所属进程是 msedge.exe / chrome.exe。
+    """
     try:
         user32 = ctypes.windll.user32
     except Exception:
@@ -49,8 +83,13 @@ def _find_hwnd(keyword=TITLE_KEYWORD):
                 return True
             buf = ctypes.create_unicode_buffer(n + 1)
             user32.GetWindowTextW(hwnd, buf, n + 1)
-            if keyword.lower() in (buf.value or "").lower():
-                found.append(hwnd)
+            if (buf.value or "").strip() != keyword:
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if _pid_exe_name(pid.value) not in _BROWSER_EXES:
+                return True
+            found.append(hwnd)
         except Exception:
             pass
         return True

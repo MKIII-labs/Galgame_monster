@@ -1,0 +1,33 @@
+{
+  "id": "ca-formula-01",
+  "ability": "method",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 3,
+  "payload": {
+    "situation": "柯西积分公式是：",
+    "options": [
+      { "key": "A", "text": "f(z₀) = (1/2πi) ∮_C f(z)/(z−z₀) dz" },
+      { "key": "B", "text": "f(z₀) = (1/2π) ∮_C f(z)/(z−z₀) dz" },
+      { "key": "C", "text": "f(z₀) = ∮_C f(z)(z−z₀) dz" },
+      { "key": "D", "text": "f(z₀) = f′(z₀)" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "柯西积分公式把解析函数在内部点的值表示成边界积分，系数是 1/(2πi)，分母是 z−z₀。缺了 i 或写成乘法都是错的。",
+    "signals": ["求内部点的函数值", "边界积分"],
+    "traps": {
+      "B": "少了虚数单位 i。",
+      "C": "分母写成了乘法，结构完全不对。",
+      "D": "函数值不等于导数值。"
+    }
+  },
+  "card": {
+    "title": "柯西公式：1/(2πi)∮ f/(z−z₀)",
+    "trigger": "求解析函数内部点值",
+    "first_step": "确认 z₀ 在 C 内、f 在 C 内解析",
+    "pitfall": "漏掉 i 或把分母写成乘积"
+  },
+  "source_ref": { "doc": "self-authored:complex-analysis", "loc": "柯西积分公式" }
+}

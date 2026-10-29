@@ -1,0 +1,31 @@
+{
+  "id": "prob-error-01",
+  "ability": "condition",
+  "primitive": "multi_select",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "关于假设检验中的两类错误，下列哪些说法正确？",
+    "options": [
+      { "key": "A", "text": "显著性水平 α 是犯第一类错误概率的上限" },
+      { "key": "B", "text": "样本量增大时，两类错误的概率可以同时减小" },
+      { "key": "C", "text": "减小 α 一定会减小第二类错误" },
+      { "key": "D", "text": "检验功效等于 1 减去第二类错误的概率" }
+    ]
+  },
+  "expert": {
+    "choice": ["A", "B", "D"],
+    "why": "α 控制第一类错误；样本量增大能同时压低两类错误；功效定义为 1−β。但在样本量固定时，减小 α 会让拒绝域变小，第二类错误反而增大。",
+    "signals": ["两类错误", "显著性水平", "样本量"],
+    "traps": {
+      "C": "固定样本量下 α 与 β 此消彼长，减小 α 通常增大第二类错误。"
+    }
+  },
+  "card": {
+    "title": "α 与 β 此消彼长",
+    "trigger": "假设检验的两类错误",
+    "first_step": "先分清第一类（弃真）与第二类（取伪）",
+    "pitfall": "以为减小 α 总能两全"
+  },
+  "source_ref": { "doc": "self-authored:probability", "loc": "假设检验" }
+}

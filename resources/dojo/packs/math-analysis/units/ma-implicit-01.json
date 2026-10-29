@@ -1,0 +1,33 @@
+{
+  "id": "ma-implicit-01",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "F(x,y) = 0 在点 (x₀,y₀) 附近能唯一确定隐函数 y = y(x)，关键条件是：",
+    "options": [
+      { "key": "A", "text": "F(x₀,y₀) = 0" },
+      { "key": "B", "text": "F_y(x₀,y₀) ≠ 0" },
+      { "key": "C", "text": "F_x(x₀,y₀) ≠ 0" },
+      { "key": "D", "text": "F 在附近有界" }
+    ]
+  },
+  "expert": {
+    "choice": "B",
+    "why": "隐函数定理要求 F 连续可微、F(x₀,y₀)=0，且对 y 的偏导在该点不为 0。F_y≠0 保证方程在 y 方向可以局部解出；F_x≠0 对应的是解出 x=x(y)。",
+    "signals": ["隐函数存在", "方程 F(x,y)=0", "要解出 y(x)"],
+    "traps": {
+      "A": "F=0 只是必要条件，没有 F_y≠0 无法保证唯一解。",
+      "C": "F_x≠0 是用来解出 x=x(y) 的条件。",
+      "D": "有界与隐函数存在无关。"
+    }
+  },
+  "card": {
+    "title": "解 y 看 F_y",
+    "trigger": "隐函数定理",
+    "first_step": "确认 F=0 且对目标变量偏导非零",
+    "pitfall": "把 F_x 与 F_y 的条件弄反"
+  },
+  "source_ref": { "doc": "self-authored:math-analysis", "loc": "隐函数定理" }
+}

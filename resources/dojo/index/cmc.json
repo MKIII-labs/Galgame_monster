@@ -1,0 +1,269 @@
+{
+  "contest": "CMC",
+  "name": "CMC 数学类初赛真题",
+  "standard": "全国大学生数学竞赛初赛（数学专业类）：数学分析 50% / 高等代数 35% / 解析几何 15%",
+  "source_url": "https://www.cmathc.org.cn/stxz/",
+  "note": "题号、分值、卷别以官方 PDF 为准。第十一至十七届官网分数学 A 类 / B 类发布；第八至十届为不分卷的「数学类」。题面为索引摘要，完整题目请点开官方 PDF。",
+  "papers": [
+    {
+      "id": "cmc2016",
+      "edition": 8,
+      "year": 2016,
+      "paper": "数学类",
+      "url": "https://math.ecnu.edu.cn/llin/pdf_files/MathAns_2016.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "椭球面平行光切点轨迹", "head": "平行光照射椭球面，切点曲线落在过中心的平面上"},
+        {"no": 2, "points": 15, "subject": "高等代数", "topic": "BA=0 矩阵 Jordan 谱含零", "head": "n 为奇数，A、B 实方阵且 BA=0，证明 0 属于 A 或 B 的谱"},
+        {"no": 3, "points": 20, "subject": "高等代数", "topic": "实方阵线性组合行列式零点", "head": "2017 个 2016 阶实方阵的线性组合，证明存在非零系数使行列式为 0"},
+        {"no": 4, "points": 20, "subject": "数学分析", "topic": "积分递推数列单调收敛", "head": "正连续函数递推积分序列，证明积分单调并求极限"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "微分不等式无正可导解", "head": "α>1，证明不存在正可导函数满足 f'≥f^α"},
+        {"no": 6, "points": 15, "subject": "数学分析", "topic": "单调函数积分差的 L1 估计", "head": "两单调递增函数积分相等，证明差的 L1 范数不超过 1/2"}
+      ]
+    },
+    {
+      "id": "cmc2017",
+      "edition": 9,
+      "year": 2017,
+      "paper": "数学类",
+      "url": "https://m.doc88.com/p-80187004057779.html",
+      "note": "官方公众号原文为图片，此处链接为公开转载的试卷文本",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "单叶双曲面抛物线截面法线夹角", "head": "平面截单叶双曲面得抛物线，求平面法线与 z 轴夹角"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "级数收敛与数列有界", "head": "递增数列 a₁>1，证明级数收敛当且仅当数列有界"},
+        {"no": 3, "points": 15, "subject": "高等代数", "topic": "可逆矩阵乘法封闭与迹", "head": "可逆复方阵集合对乘法封闭，证明矩阵和为零等价于迹和为零"},
+        {"no": 4, "points": 20, "subject": "高等代数", "topic": "反对称矩阵的矩阵方程", "head": "XY−YX=aI+A 的有序对集合，证明 XNᵀ+YMᵀ≠0"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "arctan 级数与极限", "head": "f=arctan x，由极限存在求常数 A、B"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "函数积分比极限", "head": "f=x²(1−x)³，求含 ln(n+2) 的积分比极限"}
+      ]
+    },
+    {
+      "id": "cmc2018",
+      "edition": 10,
+      "year": 2018,
+      "paper": "数学类",
+      "url": "http://cmathc.cn/upfiles/file/201811/20181105200130534.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "马鞍面直母线与平行平面", "head": "马鞍面上过 P 的直线均平行于平面，求 P 的坐标"},
+        {"no": 2, "points": 15, "subject": "高等代数", "topic": "对角占优矩阵二次型规范形", "head": "对角元为正且行和受限，求二次型的规范形"},
+        {"no": 3, "points": 20, "subject": "高等代数", "topic": "整矩阵可逆性与多项式方法", "head": "整矩阵可逆且逆为整矩阵，等价于行列式绝对值为 1"},
+        {"no": 4, "points": 15, "subject": "数学分析", "topic": "无穷阶零导数与微分不等式", "head": "在 0 处各阶导数为 0 且满足 |xf'|≤C|f|，证明 f≡0"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "数列比值估计与级数发散", "head": "比值上界含 1/(n ln n)，证明级数发散"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "导数 Hölder 条件与不等式", "head": "导数满足 Hölder 条件，证明 |f'|^((α+1)/α) < ((α+1)/α)f"}
+      ]
+    },
+    {
+      "id": "cmc2019a",
+      "edition": 11,
+      "year": 2019,
+      "paper": "数学A类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十一届全国大学生数学竞赛初赛（数学A类）试题及参考答案.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "旋转椭球面与球心轨迹", "head": "与两同心球面均相切的球，求球心轨迹曲面类型"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "微分不等式与中值点", "head": "证明存在 ξ 使 ξf''(ξ)+(α+1)f'(ξ)>αf(ξ)"},
+        {"no": 3, "points": 15, "subject": "高等代数", "topic": "复方阵特征多项式", "head": "证明 I−ĀᵀA 的特征多项式为实系数"},
+        {"no": 4, "points": 20, "subject": "高等代数", "topic": "二次型空间与维数", "head": "与正定二次型相加恒为恒号二次型，证明构成线性空间并求维数"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "递推数列有界性估计", "head": "递推式含 hₙ/n^α，证明 {n^δ xₙ} 有界"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "凸函数与集合值域", "head": "f=1/(1+eˣ) 的凸性与集合 E={Σf(xₖ)} 的确定"}
+      ]
+    },
+    {
+      "id": "cmc2019b",
+      "edition": 11,
+      "year": 2019,
+      "paper": "数学B类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十一届全国大学生数学竞赛初赛（数学B类）试题及参考答案.pdf",
+      "note": "该卷共 7 题（官网 PDF 实际分值 15/10/15/15/20/15/10）",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "异面直线与单叶双曲面", "head": "两异面直线上动点满足 A₁B⊥A₂B，证明 A₁A₂ 轨迹为单叶双曲面"},
+        {"no": 2, "points": 10, "subject": "数学分析", "topic": "含参反常积分计算", "head": "计算 ∫₀^{+∞} dx/((1+x²)(1+x^2019))"},
+        {"no": 3, "points": 15, "subject": "数学分析", "topic": "递推数列敛散性", "head": "x_{n+1}=ln(1+xₙ)，证明收敛并求极限"},
+        {"no": 4, "points": 15, "subject": "高等代数", "topic": "基与坐标非负表示", "head": "由 n+1 个和为 0 的向量构造 n+1 组基，证明存在坐标全非负的基"},
+        {"no": 5, "points": 20, "subject": "高等代数", "topic": "对合矩阵的秩与对角化", "head": "A²=I，证明秩关系、可对角化与同时对角化"},
+        {"no": 6, "points": 15, "subject": "数学分析", "topic": "凹函数与上下确界", "head": "凹函数下的和式集合 Sₙ，求 sup−inf 的极限"},
+        {"no": 7, "points": 10, "subject": "数学分析", "topic": "正项级数收敛性", "head": "Σ1/aₙ 收敛，证明 Σn²aₙ/Sₙ² 收敛"}
+      ]
+    },
+    {
+      "id": "cmc2020a",
+      "edition": 12,
+      "year": 2020,
+      "paper": "数学A类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十二届全国大学生数学竞赛初赛（数学A类）试题及参考答案.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "球面投影与四面体体积", "head": "北极点与平面三点连线交球面，求投影点与四面体体积"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "数列极限与定积分", "head": "求 lim ln n / ln(1^2020+…+n^2020)"},
+        {"no": 3, "points": 15, "subject": "高等代数", "topic": "正交矩阵相似性判定", "head": "Ax=Bx 解空间维数为 3，判断两个 2020 阶正交矩阵是否相似"},
+        {"no": 4, "points": 20, "subject": "高等代数", "topic": "首一多项式第二项系数", "head": "求所有满足第二项系数条件的 2020 次首一多项式"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "反函数迭代数列收敛", "head": "由 φ 与反函数 ψ 构造递推，证明收敛或举反例"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "曲线可求长与 Lipschitz", "head": "Lipschitz 函数的等分折线长收敛，证明曲线可求长"}
+      ]
+    },
+    {
+      "id": "cmc2020b",
+      "edition": 12,
+      "year": 2020,
+      "paper": "数学B类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十二届全国大学生数学竞赛初赛（数学B类）试题及参考答案.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "椭球面外切柱面法方向", "head": "求与椭球面外切柱面交于圆周的平面法方向"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "积分不等式估计", "head": "1≤f≤3，证明 ∫f · ∫1/f ≤ 4/3"},
+        {"no": 3, "points": 15, "subject": "高等代数", "topic": "矩阵多项式与互素", "head": "g(A) 可逆当且仅当特征多项式与 g 互素"},
+        {"no": 4, "points": 20, "subject": "高等代数", "topic": "线性变换特征向量组", "head": "σ=k·I 等价于存在任意 n 个都线性无关的 n+1 个特征向量"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "小数部分广义积分", "head": "计算含小数部分的广义积分 ∫(x)/x³ dx"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "积分不等式证明", "head": "由积分下界条件证明 ∫f² ≥ 1/10"}
+      ]
+    },
+    {
+      "id": "cmc2021a",
+      "edition": 13,
+      "year": 2021,
+      "paper": "数学A类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十三届全国大学生数学竞赛初赛（数学A类）试题及参考答案.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "直线绕轴旋转曲面", "head": "求过定点直线绕 z 轴旋转所得曲面方程"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "单位球上椭圆型方程组", "head": "证明 u²+v²≤1（极值原理）"},
+        {"no": 3, "points": 15, "subject": "高等代数", "topic": "整系数多项式根为实数", "head": "系数绝对值≤40，证明 2021 次整系数多项式根不可能全为实数"},
+        {"no": 4, "points": 20, "subject": "高等代数", "topic": "对称酉矩阵分解", "head": "对称酉矩阵 P 表示为 Q Q̄ Q⁻¹"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "含参积分交换次序", "head": "证明二重积分可交换次序并计算两个振荡积分之积"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "微分不等式与函数界", "head": "由 f'≥6+f−f² 与 g'≤6+g−g² 证明上下界"}
+      ]
+    },
+    {
+      "id": "cmc2021b",
+      "edition": 13,
+      "year": 2021,
+      "paper": "数学B类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十三届全国大学生数学竞赛初赛（数学B类）试题及参考答案.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "球面切锥面方程", "head": "求以 |a|>1 的点为顶点、与单位球面相切的锥面"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "单位球上椭圆型方程组", "head": "证明 u²+v²≤1（与 A 卷第 2 题同题）"},
+        {"no": 3, "points": 15, "subject": "高等代数", "topic": "整系数多项式根为实数", "head": "与 A 卷第 3 题同题"},
+        {"no": 4, "points": 20, "subject": "高等代数", "topic": "三阶行列式值集", "head": "元素取 0,±1 的三阶行列式值集为 {−4,…,4}"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "级数敛散性判定", "head": "由 lim f(x)/x=a>0 判断交错级数收敛、绝对值级数发散"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "严格凸函数与中值", "head": "证明 f 严格凸且任意切线斜率可由割线斜率取得"}
+      ]
+    },
+    {
+      "id": "cmc2022a",
+      "edition": 14,
+      "year": 2022,
+      "paper": "数学A类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十四届全国大学生数学竞赛初赛（数学A类）试题及参考答案.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "单叶双曲面直母线夹角", "head": "求过 P(1,1,1) 的两条直母线夹角"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "数列极限与卷积和", "head": "aₙ,bₙ 为 n² 量级，求卷积和的极限"},
+        {"no": 3, "points": 15, "subject": "高等代数", "topic": "交换矩阵与行列式 1", "head": "正整数元素、行列式为 1 的交换矩阵必为 A^k"},
+        {"no": 4, "points": 20, "subject": "高等代数", "topic": "多项式有理域上不可约", "head": "证明 xⁿ−x−1 在 Q 上不可约"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "Riemann 可积与黎曼和", "head": "偏移点列的黎曼和仍收敛到积分"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "变限积分一致连续性", "head": "讨论 F(x)=∫t^α f(t+x)dt 的一致连续性"}
+      ]
+    },
+    {
+      "id": "cmc2022b",
+      "edition": 14,
+      "year": 2022,
+      "paper": "数学B类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十四届全国大学生数学竞赛初赛（数学B类）试题及参考答案.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "两平面交线与法平面", "head": "求过定点且与两平面交线垂直的平面"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "数列极限与卷积和", "head": "与 A 卷第 2 题同题"},
+        {"no": 3, "points": 15, "subject": "高等代数", "topic": "交换矩阵与行列式 1", "head": "与 A 卷第 3 题同题"},
+        {"no": 4, "points": 20, "subject": "高等代数", "topic": "相同 Jordan 标准型", "head": "由相同 Jordan 标准型求矩阵中的未知参数"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "幂级数系数级数求和", "head": "由 1/(1−x−x²) 的系数构造级数并求和"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "函数不等式与唯一性", "head": "证明 a−ln a=b−ln b 的唯一性及 ab<1、b+ln a>1"}
+      ]
+    },
+    {
+      "id": "cmc2023a",
+      "edition": 15,
+      "year": 2023,
+      "paper": "数学A类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十五届全国大学生数学竞赛初赛（数学A类）试题及参考答案.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "球心轨迹与抛物柱面", "head": "过定点且与定直线相切的球，球心轨迹是何种曲面"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "三元函数极值与条件最值", "head": "求驻点、边界最小值与椭球上最小值"},
+        {"no": 3, "points": 20, "subject": "高等代数", "topic": "循环基与特征值几何重数", "head": "存在循环基当且仅当各特征值几何重数为 1"},
+        {"no": 4, "points": 15, "subject": "高等代数", "topic": "正弦型矩阵行列式计算", "head": "计算 E+A^2023 的行列式"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "集合直径与平移比较", "head": "证明 diam E < diam(E∪(E+c))"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "幂指迭代数列极限", "head": "a=∛3，x_{n+1}=a^{xₙ}，证明极限存在但不是 3"}
+      ]
+    },
+    {
+      "id": "cmc2023b",
+      "edition": 15,
+      "year": 2023,
+      "paper": "数学B类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十五届全国大学生数学竞赛初赛（数学B类）试题及参考答案.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "正交直线交点轨迹球面", "head": "过 P、Q 的正交直线交点轨迹是何种曲面"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "三元函数极值与条件最值", "head": "与 A 卷第 2 题同题"},
+        {"no": 3, "points": 20, "subject": "高等代数", "topic": "循环基与特征值几何重数", "head": "与 A 卷第 3 题同题"},
+        {"no": 4, "points": 15, "subject": "高等代数", "topic": "对角 ±1 扰动使矩阵可逆", "head": "必存在对角元为 ±1 的对角阵 J 使 A+J 可逆"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "高阶导数组合式化简", "head": "化简 d/dx(F''sinx−Fcosx)"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "广义积分控制下的极限", "head": "f 可积、f'≤g，分三种情形证明 f→0"}
+      ]
+    },
+    {
+      "id": "cmc2024a",
+      "edition": 16,
+      "year": 2024,
+      "paper": "数学A类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十六届全国大学生数学竞赛初赛（数学A类）试题及答案解析.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "双曲面切锥面与截面", "head": "求双叶双曲面的切锥面方程与切点所在平面"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "含参广义积分求值", "head": "φ(s)=∫ln(1+sx²)/(x(1+x²))dx，求 φ(1)、φ(2)"},
+        {"no": 3, "points": 20, "subject": "高等代数", "topic": "伴随矩阵元素取平方", "head": "3 阶不可逆方阵的伴随矩阵等于元素平方阵，求 A"},
+        {"no": 4, "points": 15, "subject": "高等代数", "topic": "多项式组线性相关", "head": "次数和小于阈值，证明 2024 个多项式线性相关"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "含取整数部分的级数敛散", "head": "讨论含 (−1)^⌊√n⌋ 的两个级数的收敛性"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "迭代函数列一致极限", "head": "压缩映射复合函数列，证明极限与初值无关"}
+      ]
+    },
+    {
+      "id": "cmc2024b",
+      "edition": 16,
+      "year": 2024,
+      "paper": "数学B类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十六届全国大学生数学竞赛初赛（数学B类）试题及答案解析.pdf",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "单叶双曲面直母线", "head": "求过定点的两条直母线及相互垂直直母线交点轨迹"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "含参广义积分求值", "head": "与 A 卷第 2 题同题"},
+        {"no": 3, "points": 20, "subject": "高等代数", "topic": "伴随矩阵元素取平方", "head": "与 A 卷第 3 题同题"},
+        {"no": 4, "points": 15, "subject": "高等代数", "topic": "对角加 f(xᵢ) 型矩阵可逆", "head": "由 f(2023)+f(2024)=2025 证明特殊矩阵可逆"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "整数集与根号集和式极限", "head": "求完全平方数与根号非整数之和的极限"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "递推正数列的渐近估计", "head": "证明 {n xₙ^α} 收敛并给出 yₙ 的上极限估计"}
+      ]
+    },
+    {
+      "id": "cmc2025a",
+      "edition": 17,
+      "year": 2025,
+      "paper": "数学A类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十七届全国大学生数学竞赛初赛试题及参考答案（数学A类）.pdf",
+      "note": "官网 PDF 为扫描件；题目内容另经高校转载文本核对",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "四面体体积与向量恒等式", "head": "四面体内一点分出的四个小四面体，证明体积加权的向量恒等式"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "指数和函数积分估计", "head": "加性唯一集上的指数和，计算 L²、L⁴ 范数并证 L¹ 下界"},
+        {"no": 3, "points": 20, "subject": "高等代数", "topic": "有理方阵行列式构造", "head": "构造行列式依次取给定有理数的矩阵组"},
+        {"no": 4, "points": 15, "subject": "高等代数", "topic": "极小多项式与不变子空间", "head": "极小多项式的循环向量、不变子空间与交换性"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "二次多项式逼近与凸性", "head": "二阶导上界为 2，证明存在唯一切触的二次多项式"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "数集计数与积分极限", "head": "由自然密度 p 推导子区间计数与黎曼和的极限"}
+      ]
+    },
+    {
+      "id": "cmc2025b",
+      "edition": 17,
+      "year": 2025,
+      "paper": "数学B类",
+      "url": "https://www.cmathc.org.cn/static/upload/file/jsst/第十七届全国大学生数学竞赛初赛试题及参考答案（数学B类）.pdf",
+      "note": "官网 PDF 为扫描件；题目内容另经高校转载文本核对",
+      "problems": [
+        {"no": 1, "points": 15, "subject": "解析几何", "topic": "四面体重心坐标与共点", "head": "求侧面重心坐标并证明三条连线共点"},
+        {"no": 2, "points": 15, "subject": "数学分析", "topic": "指数和函数积分估计", "head": "与 A 卷第 2 题同题"},
+        {"no": 3, "points": 20, "subject": "高等代数", "topic": "有理方阵行列式构造", "head": "与 A 卷第 3 题同题"},
+        {"no": 4, "points": 15, "subject": "高等代数", "topic": "特殊方阵秩的取值", "head": "对角 3、其余 2 或 2029，证明秩为 n 或 n−1"},
+        {"no": 5, "points": 15, "subject": "数学分析", "topic": "方程根列单调与极限", "head": "证明根 xₖ 唯一、严格单调并求极限"},
+        {"no": 6, "points": 20, "subject": "数学分析", "topic": "对数权函数积分不等式", "head": "由 f ln²x+xf'≤0 证明积分恒负或 f≡0"}
+      ]
+    }
+  ]
+}

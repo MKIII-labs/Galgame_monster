@@ -1,0 +1,9 @@
+{
+  "id": "course-abstract-algebra",
+  "name": "抽象代数 · 教材",
+  "standard": "John B. Fraleigh《抽象代数基础教程》原书第 8 版",
+  "note": "按教材章节生成；审核通过后入库。",
+  "tracks": [
+    "教材"
+  ]
+}

@@ -1,0 +1,130 @@
+{
+  "items": [
+    {
+      "file": "bgm_battle.mp3",
+      "name": "战斗 · 背水一战",
+      "tags": {
+        "情绪": [
+          "紧张",
+          "热血"
+        ],
+        "场景": [
+          "战斗",
+          "危险"
+        ],
+        "氛围": [
+          "激烈"
+        ],
+        "extra": [
+          "来源:OpenGameArt",
+          "CC0 · cynicmusic"
+        ]
+      }
+    },
+    {
+      "file": "bgm_dark_amb.mp3",
+      "name": "黑暗 · 潜行探索",
+      "tags": {
+        "情绪": [
+          "黑暗",
+          "悬疑"
+        ],
+        "场景": [
+          "探索",
+          "夜晚"
+        ],
+        "氛围": [
+          "压抑"
+        ],
+        "extra": [
+          "来源:OpenGameArt",
+          "CC-BY 3.0 · Alexandr Zhelanov"
+        ]
+      }
+    },
+    {
+      "file": "bgm_melancholy.ogg",
+      "name": "悲伤 · 独行之忆",
+      "tags": {
+        "情绪": [
+          "悲伤",
+          "孤独"
+        ],
+        "场景": [
+          "回忆",
+          "离别"
+        ],
+        "氛围": [
+          "安静"
+        ],
+        "extra": [
+          "来源:OpenGameArt",
+          "CC-BY 3.0 · syncopika"
+        ]
+      }
+    },
+    {
+      "file": "bgm_war.mp3",
+      "name": "悲壮 · 战火挽歌",
+      "tags": {
+        "情绪": [
+          "悲壮",
+          "沉重"
+        ],
+        "场景": [
+          "战争",
+          "结局"
+        ],
+        "氛围": [
+          "悲凉"
+        ],
+        "extra": [
+          "来源:OpenGameArt",
+          "CC0 · Cethiel"
+        ]
+      }
+    },
+    {
+      "file": "bgm_creepy.mp3",
+      "name": "诡异 · 低语暗涌",
+      "tags": {
+        "情绪": [
+          "诡异",
+          "不安"
+        ],
+        "场景": [
+          "探索"
+        ],
+        "氛围": [
+          "神秘",
+          "压抑"
+        ],
+        "extra": [
+          "来源:OpenGameArt",
+          "CC-BY 3.0 · Muncheybobo"
+        ]
+      }
+    },
+    {
+      "file": "bgm_horror.mp3",
+      "name": "诡异 · 不祥之影",
+      "tags": {
+        "情绪": [
+          "恐怖",
+          "诡异"
+        ],
+        "场景": [
+          "遭遇",
+          "危险"
+        ],
+        "氛围": [
+          "压抑"
+        ],
+        "extra": [
+          "来源:OpenGameArt",
+          "OGA-BY 3.0 · ISAo (airyluvs.com)"
+        ]
+      }
+    }
+  ]
+}

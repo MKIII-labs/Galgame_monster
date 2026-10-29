@@ -1,0 +1,34 @@
+{
+  "id": "cmc-post-06",
+  "test": "post",
+  "ability": "condition",
+  "primitive": "single_choice",
+  "judge": "L2",
+  "minutes": 2,
+  "payload": {
+    "situation": "设 z = xy，在点 (2,3) 处的全微分 dz 是：",
+    "options": [
+      { "key": "A", "text": "dz = 3dx + 2dy" },
+      { "key": "B", "text": "dz = 2dx + 3dy" },
+      { "key": "C", "text": "dz = 6" },
+      { "key": "D", "text": "dz = 3dx + 2dy + 6" }
+    ]
+  },
+  "expert": {
+    "choice": "A",
+    "why": "z_x = y = 3，z_y = x = 2，在 (2,3) 处 dz = 3dx + 2dy。全微分是线性主部。",
+    "signals": ["求 dz", "点 (2,3) 已给定"],
+    "traps": {
+      "B": "两个偏导对调了：z 对 x 的偏导是 y，不是 x。",
+      "C": "6 是 z(2,3) 的函数值。",
+      "D": "全微分不能带常数项。"
+    }
+  },
+  "card": {
+    "title": "偏导别对调",
+    "trigger": "z = xy 求全微分",
+    "first_step": "z_x = y，z_y = x，再代点",
+    "pitfall": "把偏导写成 x 和 y 的原位置"
+  },
+  "source_ref": { "doc": "self-authored:assessment", "loc": "cmc-post-06" }
+}

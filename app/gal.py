@@ -4,11 +4,14 @@
 设计见 docs/GAL_MODE_DESIGN.md（本地文档）。
 本模块只做「数据 + 契约 + 解析」，不涉及 HTTP；路由与聊天流集成在 app/httpd.py。
 """
+import base64
 import json
 import os
+import random
 import re
 import shutil
 
+from app import prompts as P
 from app.store import DATA_DIR
 
 GAL_DIR = os.path.join(DATA_DIR, "gal")
@@ -32,6 +35,13 @@ WEIGHT_EXT = (".ckpt", ".pth")
 # 背景 / BGM 资源目录（不属于任何角色）
 BACKGROUND_DIR = os.path.join(GAL_DIR, "backgrounds")
 BGM_DIR = os.path.join(GAL_DIR, "bgm")
+# 背景库索引（图片仍在 backgrounds/ 下，名称与标签记在这里）
+BACKGROUND_INDEX = os.path.join(GAL_DIR, "backgrounds.json")
+# 背景分类标签的固定维度（顺序即 UI 与提示词里的展示顺序）
+BG_TAG_DIMS = ("场景", "时间", "天气", "氛围")
+# BGM 库索引与分类标签维度（音频按「情绪 / 场景 / 氛围」归类）
+BGM_INDEX = os.path.join(GAL_DIR, "bgm.json")
+BGM_TAG_DIMS = ("情绪", "场景", "氛围")
 
 
 # ============================================================
@@ -129,6 +139,7 @@ def normalize_character(data, cid):
         "color": _valid_color(data.get("color")),
         "sprite_scale": scale,
         "profile": str(data.get("profile") or ""),
+        "intro": str(data.get("intro") or "").strip()[:1500],  # 给玩家看的一段介绍（不注入 AI）
         "sprites": sprites,
         "tts": _normalize_tts(data.get("tts")),
     }
@@ -189,6 +200,7 @@ def list_characters():
             continue
         out.append({
             "id": c["id"], "name": c["name"], "color": c["color"],
+            "intro": c.get("intro", ""),
             "sprite_count": len(c["sprites"]),
             "default_sprite": (c["sprites"][0]["path"] if c["sprites"] else ""),
         })
@@ -552,6 +564,783 @@ def list_sprite_files(cid):
     return sorted(out)
 
 
+# ============================================================
+# 1b. 背景库（图片在 backgrounds/，名称与分类标签记在 backgrounds.json）
+# ============================================================
+def _safe_bg_rel(rel):
+    """把背景相对路径收敛成安全形式（只允许 backgrounds/ 内的相对路径）"""
+    rel = str(rel or "").replace("\\", "/").strip().lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return ""
+    return rel
+
+
+def _bg_abs(rel):
+    rel = _safe_bg_rel(rel)
+    if not rel:
+        return ""
+    return os.path.join(BACKGROUND_DIR, *rel.split("/"))
+
+
+def _bg_display_name(rel):
+    """背景的显示名（只读索引，不触发扫描/回写；找不到就用文件名）"""
+    rel = _safe_bg_rel(rel)
+    if not rel:
+        return ""
+    name = ""
+    try:
+        with open(BACKGROUND_INDEX, "r", encoding="utf-8") as f:
+            for b in (json.load(f) or {}).get("items") or []:
+                if _safe_bg_rel((b or {}).get("file")) == rel:
+                    name = str((b or {}).get("name") or "").strip()
+                    break
+    except Exception:
+        name = ""
+    return name or os.path.splitext(os.path.basename(rel))[0]
+
+
+def _norm_tags(raw, dims=BG_TAG_DIMS):
+    """把标签收敛成 {维度: [...], "extra": [自由标签]}
+
+    兼容三种输入：字符串 / 字符串数组 / 分类字典（{"场景": [...], "extra": [...]}）
+    dims 指定固定维度（背景用 BG_TAG_DIMS，BGM 用 BGM_TAG_DIMS）
+    """
+    out = {d: [] for d in dims}
+    extra = []
+
+    def _add(bucket, v):
+        for t in ([v] if isinstance(v, str) else (v or [])):
+            t = str(t).strip()
+            if t and t not in bucket:
+                bucket.append(t)
+
+    if isinstance(raw, dict):
+        for d in dims:
+            if d in raw:
+                _add(out[d], raw.get(d))
+        _add(extra, raw.get("extra") or raw.get("其他") or raw.get("标签"))
+    else:
+        _add(extra, raw)
+    out["extra"] = extra
+    return out
+
+
+def normalize_background(it):
+    if not isinstance(it, dict):
+        return None
+    rel = _safe_bg_rel(it.get("file"))
+    if not rel:
+        return None
+    return {
+        "file": rel,
+        "name": str(it.get("name") or "").strip()[:60],
+        "tags": _norm_tags(it.get("tags")),
+    }
+
+
+# 文件名自动归类用的关键词（够用即可，用户可在 UI 里手改）
+_BG_DIM_HINTS = {
+    "场景": ("教室", "海边", "河边", "街道", "走廊", "天台", "屋顶", "公园", "森林", "房间",
+             "卧室", "客厅", "厨房", "餐厅", "咖啡", "神社", "车站", "图书馆", "医院", "学校",
+             "家", "城市", "广场", "桥", "山路", "湖边", "海边", "沙滩", "星空", "樱花", "庭院"),
+    "时间": ("清晨", "早晨", "上午", "中午", "午后", "下午", "黄昏", "傍晚", "夜晚", "深夜",
+             "凌晨", "白天", "日落", "日出", "黎明", "夜"),
+    "天气": ("晴朗", "多云", "小雨", "大雨", "下雨", "下雪", "雾", "彩虹", "晴", "阴", "雨", "雪", "风"),
+    "氛围": ("温馨", "安静", "热闹", "悲伤", "浪漫", "紧张", "恐怖", "梦幻", "孤独", "宁静", "温暖", "冷清"),
+}
+
+
+def _infer_tags_from_name(rel):
+    """从背景文件名推断分类标签（分类关键词命中维度，其余进 extra）"""
+    tags = {d: [] for d in BG_TAG_DIMS}
+    extra = []
+    for w in _tags_from_filename(rel):
+        placed = False
+        for d, kws in _BG_DIM_HINTS.items():
+            if any((k in w) or (w in k) for k in kws):
+                if w not in tags[d]:
+                    tags[d].append(w)
+                placed = True
+                break
+        if not placed and w not in extra:
+            extra.append(w)
+    tags["extra"] = extra
+    return tags
+
+
+def _scan_bg_files():
+    """扫描 backgrounds/ 下所有图片，返回相对路径（正斜杠）列表"""
+    if not os.path.isdir(BACKGROUND_DIR):
+        return []
+    out = []
+    for dirpath, _dirs, files in os.walk(BACKGROUND_DIR):
+        for fn in sorted(files):
+            if os.path.splitext(fn)[1].lower() not in IMAGE_EXT:
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fn), BACKGROUND_DIR).replace("\\", "/")
+            out.append(rel)
+    return sorted(out)
+
+
+def save_backgrounds(data):
+    os.makedirs(GAL_DIR, exist_ok=True)
+    tmp = BACKGROUND_INDEX + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data or {"items": []}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, BACKGROUND_INDEX)
+
+
+def load_backgrounds():
+    """读取背景库 {items:[{file,name,tags}]}
+
+    - 目录里有、索引里没有的图片：自动补一条（名称=文件名，标签自动推断）
+    - 索引里有、文件已删除的条目：自动剔除
+    变化时回写 backgrounds.json。
+    """
+    os.makedirs(BACKGROUND_DIR, exist_ok=True)
+    raw = {}
+    if os.path.isfile(BACKGROUND_INDEX):
+        try:
+            with open(BACKGROUND_INDEX, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+    items = [b for b in (normalize_background(x) for x in ((raw or {}).get("items") or [])) if b]
+    have = {b["file"] for b in items}
+    exists = set(_scan_bg_files())
+    changed = False
+    for rel in exists:
+        if rel not in have:
+            items.append({"file": rel, "name": os.path.splitext(os.path.basename(rel))[0],
+                          "tags": _infer_tags_from_name(rel)})
+            changed = True
+    kept = []
+    for b in items:
+        if b["file"] in exists:
+            kept.append(b)
+        else:
+            changed = True
+    result = {"items": kept}
+    if changed or not os.path.isfile(BACKGROUND_INDEX):
+        save_backgrounds(result)
+    return result
+
+
+def background_roster():
+    """给提示词用的背景清单文本（按维度分组）+ 名称列表"""
+    items = load_backgrounds()["items"]
+    lines, names = [], []
+    for i, b in enumerate(items):
+        nm = b.get("name") or os.path.splitext(os.path.basename(b["file"]))[0]
+        names.append(nm)
+        tg = b.get("tags") or {}
+        parts = [d + "：" + "、".join(tg[d]) for d in BG_TAG_DIMS if tg.get(d)]
+        if tg.get("extra"):
+            parts.append("标签：" + "、".join(tg["extra"]))
+        lines.append("%d. %s%s" % (i + 1, nm, ("（" + "；".join(parts) + "）") if parts else ""))
+    return "\n".join(lines), names
+
+
+def match_background(spec):
+    """把 AI 给的背景编号 / 文件名 / 名称 / 标签匹配到条目；匹配不到返回 None"""
+    items = load_backgrounds()["items"]
+    if not items:
+        return None
+    if isinstance(spec, int) and 1 <= spec <= len(items):
+        return items[spec - 1]
+    keys = spec if isinstance(spec, list) else ([spec] if spec else [])
+    keys = [str(k or "").strip() for k in keys]
+    keys = [k for k in keys if k]
+    if not keys:
+        return None
+    # 1) 文件名 / 名称精确 + 包含
+    for k in keys:
+        for b in items:
+            if k == b["file"] or k == b.get("name"):
+                return b
+    for k in keys:
+        kl = k.lower()
+        for b in items:
+            if kl in os.path.basename(b["file"]).lower() or k in (b.get("name") or ""):
+                return b
+    # 2) 标签模糊匹配
+    for k in keys:
+        for b in items:
+            tg = b.get("tags") or {}
+            pool = [t for d in BG_TAG_DIMS for t in (tg.get(d) or [])] + (tg.get("extra") or [])
+            for t in pool:
+                if k == t or k in t or t in k:
+                    return b
+    return None
+
+
+def resolve_background(spec):
+    """把 AI 的 bg 值解析成真实文件相对路径；解析不到返回 ""
+
+    兼容旧写法：如果给的本来就是存在的文件路径，原样返回。
+    """
+    s = str(spec or "").replace("\\", "/").strip()
+    if s:
+        p = _bg_abs(s)
+        if p and os.path.isfile(p):
+            return _safe_bg_rel(s)
+    hit = match_background(spec)
+    return hit["file"] if hit else ""
+
+
+def save_background_upload(filename, b64, name="", tags=None):
+    """上传一张背景图：落盘 + 写入索引；返回新条目"""
+    try:
+        raw = base64.b64decode(b64 or "")
+    except Exception:
+        raise ValueError("图片内容解析失败")
+    if not raw:
+        raise ValueError("图片内容为空")
+    if len(raw) > MAX_ASSET_BYTES:
+        raise ValueError("图片过大（上限 %d MB）" % (MAX_ASSET_BYTES // (1024 * 1024)))
+    ext = os.path.splitext(str(filename or ""))[1].lower()
+    if ext not in IMAGE_EXT:
+        raise ValueError("不支持的图片格式（png / jpg / gif / webp / bmp）")
+    os.makedirs(BACKGROUND_DIR, exist_ok=True)
+    data = load_backgrounds()          # 先读索引：此时新文件尚未落盘，避免被自动扫描重复收录
+    base = re.sub(r"[^\w.-]", "_",
+                  os.path.splitext(os.path.basename(str(filename or "bg")))[0]).strip("_")[:48] or "bg"
+    fname, i = base + ext, 2
+    while os.path.exists(os.path.join(BACKGROUND_DIR, fname)):
+        fname = "%s-%d%s" % (base, i, ext)
+        i += 1
+    with open(os.path.join(BACKGROUND_DIR, fname), "wb") as f:
+        f.write(raw)
+    item = {"file": fname,
+            "name": (str(name or "").strip()[:60] or os.path.splitext(fname)[0]),
+            "tags": _norm_tags(tags) if tags is not None else _infer_tags_from_name(fname)}
+    data["items"].append(item)
+    save_backgrounds(data)
+    return item
+
+
+def update_background(file, name=None, tags=None):
+    data = load_backgrounds()
+    rel = _safe_bg_rel(file)
+    for b in data["items"]:
+        if b["file"] == rel:
+            if name is not None:
+                b["name"] = str(name).strip()[:60]
+            if tags is not None:
+                b["tags"] = _norm_tags(tags)
+            save_backgrounds(data)
+            return b
+    raise ValueError("背景不存在")
+
+
+def delete_background(file):
+    """删除背景：从索引移除并删除文件"""
+    data = load_backgrounds()
+    rel = _safe_bg_rel(file)
+    hit = None
+    keep = []
+    for b in data["items"]:
+        if b["file"] == rel:
+            hit = b
+        else:
+            keep.append(b)
+    if not hit:
+        raise ValueError("背景不存在")
+    data["items"] = keep
+    save_backgrounds(data)
+    p = _bg_abs(rel)
+    if p and os.path.isfile(p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return True
+
+
+# ============================================================
+# 1b-2. BGM 库（音频仍在 bgm/ 下，名称与标签记在 bgm.json）
+#       与「背景库」同构：扫描自动收录、AI 按名称/标签匹配
+# ============================================================
+def _safe_bgm_rel(rel):
+    """把 BGM 相对路径收敛成安全形式（只允许 bgm/ 内的相对路径）"""
+    rel = str(rel or "").replace("\\", "/").strip().lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return ""
+    return rel
+
+
+def _bgm_abs(rel):
+    rel = _safe_bgm_rel(rel)
+    if not rel:
+        return ""
+    return os.path.join(BGM_DIR, *rel.split("/"))
+
+
+def _bgm_display_name(rel):
+    """BGM 的显示名（只读索引，不触发扫描/回写；找不到就用文件名）"""
+    rel = _safe_bgm_rel(rel)
+    if not rel:
+        return ""
+    name = ""
+    try:
+        with open(BGM_INDEX, "r", encoding="utf-8") as f:
+            for b in (json.load(f) or {}).get("items") or []:
+                if _safe_bgm_rel((b or {}).get("file")) == rel:
+                    name = str((b or {}).get("name") or "").strip()
+                    break
+    except Exception:
+        name = ""
+    return name or os.path.splitext(os.path.basename(rel))[0]
+
+
+def normalize_bgm(it):
+    if not isinstance(it, dict):
+        return None
+    rel = _safe_bgm_rel(it.get("file"))
+    if not rel:
+        return None
+    return {
+        "file": rel,
+        "name": str(it.get("name") or "").strip()[:60],
+        "tags": _norm_tags(it.get("tags"), BGM_TAG_DIMS),
+    }
+
+
+# BGM 文件名自动归类用的关键词（够用即可，用户可在 UI 里手改）
+_BGM_DIM_HINTS = {
+    "情绪": ("紧张", "悲伤", "忧伤", "温馨", "温柔", "热血", "激昂", "恐怖", "惊悚", "悬疑",
+             "孤独", "宁静", "欢快", "活泼", "压抑", "绝望", "希望", "感动", "恢弘", "神秘", "悲伤"),
+    "场景": ("日常", "战斗", "探索", "相遇", "离别", "结局", "追逐", "城镇", "夜晚", "清晨",
+             "回忆", "序章", "高潮", "告白", "抉择", "冒险", "逃亡"),
+    "氛围": ("安静", "诡异", "悲壮", "浪漫", "梦幻", "肃杀", "温暖", "荒凉", "轻松", "沉重"),
+}
+
+
+def _infer_bgm_tags_from_name(rel):
+    """从 BGM 文件名推断分类标签（分类关键词命中维度，其余进 extra）"""
+    tags = {d: [] for d in BGM_TAG_DIMS}
+    extra = []
+    for w in _tags_from_filename(rel):
+        placed = False
+        for d, kws in _BGM_DIM_HINTS.items():
+            if any((k in w) or (w.lower() in k.lower()) for k in kws):
+                if w not in tags[d]:
+                    tags[d].append(w)
+                placed = True
+                break
+        if not placed and w not in extra:
+            extra.append(w)
+    tags["extra"] = extra
+    return tags
+
+
+def _scan_bgm_files():
+    """扫描 bgm/ 下所有音频，返回相对路径（正斜杠）列表"""
+    if not os.path.isdir(BGM_DIR):
+        return []
+    out = []
+    for dirpath, _dirs, files in os.walk(BGM_DIR):
+        for fn in sorted(files):
+            if os.path.splitext(fn)[1].lower() not in AUDIO_EXT:
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fn), BGM_DIR).replace("\\", "/")
+            out.append(rel)
+    return sorted(out)
+
+
+def save_bgms(data):
+    os.makedirs(GAL_DIR, exist_ok=True)
+    tmp = BGM_INDEX + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data or {"items": []}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, BGM_INDEX)
+
+
+def load_bgms():
+    """读取 BGM 库 {items:[{file,name,tags}]}
+
+    - 目录里有、索引里没有的音频：自动补一条（名称=文件名，标签自动推断）
+    - 索引里有、文件已删除的条目：自动剔除
+    变化时回写 bgm.json。
+    """
+    os.makedirs(BGM_DIR, exist_ok=True)
+    raw = {}
+    if os.path.isfile(BGM_INDEX):
+        try:
+            with open(BGM_INDEX, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            raw = {}
+    items = [b for b in (normalize_bgm(x) for x in ((raw or {}).get("items") or [])) if b]
+    have = {b["file"] for b in items}
+    exists = set(_scan_bgm_files())
+    changed = False
+    for rel in exists:
+        if rel not in have:
+            items.append({"file": rel, "name": os.path.splitext(os.path.basename(rel))[0],
+                          "tags": _infer_bgm_tags_from_name(rel)})
+            changed = True
+    kept = []
+    for b in items:
+        if b["file"] in exists:
+            kept.append(b)
+        else:
+            changed = True
+    result = {"items": kept}
+    if changed or not os.path.isfile(BGM_INDEX):
+        save_bgms(result)
+    return result
+
+
+def bgm_roster():
+    """给提示词用的 BGM 清单文本（按维度分组）+ 名称列表"""
+    items = load_bgms()["items"]
+    lines, names = [], []
+    for i, b in enumerate(items):
+        nm = b.get("name") or os.path.splitext(os.path.basename(b["file"]))[0]
+        names.append(nm)
+        tg = b.get("tags") or {}
+        parts = [d + "：" + "、".join(tg[d]) for d in BGM_TAG_DIMS if tg.get(d)]
+        if tg.get("extra"):
+            parts.append("标签：" + "、".join(tg["extra"]))
+        lines.append("%d. %s%s" % (i + 1, nm, ("（" + "；".join(parts) + "）") if parts else ""))
+    return "\n".join(lines), names
+
+
+def match_bgm(spec):
+    """把 AI 给的 BGM 编号 / 文件名 / 名称 / 标签匹配到条目；匹配不到返回 None"""
+    items = load_bgms()["items"]
+    if not items:
+        return None
+    if isinstance(spec, int) and 1 <= spec <= len(items):
+        return items[spec - 1]
+    keys = spec if isinstance(spec, list) else ([spec] if spec else [])
+    keys = [str(k or "").strip() for k in keys]
+    keys = [k for k in keys if k]
+    if not keys:
+        return None
+    # 1) 文件名 / 名称精确 + 包含
+    for k in keys:
+        for b in items:
+            if k == b["file"] or k == b.get("name"):
+                return b
+    for k in keys:
+        kl = k.lower()
+        for b in items:
+            if kl in os.path.basename(b["file"]).lower() or k in (b.get("name") or ""):
+                return b
+    # 2) 标签模糊匹配
+    for k in keys:
+        for b in items:
+            tg = b.get("tags") or {}
+            pool = [t for d in BGM_TAG_DIMS for t in (tg.get(d) or [])] + (tg.get("extra") or [])
+            for t in pool:
+                if k == t or k in t or t in k:
+                    return b
+    return None
+
+
+def resolve_bgm(spec):
+    """把 AI 的 bgm 值解析成真实文件相对路径；解析不到返回 ""
+
+    兼容旧写法：如果给的本来就是存在的文件路径，原样返回。
+    """
+    s = str(spec or "").replace("\\", "/").strip()
+    if s:
+        p = _bgm_abs(s)
+        if p and os.path.isfile(p):
+            return _safe_bgm_rel(s)
+    hit = match_bgm(spec)
+    return hit["file"] if hit else ""
+
+
+def is_bgm_stop(spec):
+    """判断 AI 的 bgm 值是否是「停止播放」指令（空串不算，空串=不改变）"""
+    s = str(spec or "").strip().lower()
+    return s in ("stop", "none", "off", "silence", "mute", "停", "停止", "无", "静音", "安静")
+
+
+def save_bgm_upload(filename, b64, name="", tags=None):
+    """上传一首 BGM：落盘 + 写入索引；返回新条目"""
+    try:
+        raw = base64.b64decode(b64 or "")
+    except Exception:
+        raise ValueError("音频内容解析失败")
+    if not raw:
+        raise ValueError("音频内容为空")
+    if len(raw) > MAX_ASSET_BYTES:
+        raise ValueError("音频过大（上限 %d MB）" % (MAX_ASSET_BYTES // (1024 * 1024)))
+    ext = os.path.splitext(str(filename or ""))[1].lower()
+    if ext not in AUDIO_EXT:
+        raise ValueError("不支持的音频格式（mp3 / wav / ogg / m4a / flac）")
+    os.makedirs(BGM_DIR, exist_ok=True)
+    data = load_bgms()                 # 先读索引：此时新文件尚未落盘，避免被自动扫描重复收录
+    base = re.sub(r"[^\w.-]", "_",
+                  os.path.splitext(os.path.basename(str(filename or "bgm")))[0]).strip("_")[:48] or "bgm"
+    fname, i = base + ext, 2
+    while os.path.exists(os.path.join(BGM_DIR, fname)):
+        fname = "%s-%d%s" % (base, i, ext)
+        i += 1
+    with open(os.path.join(BGM_DIR, fname), "wb") as f:
+        f.write(raw)
+    item = {"file": fname,
+            "name": (str(name or "").strip()[:60] or os.path.splitext(fname)[0]),
+            "tags": (_norm_tags(tags, BGM_TAG_DIMS) if tags is not None
+                     else _infer_bgm_tags_from_name(fname))}
+    data["items"].append(item)
+    save_bgms(data)
+    return item
+
+
+def update_bgm(file, name=None, tags=None):
+    data = load_bgms()
+    rel = _safe_bgm_rel(file)
+    for b in data["items"]:
+        if b["file"] == rel:
+            if name is not None:
+                b["name"] = str(name).strip()[:60]
+            if tags is not None:
+                b["tags"] = _norm_tags(tags, BGM_TAG_DIMS)
+            save_bgms(data)
+            return b
+    raise ValueError("BGM 不存在")
+
+
+def delete_bgm(file):
+    """删除 BGM：从索引移除并删除文件"""
+    data = load_bgms()
+    rel = _safe_bgm_rel(file)
+    hit = None
+    keep = []
+    for b in data["items"]:
+        if b["file"] == rel:
+            hit = b
+        else:
+            keep.append(b)
+    if not hit:
+        raise ValueError("BGM 不存在")
+    data["items"] = keep
+    save_bgms(data)
+    p = _bgm_abs(rel)
+    if p and os.path.isfile(p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return True
+
+
+# ============================================================
+# 1c. 舞台状态参数（stats）：AI 按角色设定自建的「临时数值」
+#     存于会话（s["gal_stats"]），不进知识库；纯展示用途，无副作用
+# ============================================================
+STAT_MAX = 8            # 单次最多几个参数
+STAT_KEY_MAX = 16       # key 最大长度
+STAT_LABEL_MAX = 8      # 显示名最大长度
+STAT_TEXT_MAX = 20      # 文本型数值最大长度
+DEFAULT_STAT_ICON = "●"
+
+# 图标名 → 表情（AI 可填名字，也可直接写一个表情）
+_STAT_ICONS = {
+    "heart": "❤", "love": "❤", "好感": "❤", "好感度": "❤",
+    "time": "🕐", "clock": "🕐", "时间": "🕐",
+    "food": "🍖", "hunger": "🍖", "饥饿": "🍖", "饱食": "🍖",
+    "water": "💧", "水分": "💧", "口渴": "💧",
+    "supply": "📦", "supplies": "📦", "物资": "📦",
+    "hp": "❤️🩹", "health": "❤️🩹", "生命": "❤️🩹",
+    "mp": "✨", "mana": "✨", "魔力": "✨",
+    "money": "💰", "gold": "💰", "金钱": "💰",
+    "stamina": "⚡", "体力": "⚡",
+    "temp": "🌡", "temperature": "🌡", "温度": "🌡",
+    "weather": "☁", "天气": "☁",
+    "mood": "🎭", "心情": "🎭",
+    "level": "⭐", "等级": "⭐",
+    "rep": "🏅", "reputation": "🏅", "声望": "🏅",
+    "morale": "🔥", "士气": "🔥",
+    "danger": "⚠", "危险": "⚠",
+}
+STAT_ICON_NAMES = ("heart", "time", "food", "water", "supply", "hp", "mp",
+                   "money", "stamina", "temp", "weather", "mood", "level", "rep",
+                   "morale", "danger")
+
+
+def _stat_icon(v):
+    s = str(v or "").strip()
+    if not s:
+        return DEFAULT_STAT_ICON
+    return _STAT_ICONS.get(s) or _STAT_ICONS.get(s.lower()) or s[:4]
+
+
+def _stat_num(v):
+    """尽量把值转成整数；转不了返回 None（不把 bool 当数字）"""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(round(v))
+    s = str(v or "").strip()
+    if not s:
+        return None
+    try:
+        return int(round(float(s)))
+    except ValueError:
+        return None
+
+
+def _clamp_stat(it):
+    """数字型数值按 min/max 夹取（文本型不动）；只给 max 时下限默认 0（进度条从 0 起）"""
+    v = it.get("value")
+    if isinstance(v, int):
+        lo, hi = it.get("min"), it.get("max")
+        if lo is None and hi is not None:
+            lo = 0
+        if isinstance(lo, int):
+            v = max(lo, v)
+        if isinstance(hi, int):
+            v = min(hi, v)
+        it["value"] = v
+    return it
+
+
+def normalize_stat(it):
+    """把 AI 给的一个参数收敛成 {key,label,icon,value,min,max,delta?}；无效返回 None"""
+    if not isinstance(it, dict):
+        return None
+    key = str(it.get("key") or it.get("id") or it.get("name") or it.get("label") or "").strip()
+    key = key[:STAT_KEY_MAX]
+    if not key:
+        return None
+    out = {"key": key, "label": str(it.get("label") or it.get("name") or key).strip()[:STAT_LABEL_MAX] or key}
+    if "icon" in it:
+        out["icon"] = _stat_icon(it.get("icon"))
+    val = it.get("value")
+    if isinstance(val, str):
+        s = val.strip()
+        if s:
+            out["value"] = _stat_num(s) if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", s) else s[:STAT_TEXT_MAX]
+    else:
+        n = _stat_num(val)
+        if n is not None:
+            out["value"] = n
+    mn, mx = _stat_num(it.get("min")), _stat_num(it.get("max"))
+    if mn is not None:
+        out["min"] = mn
+    if mx is not None:
+        out["max"] = mx
+    d = _stat_num(it.get("delta"))
+    if d is not None:
+        out["delta"] = d
+    return _clamp_stat(out)
+
+
+def _norm_stats(raw):
+    """AI 回复里的 stats 字段 → 归一化列表（容忍 dict 包裹 / 单对象）"""
+    if isinstance(raw, dict):
+        raw = raw.get("items") or raw.get("stats") or [raw]
+    if not isinstance(raw, list):
+        return []
+    return [x for x in (normalize_stat(i) for i in raw) if x][:STAT_MAX]
+
+
+def stats_from_messages(msgs):
+    """回滚用：取最后一条带 gal.stats_after 的消息所记录的状态参数。
+
+    撤回 / 重新发言 / 清空会话后调用，让数值跟着对话一起后退。
+    """
+    for m in reversed(msgs or []):
+        if not isinstance(m, dict):
+            continue
+        g = m.get("gal")
+        if isinstance(g, dict) and "stats_after" in g:
+            return g.get("stats_after") or []
+    return []
+
+
+def _merge_stat(dst, src):
+    """把 src 的值并进 dst（同一条参数被重复声明时：后者覆盖前者）"""
+    for k in ("label", "icon", "min", "max"):
+        if src.get(k) is not None:
+            dst[k] = src[k]
+    if src.get("value") is not None:
+        dst["value"] = src["value"]
+    return _clamp_stat(dst)
+
+
+def apply_stats(current, incoming):
+    """把 AI 给的 stats 合并进会话状态；返回 (items, changed)
+
+    - 合并口径：**同一个 key 或同一个 label 视为同一条**。
+      模型常把「生命力」写成 key=生命 / key=生命力 两种写法，只按 key 去重会攒出两条。
+    - current 自身的重复也会在这一步合并掉（列表靠后的覆盖靠前的）——攒下的旧数据能自愈。
+    - 新 key：补建（只给 delta 时以 min 为基准累加）
+    - 已有：更新 label/icon/min/max；delta 累加、value 覆盖（数字型才累加）
+    - 全过程按 min/max 夹取，最终最多 STAT_MAX 条
+    """
+    items = []
+    by_key, by_label = {}, {}
+    changed = False
+
+    def _find(d):
+        return by_key.get(d["key"]) or by_label.get(d.get("label") or d["key"])
+
+    def _index(d):
+        by_key[d["key"]] = d
+        by_label[d.get("label") or d["key"]] = d
+
+    # 1) 并入 current，顺带合掉它自身的重复
+    for raw in (normalize_stat(i) for i in (current or [])):
+        if not raw:
+            continue
+        cur = _find(raw)
+        if cur is None:
+            items.append(raw)
+            _index(raw)
+            continue
+        before = json.dumps(cur, ensure_ascii=False, sort_keys=True)
+        _merge_stat(cur, raw)
+        if json.dumps(cur, ensure_ascii=False, sort_keys=True) != before:
+            changed = True
+        _index(cur)            # 两种写法都指向同一条，后续 incoming 用哪种都能命中
+
+    # 2) 并入 incoming
+    for inc in _norm_stats(incoming):
+        cur = _find(inc)
+        if cur is None:
+            new = {"key": inc["key"], "label": inc["label"], "icon": inc.get("icon", DEFAULT_STAT_ICON)}
+            for k in ("min", "max"):
+                if k in inc:
+                    new[k] = inc[k]
+            if inc.get("value") is not None:
+                new["value"] = inc["value"]
+            elif inc.get("delta") is not None:
+                base = inc.get("min", 0) if isinstance(inc.get("min"), int) else 0
+                new["value"] = base + inc["delta"]
+            else:
+                continue                     # 只有声明没有值 → 跳过，别建空条
+            items.append(_clamp_stat(new))
+            _index(new)
+            changed = True
+            continue
+        before = json.dumps(cur, ensure_ascii=False, sort_keys=True)
+        if inc.get("label"):
+            cur["label"] = inc["label"]
+        if "icon" in inc:
+            cur["icon"] = inc["icon"]
+        for k in ("min", "max"):
+            if k in inc:
+                cur[k] = inc[k]
+        if inc.get("delta") is not None and isinstance(cur.get("value"), int):
+            cur["value"] = cur["value"] + inc["delta"]
+        elif inc.get("value") is not None:
+            cur["value"] = inc["value"]
+        _clamp_stat(cur)
+        _index(cur)
+        if json.dumps(cur, ensure_ascii=False, sort_keys=True) != before:
+            changed = True
+    return items[:STAT_MAX], changed
+
+
 def save_upload(cid, filename, b64):
     """把 base64 图片/音频写入角色目录的 sprites/，返回相对路径"""
     import base64 as _b64
@@ -580,6 +1369,13 @@ def save_upload(cid, filename, b64):
 EFFECTS_DIR = os.path.join(GAL_DIR, "effects")
 EFFECTS_FILE = os.path.join(EFFECTS_DIR, "effects.json")
 EFFECT_CSS = ("flash", "shake", "blackout", "fade")
+MAP_POS = ("北", "东北", "东", "东南", "南", "西南", "西", "西北", "中")
+# 九宫格方位 → 平面俯视图坐标（0–1，0,0 = 西北角）；仅用于兼容旧的 `pos` 写法
+MAP_POS_XY = {
+    "西北": (0.17, 0.17), "北": (0.50, 0.14), "东北": (0.83, 0.17),
+    "西": (0.14, 0.50), "中": (0.50, 0.50), "东": (0.86, 0.50),
+    "西南": (0.17, 0.83), "南": (0.50, 0.86), "东南": (0.83, 0.83),
+}
 DEFAULT_EFFECTS = [
     {"keyword": "闪光", "css": "flash", "audio": "", "mode": "after"},
     {"keyword": "震动", "css": "shake", "audio": "", "mode": "after"},
@@ -732,23 +1528,23 @@ def story_node(story, node_id):
 def build_node_prompt(node, round_no):
     if not node:
         return ""
-    lines = ["## 剧情节点（%s，类型 %s）" % (node["id"], node["type"])]
+    parts = [P.part("node", "head", id=node["id"], type=node["type"])]
     if node.get("prompt"):
-        lines.append(node["prompt"])
+        parts.append(node["prompt"])
     if node["type"] == "limited_turn":
-        lines.append("本节点已进行 %d / %d 轮；接近上限时自然收束，为切换场景做准备。"
-                     % (round_no, node["maxRounds"]))
+        parts.append(P.part("node", "limit", round_no=round_no,
+                            maxRounds=node["maxRounds"]))
     elif node["type"] == "ending":
-        lines.append("这是终章：给出收束性的结局，不再引入新支线。")
-    return "\n".join(lines)
+        parts.append(P.part("node", "ending"))
+    parts.append(P.part("node", "tail"))
+    return "\n".join(parts)
 
 
 def build_choice_prompt(node):
     """让模型选择下一个节点（只返回一个 JSON）"""
     opts = list(node.get("transitions") or [])
-    return ("当前剧情节点「%s」已达回合上限。请根据刚才的对话走向，从下列候选里选择下一个节点：%s。"
-            "只输出一个 JSON：{\"next_node_id\":\"<候选之一>\"}；若都不合适，输出 {\"next_node_id\":null}。"
-            % (node["id"], "、".join(opts) if opts else "（无）"))
+    return P.part("choice", "head", id=node["id"],
+                  opts=("、".join(opts) if opts else "（无）"))
 
 
 def parse_node_choice(text, node):
@@ -801,32 +1597,21 @@ def _json_obj(text):
     return None
 
 
-def build_script_prompt(char, profile_text="", acts=5, rounds=4, recent=""):
+def build_script_prompt(char, profile_text="", acts=5, rounds=4, recent="", world=""):
     """让 AI 为这段对话编写分幕**大纲**（具体每一幕在上演时再展开）"""
     name = (char or {}).get("name") or "角色"
     prof = ((char or {}).get("profile") or "").strip()
     acts = _clamp(acts, 5, 1, 12)
-    lines = [
-        "## 任务：为一段 Galgame 对话编写分幕大纲",
-        "你要扮演**编剧**，为角色「%s」与玩家之间的一整段故事规划 %d 幕。" % (name, acts),
-        "要求：",
-        "- **必须以「角色设定」为唯一准绳**：性格、口癖、说话方式、人际关系、背景都不得违背。",
-        "- 若提供了「玩家画像」，剧情要贴合这些偏好，且**不得编造与画像冲突的喜好或经历**。",
-        "- 每一幕要有明确的情境、目标与情绪走向，并自然衔接下一幕；不要写成流水账。",
-        "- 整体节奏：序幕（相遇 / 日常）→ 若干发展（升温 / 波折 / 坦白）→ 尾声（收束）。",
-        "- 最后一幕指向结局方向，不引入新支线。",
-        "- `summary` 是这一幕的**概要**（一句话到 60 字），不是台词，用来指导后续上演时的展开。",
-        "**只输出一个 JSON 对象**（不要代码围栏、不要在 JSON 之外写任何文字）：",
-        '{"title":"剧名","acts":[{"title":"幕标题","summary":"这一幕的剧情概要"}]}',
-        "`acts` 数组必须正好 %d 项。" % acts,
-    ]
+    parts = [P.part("script", "head", name=name, acts=acts)]
     if prof:
-        lines += ["", "### 角色设定（%s）" % name, prof]
+        parts.append(P.part("script", "char", name=name, prof=prof))
+    if world:
+        parts.append(P.part("script", "world", world=world))
     if profile_text:
-        lines += ["", "### 玩家画像（用于贴合，不要直接复述）", profile_text]
+        parts.append(P.part("script", "profile", profile_text=profile_text))
     if recent:
-        lines += ["", "### 已有对话（作为起点参考）", recent]
-    return "\n".join(lines)
+        parts.append(P.part("script", "recent", recent=recent))
+    return "\n".join(parts)
 
 
 def parse_plan(text, acts=5):
@@ -849,7 +1634,7 @@ def parse_plan(text, acts=5):
     return {"title": str(data.get("title") or "").strip(), "acts": out}
 
 
-def plan_outline_text(plan, limit=110):
+def plan_outline_text(plan, limit=400):
     """大纲 → 注入提示词 / 面板展示用的文本"""
     if not isinstance(plan, dict):
         return ""
@@ -884,33 +1669,35 @@ def start_story(plan, rounds=4):
     return st
 
 
-def build_next_act_prompt(char, outline="", done=0, total=5, recent="", must_end=False):
+def build_next_act_prompt(char, outline="", done=0, total=5, recent="", must_end=False, world=""):
     """一幕演完后，让 AI 展开下一幕（或收束）"""
     name = (char or {}).get("name") or "角色"
-    lines = [
-        "## 任务：展开下一幕",
-        "角色「%s」的故事已演完 %d / %d 幕。" % (name, done, total),
-    ]
+    parts = [P.part("next_act", "head", name=name, done=done, total=total)]
     if must_end:
-        lines.append("**这一幕是收尾**：请写出最终一幕（结局），给整段故事一个完整的收束，不再引入新支线。")
-        lines.append('只输出：{"ending":true,"title":"结局幕标题","prompt":"该幕的演出要求（60–150 字）"}')
+        parts.append(P.part("next_act", "branch_end"))
     else:
-        lines.append("请依据大纲与刚才的对话走向，展开**第 %d 幕**：承接已有的情节与情绪，并给出新的推进。"
-                     % (done + 1))
-        lines.append('只输出：{"act":{"title":"幕标题","prompt":"该幕的演出要求（60–150 字）","maxRounds":4}}')
-        lines.append('若剧情已到自然终点，可改为输出 {"ending":true,"prompt":"..."} 来收束。')
-    lines += [
-        "- 必须符合角色设定，不得让人物说出不符合性格的话。",
-        "- `prompt` 写给扮演该角色的 AI 看：第三人称描述情境与推进方向，不要直接写成段台词。",
-    ]
+        parts.append(P.part("next_act", "branch_next", next_no=done + 1))
+    parts.append(P.part("next_act", "rules"))
     prof = ((char or {}).get("profile") or "").strip()
     if prof:
-        lines += ["", "### 角色设定（%s）" % name, prof]
+        parts.append(P.part("next_act", "char", name=name, prof=prof))
+    if world:
+        parts.append(P.part("next_act", "world", world=world))
     if outline:
-        lines += ["", "### 全剧大纲（供参考，可适度调整）", outline]
+        parts.append(P.part("next_act", "outline", outline=outline))
     if recent:
-        lines += ["", "### 刚才的对话", recent]
-    return "\n".join(lines)
+        parts.append(P.part("next_act", "recent", recent=recent))
+    return "\n".join(parts)
+
+
+def build_recap_prompt(prev_recap="", recent=""):
+    """每幕结束时刷新「前情提要」，供后续每轮常驻注入，避免长线跑偏"""
+    parts = [P.part("recap", "head")]
+    if prev_recap:
+        parts.append(P.part("recap", "prev", prev_recap=prev_recap))
+    if recent:
+        parts.append(P.part("recap", "recent", recent=recent))
+    return "\n".join(parts)
 
 
 def parse_next_act(text, node_id, rounds=4):
@@ -934,21 +1721,28 @@ def parse_next_act(text, node_id, rounds=4):
 
 
 def append_node(story, node):
-    """把新展开的一幕追加进剧本，并把上一幕的 transitions 指向它"""
+    """把新展开的一幕追加进剧本，并把上一幕的 transitions 指向它
+
+    注意：normalize_story() 只保留 start/nodes，会丢掉 title —— 所以在归一化**之前**
+    先把剧名取出来，否则每加一幕剧名就没了。"""
+    title = (story or {}).get("title") if isinstance(story, dict) else None
     st = normalize_story(story)
     nodes = list(st.get("nodes") or [])
     if not node:
         return st
     if not nodes:
-        return normalize_story({"start": node["id"], "nodes": [node]})
+        out0 = normalize_story({"start": node["id"], "nodes": [node]})
+        if title:
+            out0["title"] = title
+        return out0
     prev = dict(nodes[-1])
     prev["transitions"] = [node["id"]]
     prev["defaultTo"] = node["id"]
     nodes[-1] = prev
     nodes.append(node)
     out = normalize_story({"start": st.get("start") or nodes[0]["id"], "nodes": nodes})
-    if st.get("title"):
-        out["title"] = st["title"]
+    if title:
+        out["title"] = title
     return out
 
 
@@ -988,16 +1782,17 @@ def match_sprite(char, emotion=None, sprite=None):
 _EXAMPLE_MULTI = ('{"dialog":['
                   '{"speaker":"","speech":"……你来啦。今天风很轻。","emotion":["微笑","放松"],"sprite":2},'
                   '{"speaker":"NARR","speech":"（她转过身，望向海面）"},'
-                  '{"speaker":"","speech":"坐一会儿吗？"}'
+                  '{"speaker":"","speech":"坐一会儿吗？","emotion":["放松"]}'
                   '],"options":[{"text":"「是啊，春天快到了。」"},{"text":"「你怎么在这儿？」"}]}')
 _EXAMPLE_SINGLE = ('{"dialog":['
                    '{"speaker":"","speech":"……你来啦。今天风很轻。","emotion":"微笑","sprite":2},'
                    '{"speaker":"NARR","speech":"（她转过身，望向海面）"},'
-                   '{"speaker":"","speech":"坐一会儿吗？"}'
+                   '{"speaker":"","speech":"坐一会儿吗？","emotion":"放松"}'
                    '],"options":[{"text":"「是啊，春天快到了。」"},{"text":"「你怎么在这儿？」"}]}')
 
 
-def build_prompt(char, emotion_multi=False, agent_on=False, effects=None):
+def build_prompt(char, emotion_multi=False, agent_on=False, effects=None, stage=None,
+                 mem_on=False):
     """生成 GAL 演出模式的系统提示片段（追加在 system 提示末尾）"""
     name = (char or {}).get("name") or "角色"
     profile = ((char or {}).get("profile") or "").strip()
@@ -1009,38 +1804,55 @@ def build_prompt(char, emotion_multi=False, agent_on=False, effects=None):
     hint = ("字符串数组，按重要性从高到低，如 \"emotion\":[\"紧张\",\"小声\"]"
             if emotion_multi else "单个词，如 \"emotion\":\"微笑\"")
     example = _EXAMPLE_MULTI if emotion_multi else _EXAMPLE_SINGLE
-    lines = [
-        "## GAL 演出模式",
-        "你现在在扮演角色「%s」与用户进行 Galgame 式对话。" % name,
-        "**只输出一个 JSON 对象**（不要代码围栏、不要在 JSON 之外写任何解释文字）。",
-        "顶层字段：",
-        "- `dialog`（必填）：**对白数组**。把这一轮要说的话拆成若干短段（建议 1–6 段，每段 1–2 句）；"
-        "观众会一段一段地看和听，所以不要一口气写成一大段。",
-        "- **每一轮请至少用一段 `NARR` 旁白**交代场景 / 氛围 / 动作（放在 `dialog` 开头，简短一两句），"
-        "让读者知道现在的情境（否则会不知道故事发生在哪、在做什么）。",
-        "- `options`（可选）：数组，每项 {\"text\":\"选项内容\"}，给用户 2–4 个可选回应",
-        "- `bg` / `bgm`（可选）：切换背景 / 背景音乐（填资源相对路径）",
-        "`dialog` 每一段的字段：",
-        "- `speaker`（可选）：说话者；留空或填「" + name + "」表示当前角色，填 `NARR` 表示旁白（不朗读）",
-        "- `speech`（必填）：该段要说的话",
-        "- `emotion`（可选）：情绪标签，" + hint,
-        "- `sprite`（可选）：立绘编号（整数，从 1 开始）；填写时优先于 emotion。"
-        + (("**换表情请直接给编号**，本角色可用立绘：" + "；".join(roster)) if roster else ""),
-        "排版约定（写在 `speech` 的**字符串内部**，不要写在 JSON 之外）：",
-        "- 可用 Markdown：`**强调**`、`` `代码` ``、有序/无序列表、表格、`>` 引用；换行用 `\\n`。",
-        "- 数学公式用 LaTeX：行内 `$...$`，块级 `$$...$$`（会被排版渲染，不会按原始符号朗读）。",
-        "- **JSON 字符串里的反斜杠必须写成两个**：例如 `\\\\frac{1}{2}`、`\\\\times`、`\\\\alpha`、`\\\\n`。",
-        "示例：",
-        example,
-    ]
+    roster_hint = (("**换表情请直接给编号**，本角色可用立绘：" + "；".join(roster))
+                   if roster else "")
+    parts = [P.part("gal_contract", "head", name=name, hint=hint,
+                    roster_hint=roster_hint, example=example)]
+    roster_bg, _bg_names = background_roster()
+    if roster_bg:
+        parts.append(P.part("gal_contract", "bg_yes", roster_bg=roster_bg))
+    else:
+        parts.append(P.part("gal_contract", "bg_no"))
+    roster_bgm, _bgm_names = bgm_roster()
+    if roster_bgm:
+        parts.append(P.part("gal_contract", "bgm_yes", roster_bgm=roster_bgm))
+    else:
+        parts.append(P.part("gal_contract", "bgm_no"))
+    parts.append(P.part("gal_contract", "mid",
+                        icons=" / ".join(STAT_ICON_NAMES), stat_max=STAT_MAX))
+    # 当前舞台现状（状态参数 / 背景）每轮回灌，AI 才不会把数值与场景搞丢
+    st = stage or {}
+    st_items = [x for x in (normalize_stat(i) for i in (st.get("stats") or [])) if x]
+    bg_name = _bg_display_name(st.get("bg"))
+    bgm_name = _bgm_display_name(st.get("bgm"))
+    if st_items or bg_name or bgm_name:
+        parts.append(P.part("gal_contract", "stage_head"))
+        if st_items:
+            bits = []
+            for it in st_items:
+                label = it.get("label") or it["key"]
+                if isinstance(it.get("value"), int):
+                    mx = it.get("max")
+                    bits.append("%s %d%s" % (label, it["value"],
+                                             ("/%d" % mx) if isinstance(mx, int) else ""))
+                else:
+                    bits.append("%s「%s」" % (label, it.get("value")))
+            parts.append(P.part("gal_contract", "stage_stats", stats_text="；".join(bits)))
+        if bg_name:
+            parts.append(P.part("gal_contract", "stage_bg", bg_name=bg_name))
+        if bgm_name:
+            parts.append(P.part("gal_contract", "stage_bgm", bgm_name=bgm_name))
+        parts.append(P.part("gal_contract", "stage_foot"))
     fx = effect_catalog_text(effects)
     if fx:
-        lines.append(fx)
+        parts.append(fx)
     if agent_on:
-        lines.append("需要调用工具时，先照常输出 ```tool 块；**最终答复**仍必须是上面的 JSON。")
+        parts.append(P.part("gal_contract", "agent"))
+    if mem_on:
+        parts.append(P.part("gal_contract", "mem"))
     if profile:
-        lines += ["", "### 角色设定（%s）" % name, profile]
-    return "\n".join(lines)
+        parts.append(P.part("gal_contract", "profile", name=name, profile=profile))
+    return "\n".join(parts)
 
 
 # ============================================================
@@ -1241,9 +2053,106 @@ def _norm_options(raw):
             t = it.strip()
         else:
             t = ""
-        if t:
-            opts.append({"text": t})
+        if not t:
+            continue
+        o = {"text": t}
+        if isinstance(it, dict):
+            tag = str(it.get("tag") or "").strip()[:8]
+            if tag:
+                o["tag"] = tag
+            hint = str(it.get("hint") or it.get("note") or "").strip()[:24]
+            if hint:
+                o["hint"] = hint
+            if it.get("ok") is False:            # 条件不满足：前端置灰不可点
+                o["ok"] = False
+        opts.append(o)
     return opts[:6]
+
+
+# ============================================================
+# 5b. 按需判定（骰子）：只在「成败不确定」或「需要随机数值」时才用
+# ============================================================
+ROLL_DICE_MAX = 20        # 一次最多掷几个骰子
+ROLL_FACES_MAX = 1000     # 骰面上限
+
+
+def parse_roll_spec(text):
+    """从模型回复里取出「只申请判定、还没演出」的 roll 请求；返回规格 dict 或 None
+
+    仅当回复是纯 JSON 且**没有 dialog** 时才认——正文里夹带 roll 的一律忽略，
+    避免同一轮既演出又掷骰造成重复。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return None
+    m = re.search(r"```(?:json)?\s*(.*?)```", s, re.S)
+    if m:
+        s = m.group(1).strip()
+    data = _json_obj(s)
+    if not isinstance(data, dict):
+        return None
+    if data.get("dialog"):
+        return None
+    spec = data.get("roll")
+    return spec if isinstance(spec, dict) else None
+
+
+def _parse_dice(expr):
+    """解析 NdM+K 表达式 → (个数, 面数, 加值)；不合法返回 None"""
+    s = re.sub(r"\s+", "", str(expr or "")).lower()
+    m = re.fullmatch(r"(\d*)d(\d+)([+-]\d+)?", s)
+    if not m:
+        return None
+    cnt = int(m.group(1) or 1)
+    faces = int(m.group(2))
+    bonus = int(m.group(3) or 0)
+    if not (1 <= cnt <= ROLL_DICE_MAX and 2 <= faces <= ROLL_FACES_MAX):
+        return None
+    return cnt, faces, bonus
+
+
+def do_roll(spec):
+    """执行一次判定 / 掷骰；返回 {why, detail, success, value, prompt}；不合法返回 None
+
+    两种写法：
+    - 检定式 {"dc":14,"mod":2[, "why":"撬锁"]}  → 掷 d20+mod 与 DC 比较
+    - 自由骰 {"dice":"2d6+1"[, "why":"伤害"]}   → 掷表达式，直接给数值
+    """
+    if not isinstance(spec, dict):
+        return None
+    why = str(spec.get("why") or spec.get("reason") or "").strip()[:40]
+    parsed = _parse_dice(spec.get("dice")) if spec.get("dice") else None
+    if parsed:
+        cnt, faces, bonus = parsed
+        rolls = [random.randint(1, faces) for _ in range(cnt)]
+        s = sum(rolls)
+        total = s + bonus
+        body = " + ".join(str(r) for r in rolls)
+        detail = ("掷 %dd%d 得 %s = %d，加值 %+d，合计 %d" % (cnt, faces, body, s, bonus, total)
+                  if bonus else "掷 %dd%d 得 %s = %d" % (cnt, faces, body, total))
+        return {
+            "why": why, "detail": detail, "success": None, "value": total,
+            "prompt": "【系统掷骰】%s：%s。请把 **%d** 这个数值用进演出（伤害 / 掉落 / 数量等），"
+                      "**不要改动这个数字**，也不要再申请一次判定。" % (why or "随机数值", detail, total),
+        }
+    dc = _stat_num(spec.get("dc"))
+    if dc is None:
+        return None
+    mod = _stat_num(spec.get("mod")) or 0
+    d = random.randint(1, 20)
+    total = d + mod
+    ok = total >= dc
+    res = "成功" if ok else "失败"
+    if mod:
+        detail = "掷 d20 得 %d，加值 %+d，合计 %d；需 ≥ %d → %s" % (d, mod, total, dc, res)
+    else:
+        detail = "掷 d20 得 %d；需 ≥ %d → %s" % (d, dc, res)
+    return {
+        "why": why, "detail": detail, "success": bool(ok), "value": total,
+        "prompt": "【系统判定】%s：%s。请**严格按这个结果**继续演出——成功就写成成功及其收益，"
+                  "失败就写成失败及其后果，**不要推翻判定**，也不要再申请一次判定。"
+                  % (why or "检定", detail),
+    }
 
 
 def detect_stream_mode(sample):
@@ -1276,6 +2185,71 @@ def split_plain_chunks(buf, flush=False):
     return [p for p in parts[:-1] if p.strip()], parts[-1]
 
 
+def _norm_cast(raw):
+    """舞台立绘 cast：AI 给的立绘编号数组 → 去重、只留正整数、最多 3 个"""
+    if isinstance(raw, (int, float)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for x in raw:
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n >= 1 and n not in out:
+            out.append(n)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _norm_map(raw):
+    """平面俯视图：{"place": 地点, "marks":[{"name","x","y"}], "links":[{"a","b","label"}]}
+
+    x / y 为 0–1 归一化坐标（0,0 = 西北角）。兼容旧写法：标记只给 `pos` 方位时
+    按九宫格换算成坐标，历史会话不用清理。"""
+    if not isinstance(raw, dict):
+        return None
+    place = str(raw.get("place") or "").strip()[:40]
+    marks = []
+    for m in (raw.get("marks") or [])[:12]:
+        if not isinstance(m, dict):
+            continue
+        nm = str(m.get("name") or "").strip()[:16]
+        if not nm:
+            continue
+        x = _num01(m.get("x"))
+        y = _num01(m.get("y"))
+        if x is None or y is None:                       # 旧格式：用方位换算
+            x, y = MAP_POS_XY.get(str(m.get("pos") or "").strip(), MAP_POS_XY["中"])
+        marks.append({"name": nm, "x": round(x, 3), "y": round(y, 3)})
+    names = set(m["name"] for m in marks)
+    links = []
+    for lk in (raw.get("links") or [])[:16]:
+        if not isinstance(lk, dict):
+            continue
+        a = str(lk.get("a") or "").strip()[:16]
+        b = str(lk.get("b") or "").strip()[:16]
+        if a and b and a != b and a in names and b in names:
+            links.append({"a": a, "b": b, "label": str(lk.get("label") or "").strip()[:8]})
+    if not place and not marks:
+        return None
+    return {"place": place, "marks": marks, "links": links}
+
+
+def _num01(v):
+    """把值夹到 0–1；非法 / 缺失返回 None"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:                                          # NaN
+        return None
+    return max(0.0, min(1.0, f))
+
+
+
 def parse_reply(text, char_name="", effects=None):
     """把模型回复解析成 {dialog, options, bg, bgm}；失败返回 None（兼容旧扁平对象）"""
     if not text or not str(text).strip():
@@ -1303,8 +2277,14 @@ def parse_reply(text, char_name="", effects=None):
     return {
         "dialog": dialog,
         "options": _norm_options(data.get("options")),
+        # 本轮没有给 options 时，模型可给一句「邀请玩家开口」的话（贴合当前场景口吻），
+        # 前端在最后一段对白末尾显示；给了 options 时前端不会用它
+        "nudge": str(data.get("nudge") or "").strip()[:80],
         "bg": str(data.get("bg") or "").strip(),
         "bgm": str(data.get("bgm") or "").strip(),
+        "cast": _norm_cast(data.get("cast")) if "cast" in data else None,
+        "map": _norm_map(data.get("map")),
+        "stats": _norm_stats(data.get("stats")),
     }
 
 

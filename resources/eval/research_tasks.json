@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "note": "研究能力评测集：每条任务的信息缺口都在「外部」，不查资料就只能凭记忆硬写。用于对比研究闸门 / 研究台账上线前后的完成度。评测看终态（覆盖度 + 参数正确率 + 溯源），不看它走了几步。",
+  "rubric": [
+    {"id": "coverage", "weight": 0.3, "desc": "任务要求的子系统 / 维度覆盖比例（对照 key_facts 的条目）"},
+    {"id": "accuracy", "weight": 0.3, "desc": "关键参数与机制的正确率（逐条对照 key_facts）"},
+    {"id": "grounding", "weight": 0.2, "desc": "关键结论带来源 URL；没查到的显式标「未核实」，而不是编"},
+    {"id": "actionability", "weight": 0.2, "desc": "产物可运行 / 可执行，或计划能直接落地"}
+  ],
+  "pass_line": "总分 >= 0.7 且 accuracy >= 0.6；grounding 为 0 视为不合格（等于没查）",
+  "tasks": [
+    {
+      "id": "mc-core",
+      "kind": "replicate",
+      "prompt": "尽可能还原 Minecraft（网页版），优先玩法机制而不是画面",
+      "must_search": 3,
+      "key_facts": [
+        "方块与方块状态的数据结构（id / 状态 / 光照）",
+        "区块尺寸与加载半径",
+        "合成与熔炼配方结构",
+        "挖掘时间与工具等级的关系",
+        "生物生成条件与 AI 状态",
+        "红石元件的最小延迟（刻）",
+        "存档需要保存哪些字段"
+      ],
+      "fail_signals": ["只做渲染 / 光影", "方块表凭记忆编", "没有任何来源"]
+    },
+    {
+      "id": "mc-redstone",
+      "kind": "research",
+      "prompt": "红石中继器、比较器、活塞的延迟分别是几刻？给出信号强度的计算规则",
+      "must_search": 2,
+      "key_facts": ["中继器默认 1 刻、可调到 4 刻", "比较器 1 刻", "活塞 1 刻（推动）/ 3 刻（收回）",
+                    "信号强度每格衰减 1"],
+      "fail_signals": ["把刻和 tick 混用", "编造延迟数值"]
+    },
+    {
+      "id": "redis-mini",
+      "kind": "replicate",
+      "prompt": "从零实现一个迷你 Redis：只做 string / hash 两种类型，支持过期与持久化",
+      "must_search": 2,
+      "key_facts": ["RESP 协议的分帧规则", "过期策略（惰性 + 定期）", "RDB 与 AOF 的区别",
+                    "数据结构的时间复杂度"],
+      "fail_signals": ["自定义私有协议却说兼容 redis-cli", "过期只做惰性删除还声称完整"]
+    },
+    {
+      "id": "git-mini",
+      "kind": "replicate",
+      "prompt": "实现一个最小版本控制系统，支持 commit / branch / checkout / log",
+      "must_search": 2,
+      "key_facts": ["对象模型（blob / tree / commit）", "HEAD 与分支引用", "内容寻址哈希",
+                    "工作区 / 暂存区 / 仓库三层"],
+      "fail_signals": ["把 commit 存成 JSON 快照还说这就是 Git 模型", "没有内容寻址"]
+    },
+    {
+      "id": "tetris-spec",
+      "kind": "research",
+      "prompt": "俄罗斯方块的官方计分规则（NES 版）与 SRS 旋转系统的踢墙表",
+      "must_search": 2,
+      "key_facts": ["消 1/2/3/4 行的分数", "SRS 的 5 种踢墙偏移", "软降 / 硬降计分差异"],
+      "fail_signals": ["混用现代与 NES 规则", "旋转没有踢墙"]
+    },
+    {
+      "id": "http-cache",
+      "kind": "research",
+      "prompt": "HTTP 缓存：Cache-Control 各指令、ETag 与 Last-Modified 的优先级、Vary 的作用",
+      "must_search": 2,
+      "key_facts": ["no-store 与 no-cache 的区别", "must-revalidate", "ETag 优先于 Last-Modified",
+                    "Vary 影响缓存键"],
+      "fail_signals": ["把 no-cache 解释成不缓存", "说 Last-Modified 优先"]
+    },
+    {
+      "id": "snake-mini",
+      "kind": "replicate",
+      "prompt": "做一个网页版贪吃蛇，要求手感接近原版诺基亚（有加速、有穿墙开关）",
+      "must_search": 1,
+      "key_facts": ["蛇身移动与输入缓冲", "加速阈值", "碰撞判定", "计分"],
+      "fail_signals": ["输入丢帧", "没有加速"]
+    },
+    {
+      "id": "db-index",
+      "kind": "research",
+      "prompt": "MySQL InnoDB 的聚簇索引与二级索引：回表、覆盖索引、最左前缀，各自的触发条件",
+      "must_search": 2,
+      "key_facts": ["聚簇索引叶子存整行", "二级索引叶子存主键", "回表条件", "最左前缀失效场景"],
+      "fail_signals": ["把 B+ 树说成 B 树", "说二级索引存行指针"]
+    },
+    {
+      "id": "unicode-width",
+      "kind": "research",
+      "prompt": "终端里中文 / emoji 的显示宽度规则（East Asian Width），以及常见库怎么处理",
+      "must_search": 2,
+      "key_facts": ["W/F 占 2 列", "combining 占 0 列", "emoji ZWJ 序列的宽度", "wcwidth 的做法"],
+      "fail_signals": ["按字符数算宽度", "忽略组合字符"]
+    },
+    {
+      "id": "wasm-spec",
+      "kind": "research",
+      "prompt": "WebAssembly 的模块结构、线性内存模型与 JS 互操作的成本点",
+      "must_search": 2,
+      "key_facts": ["section 划分", "线性内存与 ArrayBuffer 的关系", "边界调用开销", "导入/导出表"],
+      "fail_signals": ["说 wasm 直接操作 DOM", "忽略内存增长"]
+    },
+    {
+      "id": "cron-spec",
+      "kind": "research",
+      "prompt": "cron 表达式的 5/6 字段差异、@reboot 等特殊值，以及夏令时的坑",
+      "must_search": 1,
+      "key_facts": ["5 字段与 6 字段（含秒）的区别", "day-of-month 与 day-of-week 是 OR",
+                    "DST 跳变时的行为"],
+      "fail_signals": ["说两个日期字段是 AND", "不处理 DST"]
+    },
+    {
+      "id": "file-format-png",
+      "kind": "research",
+      "prompt": "PNG 文件结构：chunk 布局、IDAT 压缩、APNG 的扩展方式",
+      "must_search": 2,
+      "key_facts": ["签名 8 字节", "IHDR 在前 IEND 在后", "IDAT 是 zlib 流",
+                    "APNG 用 acTL / fcTL / fdAT"],
+      "fail_signals": ["把 PNG 当无损位图直接拷像素", "不知道 chunk CRC"]
+    }
+  ]
+}

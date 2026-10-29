@@ -1,0 +1,353 @@
+{
+  "id": "cmc2017-q4",
+  "title": "交换子、迹与反对称矩阵：一个不可能方程的研究",
+  "subject": "高等代数",
+  "track": "竞赛",
+  "minutes": 30,
+  "source": {
+    "contest": "CMC",
+    "year": 2017,
+    "paper": "数学类",
+    "problem": "4",
+    "url": "https://m.doc88.com/p-80187004057779.html",
+    "note": "改编自官方真题，题干为教学改写"
+  },
+  "exam": {
+    "topic": "反对称矩阵的矩阵方程",
+    "weight": "CMC 数学类初赛",
+    "variant": "常见考法"
+  },
+  "prerequisites": [
+    "交换子与迹",
+    "反对称矩阵",
+    "矩阵方程",
+    "反证法"
+  ],
+  "brief": "本题围绕矩阵方程 XY−YX=λI+A 展开，其中 A 为实反对称矩阵且 λ≠0。核心不是硬解 X,Y，而是寻找与 X,Y 无关的不变量：迹。通过迹的交换性、反对称矩阵的迹为零，可以迅速发现矛盾；再检查 λ=0 的边界和反 Hermitian 变式，理解条件与方法的适用范围。",
+  "acts": [
+    {
+      "id": "cmc2017-q4-a1",
+      "label": "原题在问什么",
+      "ability": "framing",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 4,
+      "payload": {
+        "situation": "设 n≥1，A 为实 n 阶反对称矩阵，λ≠0。考虑实矩阵有序对 (X,Y) 满足 XY−YX=λI+A。研究其是否存在时，第一步应优先利用哪个与 X,Y 内部结构无关的量？",
+        "options": [
+          {
+            "key": "A",
+            "text": "对等式两边取迹，利用 tr(XY)=tr(YX) 消去 X,Y"
+          },
+          {
+            "key": "B",
+            "text": "对等式两边取行列式，利用 det(XY)=det(X)det(Y)"
+          },
+          {
+            "key": "C",
+            "text": "先求 X 的全部特征值，再代入方程"
+          },
+          {
+            "key": "D",
+            "text": "先看 A 的秩，只要 rank A 合适就一定有解"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "A",
+        "why": "取迹后左边自动为零，右边只含 λ、n 与 tr(A)，这是与 X,Y 无关的约束，最直接。",
+        "signals": [
+          "看到交换子想到迹",
+          "右边含 I 时比较迹",
+          "反对称想到 tr(A)=0"
+        ],
+        "traps": {
+          "B": "行列式对差 XY−YX 没有简单的乘法公式，det(XY)=det(X)det(Y) 不能处理两项之差。",
+          "C": "X 的特征值并不能单独控制交换子 XY−YX，而且题目没有给出可对角化等条件。",
+          "D": "rank A 不能直接处理 λI，也不能给出与 X,Y 无关的存在性判据。"
+        }
+      },
+      "card": {
+        "title": "交换子先取迹",
+        "trigger": "遇到 XY−YX 或 [X,Y] 型矩阵方程",
+        "first_step": "两边取迹并利用 tr(XY)=tr(YX)",
+        "pitfall": "不要先假设 X,Y 可逆或可对角化"
+      }
+    },
+    {
+      "id": "cmc2017-q4-a2",
+      "label": "先猜与必要条件",
+      "ability": "assumption",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "假设已有实矩阵 X,Y 满足 XY−YX=λI+A，A^T=−A，λ≠0。下列哪些观察是必然成立且能共同导出矛盾？",
+        "options": [
+          {
+            "key": "A",
+            "text": "tr(XY−YX)=0"
+          },
+          {
+            "key": "B",
+            "text": "tr(A)=0"
+          },
+          {
+            "key": "C",
+            "text": "tr(λI+A)=λn"
+          },
+          {
+            "key": "D",
+            "text": "因为 X,Y 可逆，所以 det(XY−YX)=0"
+          }
+        ]
+      },
+      "expert": {
+        "choice": [
+          "A",
+          "B",
+          "C"
+        ],
+        "why": "A、B、C 直接给出 0=λn；D 需要 X,Y 可逆，题目没有给出，且差的 det 也不受 det(XY)=det(X)det(Y) 控制。",
+        "signals": [
+          "迹的交换性",
+          "反对称矩阵迹为零",
+          "λ≠0 使 λn 非零"
+        ]
+      },
+      "card": {
+        "title": "把方程压成数值等式",
+        "trigger": "矩阵方程含未知矩阵的交换子",
+        "first_step": "列出由迹得到的必要条件",
+        "pitfall": "不要引入题目未给的可逆性"
+      }
+    },
+    {
+      "id": "cmc2017-q4-a3",
+      "label": "具体算一次迹",
+      "ability": "evidence",
+      "primitive": "numeric",
+      "judge": "L1",
+      "minutes": 3,
+      "payload": {
+        "situation": "取 n=2，A=[[0,1],[-1,0]]，λ=3。若方程 XY−YX=λI+A 有解，对两边取迹会得到左边 0，右边等于多少？"
+      },
+      "expert": {
+        "value": 6,
+        "tolerance": 0,
+        "why": "tr(A)=0，tr(3I_2)=3·2=6，所以右边迹为 6，与左边 0 矛盾。",
+        "signals": [
+          "2 阶单位阵的迹是 2",
+          "反对称矩阵迹为 0",
+          "矛盾来自 0=6"
+        ]
+      },
+      "card": {
+        "title": "先算一个最小例子",
+        "trigger": "需要确认迹矛盾的数值形态",
+        "first_step": "分别算 tr(λI) 与 tr(A)",
+        "pitfall": "不要把 n=2 时的 tr(λI) 写成 λ"
+      }
+    },
+    {
+      "id": "cmc2017-q4-a4",
+      "label": "证明骨架",
+      "ability": "argument",
+      "primitive": "order",
+      "judge": "L2",
+      "minutes": 6,
+      "payload": {
+        "steps": [
+          {
+            "id": "s1",
+            "text": "假设存在实矩阵 X,Y 满足 XY−YX=λI+A。"
+          },
+          {
+            "id": "s2",
+            "text": "对等式两边取迹，得 tr(XY−YX)=tr(λI+A)。"
+          },
+          {
+            "id": "s3",
+            "text": "利用 tr(XY)=tr(YX)，左边等于 0。"
+          },
+          {
+            "id": "s4",
+            "text": "利用 A^T=−A 得 tr(A)=0，故右边等于 λn。"
+          },
+          {
+            "id": "s5",
+            "text": "由 λ≠0 且 n≥1 得 λn≠0，与 0=λn 矛盾，故不存在这样的有序对。"
+          }
+        ]
+      },
+      "expert": {
+        "order": [
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+          "s5"
+        ],
+        "why": "证明主线是反证法加取迹：先假设解存在，再用交换子迹为零和反对称矩阵迹为零压出 0=λn。",
+        "signals": [
+          "反证开头",
+          "取迹是核心动作",
+          "最后用 λ≠0 与 n≥1 收尾"
+        ]
+      },
+      "card": {
+        "title": "反证加取迹的五步骨架",
+        "trigger": "证明含交换子的矩阵方程无解",
+        "first_step": "假设解存在并两边取迹",
+        "pitfall": "不要跳过 tr(A)=0 的理由"
+      }
+    },
+    {
+      "id": "cmc2017-q4-a5",
+      "label": "条件边界",
+      "ability": "condition",
+      "primitive": "single_choice",
+      "judge": "L2",
+      "minutes": 5,
+      "payload": {
+        "situation": "在上面的迹证明中，哪个条件一旦去掉，迹恒等式就不再自动导致矛盾，方程可能变得可解？",
+        "options": [
+          {
+            "key": "A",
+            "text": "去掉 A 反对称，只保留 tr(A)=0"
+          },
+          {
+            "key": "B",
+            "text": "去掉 λ≠0，允许 λ=0"
+          },
+          {
+            "key": "C",
+            "text": "去掉 n≥1，允许 n=0"
+          },
+          {
+            "key": "D",
+            "text": "去掉 X,Y 为实矩阵，允许复矩阵"
+          }
+        ]
+      },
+      "expert": {
+        "choice": "B",
+        "why": "λ=0 时右端迹为 tr(A)=0，迹恒等式变成 0=0，不能排除；例如 A=0、X=Y=0 满足 XY−YX=0。",
+        "signals": [
+          "迹矛盾依赖 λn≠0",
+          "λ=0 时矛盾消失",
+          "零矩阵给出边界例子"
+        ],
+        "traps": {
+          "A": "只保留 tr(A)=0 时右端迹仍为 λn，λ≠0 仍矛盾；反对称只是保证 tr(A)=0 的充分条件。",
+          "C": "n=0 不是本题的有意义情形；n≥1 用于保证 λn≠0。",
+          "D": "迹的交换性在复数域仍成立，取迹证明不受影响；复数域中 λ≠0 仍给 λn≠0。"
+        }
+      },
+      "card": {
+        "title": "找真正发力的条件",
+        "trigger": "判断证明中哪个假设不可删",
+        "first_step": "检查去掉条件后关键等式是否仍矛盾",
+        "pitfall": "不要把充分条件误当成必要条件"
+      }
+    },
+    {
+      "id": "cmc2017-q4-a6",
+      "label": "同类变式",
+      "ability": "reflection",
+      "primitive": "multi_select",
+      "judge": "L2",
+      "minutes": 7,
+      "payload": {
+        "situation": "同类变式：把实反对称 A 换成复矩阵 A 且 A^*=−A（反 Hermitian），并允许复矩阵 X,Y。下列判断哪些正确？",
+        "options": [
+          {
+            "key": "A",
+            "text": "若 λ 为非零实数，方程 XY−YX=λI+A 仍无解。"
+          },
+          {
+            "key": "B",
+            "text": "若 λ 为纯虚数，迹等式两边都可能只有纯虚迹，因此仅靠迹不能自动排除。"
+          },
+          {
+            "key": "C",
+            "text": "反 Hermitian 矩阵的迹必为实数，所以与 λI 的迹直接冲突。"
+          },
+          {
+            "key": "D",
+            "text": "若右端改为任意 B+A，则 tr(B)+tr(A)=0 是存在解的必要条件。"
+          }
+        ]
+      },
+      "expert": {
+        "choice": [
+          "A",
+          "B",
+          "D"
+        ],
+        "why": "取迹仍得 0=tr(B)+tr(A)；A 中 λ 实非零时右端迹有非零实部 nλ，故无解；λ 纯虚时右端迹为纯虚，不能单靠迹否定。反 Hermitian 矩阵的迹是纯虚数而非必为实数。",
+        "signals": [
+          "迁移仍先取迹",
+          "比较迹的实部虚部",
+          "纯虚 λ 时迹障碍可能消失"
+        ]
+      },
+      "card": {
+        "title": "换对象后先看数域",
+        "trigger": "把实反对称矩阵迁移到复反 Hermitian 矩阵",
+        "first_step": "比较等式两边迹的实部与虚部",
+        "pitfall": "不要默认反 Hermitian 矩阵的迹为实数"
+      }
+    }
+  ],
+  "artifact": {
+    "prompt": "请用 150–300 字回答：在方程 XY−YX=λI+A（A 为实反对称矩阵，λ≠0）的研究中，关键不变量是什么？证明主线怎样展开？哪个条件不能删，并用一个 λ=0 的特例说明；再把方法迁移到反 Hermitian 矩阵与纯虚 λ 的情形，说明迹方法能直接排除什么、不能直接排除什么。",
+    "rubric": [
+      {
+        "id": "r1",
+        "text": "指出关键不变量是迹，并写出 tr(XY−YX)=0。",
+        "keywords": [
+          "迹",
+          "tr(XY−YX)=0"
+        ]
+      },
+      {
+        "id": "r2",
+        "text": "说明反对称矩阵的迹为 0，因此右端迹为 λn。",
+        "keywords": [
+          "反对称",
+          "tr(A)=0",
+          "λn"
+        ]
+      },
+      {
+        "id": "r3",
+        "text": "用反证法给出矛盾：λ≠0 且 n≥1 推出 λn≠0。",
+        "keywords": [
+          "反证",
+          "λ≠0",
+          "矛盾"
+        ]
+      },
+      {
+        "id": "r4",
+        "text": "指出 λ≠0 不能删；λ=0 时取 A=0、X=Y=0 说明无矛盾。",
+        "keywords": [
+          "λ=0",
+          "A=0",
+          "X=Y=0"
+        ]
+      },
+      {
+        "id": "r5",
+        "text": "迁移到反 Hermitian 等情形时先比较迹的实部或虚部；纯虚 λ 不能仅靠迹自动排除。",
+        "keywords": [
+          "反Hermitian",
+          "纯虚",
+          "迹"
+        ]
+      }
+    ],
+    "expert_sample": "关键是取迹：对任意方阵 X,Y，tr(XY−YX)=0；而 A 反对称给出 tr(A)=0，故右端迹为 λn。若 λ≠0、n≥1，则 0=λn 矛盾，这是反证法的主线。必须保留 λ≠0；若取 λ=0、A=0、X=Y=0，则 XY−YX=0，迹等式不再矛盾，说明该条件不可删。迁移时仍先比较迹：若 A 是反Hermitian，则 tr(A) 为纯虚数；当 λ 为纯虚数时，仅靠迹不能自动排除，需要再看实部、虚部或其他不变量。"
+  }
+}

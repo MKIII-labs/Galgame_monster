@@ -1,0 +1,28 @@
+{
+  "effects": [
+    {
+      "keyword": "闪光",
+      "css": "flash",
+      "audio": "",
+      "mode": "after"
+    },
+    {
+      "keyword": "震动",
+      "css": "shake",
+      "audio": "shake.wav",
+      "mode": "after"
+    },
+    {
+      "keyword": "黑屏",
+      "css": "blackout",
+      "audio": "",
+      "mode": "after"
+    },
+    {
+      "keyword": "淡入",
+      "css": "fade",
+      "audio": "",
+      "mode": "after"
+    }
+  ]
+}

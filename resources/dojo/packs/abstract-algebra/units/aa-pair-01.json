@@ -1,0 +1,34 @@
+{
+  "id": "aa-pair-01",
+  "ability": "method",
+  "primitive": "pair",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "把代数结构与它的作用配对。",
+    "left": [
+      { "id": "l1", "text": "群同态的核" },
+      { "id": "l2", "text": "正规子群" },
+      { "id": "l3", "text": "域" },
+      { "id": "l4", "text": "环的理想" }
+    ],
+    "right": [
+      { "id": "r1", "text": "同态下映到单位元的元素" },
+      { "id": "r2", "text": "可以用来构造商群" },
+      { "id": "r3", "text": "每个非零元都有乘法逆元" },
+      { "id": "r4", "text": "可以用来构造商环" }
+    ]
+  },
+  "expert": {
+    "why": "核是同态中映到单位元的部分；正规子群是商群存在的前提；域要求非零元全体构成乘法群；理想是商环存在的前提。",
+    "signals": ["群与环的结构", "商结构"],
+    "pairs": { "l1": "r1", "l2": "r2", "l3": "r3", "l4": "r4" }
+  },
+  "card": {
+    "title": "核、正规、理想、域",
+    "trigger": "区分代数结构",
+    "first_step": "先问是群还是环，再问能否作商",
+    "pitfall": "把理想与正规子群的作用对调"
+  },
+  "source_ref": { "doc": "self-authored:abstract-algebra", "loc": "结构总览" }
+}

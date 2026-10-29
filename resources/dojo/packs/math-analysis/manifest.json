@@ -1,0 +1,31 @@
+{
+  "id": "math-analysis",
+  "name": "数学分析",
+  "desc": "极限、连续、微分、积分与级数中的判断",
+  "version": 1,
+  "grade": "official",
+  "alignment": {
+    "standard": "本科数学分析（数学系）",
+    "dimensions": ["极限与连续", "微分", "积分", "级数"]
+  },
+  "ability_weights": {
+    "framing": 0.1,
+    "assumption": 0.3,
+    "method": 0.3,
+    "condition": 0.25,
+    "evidence": 0.05
+  },
+  "entry": { "minutes": 4, "first_unit": "ma-monotone-01" },
+  "sequence": [
+    "ma-monotone-01",
+    "ma-uniform-01",
+    "ma-partial-01",
+    "ma-riemann-01",
+    "ma-series-01",
+    "ma-mvt-01",
+    "ma-integral-01",
+    "ma-implicit-01",
+    "ma-compact-01",
+    "ma-pair-01"
+  ]
+}

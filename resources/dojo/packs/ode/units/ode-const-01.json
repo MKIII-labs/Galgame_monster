@@ -1,0 +1,34 @@
+{
+  "id": "ode-const-01",
+  "ability": "method",
+  "primitive": "pair",
+  "judge": "L2",
+  "minutes": 4,
+  "payload": {
+    "situation": "把二阶常系数齐次线性方程的特征根情形与对应通解配对。",
+    "left": [
+      { "id": "l1", "text": "两个不同实根 r₁、r₂" },
+      { "id": "l2", "text": "二重实根 r" },
+      { "id": "l3", "text": "共轭复根 α ± βi" },
+      { "id": "l4", "text": "纯虚根 ±βi" }
+    ],
+    "right": [
+      { "id": "r1", "text": "C₁e^(r₁x) + C₂e^(r₂x)" },
+      { "id": "r2", "text": "(C₁ + C₂x)e^(rx)" },
+      { "id": "r3", "text": "e^(αx)(C₁cos βx + C₂sin βx)" },
+      { "id": "r4", "text": "C₁cos βx + C₂sin βx" }
+    ]
+  },
+  "expert": {
+    "why": "不同实根给两个指数解；重根需要乘以 x 补出第二个线性无关解；共轭复根用欧拉公式化成指数乘三角；纯虚根是 α=0 的特例。",
+    "signals": ["二阶常系数齐次", "特征根类型"],
+    "pairs": { "l1": "r1", "l2": "r2", "l3": "r3", "l4": "r4" }
+  },
+  "card": {
+    "title": "特征根决定通解形状",
+    "trigger": "解二阶常系数齐次方程",
+    "first_step": "先解特征方程，判断根的类型",
+    "pitfall": "重根时忘记乘 x"
+  },
+  "source_ref": { "doc": "self-authored:ode", "loc": "常系数线性方程" }
+}
