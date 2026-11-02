@@ -53,6 +53,11 @@ def enabled():
     return bool(_cfg().get("computer_desktop_enabled"))
 
 
+def unrestricted_enabled():
+    """无限制：不检查 exe 白名单（提权窗口 / 密码框等硬限制仍生效）。"""
+    return bool(_cfg().get("computer_desktop_unrestricted"))
+
+
 def allowed_exes():
     return [str(x).strip().lower() for x in (_cfg().get("computer_apps") or []) if str(x).strip()]
 
@@ -61,6 +66,8 @@ def exe_allowed(exe, patterns=None):
     """exe 是否在白名单里（支持 *.exe 与完整路径）。纯函数，便于测试。"""
     if not exe:
         return False
+    if patterns is None and unrestricted_enabled():
+        return True
     patterns = allowed_exes() if patterns is None else patterns
     base = os.path.basename(exe).lower()
     for p in patterns:
@@ -87,9 +94,9 @@ def _ensure_hotkey():
 def list_windows():
     if not enabled():
         return "⚠️ 桌面操作未开启：设置 → Agent → Computer Use → 「允许操作桌面程序」。"
-    if not allowed_exes():
+    if not unrestricted_enabled() and not allowed_exes():
         return ("⚠️ 桌面程序白名单是空的。请先在设置里填入允许操作的 exe 名"
-                "（如 notepad.exe），否则任何窗口都不会列出来。")
+                "（如 notepad.exe），或打开「无限制」开关；否则任何窗口都不会列出来。")
     _ensure_hotkey()
     auto = _uia()
     try:
@@ -129,9 +136,10 @@ def list_windows():
         except Exception:
             continue
     if not rows:
-        return ("白名单（%s）当前没有可见窗口。可以先把目标程序打开，再让我列一次。"
-                % "、".join(allowed_exes()))
-    lines = ["可用窗口（只有白名单内的程序会出现在这里）："]
+        scope = "无限制模式" if unrestricted_enabled() else ("白名单（%s）" % "、".join(allowed_exes()))
+        return ("%s当前没有可见窗口。可以先把目标程序打开，再让我列一次。" % scope)
+    lines = ["可用窗口（%s）："
+             % ("无限制模式：所有可见程序" if unrestricted_enabled() else "只有白名单内的程序")]
     for key, title, exe, width, height, pid in rows:
         lines.append("[%s] %s · %s · %s×%s · pid=%d" % (key, title[:60], exe, width, height, pid))
     lines.append("")
@@ -468,18 +476,23 @@ def read_value(key, ref):
 # 审批
 # ============================================================
 
-def judge(name, args):
-    """返回 (decision, reason)。name 是 computer_act / computer_shot 等。"""
+def judge(name, args, unrestricted=False):
+    """返回 (decision, reason)。name 是 computer_act / computer_shot 等。
+
+    unrestricted=True（完全放权档位）：桌面白名单与高危动作都不再询问；
+    「无限制」配置开关只跳过 exe 白名单，高危动作仍然问。
+    """
     args = args if isinstance(args, dict) else {}
     if not enabled():
         return "deny", "桌面操作未开启"
+    un = bool(unrestricted or unrestricted_enabled())
     key = str(args.get("target") or "").strip()
     if name == "computer_windows":
         return "allow", ""
     info = _WINDOWS.get(key)
     if not info:
         return "deny", "窗口 %s 不在本次可用列表里（先 computer_windows）" % key
-    if not exe_allowed(info["exe"]):
+    if not un and not exe_allowed(info["exe"]):
         return "deny", "程序 %s 不在白名单" % os.path.basename(info["exe"])
     if name == "computer_shot":
         return "allow", ""
@@ -487,6 +500,6 @@ def judge(name, args):
         risk, why = classify(key, args.get("action"), args.get("ref"))
         if risk == "deny":
             return "deny", why
-        if risk == "high":
+        if risk == "high" and not unrestricted:
             return "ask", why
     return "allow", ""

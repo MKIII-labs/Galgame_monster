@@ -44,6 +44,9 @@ def test_judge_computer_blocks_sensitive(monkeypatch):
 def test_judge_computer_asks_unknown_site(monkeypatch):
     monkeypatch.setattr(computer, "enabled", lambda: True)
     monkeypatch.setattr(computer.policy, "_cfg", lambda: {"computer_sites": []})
+    # 用例验的是默认档位；本机配置可能开了「无限制」，这里显式关掉
+    monkeypatch.setattr(computer, "_cfg", lambda: {"computer_sites": [],
+                                                   "computer_browser_unrestricted": False})
     decision, why, host = agent.judge_computer("computer_open", {"url": "https://example.com/x"})
     assert decision == "ask" and host == "example.com"
 

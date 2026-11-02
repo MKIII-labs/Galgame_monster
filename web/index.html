@@ -45,7 +45,9 @@
 <link rel="stylesheet" href="/static/css/hall-math.css">
 <link rel="stylesheet" href="/static/css/hall-dojo.css">
 <link rel="stylesheet" href="/static/css/hall-interview.css">
+<link rel="stylesheet" href="/static/css/hall-plugins.css">
 <link rel="stylesheet" href="/static/css/work.css">
+<link rel="stylesheet" href="/static/css/trajectory.css">
 <link rel="stylesheet" href="/static/css/turndots.css">
 <!-- 复古像素主题用的点阵字体：只有 pixel 主题会引用这个字体族，因此 woff2 实际是「用到才下载」；
      非阻塞加载，失败即移除并回退到系统宋体 / 等宽（保证离线可用） -->
@@ -131,6 +133,7 @@
   <symbol id="i-record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor" stroke="none"/></symbol>
   <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M7.5 10l2.6 2.6-2.6 2.6M13 15.2h3.6"/></symbol>
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 015.5 5h3.2l2 2.4h7.8A2.5 2.5 0 0121 9.9v7.6a2.5 2.5 0 01-2.5 2.5h-13A2.5 2.5 0 013 17.5z"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4.5h5.5V10M19.5 4.5L11 13"/><path d="M19.5 14v4.5a1.5 1.5 0 01-1.5 1.5H5.5A1.5 1.5 0 014 18.5V6A1.5 1.5 0 015.5 4.5H10"/></symbol>
   <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 015.5 5h3.2l2 2.4h7.8A2.5 2.5 0 0121 9.9v7.6a2.5 2.5 0 01-2.5 2.5h-13A2.5 2.5 0 013 17.5z"/><path d="M12 12v5M9.5 14.5h5"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.2"/><path d="M20 20l-4.3-4.3"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.5v13M5.5 12h13"/></symbol>
@@ -143,6 +146,8 @@
   <symbol id="i-note" viewBox="0 0 24 24"><path d="M6 3.5h8l4.5 4.5v12a1.5 1.5 0 01-1.5 1.5H6A1.5 1.5 0 014.5 20V5A1.5 1.5 0 016 3.5z"/><path d="M14 3.7V8h4.3M8.5 12.5h7M8.5 16h4.5"/></symbol>
   <symbol id="i-file-plus" viewBox="0 0 24 24"><path d="M6.5 3.5h6.5l4.5 4.5v12a1.5 1.5 0 01-1.5 1.5H6.5A1.5 1.5 0 015 20V5a1.5 1.5 0 011.5-1.5z"/><path d="M13 3.7V8h4.3M12 12.5v6M9 15.5h6"/></symbol>
   <symbol id="i-history" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 108.5-8.5A8.5 8.5 0 005 7.2"/><path d="M3.4 3.6v3.9h3.9M12 8.2V12l2.8 1.7"/></symbol>
+  <symbol id="i-trajectory" viewBox="0 0 24 24"><path d="M4.5 19c3.8 0 4-6 7.5-6s3.7-6 7.5-6"/><circle cx="4.5" cy="19" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="13" r="1.5" fill="currentColor" stroke="none"/><circle cx="19.5" cy="7" r="1.5" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-debug" viewBox="0 0 24 24"><rect x="8" y="8" width="8" height="10" rx="4"/><path d="M8 11H4.5M8 14H4.5M8 17l-3 2M16 11h3.5M16 14h3.5M16 17l3 2M9.5 6.5L8 4.5M14.5 6.5L16 4.5M12 8V5"/></symbol>
   <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M4.9 7.5l1.9 1.1M17.2 15.4l1.9 1.1M4.9 16.5l1.9-1.1M17.2 8.6l1.9-1.1"/></symbol>
   <symbol id="i-theme" viewBox="0 0 24 24"><path d="M20.5 14.6A8.6 8.6 0 019.4 3.5a8.6 8.6 0 1011.1 11.1z"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M8.5 5.5l10 6.5-10 6.5z"/></symbol>
@@ -216,18 +221,29 @@
     <div class="side-top">
       <button id="btn-new" class="new-chat"><svg class="ic"><use href="#i-plus"/></svg>新建对话</button>
       <div id="mode-switch" class="mode-switch" title="在「Solo 对话」「IDE 工作区」「GAL 演出」「功能大厅」之间切换">
-        <button class="ms-btn active" data-mode="solo">Solo</button>
-        <button class="ms-btn" data-mode="ide">IDE</button>
-        <button class="ms-btn" data-mode="hall">大厅</button>
-        <button class="ms-btn" data-mode="work">工作台</button>
+        <button class="ms-btn active" data-mode="solo" title="Solo 对话" aria-label="Solo 对话"><svg class="ic"><use href="#i-chat"/></svg><span>Solo</span></button>
+        <button class="ms-btn" data-mode="ide" title="IDE 工作区" aria-label="IDE 工作区"><svg class="ic"><use href="#i-code"/></svg><span>IDE</span></button>
+        <button class="ms-btn" data-mode="hall" title="功能大厅" aria-label="功能大厅"><svg class="ic"><use href="#i-grid"/></svg><span>大厅</span></button>
+        <button class="ms-btn" data-mode="work" title="工作台" aria-label="工作台"><svg class="ic"><use href="#i-box"/></svg><span>工作台</span></button>
       </div>
     </div>
-    <div class="side-label">会话记录</div>
+    <div class="side-nav">
+      <button id="btn-plugins" class="side-nav-item" type="button"
+              title="插件：Python 工具插件 / MCP 服务器 / DSH 生态索引">
+        <svg class="ic"><use href="#i-box"/></svg><span>插件</span>
+      </button>
+    </div>
+    <div class="side-head">
+      <span class="side-label">会话记录</span>
+      <button id="session-group-toggle" class="side-head-btn" type="button"
+              title="按目录分组（点击切为平铺）" aria-label="切换会话分组方式" aria-pressed="true">
+        <svg class="ic"><use href="#i-folder"/></svg>
+      </button>
+    </div>
     <div id="session-list" class="session-list"></div>
     <div class="side-foot">
       <button id="btn-usage" class="ghost wide" title="Token 用量统计"><svg class="ic"><use href="#i-chart"/></svg>用量统计</button>
-      <button id="btn-observe" class="ghost wide" title="学习观测：查看对话 / 竞技场 / 模拟卷留下的学习行为"><svg class="ic"><use href="#i-check-square"/></svg>学习观测</button>
-      <button id="btn-skills" class="ghost wide" title="Skill：可插拔的流程包，按需展开"><svg class="ic"><use href="#i-sparkle"/></svg>Skill</button>
+      <button id="btn-trajectory" class="ghost wide" title="轨迹：查看模型看到的系统提示、上下文、思考、工具与耗时"><svg class="ic"><use href="#i-trajectory"/></svg>轨迹</button>
       <button id="btn-saves" class="ghost wide" title="会话存档 / 倒带：回退到旧存档点，或从旧点分叉出新线"><svg class="ic"><use href="#i-history"/></svg>存档</button>
       <button id="btn-kb" class="ghost wide" title="知识库 / 记忆图谱"><svg class="ic"><use href="#i-brain"/></svg>知识库</button>
       <button id="btn-notes" class="ghost wide" title="内置笔记库（Markdown + 双链 + 关系图谱）"><svg class="ic"><use href="#i-note"/></svg>笔记</button>
@@ -245,6 +261,8 @@
             aria-label="展开侧栏" aria-controls="sidebar" aria-expanded="false">
       <svg class="ic"><use href="#i-sidebar"/></svg>
     </button>
+    <!-- 侧栏收起时，模式切换会挪到这个悬浮容器里（同一个节点，不复制） -->
+    <div id="mode-float" class="mode-float hidden"></div>
     <!-- IDE 模式：以「当前会话的沙箱」为根的工作区（Solo 模式下隐藏） -->
     <section id="ide-panel" class="ide-panel hidden">
       <!-- 顶部提示条：说明原生 IDE 的定位 -->
@@ -261,6 +279,7 @@
           <svg class="ic"><use href="#i-branch"/></svg>
           <span id="ide-git-badge" class="act-badge hidden">0</span>
         </button>
+        <button class="act-btn" data-act="debug" title="运行和调试"><svg class="ic"><use href="#i-debug"/></svg></button>
         <button class="act-btn" id="ide-term-act" title="终端（Ctrl+`）"><svg class="ic"><use href="#i-terminal"/></svg></button>
         <span class="act-spacer"></span>
         <button class="act-btn" id="ide-open-vscode" title="在 VS Code 中打开当前沙箱"><svg class="ic"><use href="#i-code"/></svg></button>
@@ -294,7 +313,66 @@
         <div class="ide-side-head"><span class="ide-side-title">在沙箱内搜索</span></div>
         <div class="ide-search">
           <input id="ide-search-input" class="field-input" placeholder="文件内容正则或文件名，回车搜索">
+          <input id="ide-replace-input" class="field-input" placeholder="替换为（留空 = 删除匹配）">
+          <div class="ide-search-opts">
+            <label class="ide-search-opt" title="勾选后按正则解释；不勾就是原样文字替换">
+              <input type="checkbox" id="ide-search-regex"> 正则</label>
+            <label class="ide-search-opt" title="用本地全仓语义索引检索；会按相关度返回函数级片段">
+              <input type="checkbox" id="ide-search-semantic"> 语义</label>
+            <button id="ide-replace-all" class="ide-btn" type="button">全部替换</button>
+          </div>
           <div id="ide-search-hits" class="ide-search-hits"></div>
+        </div>
+      </div>
+
+      <!-- 侧边栏：运行和调试 -->
+      <div class="ide-side hidden" id="ide-side-debug">
+        <div class="ide-side-head">
+          <span class="ide-side-title">运行和调试</span>
+          <span class="ide-side-actions">
+            <button id="debug-refresh" class="ico-btn" title="刷新调试状态"><svg class="ic"><use href="#i-refresh"/></svg></button>
+          </span>
+        </div>
+        <div class="ide-debug">
+          <div class="ide-debug-start">
+            <input id="debug-program" class="field-input" placeholder="脚本（沙箱内相对路径，默认当前文件）">
+            <input id="debug-args" class="field-input" placeholder="启动参数（空格分隔，可选）">
+            <label class="check-row"><input type="checkbox" id="debug-stop-entry"> 启动时先暂停在第一行</label>
+            <div class="preset-row">
+              <button id="debug-start" class="ghost" type="button">
+                <svg class="ic"><use href="#i-play"/></svg>开始调试</button>
+              <button id="debug-stop" class="ghost" type="button">
+                <svg class="ic"><use href="#i-stop"/></svg>停止</button>
+            </div>
+          </div>
+          <div class="ide-debug-toolbar">
+            <button type="button" data-dact="continue" title="继续（F5）">▶</button>
+            <button type="button" data-dact="next" title="单步跳过（F10）">⤼</button>
+            <button type="button" data-dact="step_in" title="单步进入（F11）">⤓</button>
+            <button type="button" data-dact="step_out" title="单步跳出（Shift+F11）">⤒</button>
+            <button type="button" data-dact="pause" title="暂停">⏸</button>
+          </div>
+          <div class="ide-debug-sec">
+            <div class="ide-debug-h">调用栈</div>
+            <div id="debug-stack" class="ide-debug-list"><div class="ide-empty">未启动</div></div>
+          </div>
+          <div class="ide-debug-sec">
+            <div class="ide-debug-h">变量</div>
+            <div id="debug-vars" class="ide-debug-list"><div class="ide-empty">—</div></div>
+          </div>
+          <div class="ide-debug-sec">
+            <div class="ide-debug-h">断点</div>
+            <div id="debug-breakpoints" class="ide-debug-list"><div class="ide-empty">在编辑器行号左侧点击添加</div></div>
+          </div>
+          <div class="ide-debug-sec">
+            <div class="ide-debug-h">求值</div>
+            <input id="debug-eval-input" class="field-input" placeholder="表达式，回车求值">
+            <div id="debug-eval-result" class="ide-debug-eval"></div>
+          </div>
+          <div class="ide-debug-sec">
+            <div class="ide-debug-h">输出</div>
+            <pre id="debug-output" class="ide-debug-out"></pre>
+          </div>
         </div>
       </div>
 
@@ -345,6 +423,9 @@
       <div class="ide-main">
         <div class="ide-tabsbar">
           <div id="ide-tabs" class="ide-tabs"></div>
+          <button id="ide-run-btn" class="ico-btn hidden" title="运行 / 编译并运行（Ctrl+Alt+R）"><svg class="ic"><use href="#i-play"/></svg></button>
+          <button id="ide-md-btn" class="ico-btn" title="Markdown 预览（Ctrl+Shift+V）"><svg class="ic"><use href="#i-book"/></svg></button>
+          <button id="ide-preview-btn" class="ico-btn" title="网页预览"><svg class="ic"><use href="#i-globe"/></svg></button>
           <button id="ide-diff-btn" class="ico-btn hidden" title="查看 AI 变更审阅"><svg class="ic"><use href="#i-history"/></svg></button>
           <button id="ide-save" class="ico-btn" title="保存（Ctrl+S）"><svg class="ic"><use href="#i-save"/></svg></button>
         </div>
@@ -356,6 +437,26 @@
           </div>
           <div id="ide-image" class="ide-image hidden">
             <img id="ide-image-img" alt="">
+          </div>
+          <!-- 网页预览：沙箱目录会临时挂到本机端口，也可以直接填自己的 dev server -->
+          <div id="ide-preview" class="ide-preview hidden">
+            <div class="ide-preview-bar">
+              <input id="ide-preview-url" class="field-input"
+                     placeholder="http://localhost:5173 或沙箱内的 index.html">
+              <button id="ide-preview-open" class="ide-btn" type="button">打开</button>
+              <button id="ide-preview-reload" class="ico-btn" title="刷新">↻</button>
+              <button id="ide-preview-close" class="ico-btn" title="关闭">✕</button>
+            </div>
+            <iframe id="ide-preview-frame" class="ide-preview-frame" title="网页预览"></iframe>
+          </div>
+          <!-- Markdown 预览：右半边分屏，复用聊天那套渲染（含 KaTeX 公式） -->
+          <div id="ide-md" class="ide-md hidden">
+            <div class="ide-md-head">
+              <span class="ide-md-title">Markdown 预览</span>
+              <button id="ide-md-pdf" class="ide-btn" type="button">导出 PDF</button>
+              <button id="ide-md-close" class="ico-btn" title="关闭">✕</button>
+            </div>
+            <div id="ide-md-body" class="ide-md-body work-preview-md"></div>
           </div>
           <div id="ide-diff" class="ide-diff hidden">
             <div class="review-bar">
@@ -371,6 +472,7 @@
                 <button id="ide-review-keep" class="review-btn primary" type="button">保留 <kbd>Ctrl</kbd><kbd>Enter</kbd></button>
               </div>
             </div>
+            <div id="ide-hunk-bar" class="hunk-bar hidden"></div>
             <div id="ide-diff-editor" class="review-editor"></div>
           </div>
           <!-- Git 改动对比（只读）：点源代码管理里的文件时打开 -->
@@ -418,9 +520,24 @@
           <div id="ide-term-host" class="ide-term-host"></div>
           <div id="ide-term-hint" class="ide-term-hint hidden"></div>
         </section>
+        <!-- 问题 / 大纲 / 结果面板（语言服务前台化：pyright 诊断、符号、定义 / 引用） -->
+        <section id="ide-intel" class="ide-intel hidden">
+          <div class="ide-intel-head">
+            <button class="ide-intel-tab active" data-intel-tab="problems" type="button">
+              问题 <span id="ide-intel-pcount" class="ide-intel-count"></span></button>
+            <button class="ide-intel-tab" data-intel-tab="outline" type="button">
+              大纲 <span id="ide-intel-ocount" class="ide-intel-count"></span></button>
+            <button class="ide-intel-tab hidden" data-intel-tab="results" type="button">结果</button>
+            <span class="ide-intel-spacer"></span>
+            <button id="ide-intel-close" class="ico-btn" title="关闭（Esc）">✕</button>
+          </div>
+          <div id="ide-intel-body" class="ide-intel-body"></div>
+        </section>
         <div class="ide-status hidden">
           <span id="ide-status-path" class="ide-status-path">—</span>
           <span class="ide-status-right">
+            <button id="ide-status-problems" class="ide-status-chip hidden" type="button"
+                    title="问题（Ctrl+Shift+M）">✖ 0  ⚠ 0</button>
             <span id="ide-status-enc"></span>
             <span id="ide-status-pos"></span>
             <span id="ide-status-lang"></span>
@@ -465,6 +582,11 @@
       <div id="hall-body" class="hall-body"></div>
     </section>
 
+    <!-- 插件：侧栏入口进入的整屏页面（内容由 web/hall-plugins.js 的 marketMount 渲染） -->
+    <section id="plugins-panel" class="plugins-panel hidden">
+      <div id="plugins-body" class="plugins-body"></div>
+    </section>
+
     <!-- 工作台：个人日程 / 任务执行 / 产物（前端逻辑见 web/work.js） -->
     <section id="work-panel" class="work-panel hidden">
       <div class="work-head">
@@ -475,6 +597,7 @@
         <div class="work-head-right">
           <select id="work-scene" class="work-select" title="场景包：办公 / 学习 / 生活"></select>
           <button id="work-workflows" class="work-btn ghost" title="工作流：触发器 → 动作">工作流</button>
+          <button id="work-new-image" class="work-btn ghost" title="用本地 ComfyUI 生成图片">图片</button>
           <button id="work-memory" class="work-btn ghost" title="统一记忆：检索与手动记录">记忆</button>
           <button id="work-backup" class="work-btn ghost" title="导出 / 预检 / 恢复全量数据">备份</button>
           <button id="work-refresh" class="work-btn ghost" title="刷新">刷新</button>
@@ -954,9 +1077,15 @@
                 <svg class="ic"><use href="#i-chevron"/></svg>
               </button>
               <div id="agent-menu" class="agent-menu hidden">
-                <button id="btn-sandbox" class="pill hidden" title="选择 Agent 沙箱目录">
-                  <svg class="ic"><use href="#i-folder"/></svg><span id="sandbox-name">目录</span>
-                </button>
+                <div class="agent-sandbox-row">
+                  <button id="btn-sandbox" class="pill hidden" title="选择 Agent 沙箱目录">
+                    <svg class="ic"><use href="#i-folder"/></svg><span id="sandbox-name">目录</span>
+                  </button>
+                  <button id="btn-sandbox-open" class="pill hidden" type="button"
+                          title="在文件管理器中打开沙箱目录" aria-label="在文件管理器中打开沙箱目录">
+                    <svg class="ic"><use href="#i-external"/></svg>
+                  </button>
+                </div>
                 <button id="btn-sandbox-path" class="pill hidden" title="直接输入 / 粘贴沙箱目录路径（路径不存在会提示）">路径</button>
                 <button id="btn-outside-read" class="pill hidden" title="允许 Agent 读取沙箱外的文件（只读）：开启后，只有当你明确要求时才会读沙箱外的绝对路径；写入仍只能在沙箱内">
                   <svg class="ic"><use href="#i-upload"/></svg>沙箱外
@@ -1070,32 +1199,31 @@
           <div id="settings-search-list" class="settings-search-list hidden"></div>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">模型与接入</div>
-          <button class="snav-btn active" data-tab="chat" data-search="api 密钥 key 模型 接口 预设 轻量 深度思考 推理 reasoning 图片 识图 视觉 vision">模型接入</button>
-          <button class="snav-btn" data-tab="search" data-search="联网 检索 搜索 bocha b站 bilibili 视频 评论 字幕 ai总结 sessdata cookie 数据">联网与数据源</button>
+          <div class="snav-group-title">常用</div>
+          <button class="snav-btn active" data-tab="chat" data-search="api 密钥 key 模型 接口 预设 轻量 深度思考 推理 reasoning 图片 识图 视觉 vision"><svg class="ic"><use href="#i-chat"/></svg>模型接入</button>
+          <button class="snav-btn" data-tab="search" data-search="联网 检索 搜索 bocha b站 bilibili 视频 评论 字幕 ai总结 sessdata cookie 数据"><svg class="ic"><use href="#i-globe"/></svg>联网与数据源</button>
+          <button class="snav-btn" data-tab="context" data-search="token 上限 压缩 上下文 预留"><svg class="ic"><use href="#i-list"/></svg>上下文与压缩</button>
+          <button class="snav-btn" data-tab="remind" data-search="提醒 定时 reminder 闹钟 通知 主动聊天 自主"><svg class="ic"><use href="#i-calendar"/></svg>主动与提醒</button>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">对话与主动</div>
-          <button class="snav-btn" data-tab="context" data-search="token 上限 压缩 上下文 预留">上下文与压缩</button>
-          <button class="snav-btn" data-tab="agent" data-search="agent 轮次 续跑 自动继续 重复拦截 审批 写入 超时 工具调用 上限">Agent 执行</button>
-          <button class="snav-btn" data-tab="remind" data-search="提醒 定时 reminder 闹钟 通知 主动聊天 自主">主动与提醒</button>
+          <div class="snav-group-title">Agent 与能力</div>
+          <button class="snav-btn" data-tab="agent" data-search="agent 轮次 续跑 自动继续 重复拦截 审批 写入 超时 工具调用 上限"><svg class="ic"><use href="#i-terminal"/></svg>Agent 执行</button>
+          <button class="snav-btn" data-tab="agents" data-search="子代理 代理 团队 编排 subagent delegate 只读"><svg class="ic"><use href="#i-graph"/></svg>子代理</button>
+          <button class="snav-btn" data-tab="skills" data-search="skill 技能 能力包 流程 按需展开"><svg class="ic"><use href="#i-sparkle"/></svg>Skill</button>
+          <button class="snav-btn" data-tab="image" data-search="图片 生成 图像 文生图 comfyui flux 画图"><svg class="ic"><use href="#i-image"/></svg>图片生成</button>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">记忆与能力</div>
-          <button class="snav-btn" data-tab="profile" data-search="画像 偏好 记忆 自动记录 学习 指令 预设 记录准则">用户画像与学习</button>
-          <button class="snav-btn" data-tab="skills" data-search="skill 技能 能力包 流程 按需展开">Skill</button>
-        </div>
-        <div class="snav-group">
-          <div class="snav-group-title">外观与声音</div>
-          <button class="snav-btn" data-tab="appearance" data-search="主题 深色 浅色 外观">主题与外观</button>
-          <button class="snav-btn" data-tab="gal" data-search="gal 演出 立绘 打字机 tts 剧本 特效">GAL 演出</button>
-          <button class="snav-btn" data-tab="speech" data-search="语音 识别 朗读 tts 音色 降噪">语音与朗读</button>
+          <div class="snav-group-title">用户与外观</div>
+          <button class="snav-btn" data-tab="profile" data-search="画像 偏好 记忆 自动记录 学习 指令 预设 记录准则"><svg class="ic"><use href="#i-brain"/></svg>用户画像与学习</button>
+          <button class="snav-btn" data-tab="appearance" data-search="主题 深色 浅色 外观"><svg class="ic"><use href="#i-theme"/></svg>主题与外观</button>
+          <button class="snav-btn" data-tab="gal" data-search="gal 演出 立绘 打字机 tts 剧本 特效"><svg class="ic"><use href="#i-film"/></svg>GAL 演出</button>
+          <button class="snav-btn" data-tab="speech" data-search="语音 识别 朗读 tts 音色 降噪"><svg class="ic"><use href="#i-volume"/></svg>语音与朗读</button>
         </div>
         <div class="snav-group">
           <div class="snav-group-title">系统</div>
-          <button class="snav-btn" data-tab="keys" data-search="快捷键 按键 操作 esc ctrl">快捷键</button>
-          <button class="snav-btn" data-tab="data" data-search="数据 目录 备份 恢复 版本 关于 重置 高级">数据与高级</button>
-          <button class="snav-btn" data-tab="help" data-search="帮助 说明 文档 faq">功能说明</button>
+          <button class="snav-btn" data-tab="keys" data-search="快捷键 按键 操作 esc ctrl"><svg class="ic"><use href="#i-select"/></svg>快捷键</button>
+          <button class="snav-btn" data-tab="data" data-search="数据 目录 备份 恢复 版本 关于 重置 高级"><svg class="ic"><use href="#i-folder"/></svg>数据与高级</button>
+          <button class="snav-btn" data-tab="help" data-search="帮助 说明 文档 faq"><svg class="ic"><use href="#i-question"/></svg>功能说明</button>
         </div>
       </nav>
       <div class="modal-body settings-content">
@@ -1106,11 +1234,30 @@
           </div>
           <button id="settings-page-reset" class="ghost set-page-reset" type="button">恢复本页默认</button>
         </div>
+        <nav id="settings-anchors" class="set-anchors hidden" aria-label="本页分区"></nav>
         <section class="pane" data-pane="chat"></section>
         <section class="pane hidden" data-pane="search"></section>
         <section class="pane hidden" data-pane="context"></section>
         <section class="pane hidden" data-pane="agent"></section>
         <section class="pane hidden" data-pane="remind">
+          <h4 class="set-group">提醒开关</h4>
+          <label class="check-row" data-search="提醒 总开关 关闭">
+            <input type="checkbox" id="reminders-enabled"> 启用提醒（总开关）
+          </label>
+          <p class="hint">关闭总开关后，下面四项全部停止；已注册的 Windows 计划任务也会一并注销。
+            提醒任务本身不会删除，重新打开后按原计划继续。</p>
+          <label class="check-row" data-search="提醒 应用内 会话消息">
+            <input type="checkbox" id="reminder-inapp-enabled"> 到点后在会话里提醒（应用内）
+          </label>
+          <label class="check-row" data-search="提醒 系统通知 Windows 计划任务">
+            <input type="checkbox" id="reminder-system-enabled"> 同时弹 Windows 系统通知（程序关闭也能弹）
+          </label>
+          <label class="check-row" data-search="日程 日历 提醒">
+            <input type="checkbox" id="reminder-calendar-enabled"> 日程到点提醒
+          </label>
+          <label class="check-row" data-search="主动聊天 AI 自动 消息">
+            <input type="checkbox" id="auto-chat-enabled"> 允许 AI 主动聊天（每个会话仍需单独开启）
+          </label>
           <h4 class="set-group">定时提醒（新提醒进入工作台）</h4>
           <p class="hint" id="remind-syshint">系统通知：检查中…</p>
           <label class="field-label">时间</label>
@@ -1140,10 +1287,30 @@
           <button id="autochat-test" class="ghost wide"><svg class="ic"><use href="#i-play"/></svg>立即发一条试试</button>
           <div id="autochat-list" class="remind-list"></div>
         </section>
+        <section class="pane hidden" data-pane="image">
+          <h4 class="set-group" data-search="图片生成 图像 文生图 comfyui flux">图片生成（本地 ComfyUI）</h4>
+          <label class="check-row" data-search="启用 图片 生成 开关">
+            <input type="checkbox" id="image-enabled"> 启用图片生成（需要本机运行 ComfyUI）
+          </label>
+          <label class="field-label" data-search="comfyui 地址 端口">ComfyUI 地址</label>
+          <input id="image-comfy-url" class="field-input" type="text"
+                 placeholder="http://127.0.0.1:8188">
+          <label class="field-label" data-search="工作流 api 格式 json 路径">工作流 JSON（API 格式）</label>
+          <input id="image-workflow" class="field-input" type="text"
+                 placeholder="留空使用 data/image_workflow.json">
+          <div class="preset-row">
+            <button id="image-test" class="ghost" type="button">测试连接</button>
+            <span id="image-test-result" class="hint"></span>
+          </div>
+          <p class="hint">模型建议：FLUX 3 Image Klein 蒸馏版（INT8 / NVFP4）+ Qwen3-VL-4B 编码器 + FLUX.2 VAE。
+            在 ComfyUI 里打开官方模板后用「另存为 API 格式」导出到上面的路径；正向提示词里保留
+            <code>__PROMPT__</code> 占位符，生成时会替换成你输入的描述。固定 16 步，尺寸只给三档。</p>
+        </section>
         <section class="pane hidden" data-pane="profile">
           <h4 class="set-group" data-search="全局规则 手动偏好 规则 回答方式">全局规则</h4>
-          <textarea id="profile-manual" class="ta" rows="5" placeholder="例如：你是我的老师。每次先指出我最核心的问题，再给证据和下一步。"></textarea>
-          <p class="hint">对每个对话都生效。建议写法：角色与目标 / 判定标准 / 每轮必做 / 禁止。留空则保持默认行为。</p>
+          <div id="profile-rules" class="rule-list"></div>
+          <button id="profile-rule-add" class="ghost wide" type="button">＋ 添加一条规则</button>
+          <p class="hint">每条规则可以单独启用 / 停用；启用的规则按列表顺序拼接，对每个对话都生效。建议写法：角色与目标 / 判定标准 / 每轮必做 / 禁止。</p>
 
           <h4 class="set-group" data-search="AI 记录 画像 自动 记忆">自动记录</h4>
           <label class="check-row" data-search="AI 记录 画像 自动 记忆">
@@ -1165,20 +1332,184 @@
           <p class="hint">决定 AI 在对话中如何判断「该记什么、改什么、删什么」，以及写入用户画像时的准则。详见「功能说明 → 学习指令」。</p>
         </section>
         <section class="pane hidden" data-pane="skills">
-          <h4 class="set-group">Skill 列表</h4>
+          <h4 class="set-group">Skill</h4>
           <p class="hint" data-search="skill 技能 能力包 按需 展开">每个 Skill 是 <code>data/skills/&lt;id&gt;/SKILL.md</code>。平时只把「名称 + 一句话描述」放进提示词，任务对口时模型才调用 <code>skill.read</code> 读全文；正文只当文本用，不会执行脚本。</p>
-          <div id="skill-list" class="skill-list"></div>
 
-          <h4 class="set-group">编辑</h4>
-          <div id="skill-current" class="skill-meta">当前：新 Skill</div>
-          <div class="skill-actions">
-            <button id="skill-new" class="ghost">新建</button>
-            <button id="skill-save" class="ghost">保存</button>
-            <button id="skill-del" class="ghost">删除</button>
+          <div class="skill-wb">
+            <aside class="skill-side">
+              <div class="skill-side-top">
+                <input id="skill-search" class="field-input skill-search"
+                       placeholder="搜索名称 / 描述 / 关键词">
+                <button id="skill-new" class="primary skill-new-btn" type="button">新建</button>
+              </div>
+              <div id="skill-list" class="skill-list"></div>
+              <div class="skill-side-foot">
+                <span id="skill-count" class="skill-count"></span>
+                <button id="skill-open-dir" class="link-btn" type="button">打开目录</button>
+              </div>
+            </aside>
+
+            <section class="skill-main">
+              <div id="skill-empty" class="skill-empty">
+                从左边选一个 Skill 编辑，或点「新建」写一个。
+              </div>
+              <div id="skill-editor" class="skill-editor hidden">
+                <div class="skill-editor-head">
+                  <div class="skill-editor-title">
+                    <b id="skill-ed-name">新 Skill</b>
+                    <span id="skill-ed-state" class="skill-ed-state"></span>
+                  </div>
+                  <div class="skill-editor-actions">
+                    <button id="skill-del" class="ghost danger" type="button">删除</button>
+                    <button id="skill-save" class="primary" type="button">保存</button>
+                  </div>
+                </div>
+                <div id="skill-current" class="skill-meta"></div>
+                <label class="skill-field">
+                  <span>名称（列表与提示词里显示）</span>
+                  <input id="skill-name" class="field-input" maxlength="60" placeholder="如：数学老师">
+                </label>
+                <label class="skill-field">
+                  <span>一句话描述（决定模型什么时候展开它）</span>
+                  <input id="skill-desc" class="field-input"
+                         placeholder="如：讲题时先指出最核心的错因，再给一步可执行的练习">
+                </label>
+                <label class="skill-field">
+                  <span>关键词（逗号分隔，便于检索命中）</span>
+                  <input id="skill-keys" class="field-input" placeholder="如：数学, 错题, 讲解">
+                </label>
+                <label class="skill-field skill-field-body">
+                  <span>正文（Markdown，只在任务对口时展开给模型）</span>
+                  <textarea id="skill-body" class="ta" rows="14"
+                            placeholder="## 目标&#10;&#10;## 每轮必做&#10;1. ...&#10;&#10;## 禁止&#10;- ..."></textarea>
+                </label>
+              </div>
+            </section>
           </div>
-          <textarea id="skill-text" class="ta" rows="16"
-                    placeholder="---&#10;name: 数学老师&#10;description: 讲题时先指出最核心的错因，再给一步可执行的练习&#10;---&#10;&#10;## 每轮必做&#10;1. ..."></textarea>
-          <p class="hint" id="skill-dir"></p>
+        </section>
+        <section class="pane hidden" data-pane="agents">
+          <h4 class="set-group" data-search="子代理 代理 团队 只读 编排 delegate">子代理团队</h4>
+          <p class="hint">每个代理是一个 Markdown 文件（<code>data/agents/&lt;id&gt;.md</code>）：frontmatter 写
+            <code>name / description / tools / model / max_turns / permission</code>，正文是系统提示词。
+            默认只读；勾选「允许写文件」后可用 write_file / edit_file，每次写仍走审批与撤销。
+            保存后下一轮对话生效。主代理可用 <code>delegate</code> 派活，或用 <code>pipeline</code> 串行交接。</p>
+          <div class="preset-row">
+            <button id="agents-new" class="ghost" type="button">＋ 新建代理</button>
+            <button id="agents-refresh" class="ghost" type="button">刷新</button>
+          </div>
+          <h4 class="set-group" data-search="自动派发 自动规划 自动复核 suggest auto-plan auto-review">自动派发</h4>
+          <label class="check-row" data-search="自动派发 建议 路由 suggest">
+            <input type="checkbox" id="agent-auto-route">
+            在系统提示里给出派活建议（suggest）
+          </label>
+          <p class="hint" data-search="自动派发 建议 只读 次数">
+            系统提示会列出上面启用的代理与派活时机；连续多次只读还没派活时，提醒一次。
+            只影响「要不要派活」的判断，不替你执行任何操作。
+          </p>
+          <label class="check-row" data-search="自动规划 planner 计划 auto-plan">
+            <input type="checkbox" id="agent-auto-plan">
+            回合开始先跑 planner 做执行规划（auto-plan）
+          </label>
+          <p class="hint" data-search="自动规划 planner 计划 只读">
+            只对像「要动手」的任务触发（单文件小改、纯问答不跑），计划会注入本轮上下文，
+            由主代理用 update_plan 落成计划卡。planner 只读，不改文件。
+          </p>
+          <label class="check-row" data-search="自动复核 reviewer 审查 auto-review">
+            <input type="checkbox" id="agent-auto-review">
+            写操作后、收尾前自动派 reviewer 复核（auto-review）
+          </label>
+          <p class="hint" data-search="自动复核 reviewer 审查 成本">
+            本轮确实写过文件才触发，结论会回灌给主代理；更慢也更贵，默认关闭。
+          </p>
+          <label class="check-row" data-search="计划审批 plan review 计划卡 批准 挂起">
+            <input type="checkbox" id="agent-plan-review">
+            第一份计划先挂起，等你批准后再执行（plan review）
+          </label>
+          <p class="hint" data-search="计划审批 plan review 批准 修改步骤 超时">
+            默认开启：出现第一份计划时先弹审批卡，可以批准、提意见或逐条改步骤。
+            `/plan` 规划模式始终生效，不受这个开关影响；关闭后普通任务会直接开始执行。
+          </p>
+          <h4 class="set-group" data-search="脚本编排 workflow script wf.agent 子代理">脚本编排</h4>
+          <label class="check-row" data-search="脚本编排 workflow script wf.agent 子代理">
+            <input type="checkbox" id="agent-script-agents">
+            允许脚本调用子代理（wf.agent / wf.agents / wf.pipeline）
+          </label>
+          <p class="hint" data-search="脚本编排 workflow 子代理 审批 写权限">
+            脚本化工作流里可以按名字派活；写权限跟随代理定义，implementer / documenter
+            的每次写入仍走审批。关掉后脚本只能调工具与 DAG 工作流。
+          </p>
+          <label class="field-label" data-search="脚本编排 子代理 次数 上限">一段脚本最多调用几次子代理（0 = 不限）</label>
+          <input id="agent-script-agent-calls" class="field-input" type="number" min="0" step="1">
+          <h4 class="set-group" data-search="并行写隔离 冲突 write lock 写锁">并行写隔离</h4>
+          <label class="field-label" data-search="并行写隔离 冲突 严格 模式">同一批次重复写同一文件时</label>
+          <select id="agent-write-isolation" class="field-input">
+            <option value="serial">回灌提醒（推荐）</option>
+            <option value="strict">拒绝第二次写入</option>
+            <option value="off">不检测</option>
+          </select>
+          <p class="hint" data-search="并行写隔离 冲突 串行 严格">
+            所有写入本来就会串行执行；这里管的是「两个代理先后改同一文件」：
+            提醒模式只把「刚由谁改过」回灌给子代理，严格模式直接拒绝第二次写。
+          </p>
+          <label class="field-label" data-search="worktree 隔离 git 子代理 并行 回写 补丁">多写代理的 worktree 隔离（仅 git 沙箱）</label>
+          <select id="agent-worktree-isolation" class="field-input">
+            <option value="auto">≥2 个可写代理时自动隔离（推荐）</option>
+            <option value="always">所有可写代理都隔离</option>
+            <option value="off">关闭</option>
+          </select>
+          <p class="hint" data-search="worktree git 隔离 补丁 冲突 回写 撤销">
+            同一批多个可写子代理各拿一份本地 git worktree（data/worktrees/），
+            各自改各自的副本，互不覆盖；跑完产出补丁，经审批后回写主沙箱，
+            并登记一条可撤销记录。沙箱不是 git 仓库时自动退回上面的「串行写 + 冲突提示」。
+          </p>
+          <label class="field-label" data-search="还原质量 image_compare 参考 对照 闸门 分数">参考物 / 产物的还原质量闸门</label>
+          <select id="agent-fidelity-gate" class="field-input">
+            <option value="nudge">低于阈值时提醒一次（推荐）</option>
+            <option value="strict">未达标不允许收尾</option>
+            <option value="off">关闭</option>
+          </select>
+          <label class="field-label" data-search="还原质量 阈值 分数 总分">对照总分阈值（0–100，0 = 不限）</label>
+          <input id="agent-fidelity-min" class="field-input" type="number" min="0" max="100" step="1">
+          <p class="hint" data-search="还原质量 image_compare 参考 对照">
+            只在本轮跑过 image_compare（参考图 vs 产物图）且总分低于阈值时生效；
+            对任务领域没有假设。模型可以在 finish 里用 quality_waiver 写明为什么不再迭代。
+          </p>
+          <label class="check-row" data-search="原生视觉 图片 附图 see_image 多模态">
+            <input type="checkbox" id="agent-native-vision">
+            <span>看图时把图片直接附给主模型（原生视觉）</span>
+          </label>
+          <p class="hint" data-search="原生视觉 图片 附图 文字描述">
+            开启后 see_image 会把沙箱图片（缩到 1024）附到本轮上下文，模型直接看像素；
+            本轮结束释放。关闭则只返回文字描述。需要聊天模型支持图片输入。
+          </p>
+          <div id="agents-list" class="rule-list"></div>
+          <div id="agents-editor" class="hidden">
+            <label class="field-label">id（文件名，只允许字母 / 数字 / _ / -）</label>
+            <div class="preset-row">
+              <input id="agents-id" class="field-input" type="text" maxlength="32">
+              <button id="agents-export" class="ghost" type="button">导出 .md</button>
+              <button id="agents-import-btn" class="ghost" type="button">导入 .md</button>
+              <input id="agents-import" type="file" accept=".md,text/markdown" class="hidden">
+            </div>
+            <label class="field-label">工具（只读；勾选写权限后可再勾写文件）</label>
+            <div id="agents-tools" class="agent-tools"></div>
+            <label class="check-row">
+              <input type="checkbox" id="agents-write">
+              允许写文件（permission: write，每次写仍走审批与撤销）
+            </label>
+            <label class="field-label">模型（留空 = 用探索模型 / 主聊天模型）</label>
+            <input id="agents-model" class="field-input" list="agents-model-list"
+                   placeholder="例如 deepseek-flash">
+            <datalist id="agents-model-list"></datalist>
+            <label class="field-label">定义（frontmatter + 提示词）</label>
+            <textarea id="agents-text" class="ta" rows="14"
+                      placeholder="---&#10;name: 我的审查员&#10;description: 只读代码审查&#10;tools: read_file, search_code&#10;model:&#10;max_turns: 6&#10;---&#10;你是……"></textarea>
+            <div class="preset-row">
+              <button id="agents-save" class="primary" type="button">保存</button>
+              <button id="agents-reset" class="ghost" type="button">恢复内置 / 删除</button>
+            </div>
+            <div id="agents-msg" class="hint"></div>
+          </div>
         </section>
         <section class="pane hidden" data-pane="appearance">
           <h4 class="set-group" data-search="主题 深色 浅色 外观">主题</h4>
@@ -1484,6 +1815,35 @@
           <button id="app-backup" class="ghost" type="button">备份与恢复…</button>
         </div>
 
+        <h4 class="set-group" data-search="轨迹 trajectory 事件 账本 记录">轨迹</h4>
+        <label class="check-row" data-search="轨迹 trajectory 记录 事件">
+          <input type="checkbox" id="traj-enabled">
+          记录轨迹（系统提示 / 上下文 / 思考 / 工具 / 子代理）
+        </label>
+        <label class="field-label" data-search="轨迹 字符 上限 截断">单字段保留字符数（0 = 不限）</label>
+        <input id="traj-max-field" class="field-input" type="number" min="0" step="10000">
+        <p class="hint">轨迹只追加、不进入模型上下文；完整工具结果仍由工具 trace 保存。
+          关闭后不再写入新记录，已有轨迹仍可查看。</p>
+
+        <h4 class="set-group" data-search="代码库 索引 语义 embedding codeindex 全仓">代码库语义索引</h4>
+        <label class="check-row" data-search="代码库 索引 语义 开关">
+          <input type="checkbox" id="codeindex-enabled">
+          启用全仓语义索引（本地 embedding + 关键词混合检索）
+        </label>
+        <div class="preset-row">
+          <button id="codeindex-rebuild" class="ghost" type="button">重建索引</button>
+          <button id="codeindex-refresh" class="ghost" type="button">刷新状态</button>
+        </div>
+        <p id="codeindex-status" class="hint">打开会话后可查看当前索引状态。</p>
+        <label class="field-label" data-search="代码库 索引 文件 上限">最多索引文件数（0 = 不限）</label>
+        <input id="codeindex-max-files" class="field-input" type="number" min="0" step="1000">
+        <label class="field-label" data-search="代码库 索引 块 上限">最多索引块数（0 = 不限）</label>
+        <input id="codeindex-max-chunks" class="field-input" type="number" min="0" step="1000">
+        <label class="field-label" data-search="代码库 索引 单文件 大小">单文件大小上限（KB）</label>
+        <input id="codeindex-max-file-kb" class="field-input" type="number" min="16" step="64">
+        <p class="hint">默认不限文件 / 块数；超大仓库可收紧上限。索引在后台增量构建，
+          遵守 .gitignore 与常见依赖目录，不参与模型上下文。</p>
+
         <h4 class="set-group" data-search="右键菜单 资源管理器 打开 文件夹 注册 移除">资源管理器右键菜单</h4>
         <p class="hint">注册后，右键文件夹、或在文件夹空白处右键，会出现「用 Galgame Monster 打开」：用该目录新建会话并进入 IDE（已有同目录会话时复用最近的一条）。只写当前用户注册表（HKCU），不需要管理员权限；Windows 11 默认把它折叠在「显示更多选项」里。</p>
         <div class="preset-row">
@@ -1495,7 +1855,7 @@
         <button id="app-reset-all" class="ghost wide danger" type="button">恢复所有设置为默认</button>
       </section>
       <section class="pane hidden" data-pane="help">
-        <p class="hint">下面说明各项功能的实际作用与区别。点击标题可展开/收起；也可用左上角搜索框直接定位设置项。快捷键的完整清单见左侧「快捷键」。</p>
+        <div id="help-head" class="help-head"></div>
 
         <h4 class="set-group">模型接入</h4>
 
@@ -1555,9 +1915,11 @@
             <p>估算当前会话离模型上下文上限还有多远，避免"聊到一半突然报错"。相关设置项在「上下文与压缩」。</p>
             <ul>
               <li><strong>两个数字是什么</strong>：<strong>模型上下文窗口</strong>是模型一次能装的 token 总量（输入 + 输出都算）；<strong>留给 AI 回答</strong>是从窗口里先划给本次回答的空间，聊天历史最多用到「窗口 − 预留」。预留不是 <code>max_tokens</code>，不会硬性截断回答，只会让压缩更早发生。</li>
+              <li><strong>窗口填 0 = 不限</strong>：不猜模型窗口、不显示圆环、不按窗口触发压缩，也不按窗口夹输出上限；只有请求体字符上限（默认 50 万字符）兜底。</li>
               <li><strong>怎么看</strong>：最新一条回复的右下角有一个小圆环，右侧是占用百分比，环的颜色随剩余量转黄 / 红。</li>
               <li><strong>点圆环</strong>：直接执行「压缩历史」——把较早的对话总结成摘要，确认后才会执行；原文不会被删除。</li>
               <li><strong>点百分比</strong>：打开「上下文与压缩」详情，可看各分项占用与摘要全文，或「恢复原文」撤销压缩。</li>
+              <li><strong>「token 明细」页签</strong>：同一弹窗的第二个页签——逐轮列出每次调用的输入 / 输出 / 状态 / 首包耗时与「输入构成」（规则 / 记忆 / 工具结果 / 历史各占多少）；上方还有总输入、缓存命中、末轮输入、平均每轮输入与推理输出。</li>
               <li><strong>单位换算</strong>（按本项目的估算口径）：1 个汉字 / 中文标点 ≈ 0.6 token，1 个英文字符 ≈ 0.3 token。即 1000 token ≈ 1700 汉字；128000 token ≈ 21 万汉字；1000000 token ≈ 170 万汉字。填写时<strong>只写数字</strong>：128K 写 <code>128000</code>，1M 写 <code>1000000</code>。</li>
               <li><strong>已用</strong> ≈ 本地估算 × 校准系数；校准系数取最近一次接口返回的真实 <code>prompt_tokens</code> ÷ 当时估算。估算范围包含系统提示、摘要、对话正文、附件正文与图片描述。</li>
               <li><strong>剩余</strong> = 上限 − 已用；剩余低于上限 10% / 5% 时圆环转黄 / 红并弹出提醒。</li>
@@ -1724,6 +2086,7 @@
               <li><strong>Solo</strong>：以对话为主。</li>
               <li><strong>IDE</strong>：VS Code 风格布局 —— 最左<strong>活动栏</strong>（资源管理器 / 搜索 / 在 VS Code 打开）、<strong>侧边栏文件树</strong>、中间<strong>多标签编辑器</strong>、底部<strong>状态栏</strong>（路径 / 编码 / 行列 / 语言），右侧仍是窄栏对话。工作区根目录 = <strong>当前会话的沙箱</strong>，切会话会自动换。</li>
               <li><strong>编辑器</strong>：内置 <strong>Monaco</strong>（VS Code 同款，<strong>本地内置、离线可用</strong>）——语法高亮、多光标、查找替换、MiniMap、代码折叠。</li>
+              <li><strong>AI Tab 补全</strong>：在编辑器里停一下，模型会在光标处给出补全；<code>Tab</code> 采纳、<code>Esc</code> 收起、<code>Alt+\</code> 手动触发。默认开启，但需要先在「模型接入 → 轻量任务的模型」填一个模型才会真正请求（避免用主模型高频烧 token）；一次最多 8 行、不跨文件。</li>
               <li><strong>编辑器主题</strong>：设置 →「主题与外观」里的 <strong>IDE 主题</strong>是独立于界面主题的一套配置（<strong>跟随 VS Code</strong> / VSCode Dark Modern / Light Modern / Dark+ / Light+、Trae Dark / Light / Deep Blue，或「跟随界面主题」），只在 IDE 模式生效，界面与编辑器配色一起换。</li>
               <li><strong>空白字符</strong>：同页「空白字符可视化」可选 关闭 / 仅选区内 / 仅行尾 / 词之间 / 全部（默认「全部」）；空格显示为浅灰中点 <code>·</code>、制表符为 <code>→</code>。</li>
               <li><strong>文件管理区收起</strong>：点活动栏里<strong>当前已激活</strong>的图标即可收起右侧的视图区（再点任意图标展开），或按 <code>Ctrl+B</code> 切换；收起状态会被记住。命令面板里也有「收起 / 展开文件管理区」。</li>
@@ -1820,6 +2183,7 @@
             <ul>
               <li><strong>三种触发</strong>：① 计划里还有没做完的步骤；② 没有计划，但结尾在问「要不要 / 需要我」；③ 是开发型任务、既没建计划也没动手，催一次让它先列计划。</li>
               <li><strong>什么时候放行</strong>：计划全部完成（含 blocked），或它明确说了「已完成 / 改完了」，就直接结束，不会硬拖。</li>
+              <li><strong>显式收尾</strong>：模型可以调用 <code>finish</code> 声明本轮完成（可带摘要与未完成说明）；计划里还有未完成的步骤时，这个声明不会被采纳，会继续跑。</li>
               <li><strong>次数上限</strong>：默认 3 次，可在工具条的 Agent 菜单或「设置 → Agent 执行」里改成关闭 / 3 / 5。到上限就正常停下，等你决定。</li>
               <li><strong>为什么不再问「要不要继续」</strong>：提问通道收紧了——实现细节、命名、先改哪个文件都由它自己定；真要你决策时会弹「提问卡」，而不是在正文里问一句然后停下。</li>
             </ul>
@@ -1950,14 +2314,15 @@
               <li><strong>GAL</strong>：<code>空格</code> / <code>Enter</code> 推进、按住 <code>Ctrl</code> 快进、<code>A</code> 自动播放、<code>↑</code> 打开回顾、<code>Esc</code> 关面板。</li>
               <li><strong>设置</strong>：<code>Esc</code> 关闭、<code>Ctrl+S</code> 保存、<code>←</code> / <code>→</code> 切分类；左上角搜索框可直接搜「快捷键」跳过来。</li>
               <li><strong>IDE</strong>：<code>Ctrl+S</code> 保存、<code>Ctrl+P</code> 打开文件、<code>Ctrl+Shift+P</code> 命令面板。</li>
+              <li><strong>两个「?」别混</strong>：键盘按 <code>?</code>（<code>Shift+/</code>）打开<strong>快捷键清单</strong>（可改键）；界面右下角的 <code>?</code> 按钮打开的是<strong>本页「功能说明」</strong>。</li>
             </ul>
           </div>
         </details>
 
-        <details class="help-sec" data-search="用量 统计 token 折线图">
+        <details class="help-sec" data-search="用量 统计 token 折线图 柱状图">
           <summary>用量统计（侧栏「用量统计」）</summary>
           <div class="help-body">
-            <p>每次回复下方会显示本次消耗的 token；「用量统计」里可按近 7 天 / 近 30 天 / 近 12 个月查看「按模型 / 按来源 / 按日或月」的明细，并用折线图展示趋势。<strong>它只统计本程序自己发起的调用</strong>（对话 + 角色设定生成 + 剧本生成 / 续幕 + 剧情节点判定），不含账户在其他客户端的消耗。</p>
+            <p>每次回复下方会显示本次消耗的 token；「用量统计」里可按近 7 天 / 近 30 天 / 近 12 个月查看。顶部 7 张卡片给出总量、输入 / 输出占比、缓存命中率、平均单次、峰值与活跃天数；两张图分别是「按模型的趋势折线」和「输入 / 输出堆叠柱 + 调用次数折线（双 Y 轴）」；下方按 API 端点 / 接入通道 / 模型 / 来源 / 日或月列出明细（带占比条）与逐次调用记录。<strong>它只统计本程序自己发起的调用</strong>（对话 + 角色设定生成 + 剧本生成 / 续幕 + 剧情节点判定），不含账户在其他客户端的消耗。</p>
           </div>
         </details>
 
@@ -2004,6 +2369,7 @@
       </div>
     </div>
     <div class="review-body">
+      <div id="review-hunk-bar" class="hunk-bar hidden"></div>
       <div id="review-diff" class="review-editor"></div>
     </div>
   </div>
@@ -2027,32 +2393,11 @@
         <button id="usage-balance-refresh" class="ctx-btn" type="button" title="重新查询账户余额">刷新</button>
       </div>
       <div id="usage-cards" class="usage-cards"></div>
+      <h3 id="usage-chart-title" class="usage-h3">趋势（按模型）</h3>
       <div id="usage-chart" class="usage-chart"></div>
+      <h3 id="usage-bars-title" class="usage-h3">输入 / 输出与调用次数</h3>
+      <div id="usage-bars" class="usage-chart"></div>
       <div id="usage-tables" class="usage-tables"></div>
-    </div>
-  </div>
-</div>
-
-<!-- 学习观测：observations 表的用户可见入口 -->
-<div id="observe-modal" class="modal hidden">
-  <div class="modal-card wide-card">
-    <div class="modal-head">
-      <div class="modal-tabs">
-        <button class="tab active" data-observe-days="7">近 7 天</button>
-        <button class="tab" data-observe-days="30">近 30 天</button>
-        <button class="tab" data-observe-days="90">近 90 天</button>
-      </div>
-      <button id="btn-close-observe" class="modal-close" title="关闭">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="observe-filterbar">
-        <span class="hint">对话、数学竞技场、模拟卷产生的学习行为都记在这里；点某一项可只看该学科。</span>
-        <button id="observe-clear-filter" class="ctx-btn hidden" type="button">查看全部</button>
-      </div>
-      <div id="observe-cards" class="usage-cards"></div>
-      <div id="observe-groups" class="observe-groups"></div>
-      <h3 class="observe-h3">明细</h3>
-      <div id="observe-items" class="observe-items"></div>
     </div>
   </div>
 </div>
@@ -2086,7 +2431,7 @@
     <div class="modal-body">
       <div class="ctx-tabs" role="tablist">
         <button class="ctx-tab active" type="button" data-ctx-tab="usage">占用明细</button>
-        <button class="ctx-tab" type="button" data-ctx-tab="input">输入明细</button>
+        <button class="ctx-tab" type="button" data-ctx-tab="input">token 明细</button>
       </div>
       <div id="ctx-pane-usage">
         <p id="ctx-detail-total" class="ctx-detail-total"></p>
@@ -2173,6 +2518,7 @@
           <summary>本会话使用的知识库</summary>
           <div class="kb-bind">
           <div id="kb-bind-list" class="kb-bind-list"></div>
+          <div id="kb-token-est" class="kb-token-est hidden"></div>
           <p class="hint">AI 会<b>优先写入上面勾选</b>的知识库（各库还需开启「允许 AI 修改本库」）；未勾选任何库时，AI 只写本会话记忆。</p>
           <p class="hint">侧栏「知识库」按钮右上角的<strong>红点</strong>表示本会话还没绑定任何通用库；看过这一栏后红点不再重复出现，之后可随时回来勾选。</p>
           <p class="hint kb-ai-target" id="kb-ai-target"></p>
@@ -2180,10 +2526,12 @@
           <div id="kb-use-profile-row">
             <label class="check-row" data-search="用户画像 读取 开关 会话"><input type="checkbox" id="sess-use-profile"> 读取用户画像（本会话）</label>
             <p class="hint">默认开启。关闭后本会话的提示词里不再出现画像条目（检索段与记忆工具说明都不再列出）；画像内容仍保留在「用户画像」知识库，可随时打开。</p>
+            <div id="mem-est-profile" class="kb-token-est hidden"></div>
           </div>
           <div id="kb-use-memory-row">
             <label class="check-row" data-search="记忆 知识库 读取 开关 会话"><input type="checkbox" id="sess-use-memory"> 读取会话记忆与知识库（本会话）</label>
             <p class="hint">默认开启。关闭后本会话的提示词里不再注入会话记忆、绑定的知识库与统一记忆检索（也不再列出记忆工具条目）；内容仍保留，可随时打开。</p>
+            <div id="mem-est-session" class="kb-token-est hidden"></div>
           </div>
           </div>
         </details>
@@ -2255,6 +2603,7 @@
           <label class="check-row"><input type="checkbox" id="kd-locked"> 锁定（AI 不可修改）</label>
           <div class="kb-node-btns">
             <button id="kd-save" class="primary">应用</button>
+            <button id="kd-origin" class="ghost hidden" title="回到写下这条记忆的那条回复">查看原话</button>
             <button id="kd-del" class="ghost">删除节点</button>
           </div>
         </div>
@@ -2268,6 +2617,8 @@
             <option value="1">单向 →（起点到终点）</option>
             <option value="0">双向 ⇄（互相）</option>
           </select>
+          <textarea id="ke-fact" class="ta" rows="2"
+            placeholder="为什么成立：写一句话说明依据或具体表现（必填）"></textarea>
           <div class="kb-node-btns">
             <button id="ke-add" class="primary">添加连线</button>
             <button id="ke-cancel" class="ghost">取消</button>
@@ -2492,9 +2843,9 @@
   </div>
 </div>
 
-<!-- 快捷键实时提示（默认折叠为右下角小图标；展开后随模式与状态实时变化） -->
+<!-- 右下角 ? 按钮：点开「设置 → 功能说明」 -->
 <div id="hk-hud" class="hk-hud collapsed">
-  <button id="hk-hud-toggle" class="hk-hud-toggle" type="button" aria-label="快捷键提示">
+  <button id="hk-hud-toggle" class="hk-hud-toggle" type="button" title="打开功能说明" aria-label="打开功能说明">
     <svg class="ic"><use href="#i-question"/></svg>
   </button>
   <div id="hk-hud-list" class="hk-hud-list"></div>
@@ -2530,6 +2881,56 @@
         onerror="__fb(this,'https://cdn.staticfile.org/KaTeX/0.16.9/katex.min.js','katex')"></script>
 <!-- highlight / echarts / vis-network 移到 window.load 之后空闲加载（见 head 里的 loadLazyLib），
      需要时也可直接调用 window.loadLazyLib('echarts') -->
+<!-- 轨迹：模型视角的事件账本（只读） -->
+<div id="trajectory-modal" class="traj-modal hidden" role="dialog" aria-modal="true" aria-label="轨迹">
+  <div class="traj-shell">
+    <header class="traj-head">
+      <div class="traj-title"><b>轨迹</b><span id="traj-sub"></span></div>
+      <div class="traj-actions">
+        <label class="traj-check" title="弹窗打开时自动刷新最新记录">
+          <input type="checkbox" id="traj-follow" checked> 跟随最新
+        </label>
+        <button id="traj-refresh" class="ghost" type="button" title="重新读取">刷新</button>
+        <div class="traj-menu">
+          <button id="traj-export" class="ghost" type="button" title="导出 / 复制">导出 ▾</button>
+          <div id="traj-export-menu" class="traj-menu-pop hidden">
+            <button type="button" data-fmt="json">导出 JSON（全量）</button>
+            <button type="button" data-fmt="md">导出 Markdown（当前筛选）</button>
+            <button type="button" data-fmt="copy">复制当前筛选结果</button>
+          </div>
+        </div>
+        <button id="traj-close" class="ghost" type="button" title="关闭（Esc）">✕</button>
+      </div>
+    </header>
+    <div class="traj-toolbar">
+      <div class="traj-searchwrap">
+        <input id="traj-search" class="traj-search" type="search" autocomplete="off"
+               placeholder="搜索轨迹：工具名 / 文件 / 文本…（/ 聚焦）">
+        <span id="traj-hits" class="traj-hits"></span>
+        <button id="traj-search-clear" class="traj-x hidden" type="button" title="清除搜索">✕</button>
+      </div>
+      <select id="traj-tool" class="traj-select" title="按工具名筛选">
+        <option value="">全部工具</option>
+      </select>
+      <div id="traj-filters" class="traj-filters"></div>
+      <label class="traj-check"><input type="checkbox" id="traj-errors"> 仅失败</label>
+      <button id="traj-fail-next" class="ghost traj-mini" type="button" title="跳到下一个失败（n）">下一个失败</button>
+      <button id="traj-fold" class="ghost traj-mini" type="button" title="折叠 / 展开全部轮次">折叠全部</button>
+    </div>
+    <div id="traj-timeline" class="traj-timeline"></div>
+    <div class="traj-main">
+      <div id="traj-list" class="traj-list"></div>
+      <aside id="traj-inspector" class="traj-inspector">
+        <div class="traj-empty">选择一条记录查看输入 / 输出 / 思考 / 耗时 / Schema。</div>
+      </aside>
+    </div>
+    <footer class="traj-foot">
+      <span>↑↓ 选择 · / 搜索 · n 下一个失败 · Esc 关闭</span>
+      <span id="traj-foot-stat"></span>
+    </footer>
+  </div>
+</div>
+
 <!-- 前端逻辑按功能拆分，按顺序加载（普通脚本，共享全局作用域；最后一个负责启动 init） -->
 <script src="/static/core.js"></script>
 <script src="/static/markdown.js"></script>
@@ -2539,6 +2940,8 @@
 <script src="/static/settings.js"></script>
 <script src="/static/observe.js"></script>
 <script src="/static/skills.js"></script>
+<script src="/static/agents.js"></script>
+<script src="/static/trajectory.js"></script>
 <script src="/static/gal/gal-core.js"></script>
 <script src="/static/gal/gal-assets.js"></script>
 <script src="/static/gal/gal-stats.js"></script>
@@ -2569,7 +2972,9 @@
 <script src="/static/hall-math-exam.js"></script>
 <script src="/static/hall-dojo.js"></script>
 <script src="/static/hall-gal.js"></script>
+<script src="/static/hall-observe.js"></script>
 <script src="/static/hall-interview.js"></script>
+<script src="/static/hall-plugins.js"></script>
 <script src="/static/work.js"></script>
 <script src="/static/init.js"></script>
 </body>

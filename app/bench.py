@@ -13,6 +13,7 @@
 """
 import json
 import os
+import platform
 import random
 import re
 import shutil
@@ -23,7 +24,7 @@ import time
 from contextlib import ExitStack
 from unittest.mock import patch
 
-from app import agent, llm
+from app import agent, llm, store
 from app.config import get_api_conf, load_config
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +35,8 @@ RUNS_DIR = os.path.join(ROOT, "data", "bench", "runs")
 TEXT_LIMIT = 2 * 1024 * 1024        # 断言读文件的上限
 TOOL_RESULT_CLIP = 8000             # 回灌给模型的单条工具结果上限
 MAX_CALLS_PER_ROUND = 8
+# 评测固定温度：0 不是绝对确定（服务商/模型仍可能有波动），所以还要靠 repeat 看区间
+BENCH_TEMPERATURE = 0.0
 
 # 消融：只影响「模型能看到哪些工具」，不改产品配置
 ABLATION_TOOLS = {
@@ -45,6 +48,7 @@ ABLATION_TOOLS = {
     "no_acceptance": {"acceptance", "update_plan", "research_note"},
     "no_subagent": {"explore", "explore_followup", "explore_status",
                     "explore_result", "explore_cancel"},
+    "no_delegate": {"delegate"},
 }
 ABLATIONS = tuple(ABLATION_TOOLS) + ("no_mcp", "no_hooks")
 
@@ -161,11 +165,16 @@ def _system_prompt(workdir):
 
 def _schemas(ablations):
     disabled = ablation_disable_tools(ablations)
+    # 消融按旧工具名配置；工具已按 action 合并，命中任一 action 就整组移除
+    from app import tool_meta
+    disabled_meta = {m for m, spec in tool_meta.META.items()
+                     if any(legacy in disabled
+                            for legacy, _r, _m in spec["actions"].values())}
     out = []
     for item in agent.native_tool_schemas(agent_on=True, search_ready=True,
                                           cap_domains=set()):
         name = str((item.get("function") or {}).get("name") or "")
-        if name and name not in disabled:
+        if name and name not in disabled and name not in disabled_meta:
             out.append(item)
     return out
 
@@ -184,7 +193,7 @@ def _ablation_stack(ablations, cfg):
 
 
 def run_task(task, model="", cfg=None, ablations=(), max_turns=None, timeout=None,
-             keep=False, workdir=None):
+             keep=False, workdir=None, team=False):
     """跑一个任务；返回结果 dict（可直接 JSON 序列化）。"""
     task = task if isinstance(task, dict) else get_task(task)
     if not task:
@@ -198,7 +207,9 @@ def run_task(task, model="", cfg=None, ablations=(), max_turns=None, timeout=Non
     model = str(model or api_model or "")
     started = time.time()
     base = {"task": tid, "title": task.get("title") or tid,
-            "model": model, "ablations": list(ablations or []),
+            "model": model, "temperature": BENCH_TEMPERATURE,
+            "team": bool(team),
+            "ablations": list(ablations or []),
             "status": "error", "ok": False, "checks": [], "turns": 0,
             "tool_calls": 0, "usage": {}, "ms": 0, "final": "", "tools": []}
     if not api_key:
@@ -207,11 +218,15 @@ def run_task(task, model="", cfg=None, ablations=(), max_turns=None, timeout=Non
     tmp = workdir or tempfile.mkdtemp(prefix="gm_bench_%s_" % (tid or "task"))
     _prepare_workdir(task, tmp)
     caps = agent.limits(cfg)
+    _prompt = str(task.get("prompt") or "")
+    if team:
+        _prompt += ("\n\n（团队模式）独立的子任务优先用 delegate 派给 "
+                    "reviewer / researcher / implementer；最后自己汇总并验收。")
     messages = [
         {"role": "system", "content": _system_prompt(tmp)},
         {"role": "user", "content":
             "工作目录（沙箱根）：%s\n工具里的 path 请用相对路径。\n\n任务：\n%s"
-            % (tmp, str(task.get("prompt") or ""))},
+            % (tmp, _prompt)},
     ]
     tools_log, turns, final, error = [], 0, "", ""
     usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -227,6 +242,7 @@ def run_task(task, model="", cfg=None, ablations=(), max_turns=None, timeout=Non
                     break
                 rr = llm.stream_chat(
                     api_key, api_url, model, messages, tools=schemas,
+                    temperature=BENCH_TEMPERATURE,
                     timeout=(10, max(5, min(120, int(left)))))
                 usage = rr.get("usage") or {}
                 for k in usage_total:
@@ -252,8 +268,28 @@ def run_task(task, model="", cfg=None, ablations=(), max_turns=None, timeout=Non
                     cargs = cargs if isinstance(cargs, dict) else {}
                     t0 = time.time()
                     try:
-                        t_text, _undo, is_write = agent.run_tool(
-                            tmp, name, cargs, caps=caps)
+                        if name == "delegate":
+                            # 评测里没有审批：写入直接落到临时沙箱
+                            from app import delegate as delegate_mod
+
+                            def _bench_write(n, a):
+                                _t, _u, _w = agent.run_tool(tmp, n, a, caps=caps)
+                                return (not str(_t).lstrip().startswith("❌"), str(_t))
+
+                            _dctx = {
+                                "sandbox": tmp, "api_key": api_key,
+                                "api_url": api_url, "model": model,
+                                "emit": lambda o: None, "budget": 0,
+                                "verify_evidence": False,
+                                "write_tool": _bench_write,
+                            }
+                            _dr = delegate_mod.run(cargs, _dctx)
+                            t_text = _dr.get("text") or (
+                                "❌ " + (_dr.get("error") or "delegate 失败"))
+                            is_write = False
+                        else:
+                            t_text, _undo, is_write = agent.run_tool(
+                                tmp, name, cargs, caps=caps)
                     except Exception as e:       # noqa: BLE001  单个工具失败不终止任务
                         t_text, is_write = "❌ 工具执行异常：%s" % e, False
                     t_text = str(t_text)
@@ -499,6 +535,37 @@ def evaluate(task, workdir, result):
 
 # ------------------------------------------------------------------ 汇总 / 落盘
 
+def env_info(meta=None):
+    """可复现实验的环境快照（不含 API Key）。每次 run 都写进 env.json。"""
+    info = {
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "temperature": BENCH_TEMPERATURE,
+        "cwd": ROOT,
+    }
+    try:
+        info["app_version"] = store.APP_VERSION
+    except Exception:                        # noqa: BLE001  版本取不到不影响评测
+        pass
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            info["git_commit"] = out.stdout.strip()
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            info["git_dirty"] = bool(out.stdout.strip())
+    except Exception:                        # noqa: BLE001  没装 git 也继续
+        pass
+    m = dict(meta or {})
+    for k in ("model", "repeat", "ablations", "run_id"):
+        if k in m:
+            info[k] = m[k]
+    return info
+
+
 def summarize(results, meta=None):
     results = [r for r in (results or []) if isinstance(r, dict)]
     total = len(results)
@@ -515,6 +582,20 @@ def summarize(results, meta=None):
             g["passed"] += 1
     for g in by_ablation.values():
         g["pass_rate"] = round(g["passed"] / g["total"], 4) if g["total"] else 0.0
+    # 按任务聚合：重复跑时看「几次里过几次」，比单看总通过率更能暴露不稳定
+    by_task = {}
+    for r in runnable:
+        key = str(r.get("task") or "?")
+        g = by_task.setdefault(key, {"task": key, "attempts": 0, "passed": 0,
+                                     "tokens": 0, "ms": 0, "statuses": []})
+        g["attempts"] += 1
+        g["tokens"] += int((r.get("usage") or {}).get("total_tokens") or 0)
+        g["ms"] += int(r.get("ms") or 0)
+        g["statuses"].append(r.get("status") or "")
+        if r.get("ok"):
+            g["passed"] += 1
+    for g in by_task.values():
+        g["pass_rate"] = round(g["passed"] / g["attempts"], 4) if g["attempts"] else 0.0
     return {
         "meta": dict(meta or {}),
         "total": total,
@@ -526,6 +607,7 @@ def summarize(results, meta=None):
                       for r in runnable),
         "ms": sum(int(r.get("ms") or 0) for r in runnable),
         "by_ablation": by_ablation,
+        "by_task": by_task,
         "tasks": [{
             "task": r.get("task"), "status": r.get("status"), "ok": bool(r.get("ok")),
             "turns": r.get("turns"), "tool_calls": r.get("tool_calls"),
@@ -542,11 +624,25 @@ def save_run(results, meta=None, root=None):
     run_id = str((meta or {}).get("run_id") or time.strftime("%Y%m%d-%H%M%S"))
     d = os.path.join(root or RUNS_DIR, run_id)
     os.makedirs(d, exist_ok=True)
+    # 同一任务重复跑时不能互相覆盖：第一次 tid.json，之后 tid.2.json / tid.3.json
+    counts = {}
     for r in results or []:
         tid = str(r.get("task") or "task")
-        with open(os.path.join(d, tid + ".json"), "w", encoding="utf-8") as f:
+        counts[tid] = counts.get(tid, 0) + 1
+        n = counts[tid]
+        name = tid + (".json" if n == 1 else ".%d.json" % n)
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
             json.dump(r, f, ensure_ascii=False, indent=2)
-    summary = summarize(results, dict(meta or {}, run_id=run_id))
+    meta = dict(meta or {}, run_id=run_id)
+    # CLI 没显式传 --model 时，从实际结果回填，避免汇总里模型为空
+    if not meta.get("model"):
+        first_model = next((r.get("model") for r in (results or []) if r.get("model")), "")
+        if first_model:
+            meta["model"] = first_model
+    env = env_info(meta)
+    with open(os.path.join(d, "env.json"), "w", encoding="utf-8") as f:
+        json.dump(env, f, ensure_ascii=False, indent=2)
+    summary = summarize(results, meta)
     with open(os.path.join(d, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     with open(os.path.join(d, "summary.md"), "w", encoding="utf-8") as f:
@@ -555,15 +651,29 @@ def save_run(results, meta=None, root=None):
 
 
 def _summary_md(summary):
-    lines = ["# 评测结果 %s" % (summary.get("meta") or {}).get("run_id", ""), "",
-             "- 模型：%s" % (summary.get("meta") or {}).get("model", ""),
+    meta = summary.get("meta") or {}
+    lines = ["# 评测结果 %s" % meta.get("run_id", ""), "",
+             "- 模型：%s" % meta.get("model", ""),
+             "- 温度：%s · 重复：%s 次" % (BENCH_TEMPERATURE,
+                                         meta.get("repeat", 1)),
              "- 通过：%d / %d（%s）" % (summary.get("passed", 0),
                                        summary.get("runnable", 0),
                                        summary.get("pass_rate")),
              "- token：%d · 耗时：%.1fs" % (summary.get("tokens", 0),
-                                            (summary.get("ms", 0) or 0) / 1000.0),
-             "", "| 任务 | 结果 | 轮次 | 工具 | token | 未通过项 |",
-             "|---|---|---|---|---|---|"]
+                                            (summary.get("ms", 0) or 0) / 1000.0)]
+    by_task = summary.get("by_task") or {}
+    if by_task:
+        lines += ["", "## 按任务（含重复）", "",
+                  "| 任务 | 通过 | 次数 | 通过率 | token |",
+                  "|---|---|---|---|---|"]
+        for key in sorted(by_task):
+            g = by_task[key]
+            lines.append("| %s | %d | %d | %s | %d |"
+                         % (key, g["passed"], g["attempts"],
+                            g["pass_rate"], g["tokens"]))
+    lines += ["", "## 每次运行", "",
+              "| 任务 | 结果 | 轮次 | 工具 | token | 未通过项 |",
+              "|---|---|---|---|---|---|"]
     for t in summary.get("tasks") or []:
         lines.append("| %s | %s | %s | %s | %s | %s |" % (
             t.get("task"), "✓" if t.get("ok") else t.get("status"),

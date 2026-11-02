@@ -14,7 +14,7 @@ import time
 
 from app.config import (MAX_RESERVE, get_api_conf, load_config,
                         model_context_limit)
-from app.profile import load_profile
+from app.profile import load_profile, manual_block
 from app.sessions import (MAX_COMPRESS_MARKS, compress_marks_for, find_session,
                           invalidate_compression, load_sessions, save_sessions,
                           trim_compress_marks)
@@ -75,15 +75,16 @@ def context_limits(model=""):
     try:
         limit = int(model_context_limit(model, cfg))
     except (TypeError, ValueError):
-        limit = 128000
+        limit = 0
+    if limit <= 0:
+        # 不限窗口（设置里没填）：不按比例算预算，压缩逻辑全部不触发
+        return 0, 0
     _res_raw = cfg.get("chat_reserve_output")
     try:
         # 0 是合法值（不预留），不能用 `or 默认值` 把它吃掉
         reserve = 16384 if _res_raw is None or _res_raw == "" else int(_res_raw)
     except (TypeError, ValueError):
         reserve = 16384
-    if limit <= 0:
-        limit = 128000
     if reserve < 0:
         reserve = 0
     # reserve 必须明显小于 limit，否则「可用窗口」会变成 0 或负数，压缩逻辑全部失效
@@ -125,6 +126,8 @@ def request_budget(model="", cfg=None):
     """
     cfg = cfg or load_config()
     limit, _reserve = context_limits(model)
+    if limit <= 0:
+        return 0                      # 不限窗口 = 没有提示词预算，压缩不触发
     try:
         ratio = float(cfg.get("compress_ratio") or COMPRESS_RATIO)
     except (TypeError, ValueError):
@@ -185,6 +188,19 @@ def _msg_text(m):
     """一条消息真正发给模型的文本：正文 + 图片描述 + 附件正文。
     估算与拼装必须共用这一个函数，否则进度条会低估附件体积。"""
     text = m.get("content") or ""
+    if isinstance(text, list):
+        # 多模态 content（图片 + 文字）：只取文字部分，图片按张数单独估算，
+        # 不能 str(list) —— 那会把 base64 当正文算，token 估算直接爆掉。
+        parts = []
+        for p in text:
+            if isinstance(p, dict):
+                if p.get("type") == "text":
+                    parts.append(str(p.get("text") or ""))
+                elif p.get("type") == "image_url":
+                    parts.append("[图片]")
+            elif p:
+                parts.append(str(p))
+        text = "\n".join(parts)
     if m.get("vision"):
         text = (text + "\n\n【图片内容】\n" + m["vision"]) if text \
                else ("【用户上传了一张图片】\n" + m["vision"])
@@ -196,7 +212,12 @@ def _msg_text(m):
 
 
 def _msg_tokens(m):
-    return MSG_OVERHEAD + estimate_tokens(_msg_text(m))
+    n = MSG_OVERHEAD + estimate_tokens(_msg_text(m))
+    content = m.get("content") if isinstance(m, dict) else None
+    if isinstance(content, list):
+        n += IMAGE_TOKENS * sum(1 for p in content
+                                if isinstance(p, dict) and p.get("type") == "image_url")
+    return n
 
 
 def _context_text_tokens(system_prompt, summary, msgs):
@@ -219,9 +240,14 @@ def _context_parts(system_prompt, summary, msgs):
     if summary:
         parts["summary"] = MSG_OVERHEAD + estimate_tokens(summary_block(summary))
     for m in msgs:
-        base = estimate_tokens(m.get("content") or "")
+        raw = m.get("content") or ""
+        if isinstance(raw, list):
+            base = estimate_tokens(_msg_text(m))
+            extra = 0
+        else:
+            base = estimate_tokens(raw)
+            extra = estimate_tokens(_msg_text(m)) - base
         parts["dialog"] += MSG_OVERHEAD + base
-        extra = estimate_tokens(_msg_text(m)) - base
         if extra > 0:
             parts["attachment"] += extra
     return parts
@@ -235,11 +261,16 @@ def estimate_messages_tokens(messages):
             continue
         if isinstance(m.get("content"), str):
             n += MSG_OVERHEAD + estimate_tokens(m["content"])
-        else:                       # 多模态数组：只算文字部分，图片另按 IMAGE_TOKENS 估
+        else:                       # 多模态数组：文字按字符估，图片按张数估
+            n_img = 0
             for item in (m.get("content") or []):
-                if isinstance(item, dict) and item.get("type") == "text":
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text":
                     n += estimate_tokens(item.get("text") or "")
-            n += MSG_OVERHEAD
+                elif item.get("type") == "image_url":
+                    n_img += 1
+            n += MSG_OVERHEAD + IMAGE_TOKENS * n_img
     return n
 
 
@@ -248,7 +279,7 @@ IN_PARTS = ("rules", "tools_doc", "memory", "other_sys",
 
 
 def input_breakdown(messages, sys_parts=None, summary_chars=0, schema_chars=0):
-    """按类型统计一次请求的输入体量（字符），用于「输入明细」看钱花在哪。
+    """按类型统计一次请求的输入体量（字符），用于「token 明细」看钱花在哪。
 
     只统计字符数：token 由调用方按该轮真实 `usage.prompt / 总字符` 缩放，
     这样各分类加起来正好等于那一轮显示的输入 token。
@@ -328,7 +359,7 @@ def calibrate_ratio(s, system_prompt=""):
     try:
         _window = context_limits()[0]
     except Exception:
-        _window = 128000
+        _window = 0
     for i in range(len(msgs) - 1, -1, -1):
         m = msgs[i]
         if m.get("role") != "assistant":
@@ -337,9 +368,9 @@ def calibrate_ratio(s, system_prompt=""):
         prompt_tokens = u.get("last_prompt")
         if not prompt_tokens:
             prompt_tokens = u.get("prompt")
-            # 旧数据：没有 last_prompt，只接受「像单次请求」的值
+            # 旧数据：没有 last_prompt，只接受「像单次请求」的值（不限窗口时不做这道粗筛）
             try:
-                if int(prompt_tokens or 0) > _window * 1.2:
+                if _window > 0 and int(prompt_tokens or 0) > _window * 1.2:
                     continue
             except (TypeError, ValueError):
                 continue
@@ -366,7 +397,7 @@ def session_context(s, system_prompt="", extra_tokens=0, tools_extra=0):
     est = _context_text_tokens(system_prompt, summary, msgs)
     ratio = calibrate_ratio(s, system_prompt)
     used = int(est * ratio) + int(extra_tokens or 0) + int(tools_extra or 0)
-    remain = max(0, limit - used)
+    remain = max(0, limit - used) if limit else 0
     pct = round(used * 100.0 / limit, 1) if limit else 0.0
     parts = _context_parts(system_prompt, summary, msgs)
     for k in parts:
@@ -376,6 +407,7 @@ def session_context(s, system_prompt="", extra_tokens=0, tools_extra=0):
     return {
         "used": used, "limit": limit, "reserve": reserve, "remain": remain,
         "pct": pct, "ratio": round(ratio, 3), "compressed": bool(summary),
+        "unlimited": limit <= 0,      # 前端据此隐藏进度环 / 显示「不限」
         "compress_marks": compress_marks_for(s),
         "parts": parts,
     }
@@ -514,6 +546,22 @@ def _split_summary(text):
     return raw.strip(), points[:6]
 
 
+def manual_keep_budget(msgs, cut=0, system_prompt=""):
+    """手动压缩「保留最近多少」的预算（tokens）。
+
+    有窗口时按「窗口 − 输出上限」算；不限窗口时按当前历史本身的估算量算，
+    不再引入 128k 这类假想窗口。
+    """
+    try:
+        limit = context_limits()[0]
+    except Exception:                       # noqa: BLE001  读配置失败按不限处理
+        limit = 0
+    if limit > 0:
+        return max(1, limit - effective_output_cap(limit))
+    est = _context_text_tokens(system_prompt, "", (msgs or [])[int(cut or 0):])
+    return max(1, est)
+
+
 def compress_history(s, system_prompt=""):
     """把较早的对话总结成摘要，写入 s['summary'] / s['summary_upto']。
     成功返回 True；可压缩消息不足或调用失败返回 False。
@@ -524,9 +572,9 @@ def compress_history(s, system_prompt=""):
     （dsh 的 compaction-basic 也是同样做法）。"""
     msgs = s.get("messages", [])
     cut = int(s.get("summary_upto") or 0)
-    limit, _reserve = context_limits()
     # 保留预算按 dsh 口径：(窗口 - 输出上限) * keep_ratio，并保底 8k token。
-    _input_window = max(1, limit - effective_output_cap(limit))
+    # 不限窗口时按当前历史量算（不引入假想窗口）。
+    _input_window = manual_keep_budget(msgs, cut, system_prompt)
     try:
         _cfg = load_config() or {}
         _keep_ratio = float(_cfg.get("compress_keep_ratio") or COMPRESS_KEEP_RATIO)
@@ -568,10 +616,20 @@ def compress_history(s, system_prompt=""):
     if _crit:
         lines.append("【验收项（pin）】" + "；".join(
             str(c.get("text") or "")[:80] for c in _crit[:8]))
-    if s.get("plan"):
+    # 计划卡的最新版本挂在最后一条带 plan 的 assistant 消息上（s["plan"] 是旧字段，
+    # 只作兜底）。以前只读 s["plan"]，但没有任何地方写它，这一块等于从未生效。
+    _plan = None
+    for _m in reversed(s.get("messages") or []):
+        if (isinstance(_m, dict) and _m.get("role") == "assistant"
+                and isinstance(_m.get("plan"), dict) and _m["plan"].get("steps")):
+            _plan = _m["plan"]
+            break
+    if not _plan and isinstance(s.get("plan"), dict):
+        _plan = s["plan"]
+    if _plan:
         try:
             lines.append("【当前计划（pin）】"
-                         + json.dumps(s["plan"], ensure_ascii=False)[:1500])
+                         + json.dumps(_plan, ensure_ascii=False)[:1500])
         except (TypeError, ValueError):
             pass
     # 任务状态（最近改动 / 未解决错误 / 素材 / 视觉基线 / 决策）：
@@ -778,6 +836,8 @@ def maybe_precompress(sid, system_tokens, extra_tokens=0, system_prompt=""):
             if not s:
                 return
             budget = request_budget()
+            if budget <= 0:          # 不限窗口：不做后台预压缩
+                return
             used = (session_context(s, "")["used"]
                     + int(system_tokens or 0) + int(extra_tokens or 0))
             if used < budget:
@@ -856,12 +916,42 @@ def _fold_summary(text, fold_chars=240):
     return out[:max(80, cap)]
 
 
+def real_used_tokens(last_prompt, messages, since=0, calib=1.0):
+    """真实 token 的近似值：上一轮真实 prompt_tokens + 之后新增内容的估算 × 校准系数。
+
+    这是「事后真实 + 增量估算」口径：基准来自服务商返回的 usage，只有新增的那几条
+    消息是估算，误差远小于拿整段历史去猜。last_prompt<=0（没拿到 usage）时返回 0，
+    调用方应退回纯估算。
+    """
+    try:
+        base = int(last_prompt or 0)
+    except (TypeError, ValueError):
+        base = 0
+    if base <= 0:
+        return 0
+    try:
+        since = max(0, int(since or 0))
+    except (TypeError, ValueError):
+        since = 0
+    added = estimate_messages_tokens((messages or [])[since:]) if since < len(messages or []) else 0
+    try:
+        k = float(calib or 1.0)
+    except (TypeError, ValueError):
+        k = 1.0
+    return base + int(added * max(1.0, k))
+
+
 def trim_tool_results(messages, budget_tokens, keep_recent=2, fold_chars=240):
     """把较早的工具结果替换成结构化占位，直到回到预算内。
+
+    清理单位是**单条工具结果**（对话里一条以 TOOL_MSG_PREFIX 开头的 user 消息
+    就是一个结果，见 chat.py 的回灌），保留最近 `keep_recent` 条，其余折成
+    `fold_chars` 以内的摘要；原文仍可通过落盘句柄 read_tool_result 取回。
     不调用模型、不改会话数据；返回被清理的条数。"""
     def _is_tool(m):
+        c = m.get("content") if isinstance(m, dict) else None
         return (isinstance(m, dict) and m.get("role") == "user"
-                and str(m.get("content") or "").startswith(TOOL_MSG_PREFIX))
+                and isinstance(c, str) and c.startswith(TOOL_MSG_PREFIX))
 
     idxs = [i for i, m in enumerate(messages) if _is_tool(m)]
     try:
@@ -896,7 +986,7 @@ def trim_history_to_budget(messages, budget_tokens):
     keep = []
     used = estimate_messages_tokens(sys_msgs)
     for m in reversed(rest):
-        t = MSG_OVERHEAD + estimate_tokens(str(m.get("content") or ""))
+        t = _msg_tokens(m)
         if keep and used + t > budget_tokens:
             break
         keep.append(m)
@@ -940,7 +1030,7 @@ def summary_info(s):
 
 
 def last_input_detail(s):
-    """最近一条「有逐轮明细」的助手回复的输入明细。
+    """最近一条「有逐轮明细」的助手回复的 token 明细。
 
     返回 {index, at, usage, rounds, total_ms, rounds_detail, source}：
     - rounds_detail 优先用消息里落盘的 timing.rounds_detail（新消息）；
@@ -997,5 +1087,5 @@ def current_context(data):
     cur = find_session(data, (data or {}).get("current"))
     if not cur:
         return None
-    system_prompt = (load_profile().get("manual", "") or "").strip()
+    system_prompt = manual_block(load_profile())
     return session_context(cur, system_prompt)

@@ -16,6 +16,7 @@
 import argparse
 import os
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -58,7 +59,11 @@ def cmd_run(args):
         return 1
     ablations = _ids(args.ablate)
     groups = [()] + [(a,) for a in ablations]
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    meta = {"model": args.model or "", "repeat": int(args.repeat or 1),
+            "ablations": ablations, "run_id": run_id, "team": bool(args.team)}
     results = []
+    d = ""
     for group in groups:
         for task in tasks:
             for i in range(max(1, int(args.repeat or 1))):
@@ -66,7 +71,7 @@ def cmd_run(args):
                 print("→ %-14s %-18s (%d/%d)" % (task.get("id"), label,
                                                  i + 1, max(1, int(args.repeat or 1))))
                 r = bench.run_task(task, model=args.model, ablations=group,
-                                   keep=bool(args.keep))
+                                   keep=bool(args.keep), team=bool(args.team))
                 print("   %s · %s · 轮次 %s · 工具 %s · %dms"
                       % ("✓" if r.get("ok") else "✗", r.get("status"),
                          r.get("turns"), r.get("tool_calls"), r.get("ms") or 0))
@@ -75,9 +80,10 @@ def cmd_run(args):
                         print("     - %s: %s%s" % (c.get("name"), c.get("detail"),
                                                    "（跳过）" if c.get("skipped") else ""))
                 results.append(r)
-    meta = {"model": args.model or "", "repeat": int(args.repeat or 1),
-            "ablations": ablations}
-    d, summary = bench.save_run(results, meta, root=args.out or None)
+                # 每题跑完就落盘：长跑中途也能看到进度，崩溃不丢已完成的结果
+                d, _ = bench.save_run(results, meta, root=args.out or None)
+                print("   已更新：%s" % d)
+    summary = bench.summarize(results, meta)
     print("\n已保存：%s" % d)
     print("通过 %d / %d（%s）" % (summary["passed"], summary["runnable"],
                                  summary["pass_rate"]))
@@ -114,6 +120,8 @@ def main(argv=None):
     p_run.add_argument("--ablate", default="", help="消融项，逗号分隔：" +
                        ",".join(bench.ABLATIONS))
     p_run.add_argument("--keep", action="store_true", help="保留临时工作区")
+    p_run.add_argument("--team", action="store_true",
+                       help="团队模式：提示模型用 delegate 派活")
     p_run.add_argument("--out", default="", help="结果根目录")
 
     p_rep = sub.add_parser("report", help="打印某次运行的摘要")

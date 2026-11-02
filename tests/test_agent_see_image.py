@@ -14,8 +14,9 @@ def test_see_image_registered():
     assert agent.normalize_tool_name("look") == "see_image"
     assert agent.normalize_tool_name("view_image") == "see_image"
     names = [t["function"]["name"] for t in agent.native_tool_schemas(
-        agent_on=True, search_ready=False, cap_domains=set())]
-    assert "see_image" in names
+        agent_on=True, search_ready=False, cap_domains=set(),
+        allow_groups={"image"}, unlocked={"image"})]
+    assert "image" in names
 
 
 def test_see_image_rejects_non_image(tmp_path):
@@ -36,7 +37,7 @@ def test_see_image_passes_base64_and_question(tmp_path, monkeypatch):
     (tmp_path / "a.png").write_bytes(PNG_1PX)
     seen = {}
 
-    def fake(mime, b64, question="", prefer=None):
+    def fake(mime, b64, question="", prefer=None, images=None, meta=None):
         seen.update({"mime": mime, "b64": b64, "q": question})
         return "一只白猫"
 

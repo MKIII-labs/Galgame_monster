@@ -87,7 +87,8 @@ def _guard_after(url_before):
     url = browser.current_url()
     if not url:
         return ""
-    decision, why = policy.check(url, None)
+    decision, why = policy.check(
+        url, None, skip_allowlist=bool(_cfg().get("computer_browser_unrestricted")))
     if decision == "allow":
         return ""
     if decision == "deny":
@@ -101,7 +102,9 @@ def _guard_after(url_before):
 # ============================================================
 
 def open_url(url, sandbox=None):
-    decision, why = policy.check(url, sandbox)
+    # 「无限制」开关：不再要求站点白名单；内置禁区 / 设置里的禁止站点 / 自身界面仍拒绝
+    skip = bool(_cfg().get("computer_browser_unrestricted"))
+    decision, why = policy.check(url, sandbox, skip_allowlist=skip)
     if decision == "deny":
         return "❌ " + why
     if decision == "ask":
@@ -305,13 +308,14 @@ def judge(name, args=None, sandbox=None, unrestricted=False):
     args = args if isinstance(args, dict) else {}
     target = str(args.get("target") or "").strip()
     if name == "computer_windows" or target.startswith("w"):
-        decision, why = desktop.judge(name, args)
+        decision, why = desktop.judge(name, args, unrestricted=unrestricted)
         return decision, why, ""
     if not enabled():
         return "deny", "Computer Use 未开启", ""
     if name == "computer_open":
         url = str(args.get("url") or "").strip()
-        decision, why = policy.check(url, sandbox, skip_allowlist=unrestricted)
+        skip = unrestricted or bool(_cfg().get("computer_browser_unrestricted"))
+        decision, why = policy.check(url, sandbox, skip_allowlist=skip)
         return decision, why, policy.host_of(url)
     if name == "computer_act":
         risk, why = actions.classify(args.get("action"), args.get("ref"))

@@ -59,6 +59,19 @@ def _now():
     return time.time()
 
 
+def switch_on(key, default=True):
+    """提醒开关：缺失 / True 都算开。调度器与日历共用同一套判定。"""
+    try:
+        from app.config import load_config
+        cfg = load_config() or {}
+    except Exception:                    # noqa: BLE001  读配置失败按默认放行
+        return default
+    v = cfg.get(key, default)
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "0", "no", "off")
+    return bool(v)
+
+
 # ------------------------------------------------------------
 # 存取
 # ------------------------------------------------------------
@@ -169,12 +182,33 @@ def _sync_system_task(task):
     """把 reminder 同步成一次性 Windows 计划任务；失败只提示，不影响会话内提醒。"""
     if task.get("kind") != "reminder" or not notify.available():
         return False
+    if not switch_on("reminders_enabled") or not switch_on("reminder_system_enabled"):
+        return False
     at = datetime.datetime.fromtimestamp(float(task.get("at") or 0))
     ok, info = notify.register(task["id"], at,
                                task.get("title") or "提醒", task.get("text") or "")
     if not ok:
         print("[提醒] 注册系统计划任务失败：%s" % info)
     return ok
+
+
+def apply_switches():
+    """设置里的提醒开关变化后，按当前开关同步已有提醒的 Windows 计划任务。
+
+    总开关或「系统通知」关掉时，把已注册的计划任务一并注销——否则程序关了
+    Windows 仍会弹，用户会以为开关没生效。
+    """
+    system_on = switch_on("reminders_enabled") and switch_on("reminder_system_enabled")
+    for task in list_tasks():
+        if task.get("kind") != "reminder":
+            continue
+        try:
+            if system_on and task.get("enabled") and not task.get("paused"):
+                _sync_system_task(task)
+            else:
+                notify.unregister(task["id"])
+        except Exception as e:           # noqa: BLE001  单个任务失败不影响其它提醒
+            print("[提醒] 同步开关失败 %s：%s" % (task.get("id"), e))
 
 
 # ------------------------------------------------------------
@@ -207,12 +241,14 @@ def _retire(task):
         save_tasks(data)
 
 
-def _fire_reminder(task, now):
+def _fire_reminder(task, now, deliver=True):
+    """deliver=False：应用内提醒关掉时，只推进重复计划，不写会话、不推前端。"""
     body = (task.get("text") or "").strip() or "时间到了"
-    _append_message(task["session_id"], "⏰ **提醒**：" + body)
-    events.publish({"type": "notify", "kind": "reminder",
-                    "session_id": task["session_id"], "task_id": task["id"],
-                    "title": task.get("title") or "提醒", "text": body})
+    if deliver:
+        _append_message(task["session_id"], "⏰ **提醒**：" + body)
+        events.publish({"type": "notify", "kind": "reminder",
+                        "session_id": task["session_id"], "task_id": task["id"],
+                        "title": task.get("title") or "提醒", "text": body})
     if task.get("repeat") in ("daily", "weekly"):
         step = 86400 if task.get("repeat") == "daily" else 7 * 86400
         nxt = float(task.get("at") or now)
@@ -352,6 +388,8 @@ def _auto_system_prompt(s):
 def tick(now=None):
     """扫一遍到期任务，返回本轮触发的任务 id 列表（测试用）。"""
     now = now or _now()
+    if not switch_on("reminders_enabled"):
+        return []                        # 总开关关闭：提醒 / 主动聊天 / 外部来源全部暂停
     fired = []
     for task in list_tasks():
         if not task.get("enabled") or task.get("paused"):
@@ -364,8 +402,10 @@ def tick(now=None):
             continue
         try:
             if task.get("kind") == "reminder":
-                _fire_reminder(task, now)
+                _fire_reminder(task, now, deliver=switch_on("reminder_inapp_enabled"))
             else:
+                if not switch_on("auto_chat_enabled"):
+                    continue             # 主动聊天总开关关闭：保留任务，不触发
                 _fire_auto(task, now)
             fired.append(task["id"])
         except Exception as e:

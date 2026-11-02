@@ -11,13 +11,14 @@
   5. new_asks / wait_answers  向用户提问（可一次多个）并在原地等待回答
   6. undo(token)            撤回一次写操作（恢复文件快照）
   7. pick_directory()       弹出系统文件夹选择框
-- 安全：命令执行仅限白名单可执行文件（python / node / npm / git / pytest 等），
+- 安全：命令执行仅限白名单可执行文件（常见语言工具链 / 构建器 / git / 包管理器），
   禁止管道与重定向、cwd 锁沙箱、环境变量清洗；所有文件路径限制在沙箱内；
   data/ 目录永久禁止访问。持久 shell（shell 工具）等于任意命令执行，
   不复用白名单，单独走高危审批。**这不是 OS 级沙箱**，只是有边界的便利。
 """
 import base64
 import fnmatch
+import io
 import json
 import os
 import re
@@ -33,9 +34,12 @@ import uuid
 from app import docparse
 from app import computer
 from app import webprobe
+from app import langs
+from app import tool_meta
 from app import visual_qa
 from app import assets
 from app import audio
+from app import mesh
 from app import winproc
 from app import tool_protocol
 from app.config import load_config
@@ -75,7 +79,10 @@ PLAN_MODE_TOOLS = frozenset((
     "lsp_diagnostics", "lsp_definition", "lsp_references", "lsp_hover",
     "lsp_symbols", "lsp_implementation", "lsp_calls",
     "git_status", "git_diff", "git_log", "list_steps",
-    "see_image", "read_tool_result", "fetch_url", "web_search",
+    "see_image", "image_compare", "image_analyze", "read_tool_result",
+    "mesh_inspect", "asset_scan", "asset_validate",
+    "visual_check", "render_views", "scene_assert", "geometry_compare",
+    "fetch_url", "web_search",
     "acceptance", "update_plan", "plan_patch", "research_note",
     "explore", "explore_followup", "explore_status", "explore_result",
     "explore_cancel", "ask_user", "mcp_list_servers", "mcp_list_tools",
@@ -92,10 +99,21 @@ APPROVAL_TIMEOUT = 600                     # 等待用户批准写入的超时�
 #          （沙箱边界、金融禁区仍保留）
 #   custom 自定义：只按沙箱内 .gm/agent-rules.json 的规则判定
 APPROVAL_MODES = ("ask", "ai", "full", "custom")
-APPROVAL_DEFAULT = "ask"
-APPROVAL_ALIASES = {"auto": "ask", "once": "ask", "always": "ask"}   # 旧值一律收紧为「手动审批」
+APPROVAL_DEFAULT = "ai"
+# auto / always 是旧默认值，语义就是「自动审批」；once 仍按手动处理。
+APPROVAL_ALIASES = {"auto": "ai", "always": "ai", "once": "ask"}
 RULES_REL = ".gm/agent-rules.json"          # 自定义审批规则（相对沙箱根目录）
 REPEAT_LIMIT = 5                            # 同一工具 + 同一参数连续调用几次就拦截（对齐 dsh 的 3/5/8 提醒档）
+# 死循环需要两条互补的判据：
+#   连续相同 → repeat_guard（读 A、读 B、再读 A 这种正常来回不误杀）
+#   窗口内重复 → window_hits（build→render→gap→build 这种交错循环，连续判据看不见）
+LOOP_WINDOW = 24                            # 回溯最近多少次工具调用
+LOOP_WINDOW_LIMIT = 4                       # 一般工具：窗口内同名同参出现 4 次
+LOOP_WINDOW_LIMIT_CMD = 3                   # 命令：脚本没改还反复跑，第 3 次就拦
+# 只读 / 状态类工具不进窗口：验收查状态、读步骤这类重复属于正常操作，
+# 而且它们本身不产生副作用；真正要拦的是「反复重建 / 反复渲染」。
+LOOP_EXEMPT = ("acceptance", "list_steps", "read_tool_result", "sleep", "ask_user",
+               "image_compare", "image_analyze")
 
 # 可在「设置 → Agent」里调整的运行时上限：键 → 允许的最小值。
 # 默认值仍是上面那些常量，所以从没配置过时行为与从前完全一致。
@@ -112,7 +130,15 @@ CMD_MAX_TIMEOUT = 600           # 允许模型指定的最大超时
 CMD_MAX_OUTPUT = 20000          # 回灌给模型的输出上限（头 12k + 尾 8k）
 # 只允许这些可执行文件；不在名单里的一律拒绝（不是「问一下」，是「跑不了」）
 CMD_ALLOW_EXES = {"python", "python3", "py", "node", "nodejs", "npm", "npx",
-                  "pip", "pip3", "git", "pytest", "ruff"}
+                  "pnpm", "yarn", "bun", "deno", "pip", "pip3", "git", "pytest", "ruff",
+                  # 跨语言构建 / 测试 / 编译：只放行常见工具链，装依赖仍按高风险问
+                  "go", "gofmt", "cargo", "rustc", "rustfmt",
+                  "java", "javac", "mvn", "mvnw", "gradle", "gradlew", "dotnet",
+                  "make", "cmake", "ninja", "meson",
+                  "gcc", "g++", "clang", "clang++", "cc", "c++",
+                  "tsc", "eslint", "prettier", "vite", "webpack", "rollup",
+                  "php", "composer", "ruby", "bundle", "swift", "dart", "flutter",
+                  "kotlinc", "scala", "sbt"}
 # 这些即使进了白名单也永远拒绝：换壳执行 / 删除 / 联网下载 / 计划任务
 CMD_DENY_EXES = {"cmd", "powershell", "pwsh", "bash", "sh", "rm", "del", "erase",
                  "format", "reg", "curl", "wget", "certutil", "mshta",
@@ -208,6 +234,13 @@ def _secret_deny_text(pattern):
 # 「看一眼图片」的边界：太大直接拒，避免十几 MB 的 base64 撑爆请求
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 IMG_MAX_BYTES = 12 * 1024 * 1024
+SEE_MAX_IMAGES = 4                    # see_image 一次最多看几张（多图同请求做对照）
+SEE_MAX_TOTAL = 24 * 1024 * 1024      # 多图合计上限
+VISION_NATIVE_MAX = 8                 # 原生附图：一轮最多附几张（保留到本轮结束）
+# 命令跑完后自动抽查新生成的图片：空白 / 纯色通常是「渲染没加载场景」这类失败
+BLANK_STD_MIN = 2.0                   # 灰度标准差低于它视为几乎全空白
+BLANK_RANGE_MIN = 8.0                 # 灰度极差低于它视为纯色
+BLANK_SCAN_MAX = 3000                 # 单次最多看多少个图片文件（防止大仓库拖慢）
 IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
 
@@ -215,9 +248,11 @@ TOOLS = ("list_dir", "read_file", "read_files", "search_files", "search_code", "
          "code_context", "impact",
          "make_dir", "move_file", "copy_file", "delete_file", "run_command", "shell",
          "fetch_url", "sleep", "render_check",
-         "visual_check",
+         "visual_check", "render_views", "scene_assert", "geometry_compare",
          "asset_scan", "asset_convert", "asset_atlas", "asset_inline", "asset_validate",
-         "audio_probe", "audio_compare", "see_image", "read_tool_result",
+         "mesh_inspect",
+         "audio_probe", "audio_compare", "see_image", "image_compare",
+         "image_analyze", "read_tool_result", "archify",
          "find_symbol", "check_code", "lsp_diagnostics", "lsp_definition",
          "lsp_references", "lsp_rename", "lsp_hover", "lsp_symbols",
          "lsp_implementation", "lsp_calls",
@@ -225,7 +260,6 @@ TOOLS = ("list_dir", "read_file", "read_files", "search_files", "search_code", "
          "list_steps", "undo_step", "redo_step", "recover_file",
          "acceptance",
          "update_plan", "plan_patch",
-         "run_script",
          "run_workflow_script",
          "research_note",
          "run_workflow", "workflow_status", "workflow_resume", "workflow_cancel",
@@ -236,22 +270,52 @@ TOOLS = ("list_dir", "read_file", "read_files", "search_files", "search_code", "
          "computer_open", "computer_see", "computer_act", "computer_read", "computer_shot",
          "computer_windows",
          "mcp_list_servers", "mcp_list_tools")
+TOOLS = TOOLS + tuple(tool_meta.META)
 COMPUTER_TOOLS = computer.TOOLS
 WRITE_TOOLS = ("write_file", "edit_file", "make_dir", "move_file", "copy_file", "delete_file",
                "lsp_rename", "recover_file",
                "asset_convert", "asset_atlas", "asset_inline")
+LSP_TOOLS = {"lsp_diagnostics", "lsp_definition", "lsp_references", "lsp_rename",
+             "lsp_hover", "lsp_symbols", "lsp_implementation", "lsp_calls"}
+
+
+def writes_files(name, args=None):
+    """这次调用会不会在沙箱里落文件（决定是否走写入审批）。
+
+    `archify` 只有 finalize 会写产物；schema / doctor 是只读的，不该每次弹审批。
+    """
+    n = str(name or "").strip()
+    if n in WRITE_TOOLS:
+        return True
+    if n == "archify":
+        a = args if isinstance(args, dict) else {}
+        return str(a.get("action") or "finalize").strip().lower() == "finalize"
+    return False
+
+
 RUN_TOOLS = ("run_command",)          # 执行类：不走写入审批，走 judge_command
 # 持久 shell：等于任意命令执行，无法按可执行白名单分类，审批单独走 judge_shell
 SHELL_TOOLS = ("shell",)
 # 会改变仓库状态、但改不了文件内容的工具：单独一档，审批走 judge_git_commit
 GIT_WRITE_TOOLS = ("git_commit", "split_commit")
 # 允许「读取沙箱外文件」的工具（仅在用户开启授权后生效；写入类工具永远只在沙箱内）
-OUTSIDE_READ_TOOLS = ("list_dir", "read_file")
+OUTSIDE_READ_TOOLS = ("list_dir", "read_file", "read_files", "see_image",
+                      "image_compare", "image_analyze", "geometry_compare")
 
 _UNDO = {}
 _undo_lock = threading.Lock()
 _LOADED_SIDS = set()            # 已经从磁盘并回内存的会话（避免重复加载）
 SNAP_AFTER_MAX = 1024 * 1024    # 单个文件「写后快照」上限（redo 用）
+
+# 全局写锁：主循环与子代理（explore 并发）可能同时改同一个文件 ——
+# A 读到旧内容、B 也读到旧内容，先后写回去时后写的会冲掉前一个的改动，且不报错。
+# 写操作（WRITE_TOOLS / GIT_WRITE_TOOLS）以及 IDE 的「全局替换 / 重命名」都过这把锁；
+# 用 RLock：工具实现内部再触发写也不会自锁。
+WRITE_LOCK = threading.RLock()
+# 编译锁：LaTeX / gcc 这类构建只产出「中间文件 / 可执行文件」，
+# 不需要和 agent 的源码写操作互斥（latex 一次 15 秒，拿 WRITE_LOCK 会把整个 agent 堵住）。
+# 构建之间仍然串行：同一个目录并发跑 latexmk 会互相覆盖 .aux。
+BUILD_LOCK = threading.RLock()
 
 _ASKS = {}
 _asks_lock = threading.Lock()
@@ -340,15 +404,28 @@ TOOL_ALIASES = {
     "render": "render_check", "screenshot": "render_check", "render_page": "render_check",
     "rendercheck": "render_check", "preview_page": "render_check",
     "visual": "visual_check", "visual_qa": "visual_check", "visualcheck": "visual_check",
+    "multi_view": "render_views", "multi_views": "render_views", "views": "render_views",
+    "render_view": "render_views", "screenshots": "render_views",
+    "compare_views": "geometry_compare", "geometry_diff": "geometry_compare",
+    "view_compare": "geometry_compare",
+    "scene_check": "scene_assert", "assert_scene": "scene_assert",
+    "scene_validate": "scene_assert",
+    "diagram": "archify", "architecture_diagram": "archify", "flowchart": "archify",
+    "sequence_diagram": "archify", "erd": "archify", "explainer": "archify",
     "scan_assets": "asset_scan", "assets": "asset_scan",
     "convert_asset": "asset_convert", "pack_atlas": "asset_atlas",
     "inline_assets": "asset_inline", "validate_assets": "asset_validate",
+    "inspect_mesh": "mesh_inspect", "model_inspect": "mesh_inspect",
+    "mesh": "mesh_inspect", "mesh_check": "mesh_inspect",
+    "3d_inspect": "mesh_inspect", "gltf_validate": "mesh_inspect",
     "listen": "audio_probe", "hear": "audio_probe", "probe_audio": "audio_probe",
     "audio": "audio_probe", "audio_check": "audio_probe", "sound_check": "audio_probe",
     "audio_diff": "audio_compare", "compare_audio": "audio_compare",
     "audio_ab": "audio_compare", "ab_audio": "audio_compare",
     "look": "see_image", "view_image": "see_image", "read_image": "see_image",
     "see": "see_image", "image": "see_image", "describe_image": "see_image",
+    "compare_images": "image_compare", "image_diff": "image_compare",
+    "analyze_image": "image_analyze", "image_measure": "image_analyze",
     "browser_open": "computer_open", "open_url": "computer_open", "browser_see": "computer_see",
     "browser_snapshot": "computer_see", "browser_act": "computer_act",
     "browser_click": "computer_act", "browser_type": "computer_act",
@@ -372,6 +449,9 @@ TOOL_ALIASES = {
     "bili_danmaku": "bili.danmaku", "bili_transcript": "bili.transcript",
     "bili_timeline": "bili.timeline",
     "ask": "ask_user", "question": "ask_user",
+    # 显式收尾：模型常写成 done / complete / task_done（Trae 的叫法）
+    "done": "finish", "complete": "finish", "finished": "finish",
+    "task_done": "finish", "task_complete": "finish", "finish_task": "finish",
 }
 
 
@@ -398,7 +478,9 @@ def normalize_tool_name(name):
         return TOOL_ALIASES[low]
     if raw in FILE_TOOLS or raw in ("run_command", "render_check", "web_search",
                                     "audio_probe", "audio_compare", "see_image",
-                                    "read_tool_result", "find_symbol", "check_code",
+                                    "image_compare", "image_analyze",
+                                    "read_tool_result",
+                                    "find_symbol", "check_code",
                                     "set_reminder", "ask_user") \
             or raw in COMPUTER_TOOLS:
         return raw
@@ -427,7 +509,7 @@ def normalize_tool_name(name):
 # 模块没被导入时 _capability_ids() 是空的，不能用它来判断「这个工具不存在」。
 _CAP_NAMESPACES = {"bili", "calendar", "stock", "memory", "task", "note",
                    "observe", "skill", "doc", "llm", "search",
-                   "workflow", "computer", "gal", "kb"}
+                   "workflow", "computer", "gal", "kb", "image"}
 
 
 def is_known_tool(name):
@@ -440,6 +522,8 @@ def is_known_tool(name):
     raw = str(name or "").strip()
     if not raw:
         return False
+    if raw.lower() in tool_meta.META:
+        return True
     try:
         n = normalize_tool_name(raw)
     except Exception:
@@ -448,7 +532,7 @@ def is_known_tool(name):
         return True
     if n.startswith("mcp__") or n in _PLUGIN_TOOLS:
         return True
-    if n in ("web_search", "set_reminder"):
+    if n in ("web_search", "set_reminder", "delegate"):
         return True
     if "." in n:
         return n.split(".", 1)[0].lower() in _CAP_NAMESPACES
@@ -492,70 +576,36 @@ def _fn_tool(name, description, props=None, required=None):
 # 这里把「只在特定任务里用得上」的工具归组：默认不下发 schema，
 # 命中意图关键词时整组挂载，或由模型调用 tool_search 解锁（下一轮生效）。
 TOOL_GROUPS = {
+    "visual": ("render_check", "visual_check", "render_views", "scene_assert",
+               "geometry_compare"),
+    "image": ("see_image", "image_compare", "image_analyze"),
     "asset": ("asset_scan", "asset_convert", "asset_atlas",
-              "asset_inline", "asset_validate"),
-    "visual": ("render_check", "visual_check", "see_image"),
+              "asset_inline", "asset_validate", "mesh_inspect"),
     "audio": ("audio_probe", "audio_compare"),
-    "git": ("git_status", "git_diff", "git_log", "git_commit", "split_commit"),
     "workflow": ("run_workflow", "run_workflow_script", "workflow_status",
                  "workflow_resume", "workflow_cancel"),
-    "explore": ("explore", "explore_followup", "explore_status",
-                "explore_result", "explore_cancel"),
-    "symbol": ("find_symbol", "impact", "code_context"),
-    "code": ("run_script",),
-    "history": ("list_steps", "undo_step", "redo_step", "recover_file"),
+    "utility": ("sleep", "set_reminder"),
+    "diagram": ("archify",),
 }
 
 # 意图关键词：用户这轮消息里出现这些词，就整组挂载（宁可多挂，不要该用却看不见）
 TOOL_GROUP_KEYS = {
-    "asset": ("素材", "贴图", "图集", "纹理", "图片", "图标", "sprite", "atlas", "png", "jpg"),
+    "asset": ("素材", "贴图", "图集", "纹理", "图片", "图标", "sprite", "atlas", "png", "jpg",
+              "3d", "模型", "mesh", "glb", "gltf", "obj", "fbx", "建模", "场景"),
     "visual": ("页面", "网页", "html", "css", "canvas", "画布", "游戏", "渲染",
-               "截图", "界面", "前端", "视觉", "布局", "ui"),
+               "截图", "界面", "前端", "视觉", "布局", "ui",
+               "视角", "多视图", "相机", "灯光", "场景", "3d", "模型", "几何"),
+    "image": ("图片", "看图", "截图", "参考图", "对比", "尺寸", "色彩", "png", "jpg",
+              "webp", "视觉", "图像"),
     "audio": ("音频", "音效", "bgm", "语音", "响度", "混音"),
-    "git": ("git", "提交", "commit", "diff", "分支", "版本控制", "改了什么", "改动"),
+    "diagram": ("架构图", "流程图", "时序图", "数据流", "状态图", "ERD", "类图",
+                "时间线", "瀑布图", "diagram", "archify", "画图", "可视化",
+                "一页", "explainer", "架构"),
     "workflow": ("工作流", "workflow", "自动化流程"),
-    "explore": ("调研", "探索", "子代理", "并行调查", "多个问题", "并行查"),
-    "symbol": ("符号", "函数定义", "调用点", "谁调用", "引用", "find_symbol"),
-    "code": ("脚本", "批量处理", "python 脚本", "node 脚本"),
-    "history": ("撤销", "回滚", "恢复文件", "undo"),
+    "utility": ("等待", "睡眠", "sleep", "提醒", "闹钟", "定时"),
 }
 
-# tool_search 返回给模型的参数速查（工具被解锁后，下一轮还会拿到完整 schema）
-TOOL_SIG = {
-    "asset_scan": "asset_scan(path?, out?)",
-    "asset_convert": "asset_convert(from, to, format?, width?, height?, quality?)",
-    "asset_atlas": "asset_atlas(images, out, map?, max_size?, padding?)",
-    "asset_inline": "asset_inline(images, out, max_kb?)",
-    "asset_validate": "asset_validate(manifest?)",
-    "render_check": "render_check(path, viewport?, screenshot?)",
-    "visual_check": "visual_check(path, viewport?, viewports?, screenshot?, describe?, baseline?, save_baseline?)",
-    "see_image": "see_image(path, question?)",
-    "audio_probe": "audio_probe(path)",
-    "audio_compare": "audio_compare(a, b)",
-    "git_status": "git_status()",
-    "git_diff": "git_diff(path?)",
-    "git_log": "git_log(limit?)",
-    "git_commit": "git_commit(message?)",
-    "split_commit": "split_commit(opts?)",
-    "run_workflow": "run_workflow(spec?)",
-    "run_workflow_script": "run_workflow_script(code)",
-    "workflow_status": "workflow_status(id)",
-    "workflow_resume": "workflow_resume(id)",
-    "workflow_cancel": "workflow_cancel(id)",
-    "explore": "explore(goal, questions?)",
-    "explore_followup": "explore_followup(batch, questions)",
-    "explore_status": "explore_status(id?)",
-    "explore_result": "explore_result(id?)",
-    "explore_cancel": "explore_cancel(id?)",
-    "find_symbol": "find_symbol(name, path?)",
-    "impact": "impact(target, path?)",
-    "code_context": "code_context(query, symbol?, path?)",
-    "run_script": "run_script(code)",
-    "list_steps": "list_steps()",
-    "undo_step": "undo_step(step?)",
-    "redo_step": "redo_step(step?)",
-    "recover_file": "recover_file(path?)",
-}
+# tool_search 的目录由 tool_meta 按 action 生成，不再维护第二份参数速查表。
 
 
 def hidden_tools(allow_groups=None, unlocked=None):
@@ -581,17 +631,18 @@ def tool_group_catalog(hidden=None):
     for group, names in TOOL_GROUPS.items():
         if hidden is not None and not (set(names) & set(hidden)):
             continue
-        lines.append("- %s：%s" % (group, " / ".join(names)))
+        label, _shown = tool_meta.group_catalog(group, names)
+        lines.append("- %s：%s" % (group, label))
     return "\n".join(lines)
 
 
 def _tool_search_schema():
     return _fn_tool(
         "tool_search",
-        "查找并解锁本轮未下发的工具组（asset / visual / audio / git / workflow / "
-        "explore / symbol / code / history）。解锁后下一轮即可直接调用",
+        "查找并解锁本轮未下发的工具组（visual / image / asset / audio / workflow / "
+        "utility / diagram）。解锁后下一轮即可直接调用",
         {"query": {"type": "string",
-                   "description": "组名或关键词，如 visual / 素材 / 音频 / git"},
+                   "description": "组名或关键词，如 visual / 素材 / 音频 / 提醒"},
          "group": {"type": "string", "description": "可选：直接指定组名"}},
         ["query"])
 
@@ -604,9 +655,11 @@ def _t_tool_search(args, caps):
     hit = []
     for group, names in TOOL_GROUPS.items():
         keys = TOOL_GROUP_KEYS.get(group, ())
-        if want and want == group:
+        meta_name = tool_meta.GROUP_META.get(group, "")
+        if want and want in (group, meta_name):
             hit.append(group)
-        elif q and (group in q or any(str(k).lower() in q for k in keys)
+        elif q and (group in q or (meta_name and meta_name in q)
+                    or any(str(k).lower() in q for k in keys)
                     or any(n in q for n in names)):
             hit.append(group)
     if not hit and q:
@@ -624,15 +677,15 @@ def _t_tool_search(args, caps):
     unlock.update(hit)
     lines = ["已解锁（下一轮生效）："]
     for group in hit:
-        lines.append("- %s" % group)
-        for name in TOOL_GROUPS[group]:
-            lines.append("  · " + TOOL_SIG.get(name, name))
+        label, _shown = tool_meta.group_catalog(group, TOOL_GROUPS[group])
+        lines.append("- %s：%s" % (group, label))
     return "\n".join(lines)
 
 
 def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                         computer_on=False, lsp_on=False, git_commit_mode="off",
-                        plan_mode=False, allow_groups=None, unlocked=None):
+                        plan_mode=False, allow_groups=None, unlocked=None,
+                        allowed_tools=None):
     """生成 OpenAI 兼容的 tools 列表。
 
     原生 function name 不允许点号，所以能力名里的 `.` 换成 `_`
@@ -642,8 +695,9 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
     cap_domains：只挂这些前缀的能力（如 {"bili", "calendar"}）；None = 全挂。
     B 站 / 股市 / 日程这类低频能力不该每轮都占 schema 预算，由调用方按本轮意图筛。
 
-    lsp_on：是否挂 pyright 的四个工具（关掉后模型只能用正则版 find_symbol）。
+    lsp_on：是否挂 LSP 工具（关掉后模型只能用正则版 find_symbol）。
     git_commit_mode：off = 完全不给 git_commit；ask / auto 只是审批策略不同。
+    allowed_tools：按旧工具名授权的子集（子代理 / 巡检）；meta 只暴露被授权的 action。
     """
     out = []
     if agent_on:
@@ -710,9 +764,10 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
             _fn_tool("delete_file", "删除文件或空目录",
                      {"path": {"type": "string"}}, ["path"]),
             _fn_tool("run_command",
-                     "在沙箱内执行一条命令并拿到输出（如 pytest / python 脚本 / node / git status）。"
+                     "在沙箱内执行一条命令并拿到输出（构建 / 测试 / 脚本 / git 均可，"
+                     "例如 pytest、npm test、go test ./...、cargo build）。"
                      "不支持管道、重定向、后台常驻进程；也不支持 python -c / node -e 内联代码，"
-                     "代码请先写成沙箱内的 .py / .js 文件",
+                     "代码请先写成沙箱内的脚本文件",
                      {"argv": {"type": "array", "items": {"type": "string"},
                                "description": "命令与参数，如 [\"python\",\"-m\",\"pytest\",\"-q\"]"},
                       "cwd": {"type": "string", "description": "工作目录，沙箱内相对路径，默认沙箱根"},
@@ -743,8 +798,9 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      ["path"]),
             _fn_tool("visual_check",
                      "视觉 QA：无头浏览器打开 HTML，回传控制台/资源错误、WebGL canvas 与 draw calls、"
-                     "帧率、亮度/对比度/清晰度/边缘密度、截图，并可与基线截图比 SSIM。"
-                     "做游戏 / 动画 / 3D 页面时用它量化「画面糊不糊、卡不卡」",
+                     "三角面 / 着色器 / 绑定纹理、帧率、亮度/对比度/清晰度/边缘密度、截图，"
+                     "并可与基线截图比 SSIM。"
+                     "做游戏 / 动画 / 3D 页面时用它量化「画面糊不糊、卡不卡、几何量对不对」",
                      {"path": {"type": "string", "description": "沙箱内的 .html / .htm"},
                       "viewport": {"type": "string", "description": "视口，如 1280x720，默认 1280x720"},
                       "viewports": {"type": "array", "items": {"type": "string"},
@@ -757,6 +813,80 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                       "save_baseline": {"type": "boolean",
                                         "description": "true 时把本次截图保存为基线"}},
                      ["path"]),
+            _fn_tool("render_views",
+                     "多视图截图：无头浏览器按 views 的每个视角打开同一个页面并截图。"
+                     "页面需要读取 location.search 里的 view 参数来设置相机（如 ?view=front）；"
+                     "没适配时会提示「所有截图相同」。产物落在 data/visual 下并生成 manifest.json，"
+                     "供 geometry_compare 对照",
+                     {"path": {"type": "string", "description": "沙箱内的 .html / .htm"},
+                      "views": {"type": "array",
+                                "description": "视角列表：字符串（front / side / top / iso）或 "
+                                               "{name, query}；默认 4 个标准视角"},
+                      "viewport": {"type": "string", "description": "视口，默认 1280x720"},
+                      "timeout": {"type": "integer", "description": "单张截图超时秒数，默认 90"}},
+                     ["path"]),
+            _fn_tool("geometry_compare",
+                     "多视图几何对照：把参考图与产物图按视角配对，逐视图算轮廓 IoU / SSIM / "
+                     "主色 / 比例差与 0–100 分，再给平均分与最差视图。"
+                     "用来发现单视角看不出的比例 / 朝向 / 穿插问题；只做像素形状统计，"
+                     "不判断语义与美观",
+                     {"reference": {"type": "array", "items": {"type": "string"},
+                                    "description": "参考图路径（与 candidate 按顺序配对）"},
+                      "candidate": {"type": "array", "items": {"type": "string"},
+                                    "description": "产物图路径（与 reference 按顺序配对）"},
+                      "names": {"type": "array", "items": {"type": "string"},
+                                "description": "可选：每个视图的名字（front / side…）"},
+                      "region": {"type": "array", "items": {"type": "number"},
+                                 "description": "可选：所有视图共用的裁剪区域 [x, y, w, h]（0–1）"},
+                      "max_side": {"type": "integer", "description": "比较前缩放的最长边，默认 1024"},
+                      "min_score": {"type": "number",
+                                    "description": "及格分，低于它的视图计入 views_failed，默认 70"}},
+                     ["reference", "candidate"]),
+            _fn_tool("scene_assert",
+                     "场景断言：页面暴露 window.__VQA_SCENE_INFO__（对象 / 相机 / 灯光 / renderer）"
+                     "后，按断言检查对象是否存在、数量、隐藏数、相机 FOV、灯光数、三角面、整体包围盒。"
+                     "没暴露钩子时返回可直接照抄的示例；只读场景事实，不渲染",
+                     {"path": {"type": "string", "description": "沙箱内的 .html / .htm"},
+                      "assertions": {"type": "array",
+                                     "description": "断言列表，如 "
+                                                    '[{"kind":"exists","name":"Ground"},'
+                                                    '{"kind":"lights_min","value":1},'
+                                                    '{"kind":"bbox_y_max","value":2}]',
+                                     "items": {"type": "object"}},
+                      "viewport": {"type": "string", "description": "视口，默认 1280x720"},
+                      "timeout": {"type": "integer", "description": "超时秒数，默认 90"}},
+                     ["path", "assertions"]),
+            _fn_tool("archify",
+                     "把系统 / 流程 / 计划 / 代码库画成可验证的交互式 HTML：架构、工作流、时序、"
+                     "数据流、状态、ERD、类图、树、时间线、瀑布图，或『一页式解释页』。"
+                     "先用 action=schema 取对应 schema + 示例；写候选（大候选先 write_file，"
+                     "再传 candidate_path）；action=finalize 会跑 validate → 原子写入 → "
+                     "严格检查 → 真实浏览器检查，全过才交付；action=doctor 检查环境。",
+                     {"action": {"type": "string",
+                                 "enum": ["finalize", "schema", "doctor"],
+                                 "description": "默认 finalize"},
+                      "type": {"type": "string",
+                               "enum": ["architecture", "workflow", "sequence", "dataflow",
+                                        "lifecycle", "erd", "tree", "class", "timeline",
+                                        "waterfall", "explainer"],
+                               "description": "图型；explainer 的候选是 Markdown，其余是 JSON"},
+                      "candidate": {"type": "string",
+                                    "description": "候选内容（JSON；explainer 为 Markdown）。"
+                                                   "大候选请改用 candidate_path"},
+                      "candidate_path": {"type": "string",
+                                         "description": "沙箱内的候选文件；优先用这个"},
+                      "output": {"type": "string",
+                                 "description": "HTML 输出路径（沙箱内）；省略则写 "
+                                                ".archify/<type>-<时间>/<type>.html"},
+                      "quality": {"type": "string", "enum": ["showcase", "standard"],
+                                  "description": "默认 showcase"},
+                      "repo_root": {"type": "string",
+                                    "description": "可选：代码库根目录（画『从代码得图』时用）"},
+                      "timeout": {"type": "integer",
+                                  "description": "超时秒数，默认 180，最大 600"},
+                      "example": {"type": "boolean",
+                                  "description": "schema 时是否附一份官方示例，默认 true"}},
+                     ["action"]),
             _fn_tool("asset_scan",
                      "扫描素材目录：图片尺寸/格式/哈希/重复、音频、模型、总大小；"
                      "可把清单写成 JSON，供 asset_validate 使用",
@@ -789,6 +919,15 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      "按素材清单检查：文件是否存在、图片尺寸是否变化、图集文件是否缺失",
                      {"manifest": {"type": "string", "description": "清单 JSON，默认 assets.json"}},
                      []),
+            _fn_tool("mesh_inspect",
+                     "3D 模型体检（glTF / GLB / OBJ）：解析节点 / mesh / primitive、三角面与顶点数、"
+                     "世界包围盒、材质与纹理引用、法线 / UV 缺失、贴图文件是否存在；"
+                     "不渲染、不判断好不好看，也不检查非流形 / 自交。"
+                     "做完 3D 模型后先跑它确认「几何真的建出来了」，再截图验画面",
+                     {"path": {"type": "string", "description": "沙箱内的 .gltf / .glb / .obj"},
+                      "units": {"type": "string",
+                                "description": "可选：模型单位说明（如 cm / m），只用于回报"}},
+                     ["path"]),
             _fn_tool("audio_probe",
                      "真的读一遍音频文件（WAV/FLAC/OGG/MP3），回传客观声学指标："
                      "响度包络、起音时间、RT60 混响、频谱形状、事件密度，"
@@ -806,18 +945,68 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
             _fn_tool("see_image",
                      "真的看一眼图片（PNG/JPG/WEBP/GIF/BMP），回传视觉模型对它内容的文字描述。"
                      "写完图 / 下载完图片后用它确认「实际长什么样」，不要凭想象描述；"
-                     "需要已配置视觉模型或聊天 API 密钥",
-                     {"path": {"type": "string", "description": "沙箱内的图片文件"},
+                     "需要已配置视觉模型或聊天 API 密钥。"
+                     "先要客观数据（是不是空白图、主体 bbox、主色、多视图面板）时先用 image_analyze，"
+                     "它不消耗视觉模型调用。"
+                     "可以用 paths 一次传多张（最多 %d 张）做同请求对照，"
+                     "回答里用「第 N 张」区分" % SEE_MAX_IMAGES,
+                     {"path": {"type": "string", "description": "沙箱内的单张图片"},
+                      "paths": {"type": "array", "items": {"type": "string"},
+                                "description": "可选：多张图片（与 path 合并，最多 %d 张）"
+                                               % SEE_MAX_IMAGES},
                       "question": {"type": "string",
-                                   "description": "可选：重点看什么，如「配色是否偏暗」"}},
+                                   "description": "可选：重点看什么 / 要比什么"},
+                      "native": {"type": "boolean",
+                                 "description": "默认 true：把图直接附到本轮上下文让模型看；"
+                                                "false：只返回文字描述（省 token）"}},
+                     []),
+            _fn_tool("image_compare",
+                     "对照两张图（参考物 vs 产物），输出客观指标：轮廓重合 IoU、宽高比差、"
+                     "结构相似 SSIM、主色分布差、边缘密度差、3×3 局部最大差与总分 0–100，"
+                     "并列出差距最大的三项。它只做像素 / 形状统计，不理解语义、不判断好不好看；"
+                     "用于「还原得像不像」的机检与迭代排序。背景尽量干净，"
+                     "有地面 / 阴影 / 图注时用 region 裁到主体或局部",
+                     {"reference": {"type": "string", "description": "参考图（沙箱内路径）"},
+                      "candidate": {"type": "string", "description": "产物图（沙箱内路径）"},
+                      "region": {"type": "array", "items": {"type": "number"},
+                                 "description": "可选：两张图共用的裁剪区域 [x, y, w, h]，0–1 归一化"},
+                      "max_side": {"type": "integer",
+                                   "description": "可选：比较前缩放的最长边，默认 1024"}},
+                     ["reference", "candidate"]),
+            _fn_tool("image_analyze",
+                     "测量一张图的客观几何：背景色、前景占比、主体 bbox、宽高比、主色、"
+                     "行 / 列剖面、ASCII 剪影，并自动切分多视图面板（返回归一化 region，"
+                     "可直接交给 image_compare 逐面板对照）。只做图像统计，不理解内容；"
+                     "面板切分是启发式，仅供对照参考。"
+                     "渲染 / 截图落盘后先跑它：blank_score 能直接判断是不是白图，"
+                     "不用花一次视觉模型调用去「看一眼」",
+                     {"path": {"type": "string", "description": "沙箱内的图片路径"},
+                      "region": {"type": "array", "items": {"type": "number"},
+                                 "description": "可选：只分析这块区域 [x, y, w, h]，0–1 归一化"},
+                      "panels": {"type": "string",
+                                 "description": "面板切分：auto（启发式）/ none / "
+                                                "显式网格如 2x2、1x3（多视图最稳）"},
+                      "max_side": {"type": "integer",
+                                   "description": "可选：分析前缩放的最长边，默认 1024"}},
                      ["path"]),
             _fn_tool("read_tool_result",
-                     "精读一条被截断或已落盘的工具结果：结果里会给出 handle（r2、sp_1a2b3c4d5e），"
-                     "用它取指定字符区间。sp_ 开头的落盘句柄跨轮、跨重启都有效；"
-                     "不要重新读一遍文件，直接精读更省 token",
+                     "精读或搜索一条被截断 / 已落盘的工具结果：结果里会给出 handle（r2、sp_1a2b3c4d5e）。"
+                     "已知位置用 start/end 取字符区间；不知道在哪就先给 query 搜索"
+                     "（按行匹配，返回行号 + 绝对偏移 + 上下文），再用 start=<偏移> 精读。"
+                     "sp_ 开头的落盘句柄跨轮、跨重启都有效；不要重新跑工具。",
                      {"handle": {"type": "string", "description": "截断提示里给出的句柄"},
                       "start": {"type": "integer", "description": "起始字符（0 起），默认 0"},
-                      "end": {"type": "integer", "description": "结束字符（不含），默认 +12000"}},
+                      "end": {"type": "integer", "description": "结束字符（不含），默认 +12000"},
+                      "query": {"type": "string",
+                                "description": "可选：在结果里搜索的关键词；给了它就走搜索模式"},
+                      "mode": {"type": "string", "enum": ["literal", "regex"],
+                               "description": "搜索方式，默认 literal（正则按行匹配，避免回溯炸掉）"},
+                      "ignore_case": {"type": "boolean",
+                                      "description": "搜索时忽略大小写，默认 false"},
+                      "context": {"type": "integer",
+                                  "description": "每条命中带几行上下文（0–5），默认 2"},
+                      "max_hits": {"type": "integer",
+                                   "description": "最多返回几处命中，默认 20（上限 50）"}},
                      ["handle"]),
             _fn_tool("find_symbol",
                      "按符号名找定义与引用（沙箱内 .py/.js/.ts）。"
@@ -1034,13 +1223,23 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
          "repeat": {"type": "string", "enum": ["", "daily", "weekly"]}},
         ["at", "text"]))
     out.append(_fn_tool(
-        "ask_user", "向用户提问；一次可问多个问题；允许多选的问题把 multiple 设为 true",
+        "ask_user",
+        "向用户提问；一次可问多个问题；允许多选的问题把 multiple 设为 true。"
+        "如果这件事必须由用户在你够不到的地方**亲手完成**（登录 / 扫码 / 装依赖 / "
+        "点系统弹窗 / 插设备），把 action 设为 true，前端会弹「等待你操作」卡，"
+        "用户做完点「我已完成」你再继续",
         {"questions": {"type": "array", "items": {
             "type": "object",
             "properties": {"question": {"type": "string"},
                            "options": {"type": "array", "items": {"type": "string"}},
                            "multiple": {"type": "boolean",
-                                        "description": "该题是否允许多选；题目会自动标注（多选）"}},
+                                        "description": "该题是否允许多选；题目会自动标注（多选）"},
+                           "action": {"type": "boolean",
+                                      "description": "true = 需要用户亲手操作的一步（不是选择题）"},
+                           "detail": {"type": "string",
+                                      "description": "action=true 时的一句话说明：为什么要你来做"},
+                           "items": {"type": "array", "items": {"type": "string"},
+                                     "description": "action=true 时的操作清单，一步一条"}},
             "required": ["question"]}}},
         ["questions"]))
     out.append(_fn_tool(
@@ -1114,6 +1313,51 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                         "description": "后台运行：立即返回批次号，不阻塞当前回合；"
                                        "之后用 explore_status / explore_result 取"}},
         ["goal", "questions"]))
+    _delegate_desc = (
+        "把任务派给可配置的子代理团队。默认有 researcher（只联网）、"
+        "reviewer（只读审查）、critic（反证）、implementer（可写，每次写仍走审批）；"
+        "用户可以在「设置 → 子代理」里新建或修改代理，指定工具、模型与写权限。"
+        "多个独立任务放进 agents 数组会并行执行；需要串行交接时用 pipeline。"
+        "单次并行数量由设置里的 agent_explore_max 决定（默认 8，硬上限 12）。"
+        "每个代理只回传 600 字以内结论与证据。")
+    try:
+        from app import agent_defs as _agent_defs
+        _rows = [a for a in _agent_defs.list_agents()
+                 if a.get("enabled") and not a.get("error")]
+        if _rows:
+            _delegate_desc += " 当前可用：" + "；".join(
+                "%s（%s）" % (a["id"], (a.get("description") or a.get("name") or "")[:40])
+                for a in _rows[:12]) + "。"
+    except Exception:                        # noqa: BLE001  定义读不到不影响工具可用
+        pass
+    out.append(_fn_tool(
+        "delegate",
+        _delegate_desc,
+        {"goal": {"type": "string", "description": "这一批派活要解决什么"},
+         "agents": {"type": "array", "items": {
+             "type": "object",
+             "properties": {
+                 "agent": {"type": "string",
+                           "description": "代理 id，如 researcher / reviewer / critic / implementer"},
+                 "task": {"type": "string", "description": "交给这个代理的具体任务"}},
+             "required": ["agent", "task"]}},
+         "pipeline": {"type": "array", "items": {"type": "string"},
+                      "description": "串行交接的代理 id 列表，如 "
+                                     "[planner, implementer, reviewer]；"
+                                     "上一阶段输出会作为下一阶段背景，与 agents 二选一"},
+         "task": {"type": "string",
+                  "description": "pipeline 模式下的总任务"},
+         "deliverable": {"type": "string",
+                         "description": "交付形态，如「问题清单」「事实结论」"},
+         "acceptance": {"type": "array", "items": {"type": "string"},
+                        "description": "可机检验收条件：cites>=2 / answers>=1 / "
+                                       "sources>=2 / contains:文本"},
+         "background": {"type": "boolean",
+                        "description": "后台运行：立即返回批次号，用 explore_status / "
+                                       "explore_result 取结果"},
+         "verify": {"type": "boolean",
+                    "description": "追加反证者核对各代理的结论与证据"}},
+        ["agents"]))
     out.append(_fn_tool(
         "explore_status",
         "查看后台子代理批次：状态（running / done / failed / cancelled）、"
@@ -1147,11 +1391,13 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
         ["batch", "questions"]))
     out.append(_fn_tool(
         "acceptance",
-        "多步交付任务开工前定义机检验收项：每条写清「要验证什么」+「用哪个工具/命令检查」+「期望结果」。"
+        "可选的机检验收项（不是开工门槛）：每条写清「要验证什么」+「用哪个工具/命令检查」+「期望结果」。"
         "验收项根据任务自己推导，不要套模板。set 定义；run 跑安全只读检查；"
-        "run_command 类检查在主循环执行后用 record 记录；status 查看；clear 清空。",
+        "run_command 类检查在主循环执行后用 record 记录；"
+        "标准过时用 revise 改 text/check/expect，或 drop=true 删除（必须写 reason）；"
+        "status 查看；clear 清空。",
         {"action": {"type": "string",
-                    "enum": ["set", "run", "record", "status", "clear"]},
+                    "enum": ["set", "run", "record", "revise", "status", "clear"]},
          "criteria": {"type": "array", "items": {
              "type": "object",
              "properties": {
@@ -1168,13 +1414,33 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                                            "console_errors_max / draw_calls_max / sharpness_min / "
                                            "contrast_min / blank_score_max / ssim_min；"
                                            "asset_validate 可用 missing_max / unreadable_max / "
-                                           "duplicates_max；命令类可为空"}},
+                                           "duplicates_max；mesh_inspect 可用 triangles_min / "
+                                           "triangles_max / vertices_max / materials_max / "
+                                           "textures_max / degenerate_max / missing_textures_max / "
+                                           "bbox_x_max / bbox_y_max / bbox_z_max；命令类可为空"}},
              "required": ["text", "check"]}},
-         "id": {"type": "string", "description": "record 时的验收项 id"},
+         "id": {"type": "string", "description": "record / revise 时的验收项 id"},
          "passed": {"type": "boolean", "description": "record 时该项是否通过"},
          "evidence": {"type": "string",
-                      "description": "record 时的证据（命令输出 / 检查结果摘要）"}},
+                      "description": "record 时的证据（命令输出 / 检查结果摘要）"},
+         "reason": {"type": "string",
+                    "description": "revise 时说明为什么原验收标准不再适用"},
+         "drop": {"type": "boolean", "description": "revise 时直接删除这条过时的验收项"}},
         ["action"]))
+    out.append(_fn_tool(
+        "finish",
+        "声明本轮任务已完成并交付（**显式收尾开关**）。只有确实做完、或确实要交给用户"
+        "拍板时才调用；调用后本轮立刻结束。还有计划步骤没做完、或还要读 / 写 / 跑命令时"
+        "**不要**调用它，直接继续干活。仅写正文、不调任何工具就停下会被系统判成「未完成」"
+        "并要求你继续，所以收尾时请显式调用它。",
+        {"summary": {"type": "string",
+                     "description": "一句话说明交付了什么 / 结论"},
+         "incomplete": {"type": "array", "items": {"type": "string"},
+                        "description": "确实做不了、留给用户的后续事项（可选）"},
+         "quality_waiver": {"type": "string",
+                            "description": "可选：本轮用过 image_compare 但分数仍低于阈值时，"
+                                           "写清为什么不再继续迭代（不写则可能被质量闸门拦下）"}},
+        []))
     out.append(_fn_tool(
         "update_plan",
         "更新当前任务的执行计划（活文档，不是一次性清单）。需要动手的任务"
@@ -1229,6 +1495,14 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
              "required": ["text"]}},
          "retro": {"type": "string",
                    "description": "可选：收尾复盘（实际结果 / 与计划的偏差 / 可复用经验），整份计划完成后写"},
+         "log": {"type": "array", "items": {
+             "type": "object",
+             "properties": {
+                 "kind": {"type": "string", "enum": ["decision", "discovery"]},
+                 "text": {"type": "string"},
+             },
+             "required": ["kind", "text"]},
+             "description": "可选：随计划一起记录决策 / 发现（最多各保留 20 条）"},
          "note": {"type": "string", "description": "可选备注"}},
         []))
     out.append(_fn_tool(
@@ -1299,29 +1573,15 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
              "description": "追加决策 / 发现（最多各保留 20 条）"}},
         []))
     out.append(_fn_tool(
-        "run_script",
-        "写一段 Python 脚本，在一次调用里批量调用工具，把结果汇总后只回传一份。"
-        "**只在需要循环 / 条件分支 / 复杂计算时用**——单纯看文件、搜内容、数出现次数"
-        "请直接用 read_file / read_files / search_files（它们已支持原文、批量、多处命中、"
-        "上下文与计数），写脚本反而更慢更贵。脚本里用 "
-        "gm.call(\"read_file\", path=\"src/main.js\")，"
-        "gm.parallel([(\"read_file\", {\"path\": \"a\"}), (\"read_file\", {\"path\": \"b\"})]) "
-        "可以并发读一批；gm.tools() 列出本次可用工具与参数，gm.help(name) 取单个 schema；"
-        "print 的输出会回传，gm.log(...) 可实时显示进度。失败抛 gm.ToolError（带 code / tool）。"
-        "gm 已自动注入，无需自己 import。"
-        "脚本开头会注入安全护栏：默认只能读沙箱内文件（内置 open()、os.remove、"
-        "subprocess 都会被拒绝）；会话「完全放权」或设置里打开 code_mode_allow_write / "
-        "allow_cmd 后才放行，且写入仍限制在沙箱内。",
-        {"code": {"type": "string", "description": "完整 Python 源码"},
-         "timeout": {"type": "integer", "description": "超时秒数，默认 120，最大 600"}},
-        ["code"]))
-    out.append(_fn_tool(
         "run_workflow_script",
-        "脚本化工作流：写一段 Python，用循环/条件/变量组合多次工具调用与多个 DAG 工作流。"
-        "脚本里 wf.call(tool, **args)、wf.parallel([...])、wf.workflow(spec)（同步跑一个 DAG）、"
-        "wf.workflow_text(spec)、wf.log(...)；只有 print 的最终输出回传模型。"
-        "适合「扫描 N 个文件 → 分组 → 每组跑一次工作流 → 汇总」这类脚本天生擅长的编排。"
-        "默认只读；完全放权或设置开关后可写/命令（脚本内不再逐次弹审批）。",
+        "脚本化工作流：写一段 Python，用循环/条件/变量组合多次工具调用、多个 DAG 工作流"
+        "与命名子代理。脚本里 wf.call(tool, **args)、wf.parallel([...])、wf.workflow(spec)"
+        "（同步跑一个 DAG）、wf.workflow_text(spec)、wf.agent(name, task)、"
+        "wf.agents([{agent, task}, ...])、wf.pipeline([names], task)、wf.log(...)；"
+        "只有 print 的最终输出回传模型。"
+        "适合「扫描 N 个文件 → 分组 → 每组派一个子代理 → 汇总」这类脚本天生擅长的编排。"
+        "默认只读；完全放权或设置开关后可写/命令（脚本内不再逐次弹审批）；"
+        "子代理的写权限跟随各自定义，每次写仍走审批。",
         {"code": {"type": "string", "description": "完整 Python 源码"},
          "timeout": {"type": "integer", "description": "超时秒数，默认 300，最大 600"}},
         ["code"]))
@@ -1435,18 +1695,38 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
         pass
     # 工具分层：低频工具组默认不下发（省掉每轮重发的 schema），
     # 命中意图域（allow_groups）或模型用 tool_search 解锁后才挂上。
-    hide = hidden_tools(allow_groups, unlocked)
-    if hide:
-        before = len(out)
+    if allowed_tools is not None:
+        # 子代理 / 评测的角色白名单：按旧工具名授权，meta 只暴露被授权的 action。
+        _allow = set()
+        for _n in allowed_tools:
+            _n = str(_n or "").strip()
+            if _n in tool_meta.META:
+                _allow.update(legacy for legacy, _r, _m
+                              in tool_meta.META[_n]["actions"].values())
+            elif _n:
+                _allow.add(_n)
         out = [t for t in out
-               if str((t.get("function") or {}).get("name") or "") not in hide]
-        if len(out) < before:
-            out.append(_tool_search_schema())
+               if str((t.get("function") or {}).get("name") or "") in _allow]
+    else:
+        hide = hidden_tools(allow_groups, unlocked)
+        if hide:
+            before = len(out)
+            out = [t for t in out
+                   if str((t.get("function") or {}).get("name") or "") not in hide]
+            if len(out) < before:
+                out.append(_tool_search_schema())
     if plan_mode:
         # /plan 规划轮：只把只读工具 + 计划工具交给模型，写 / 命令 / Git 提交
         # 连 schema 都不下发，避免它先写一版再被运行时拒绝。
         out = [t for t in out
                if ((t.get("function") or {}).get("name") in PLAN_MODE_TOOLS)]
+    # 工具元层：把 lsp_* / git_* / plan_* / 文件操作等收敛为少量 action 工具。
+    # 被隐藏或 plan_mode 过滤掉的 action 不会出现在 enum 里；旧工具名仍可调用。
+    _names = [str((t.get("function") or {}).get("name") or "") for t in out]
+    _metas, _used = tool_meta.build_schemas(_names)
+    if _used:
+        out = _metas + [t for t in out
+                        if str((t.get("function") or {}).get("name") or "") not in _used]
     return out
 
 
@@ -1534,6 +1814,13 @@ def normalize_call(item, default_tool=""):
         return None
     args_obj = args if isinstance(args, dict) else (
         _loads_loose(args) if isinstance(args, str) else {})
+    # 工具元层优先：read/edit/run/... 带 action 时先映射回旧工具名，
+    # 这样后面的审批 / 沙箱 / 写前必读 / 撤销全部按旧名生效。
+    _meta = tool_meta.normalize(str(tool), args_obj)
+    if _meta:
+        tool, args_obj = _meta
+        # 这里的旧名已是规范名，不能再过 alias（例如 shell 会被别名成 run_command）
+        return {"tool": tool, "args": normalize_args(tool, args_obj)}
     low_tool = str(tool).strip().lower()
     # 少量「同名但语义不同」的工具按参数消歧
     if low_tool == "search":
@@ -1702,6 +1989,10 @@ def resolve_path(sandbox, rel, allow_outside=False, for_read=False):
             norm = norm[len(base):].lstrip("/")   # 容忍模型带上沙箱目录名
         target = _real(os.path.join(root, norm))
         if target != root and not target.startswith(root + os.sep):
+            if allow_outside:
+                raise SandboxError(
+                    "路径越出沙箱范围：%s（沙箱外读取需要用绝对路径，"
+                    "相对路径（含 ../）只在沙箱内解析）" % raw)
             raise SandboxError("路径越出沙箱范围：" + raw)
     parts = os.path.relpath(target, root).replace("\\", "/").split("/")
     for seg in parts:
@@ -1780,6 +2071,11 @@ def _t_list_dir(root, args, allow_outside=False):
     p = resolve_path(root, args.get("path") or "", allow_outside, for_read=True)
     if not os.path.isdir(p):
         return "不是目录：" + _rel(root, p), None
+    # 沙箱外目录：列表里直接给绝对路径。否则模型拿到 ../xxx 再去 read_file，
+    # 相对路径会被 resolve_path 拒掉（只有绝对路径能跨沙箱），看起来就像「时好时坏」。
+    root_real = _real(root)
+    outside = bool(allow_outside) and not (
+        p == root_real or p.startswith(root_real + os.sep))
     rows = []
     for name in sorted(os.listdir(p)):
         if name in BLOCKED_SEGMENTS and name not in READ_ONLY_SEGMENTS:
@@ -1794,12 +2090,16 @@ def _t_list_dir(root, args, allow_outside=False):
             size = 0 if is_dir else os.path.getsize(full)
         except OSError:
             continue
+        label = full.replace("\\", "/") if outside else name
         rows.append("%s  %s%s" % (_fmt_size(size) if not is_dir else "<目录>",
-                                  name, "/" if is_dir else ""))
+                                  label, "/" if is_dir else ""))
         if len(rows) >= MAX_LIST_ENTRIES:
             rows.append("…（已达 %d 条上限）" % MAX_LIST_ENTRIES)
             break
-    head = "目录：%s（共 %d 项）" % (_rel(root, p) or ".", len(rows))
+    head = "目录：%s（共 %d 项%s）" % (
+        p.replace("\\", "/") if outside else (_rel(root, p) or "."),
+        len(rows),
+        "，沙箱外：以下为绝对路径" if outside else "")
     return head + "\n" + ("\n".join(rows) if rows else "（空）"), None
 
 
@@ -2046,7 +2346,7 @@ def _t_repo_map(root, args):
 
 
 # ---- 轻量「LSP」：按符号找定义 / 引用，按需做语法体检 ----
-SYMBOL_EXTS = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}
+SYMBOL_EXTS = set(langs.SOURCE_EXTS)
 SYMBOL_MAX_FILES = 800
 SYMBOL_MAX_BYTES = 512 * 1024
 SYMBOL_REF_LIMIT = 40          # 引用最多列多少条，避免刷屏
@@ -2056,12 +2356,24 @@ CHECK_MAX_FILES = 200
 
 def _symbol_def_re(name):
     esc = re.escape(name)
-    return re.compile(
-        r"^\s*(?:async\s+)?def\s+%s\s*\(" % esc                       # python
-        + r"|^\s*class\s+%s\b" % esc                                  # py / js / ts
-        + r"|^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+%s\s*\(" % esc
-        + r"|^\s*(?:export\s+)?(?:const|let|var)\s+%s\s*=" % esc,     # 变量 / 箭头函数
-        re.M)
+    pats = [
+        r"^\s*(?:async\s+)?def\s+%s\s*\(" % esc,                      # python
+        r"^\s*class\s+%s\b" % esc,                                    # py / js / ts / java
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+%s\s*\(" % esc,
+        r"^\s*(?:export\s+)?(?:const|let|var)\s+%s\s*=" % esc,        # 变量 / 箭头函数
+        r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+%s\s*[<(]" % esc,          # rust
+        r"^\s*func\s+(?:\([^)]*\)\s*)?%s\s*\(" % esc,                 # go
+        r"^\s*(?:typedef\s+)?(?:struct|enum|union|interface|trait|type)\s+%s\b" % esc,
+        r"^\s*#define\s+%s\b" % esc,
+        # java / c / c++ / c# 的方法定义：修饰符 + 返回类型 + 名字(
+        # 排除 return / if / for 这类「调用行」，否则会把普通调用误判成定义
+        r"^\s*(?!return\b|if\b|while\b|for\b|switch\b|catch\b|throw\b|await\b"
+        r"|new\b|delete\b|case\b|do\b|try\b|else\b)"
+        r"(?:(?:public|private|protected|internal|static|final|virtual|override"
+        r"|async|synchronized|const|extern|inline|unsigned|signed)\s+)*"
+        r"[A-Za-z_][\w:<>\[\],.?*&]*\s+%s\s*\(" % esc,
+    ]
+    return re.compile("|".join(pats), re.M)
 
 
 def _t_find_symbol(root, args):
@@ -2203,9 +2515,17 @@ def _t_impact(root, args):
         return "请提供 target：符号名或文件相对路径", None
     sub = str(args.get("path") or "").strip()
     try:
-        return codesym.impact(root, target, sub), None
+        text = codesym.impact(root, target, sub)
     except Exception as e:                           # noqa: BLE001
-        return "❌ 影响分析失败：%s" % e, None
+        text = "❌ 影响分析失败：%s" % e
+    if text and not str(text).lstrip().startswith("❌"):
+        return text, None
+    # 非 Python / JS 项目没有符号图：降级为正则检索，不把语言挡在门外
+    if re.match(r"^[A-Za-z_$][\w$.:]{2,80}$", target):
+        fb, _ = _t_find_symbol(root, {"name": target, "path": sub})
+        return "（该语言暂无符号图，已降级为正则检索）\n" + str(fb), None
+    return ("该语言暂无影响分析；可用 read(action=search, pattern=...) "
+            "搜符号名，或 code(action=find) 找定义。"), None
 
 
 def _t_check_code(root, args):
@@ -2224,14 +2544,15 @@ def _t_check_code(root, args):
     else:
         for dp, _dns, fns in _walk(base):
             for fn in fns:
-                if os.path.splitext(fn)[1].lower() in (".py", ".pyw", ".js", ".mjs", ".cjs", ".json"):
+                if os.path.splitext(fn)[1].lower() in langs.CHECK_EXTS:
                     targets.append(os.path.join(dp, fn))
                 if len(targets) >= CHECK_MAX_FILES:
                     break
             if len(targets) >= CHECK_MAX_FILES:
                 break
     if not targets:
-        return "没有可检查的文件（只支持 .py / .js / .json）", None
+        return ("没有可检查的文件（当前可快速校验：%s）"
+                % " / ".join(sorted(langs.CHECK_EXTS))), None
     problems, checked = [], 0
     for full in targets:
         err = post_write_check(full)
@@ -2972,6 +3293,105 @@ def _t_visual_check(root, args, caps=None):
     return text, None
 
 
+def _t_render_views(root, args, caps=None):
+    """多视图截图：页面按 ?view= 设置相机。"""
+    p = resolve_path(root, args.get("path"))
+    text = visual_qa.render_views(
+        p,
+        views=args.get("views"),
+        viewport=str(args.get("viewport") or ""),
+        sid=(caps or {}).get("sid") or "",
+        timeout=int(args.get("timeout") or 90),
+    )
+    return text, None
+
+
+def _t_geometry_compare(root, args, allow_outside=False):
+    """多视图几何对照：参考图与产物图按视角配对。"""
+    from app import imagecmp
+    refs = args.get("reference") or args.get("refs") or []
+    cands = args.get("candidate") or args.get("candidates") or []
+    if not isinstance(refs, list):
+        refs = [refs]
+    if not isinstance(cands, list):
+        cands = [cands]
+    if not refs or not cands:
+        return "❌ geometry_compare 需要 reference 与 candidate 两个数组。", None
+    if len(refs) != len(cands):
+        return ("❌ reference（%d）与 candidate（%d）数量不一致：按视角一一配对。"
+                % (len(refs), len(cands))), None
+    names = args.get("names") if isinstance(args.get("names"), list) else []
+    pairs = []
+    for i, (r, c) in enumerate(zip(refs, cands)):
+        rp = resolve_path(root, str(r or ""), allow_outside, for_read=True)
+        cp = resolve_path(root, str(c or ""), allow_outside, for_read=True)
+        nm = str(names[i]) if i < len(names) else "view%d" % (i + 1)
+        pairs.append((nm, rp, cp))
+    try:
+        res = imagecmp.compare_views(
+            pairs, region=args.get("region"),
+            max_side=int(args.get("max_side") or imagecmp.MAX_SIDE),
+            min_score=float(args.get("min_score") or 70))
+    except (TypeError, ValueError) as e:
+        return "❌ 对照参数不合法：%s" % e, None
+    return res.get("text") or "❌ 多视图对照失败", None
+
+
+def _t_scene_assert(root, args, caps=None):
+    """场景断言：读页面暴露的 __VQA_SCENE_INFO__。"""
+    p = resolve_path(root, args.get("path"))
+    text = visual_qa.scene_assert(
+        p, args.get("assertions") or [],
+        viewport=str(args.get("viewport") or ""),
+        sid=(caps or {}).get("sid") or "",
+        timeout=int(args.get("timeout") or 90),
+    )
+    return text, None
+
+
+def _t_archify(root, args):
+    """Archify：schema / doctor / finalize（原版 CLI，vendor 在 vendor/archify）。"""
+    from app import archify as archify_lib
+    act = str(args.get("action") or "finalize").strip().lower()
+    if act == "doctor":
+        return archify_lib.doctor(), None
+    if act == "schema":
+        ex = args.get("example", True)
+        if isinstance(ex, str):
+            ex = ex.strip().lower() not in ("false", "0", "no", "off")
+        return archify_lib.schema_text(args.get("type"), bool(ex)), None
+    if act != "finalize":
+        return "❌ archify 的 action 只能是 finalize / schema / doctor。", None
+    kind = str(args.get("type") or "").strip().lower()
+    if kind not in archify_lib.DIAGRAM_TYPES:
+        return ("❌ archify 需要 type（%s）" % "、".join(archify_lib.DIAGRAM_TYPES)), None
+    if args.get("candidate_path"):
+        cand = resolve_path(root, str(args["candidate_path"]), for_read=True)
+    elif args.get("candidate"):
+        raw = str(args.get("candidate") or "")
+        if len(raw) > 4 * 1024 * 1024:
+            return "❌ 内联候选超过 4 MB；请先 write_file 再传 candidate_path。", None
+        cand = archify_lib.prepare_inline(kind, raw, root)
+    else:
+        return ("❌ 需要 candidate（内联内容）或 candidate_path（沙箱内候选文件）。"
+                "大候选请先 write_file 再传 candidate_path。"), None
+    out = str(args.get("output") or "").strip()
+    output = resolve_path(root, out) if out else archify_lib.default_output(kind, root)
+    parent = os.path.dirname(output)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    repo = ""
+    if args.get("repo_root"):
+        repo = resolve_path(root, str(args["repo_root"]))
+    text, _rep = archify_lib.finalize(
+        kind, cand, output, root,
+        quality=str(args.get("quality") or "showcase"),
+        repo_root=repo,
+        timeout=args.get("timeout") or 0,
+    )
+    return text, None
+
+
 def _t_asset_scan(root, args, allow_outside=False):
     rel = str(args.get("path") or ".")
     resolve_path(root, rel)                       # 校验沙箱边界
@@ -3027,6 +3447,13 @@ def _t_asset_validate(root, args):
     return text, None
 
 
+def _t_mesh_inspect(root, args):
+    """3D 模型体检：只读解析，不渲染、不改文件。"""
+    p = resolve_path(root, args.get("path") or "")
+    text, _metrics = mesh.inspect(p, units=str(args.get("units") or ""))
+    return text, None
+
+
 def _t_run_workflow_script(root, args, caps=None):
     """脚本化工作流：脚本里可调工具与 DAG 工作流。"""
     from app import workflow_script
@@ -3058,29 +3485,136 @@ def _t_audio_compare(root, args, allow_outside=False):
     return audio.compare(a, b), None
 
 
+def _b64_for_vision(path, max_side=1024):
+    """读图并压到最长边 max_side，转 JPEG 后 base64（附图用，控制 token）。"""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            if max_side and max(im.size) > max_side:
+                scale = float(max_side) / float(max(im.size))
+                im = im.resize((max(1, int(im.size[0] * scale)),
+                                max(1, int(im.size[1] * scale))), Image.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=85, optimize=True)
+        return "image/jpeg", base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:                     # noqa: BLE001  PIL 失败就退回原图
+        ext = os.path.splitext(path)[1].lower()
+        with open(path, "rb") as f:
+            return IMG_MIME.get(ext, "image/png"), base64.b64encode(f.read()).decode("ascii")
+
+
+def _read_vision_images(root, args, allow_outside=False, max_side=0):
+    """把 see_image 的参数读成 [{path, mime, b64}]；返回 (imgs, 错误文本)。"""
+    raw = args.get("paths")
+    paths = [str(x or "").strip() for x in (raw if isinstance(raw, list) else [])
+             if str(x or "").strip()]
+    single = str(args.get("path") or "").strip()
+    if single:
+        paths.insert(0, single)
+    uniq = []
+    for x in paths:
+        if x not in uniq:
+            uniq.append(x)
+    if not uniq:
+        return [], "❌ 需要 path 或 paths（沙箱内图片路径）"
+    if len(uniq) > SEE_MAX_IMAGES:
+        return [], "❌ 一次最多看 %d 张图，请分批" % SEE_MAX_IMAGES
+    imgs, total = [], 0
+    for rel in uniq:
+        p = resolve_path(root, rel, allow_outside, for_read=True)
+        if not os.path.isfile(p):
+            return [], "❌ 文件不存在：%s" % _rel(root, p)
+        ext = os.path.splitext(p)[1].lower()
+        if ext not in IMG_EXTS:
+            return [], "❌ 只支持图片（%s）：%s" % (" / ".join(IMG_EXTS), _rel(root, p))
+        size = os.path.getsize(p)
+        if size > IMG_MAX_BYTES:
+            return [], ("❌ 图片太大（%s，%.1f MB，单张上限 %d MB），可先压缩再让我看"
+                        % (_rel(root, p), size / 1048576.0,
+                           IMG_MAX_BYTES // 1048576))
+        total += size
+        if total > SEE_MAX_TOTAL:
+            return [], ("❌ 多图合计超过 %d MB，请减少张数或先压缩"
+                        % (SEE_MAX_TOTAL // 1048576))
+        if max_side:
+            mime, b64 = _b64_for_vision(p, max_side)
+        else:
+            with open(p, "rb") as f:
+                mime = IMG_MIME.get(ext, "image/png")
+                b64 = base64.b64encode(f.read()).decode("ascii")
+        imgs.append({"path": _rel(root, p), "mime": mime, "b64": b64})
+    return imgs, ""
+
+
+def vision_attachments(root, args, allow_outside=False):
+    """原生视觉附图：读图并缩到 1024，供 chat 循环附到本轮上下文。"""
+    return _read_vision_images(root, args, allow_outside, max_side=1024)
+
+
 def _t_see_image(root, args, allow_outside=False):
     """让模型真的看一眼沙箱里的图片（走视觉通道，返回文字描述）。
 
     补的是这个缺口：模型能下载图片、也能写图片，但读不了像素 ——
     `read_file` 只处理文本。需要用户已配置视觉模型或聊天 API 密钥。
+    paths 支持一次多张：同一请求里发给视觉通道，用于参考 vs 对象的直接对照。
     """
-    p = resolve_path(root, args.get("path"))
-    if not os.path.isfile(p):
-        return "❌ 文件不存在：%s" % _rel(root, p), None
-    ext = os.path.splitext(p)[1].lower()
-    mime = IMG_MIME.get(ext)
-    if not mime:
-        return "❌ 只支持图片（%s）：%s" % (" / ".join(IMG_EXTS), _rel(root, p)), None
-    size = os.path.getsize(p)
-    if size > IMG_MAX_BYTES:
-        return ("❌ 图片太大（%.1f MB，上限 %d MB），可先压缩再让我看"
-                % (size / 1048576.0, IMG_MAX_BYTES // 1048576)), None
-    with open(p, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("ascii")
+    imgs, err = _read_vision_images(root, args, allow_outside)
+    if err:
+        return err, None
     from app import imaging
     q = str(args.get("question") or "").strip()
-    out = imaging.recognize_image_fallback(mime, b64, question=q)
+    meta = {}
+    out = imaging.recognize_image_fallback(
+        imgs[0]["mime"], imgs[0]["b64"], question=q,
+        images=[(it["mime"], it["b64"]) for it in imgs], meta=meta)
+    if meta.get("fallback") and not str(out).startswith(("❌", "⚠️")):
+        out += "\n\n（识图通道：主聊天模型未接受图片，已回落到视觉 API）"
     return out, None
+
+
+def _t_image_compare(root, args, allow_outside=False):
+    """对比参考图与产物图的客观差异（纯像素 / 形状统计，领域无关）。"""
+    from app import imagecmp
+    raw_ref = str(args.get("reference") or args.get("ref") or "").strip()
+    raw_cand = str(args.get("candidate") or args.get("cand") or "").strip()
+    if not raw_ref or not raw_cand:
+        return "❌ 需要 reference 与 candidate（沙箱内图片路径）", None
+    ref = resolve_path(root, raw_ref, allow_outside, for_read=True)
+    cand = resolve_path(root, raw_cand, allow_outside, for_read=True)
+    for p in (ref, cand):
+        if not os.path.isfile(p):
+            return "❌ 文件不存在：%s" % _rel(root, p), None
+        if os.path.splitext(p)[1].lower() not in IMG_EXTS:
+            return ("❌ 只支持图片（%s）：%s"
+                    % (" / ".join(IMG_EXTS), _rel(root, p))), None
+    try:
+        res = imagecmp.compare(ref, cand, region=args.get("region"),
+                               max_side=args.get("max_side") or imagecmp.MAX_SIDE)
+    except Exception as e:                # noqa: BLE001
+        return "❌ 图像对照失败：%s" % e, None
+    return res.get("text") or "❌ 图像对照失败", None
+
+
+def _t_image_analyze(root, args, allow_outside=False):
+    """测量单张图的背景 / 面板 / 比例（纯图像统计，领域无关）。"""
+    from app import imagecmp
+    raw = str(args.get("path") or "").strip()
+    if not raw:
+        return "❌ 需要 path（沙箱内图片路径）", None
+    p = resolve_path(root, raw, allow_outside, for_read=True)
+    if not os.path.isfile(p):
+        return "❌ 文件不存在：%s" % _rel(root, p), None
+    if os.path.splitext(p)[1].lower() not in IMG_EXTS:
+        return ("❌ 只支持图片（%s）：%s"
+                % (" / ".join(IMG_EXTS), _rel(root, p))), None
+    try:
+        res = imagecmp.analyze(p, region=args.get("region"),
+                               panels=args.get("panels") or "auto",
+                               max_side=args.get("max_side") or imagecmp.MAX_SIDE)
+    except Exception as e:                # noqa: BLE001
+        return "❌ 图像分析失败：%s" % e, None
+    return res.get("text") or "❌ 图像分析失败", None
 
 
 def _t_read_tool_result(root, args, allow_outside=False):
@@ -3140,15 +3674,22 @@ _HANDLERS = {
     "delete_file": _t_delete_file,
     "render_check": _t_render_check,
     "visual_check": _t_visual_check,
+    "render_views": _t_render_views,
+    "geometry_compare": _t_geometry_compare,
+    "scene_assert": _t_scene_assert,
+    "archify": _t_archify,
     "asset_scan": _t_asset_scan,
     "asset_convert": _t_asset_convert,
     "asset_atlas": _t_asset_atlas,
     "asset_inline": _t_asset_inline,
     "asset_validate": _t_asset_validate,
+    "mesh_inspect": _t_mesh_inspect,
     "run_workflow_script": _t_run_workflow_script,
     "audio_probe": _t_audio_probe,
     "audio_compare": _t_audio_compare,
     "see_image": _t_see_image,
+    "image_compare": _t_image_compare,
+    "image_analyze": _t_image_analyze,
     "read_tool_result": _t_read_tool_result,
     "find_symbol": _t_find_symbol,
     "check_code": _t_check_code,
@@ -3210,48 +3751,8 @@ def agent_tool(name, description, schema=None, permission="write"):
 
 
 def post_write_check(path):
-    """写操作后做一次本地语法校验，返回错误文本；没问题返回 ""。
-
-    只在失败时才把错误回灌给模型（成功不产生额外 token），
-    覆盖 .py / .js / .json 这三类最常见的「改完其实是坏的」。
-    """
-    try:
-        if not path or not os.path.isfile(path):
-            return ""
-        size = os.path.getsize(path)
-        if size <= 0 or size > MAX_CHECK_BYTES:
-            return ""
-        ext = os.path.splitext(path)[1].lower()
-        name = os.path.basename(path)
-        if ext in (".py", ".pyw"):
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                src = f.read()
-            try:
-                compile(src, name, "exec")
-            except SyntaxError as e:
-                return "第 %s 行：%s" % (e.lineno or "?", e.msg)
-            return ""
-        if ext == ".json":
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                raw = f.read()
-            try:
-                json.loads(raw)
-            except ValueError as e:
-                return str(e)
-            return ""
-        if ext in (".js", ".mjs", ".cjs"):
-            try:
-                p = subprocess.run(["node", "--check", path],
-                                   capture_output=True, text=True, timeout=8,
-                                   creationflags=winproc.no_window())
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                return ""                     # 没装 node / 卡住：跳过，不影响写入
-            if p.returncode != 0:
-                msg = (p.stderr or p.stdout or "").strip()
-                return msg[-600:] if msg else "node --check 失败"
-        return ""
-    except Exception:
-        return ""
+    """写后语法自检；跨语言逻辑在 app.langs.syntax_check（缺工具就静默跳过）。"""
+    return langs.syntax_check(path)
 
 
 def project_rules(sandbox):
@@ -3367,6 +3868,11 @@ def run_tool(sandbox, name, args, allow_outside=False, caps=None, stop_event=Non
     不改执行结果。钩子本身出问题一律吞掉 —— 审计挂了不能拖垮工具。
     """
     name = (name or "").strip()
+    args = args if isinstance(args, dict) else {}
+    # 防御性归一：直接调用 meta 工具（脚本 / 工作流 / 外部集成）也能落到旧实现上。
+    _meta = tool_meta.normalize(name, args)
+    if _meta:
+        name, args = _meta
     sid = str((caps or {}).get("sid") or "")
     safe_args = args if isinstance(args, dict) else {}
     try:
@@ -3379,9 +3885,16 @@ def run_tool(sandbox, name, args, allow_outside=False, caps=None, stop_event=Non
             tool_protocol.PERMISSION,
             "被 hook 阻止：%s" % (pre.get("reason") or "未说明原因"),
             name=name, args=safe_args), None, False
-    text, undo, is_write = _run_tool_impl(
-        sandbox, name, args, allow_outside=allow_outside, caps=caps,
-        stop_event=stop_event, unrestricted=unrestricted)
+    # 写类工具串行化：见 WRITE_LOCK 的说明（并发子代理丢改动）
+    if writes_files(name, args) or name in GIT_WRITE_TOOLS:
+        with WRITE_LOCK:
+            text, undo, is_write = _run_tool_impl(
+                sandbox, name, args, allow_outside=allow_outside, caps=caps,
+                stop_event=stop_event, unrestricted=unrestricted)
+    else:
+        text, undo, is_write = _run_tool_impl(
+            sandbox, name, args, allow_outside=allow_outside, caps=caps,
+            stop_event=stop_event, unrestricted=unrestricted)
     _ctx = list(pre.get("contexts") or [])
     try:
         from app import hooks
@@ -3397,6 +3910,63 @@ def run_tool(sandbox, name, args, allow_outside=False, caps=None, stop_event=Non
         if len(text) > MAX_RESULT_CHARS:
             text = text[:MAX_RESULT_CHARS] + "\n…（结果过长已截断）"
     return text, undo, is_write
+
+
+def _append_blank_image_warning(root, t0, text):
+    """命令结束后抽查新生成的图片：几乎全空白 / 纯色就追加一条提醒。
+
+    只覆盖「整张图异常」（渲染没加载场景、输出路径写错、脚本失败留下空图），
+    不判断内容，也不阻塞。最多列 5 张，避免把工具结果撑大。
+    """
+    try:
+        import numpy as np
+        from PIL import Image
+    except Exception:                     # noqa: BLE001
+        return text
+    root_real = _real(root)
+    if not root_real or not os.path.isdir(root_real):
+        return text
+    found, seen, dirs = [], 0, 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root_real):
+            dirs += 1
+            if dirs > 2000 or seen > BLANK_SCAN_MAX:
+                break
+            dirnames[:] = [d for d in dirnames if d not in BLOCKED_SEGMENTS]
+            for fn in filenames:
+                if os.path.splitext(fn)[1].lower() not in IMG_EXTS:
+                    continue
+                seen += 1
+                if seen > BLANK_SCAN_MAX:
+                    break
+                p = os.path.join(dirpath, fn)
+                try:
+                    if os.path.getmtime(p) < t0 - 2:
+                        continue
+                    size = os.path.getsize(p)
+                except OSError:
+                    continue
+                if size <= 0 or size > IMG_MAX_BYTES:
+                    continue
+                try:
+                    with Image.open(p) as im:
+                        arr = np.asarray(im.convert("L").resize((64, 64)),
+                                         dtype=np.float32)
+                    std = float(arr.std())
+                    rng = float(arr.max() - arr.min())
+                except Exception:         # noqa: BLE001
+                    continue
+                if std < BLANK_STD_MIN or rng < BLANK_RANGE_MIN:
+                    found.append((_rel(root, p), std))
+    except OSError:
+        return text
+    if not found:
+        return text
+    detail = "、".join("%s（std=%.1f）" % (n, s) for n, s in found[:5])
+    more = " 等 %d 张" % len(found) if len(found) > 5 else ""
+    return (str(text) + "\n\n⚠️ 本轮命令生成了 %d 张几乎全空白 / 纯色的图片%s：%s"
+            "\n（渲染 / 绘图脚本可能没有加载场景或输出失败；先核对再继续，不要直接交付）"
+            % (len(found), more, detail))
 
 
 def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_event=None,
@@ -3417,6 +3987,32 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
     if name == "tool_search":
         # 元工具：不解锁沙箱，只登记「下一轮要挂哪些工具组」
         return _t_tool_search(args, caps), None, False
+    if name in ("update_plan", "plan_patch"):
+        # 计划状态属于对话会话，不在工具层：由调用方通过 caps 注入回调。
+        # 主循环、工作流节点、脚本共用同一个回调，避免出现两套计划状态。
+        fn = (caps or {}).get("plan_tool")
+        if not callable(fn):
+            return ("❌ %s 需要对话会话（脚本 / 独立工具调用里没有计划上下文）。"
+                    % name, None, False)
+        try:
+            _pok, _ptext = fn(name, args if isinstance(args, dict) else {})
+        except Exception as e:            # noqa: BLE001
+            return "❌ %s 执行失败：%s" % (name, e), None, False
+        return str(_ptext), None, False
+    if name == "acceptance":
+        fn = (caps or {}).get("acceptance_tool")
+        if not callable(fn):
+            return ("❌ acceptance 需要对话会话（脚本 / 独立工具调用里没有验收上下文）。",
+                    None, False)
+        try:
+            _aok, _atext = fn(args if isinstance(args, dict) else {})
+        except Exception as e:            # noqa: BLE001
+            return "❌ acceptance 执行失败：%s" % e, None, False
+        return str(_atext), None, False
+    if name in LSP_TOOLS:
+        _lp = str((args or {}).get("path") or "").strip()
+        if _lp and not langs.lsp_kind(_lp):
+            return langs.lsp_fallback(_lp), None, False
     if name not in _HANDLERS:
         return tool_protocol.wrap(
             "未知工具：%s（可用：%s）" % (name, "、".join(TOOLS)), name=name), None, False
@@ -3437,6 +4033,7 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
             args = dict(args, timeout=(-1 if _ct <= 0 else _ct))
     try:
         if name == "run_command":
+            _cmd_t0 = time.time()
             _fn = _HANDLERS.get(name)
             if _fn is _t_run_command:
                 text, undo_ops = _t_run_command(
@@ -3446,12 +4043,14 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
             else:
                 # 测试 / 插件替换过实现：按原签名调用，不要把 shell_mode 塞进去
                 text, undo_ops = _fn(sandbox, args)
+            text = _append_blank_image_warning(sandbox, _cmd_t0, text)
         elif name == "shell":
             text, undo_ops = _HANDLERS[name](sandbox, args, caps, stop_event)
         elif name in ("fetch_url", "sleep"):
             text, undo_ops = _HANDLERS[name](sandbox, args, stop_event)
         elif name in ("list_steps", "undo_step", "redo_step", "recover_file",
-                      "visual_check", "run_workflow_script"):
+                      "visual_check", "render_views", "scene_assert",
+                      "run_workflow_script"):
             # 这几个要拿会话 id / caps 才能定位写后快照、视觉产物或工作流执行器
             text, undo_ops = _HANDLERS[name](sandbox, args, caps)
         elif allow_outside and name in OUTSIDE_READ_TOOLS:
@@ -3480,7 +4079,7 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
     text = tool_protocol.wrap(text, name=name, args=args)
     if len(text) > MAX_RESULT_CHARS:
         text = text[:MAX_RESULT_CHARS] + "\n…（结果过长已截断）"
-    if name in WRITE_TOOLS:
+    if writes_files(name, args):
         invalidate_tree(sandbox)             # 结构可能变了，下次读树重新遍历
     # 写后自检：语法错误直接回灌给模型（成功时零额外 token）
     target = ""
@@ -3528,7 +4127,7 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
                 _remember_read(sandbox, resolve_path(sandbox, _p, allow_outside))
             except SandboxError:
                 pass
-    return text, undo_ops, (name in WRITE_TOOLS or name in GIT_WRITE_TOOLS)
+    return text, undo_ops, (writes_files(name, args) or name in GIT_WRITE_TOOLS)
 
 
 # ============================================================
@@ -3958,7 +4557,12 @@ def load_effective_rules(sandbox):
 
 def _write_rel_paths(sandbox, name, args):
     """写入类工具会碰到的沙箱内相对路径（给规则匹配用）；非法路径直接忽略。"""
-    keys = ("from", "to") if name == "move_file" else ("path",)
+    if name == "move_file":
+        keys = ("from", "to")
+    elif name == "archify":
+        keys = ("output", "candidate_path")
+    else:
+        keys = ("path",)
     root = _real(clean_sandbox(sandbox))
     out = []
     for key in keys:
@@ -4390,6 +4994,29 @@ def _cmd_kind(argv):
         return "readonly" if ("--collect-only" in rest or "--version" in rest) else "normal"
     if exe == "ruff":
         return "readonly" if rest and rest[0] in ("check", "--version") else "normal"
+    if exe in ("pnpm", "yarn", "bun"):
+        sub = rest[0] if rest else ""
+        if sub in ("install", "i", "add", "update", "upgrade", "publish", "link"):
+            return "high"
+        return "normal"
+    if exe == "go":
+        sub = rest[0] if rest else ""
+        if sub in ("get", "install"):
+            return "high"
+        return "normal"
+    if exe == "cargo":
+        sub = rest[0] if rest else ""
+        if sub in ("add", "install", "publish", "yank"):
+            return "high"
+        return "normal"
+    if exe in ("mvn", "mvnw", "gradle", "gradlew"):
+        sub = rest[0] if rest else ""
+        return "high" if sub in ("deploy", "publish") else "normal"
+    if exe == "dotnet":
+        sub = rest[0] if rest else ""
+        if sub in ("add", "restore", "nuget", "tool"):
+            return "high"
+        return "normal"
     return "normal"
 
 
@@ -4768,6 +5395,22 @@ def _clean_output(raw):
     return text
 
 
+# 退出码 0 时也出现的「假报错」：和真错误长得一样，会把模型带偏。
+# 只在成功时过滤 —— 失败时保留全部输出，别把真错误一起藏了。
+_CMD_NOISE_PREFIXES = (
+    "exception in module register():",          # Blender / bpy 每次 import 都打印
+    "warning: ignoring invalid distribution",   # pip 的站点包残留警告
+)
+
+
+def _strip_cmd_noise(text, returncode):
+    if returncode != 0 or not text:
+        return text
+    lines = text.splitlines()
+    kept = [ln for ln in lines if not ln.strip().lower().startswith(_CMD_NOISE_PREFIXES)]
+    return text if len(kept) == len(lines) else "\n".join(kept).strip()
+
+
 def _kill_tree(pid):
     """超时后连同子进程一起杀掉（否则 pytest / node 的子进程会残留）。"""
     try:
@@ -4924,9 +5567,10 @@ def _t_run_command(root, args, stop_event=None, shell_mode="strict",
         return ("❌ 命令超时（%ds）已被终止。\n命令：%s\n%s%s"
                 % (timeout, display, body, _audit_tail()), None)
     used = time.time() - t0
-    body = _clean_output(out)
-    head = ("命令：%s\n工作目录：%s\n退出码：%d（用时 %.1fs）"
-            % (display, _rel(root, workdir), proc.returncode, used))
+    body = _strip_cmd_noise(_clean_output(out), proc.returncode)
+    verdict = "成功" if proc.returncode == 0 else "失败"
+    head = ("命令：%s\n工作目录：%s\n结论：%s（退出码：%d，用时 %.1fs）"
+            % (display, _rel(root, workdir), verdict, proc.returncode, used))
     return (head + ("\n输出：\n" + body if body else "\n输出：（空）")
             + _audit_tail()), None
 
@@ -5117,6 +5761,8 @@ def new_approval(sid, tool, args):
         _APPROVALS[aid] = {"event": threading.Event(), "ok": None, "sid": sid,
                            "tool": tool, "args": args, "remember": False,
                            "ts": time.time()}
+    from app import session_status
+    session_status.mark(sid, "approval")     # 侧栏会话行显示「待批准」
     return aid
 
 
@@ -5147,6 +5793,83 @@ def approval_remember(aid):
         return bool(_APPROVE_REMEMBER.pop(aid, False))
 
 
+def remember_approval_rule(sandbox, name, args):
+    """「始终允许」：把这一条写成项目规则（`.gm/agent-rules.json`），返回 (ok, note)。
+
+    只写最窄的匹配，绝不写成工具级通配（那等于把所有同类调用一次放开）：
+    - run_command → `commands.allow` 里放整条命令
+    - 文件类工具 → `tools.allow` 里放 `工具名:相对路径`
+    - 其它工具   → `tools.allow` 里放 `工具名:参数摘要`
+    写入是「读改写 + 临时文件替换」，不动规则文件里已有的其它字段。
+    """
+    root = clean_sandbox(sandbox)
+    if not root:
+        return False, "没有沙箱目录，无法写项目规则"
+    path = rules_path(root)
+    raw = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as e:
+            return False, "现有规则文件读不出来，已跳过写入：%s" % e
+        if not isinstance(raw, dict):
+            return False, "现有规则文件不是 JSON 对象，已跳过写入"
+    nm = str(name or "").strip()
+    if not nm:
+        return False, "缺少工具名"
+    if nm == "shell":
+        return False, "持久 shell 等于任意命令执行，不支持「始终允许」"
+    if nm.startswith("computer_"):
+        return False, "浏览器 / 桌面操作不支持「始终允许」"
+    if nm in WRITE_TOOLS or nm in GIT_WRITE_TOOLS:
+        rels = _write_rel_paths(root, nm, args)
+        brief = str(rels[0] if rels else _tool_arg_brief(nm, args)).strip()
+        section, rule = "tools", nm + (":" + brief if brief else "")
+    elif nm == "run_command":
+        brief = _tool_arg_brief(nm, args).strip()
+        if not brief:
+            return False, "拿不到命令内容"
+        # 高风险命令（安装 / 联网 / 改仓库历史 / 管道串联）不给「始终允许」：
+        # 这类一次放行等于长期交出安装权或改历史权
+        try:
+            plan, perr = _cmd_plan(args, root, "strict")
+        except Exception:                     # noqa: BLE001
+            plan, perr = None, "命令解析失败"
+        if perr or not plan:
+            return False, "命令解析失败，未写入规则：%s" % (perr or "")
+        if plan.get("shell") or _dangerous_git(plan) or _cmd_kind(plan["argv"]) == "high":
+            return False, "安装 / 联网 / 改仓库历史类命令不支持「始终允许」"
+        # 前缀匹配：`python -m pytest` 记住后，`python -m pytest -q` 也放行
+        section = "commands"
+        rule = brief if brief.endswith("*") else brief + "*"
+    else:
+        brief = _tool_arg_brief(nm, args).strip()
+        section, rule = "tools", nm + (":" + brief if brief else "")
+    sec = raw.get(section)
+    if not isinstance(sec, dict):
+        sec = {}
+        raw[section] = sec
+    lst = sec.get("allow")
+    if not isinstance(lst, list):
+        lst = []
+        sec["allow"] = lst
+    if rule in lst:
+        return True, "这条规则已经存在：%s" % rule
+    lst.append(rule)
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError as e:
+        return False, "规则写入失败：%s" % e
+    return True, "已写入规则：%s" % rule
+
+
 def wait_approval(aid, timeout=APPROVAL_TIMEOUT, stop_event=None):
     """返回 True=允许 / False=拒绝 / None=超时或被停止。"""
     with _approvals_lock:
@@ -5166,20 +5889,131 @@ def wait_approval(aid, timeout=APPROVAL_TIMEOUT, stop_event=None):
             if len(_APPROVE_REMEMBER) > 200:      # 防御：异常路径下别无限堆积
                 _APPROVE_REMEMBER.clear()
                 _APPROVE_REMEMBER[aid] = True
+    from app import session_status
+    session_status.clear(item.get("sid"), "approval")
     return item["ok"]
+
+
+# ============================================================
+# 3.3b 计划审批（Claude 式 plan mode：计划与执行分离）
+# ============================================================
+# 计划卡发出后先挂起，等用户选择：
+#   approve → 按当前计划开始执行
+#   comment → 保持规划模式，让模型按意见重排（重排后会再次挂起）
+#   edit    → 用户逐条改过步骤，直接按修改后的计划执行
+# 只在「计划第一次出现、还没动过手」时挂起；批准之后同一轮再改计划不再打断。
+PLAN_REVIEW_TIMEOUT = 1800              # 等用户审批计划的最长时间（秒）
+
+_PLAN_REVIEWS = {}
+_PLAN_REVIEWS_LOCK = threading.Lock()
+_PLAN_REVIEW_ACTIONS = ("approve", "comment", "edit")
+
+
+def new_plan_review(sid, plan):
+    """登记一次「等你批准计划」，返回 rid。侧栏会显示「待批准」。"""
+    rid = "pr_" + uuid.uuid4().hex[:10]
+    with _PLAN_REVIEWS_LOCK:
+        _PLAN_REVIEWS[rid] = {"event": threading.Event(), "sid": sid,
+                              "plan": plan if isinstance(plan, dict) else {},
+                              "action": "", "comment": "", "steps": None,
+                              "ts": time.time()}
+    from app import session_status
+    session_status.mark(sid, "approval")
+    return rid
+
+
+def get_plan_review(rid):
+    """只读地取一条待审批计划（调试 / 恢复用）。"""
+    with _PLAN_REVIEWS_LOCK:
+        item = _PLAN_REVIEWS.get(rid)
+    if not item:
+        return None
+    return {"sid": item.get("sid") or "", "plan": item.get("plan") or {},
+            "action": item.get("action") or ""}
+
+
+def resolve_plan_review(rid, action, comment="", steps=None):
+    """前端回传审批结果。同一条记录只接受第一次回答。"""
+    a = str(action or "").strip().lower()
+    if a not in _PLAN_REVIEW_ACTIONS:
+        return False
+    with _PLAN_REVIEWS_LOCK:
+        item = _PLAN_REVIEWS.get(rid)
+        if not item or item["event"].is_set():
+            return False
+        item["action"] = a
+        item["comment"] = str(comment or "").strip()[:4000]
+        item["steps"] = steps if isinstance(steps, list) else None
+        item["event"].set()
+    return True
+
+
+def wait_plan_review(rid, timeout=PLAN_REVIEW_TIMEOUT, stop_event=None):
+    """阻塞直到用户回答 / 超时 / 停止。返回 dict 或 None。"""
+    with _PLAN_REVIEWS_LOCK:
+        item = _PLAN_REVIEWS.get(rid)
+    if not item:
+        return None
+    deadline = time.time() + max(0.05, timeout)
+    while time.time() < deadline:
+        if item["event"].wait(0.2):
+            break
+        if stop_event is not None and stop_event.is_set():
+            break
+    with _PLAN_REVIEWS_LOCK:
+        _PLAN_REVIEWS.pop(rid, None)
+    from app import session_status
+    session_status.clear(item.get("sid"), "approval")
+    if not item["event"].is_set() or not item.get("action"):
+        return None
+    return {"action": item["action"], "comment": item.get("comment") or "",
+            "steps": item.get("steps")}
 
 
 # ============================================================
 # 3.4 重复调用守卫（doom loop）
 # ============================================================
 
-def call_signature(name, args):
-    """工具调用的稳定指纹：同名 + 同参数（键排序），用于识别「原地打转」。"""
+def _script_stamp(root, args):
+    """run_command 里引用的脚本文件（相对路径 + .py/.js…）的 mtime+size 指纹。"""
+    a = args if isinstance(args, dict) else {}
+    argv = a.get("argv")
+    if not isinstance(argv, list):
+        return ""
+    out = []
+    for tok in argv:
+        t = str(tok or "")
+        if not t or t.startswith("-") or " " in t:
+            continue
+        if os.path.splitext(t)[1].lower() not in (".py", ".js", ".mjs", ".ps1", ".sh"):
+            continue
+        p = t if os.path.isabs(t) else os.path.join(root, t)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        out.append("%s:%d:%d" % (t, st.st_mtime_ns, st.st_size))
+        if len(out) >= 3:
+            break
+    return ",".join(out)
+
+
+def call_signature(name, args, root=None):
+    """工具调用的稳定指纹：同名 + 同参数（键排序），用于识别「原地打转」。
+
+    root 非空时，run_command 会把 argv 引用的脚本文件（mtime, size）也算进指纹：
+    改了脚本再跑算一次新调用，脚本没变还反复跑才算重复。
+    """
     try:
         blob = json.dumps(args or {}, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:
         blob = str(args)
-    return "%s|%s" % (name or "", blob)
+    sig = "%s|%s" % (name or "", blob)
+    if root and name == "run_command":
+        stamp = _script_stamp(root, args)
+        if stamp:
+            sig += "|" + stamp
+    return sig
 
 
 def repeat_guard(state, sig, limit=None):
@@ -5203,6 +6037,47 @@ def repeat_guard(state, sig, limit=None):
         state["sig"] = sig
         state["n"] = 1
     return state["n"] >= limit
+
+
+def window_hits(state, sig, window=None, limit=None):
+    """滑动窗口重复：最近 window 次调用里同一指纹出现 >= limit 次 → True。
+
+    和 repeat_guard 互补：build → render → gap → build 这种交错循环，连续判据
+    永远看不见（中间夹一次别的就清零了），窗口判据能看出来。
+    被拦的调用也记进历史，避免「拦住一次 → 计数清空 → 继续转」。
+    """
+    w = max(2, int(window or LOOP_WINDOW))
+    lim = max(2, int(limit or LOOP_WINDOW_LIMIT))
+    hist = state.setdefault("hist", [])
+    hist.append(sig)
+    if len(hist) > w:
+        del hist[:-w]
+    return hist.count(sig) >= lim
+
+
+def reset_loop_window(state):
+    """一次成功的写入 = 有进展：清空窗口，避免「改脚本 → 再跑」被误判成死循环。"""
+    if isinstance(state, dict):
+        state["hist"] = []
+
+
+def result_ok(name, text):
+    """工具是否成功：除了 ❌ 前缀，run_command 还要看真实退出码。
+
+    以前只认「文本不以 ❌ 开头」，于是退出码 1 的命令在时间线里也是 ok:true，
+    模型和用户都会误判成「这一步过了」。
+    """
+    t = str(text or "").lstrip()
+    if t.startswith("❌"):
+        return False
+    if name == "run_command":
+        m = re.search(r"退出码：(-?\d+)", t)
+        if m:
+            try:
+                return int(m.group(1)) == 0
+            except ValueError:
+                return True
+    return True
 
 
 _FAIL_KEYS = ("path", "target", "command", "argv", "pattern", "query", "url",
@@ -5603,6 +6478,8 @@ def new_asks(sid, questions):
 
     每个问题形如 {"question": str, "options": [str, ...], "multiple": bool}；
     options 可为空。multiple 为真时题目末尾自动补「（多选）」，用户可同时选多个。
+    action 为真时是「等待用户操作」：question 是标题，detail 是说明，
+    items 是操作清单（可选），前端只给「我已完成 / 无法完成」两个按钮。
     最多 MAX_ASKS 个，超出的丢弃。
     """
     qid = "q_" + uuid.uuid4().hex[:10]
@@ -5622,12 +6499,27 @@ def new_asks(sid, questions):
         # 不用再各维护一份「是否多选」的展示逻辑。已经写了就不重复补。
         if multiple and "多选" not in q:
             q = q + "（多选）"
-        clean.append({"question": q, "options": opts, "multiple": multiple})
+        item = {"question": q, "options": opts, "multiple": multiple}
+        # action=true：这件「事」要用户在本机亲手做完（登录 / 装依赖 / 点系统弹窗），
+        # 前端渲染成「等待你操作」卡，只有「我已完成 / 无法完成」两个出口。
+        if it.get("action") is True or str(it.get("action")).strip().lower() in ("1", "true", "yes", "on"):
+            raw = it.get("items")
+            if isinstance(raw, str):
+                raw = [raw]
+            steps = [str(x).strip()[:200] for x in (raw if isinstance(raw, list) else [])
+                     if str(x).strip()][:8]
+            item.update({"action": True,
+                         "detail": str(it.get("detail") or "").strip()[:400],
+                         "items": steps,
+                         "options": []})        # 操作卡用固定按钮，不再给选项
+        clean.append(item)
         if len(clean) >= MAX_ASKS:
             break
     with _asks_lock:
         _ASKS[qid] = {"event": threading.Event(), "answers": None, "sid": sid,
                       "questions": clean}
+    from app import session_status
+    session_status.mark(sid, "ask")          # 侧栏会话行显示「待回答」
     return qid, clean
 
 
@@ -5660,6 +6552,8 @@ def wait_answers(qid, timeout=ASK_TIMEOUT, stop_event=None):
             break
     with _asks_lock:
         _ASKS.pop(qid, None)
+    from app import session_status
+    session_status.clear(item.get("sid"), "ask")
     return item.get("answers")
 
 
@@ -5743,28 +6637,23 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
     else:
         intro += "（越出沙箱的路径会被拒绝）"
     if compact:
-        # 原生 function calling 已把参数 schema 发给模型，正文里只留「名字 + 参数名」兜底
+        # 原生 function calling 已把参数 schema 发给模型；正文只留 action 速查。
+        # 高频工具已按 action 合并（旧名仍可调用），这里不再逐个列旧工具。
         tools_block = [
-            "可用工具（原生参数见 schema；文本兜底用括号内参数）：",
-            "list_dir(path)/read_file(path,start?,limit?,raw?)/read_files(paths[],raw?)"
-            "/search_files(pattern,glob?,context?,count_only?)",
-            "search_code(query)/repo_map(path?)",
-            "code_context(query)/impact(target)",
-            "write_file(path,content)/edit_file(path,old,new)/make_dir(path)",
-            "move_file(from,to)/delete_file(path)/ask_user(questions)",
-            "update_plan(steps|milestones)/plan_patch(update_steps)",
-            "research_note(action,gaps,ids)",
-            "explore(goal,questions)",
-            "explore_followup(batch,questions)",
-            "run_workflow/workflow_status/workflow_resume/workflow_cancel",
-            "run_workflow_script(code)",
-            "run_command(argv,cwd?,timeout?)",
-            "render_check(path)",
-            "visual_check/asset_*",
-            "audio_probe(path)/audio_compare(a,b)",
-            "see_image(path,question?)",
-            "read_tool_result(handle,start?,end?)",
-            "find_symbol(name,path?)/check_code(path?)",
+            "可用工具（参数以 schema 为准；旧名仍兼容，但优先用下面的 action 名）：",
+            "read(action=list|file|files|search|semantic|map)",
+            "edit(action=write|patch|mkdir|move|copy|delete)",
+            "run(action=exec|terminal)",
+            "code(action=diagnostics|definition|references|hover|symbols|implementation"
+            "|calls|rename|check|find|impact|context)",
+            "git(action=status|diff|log|commit|split)",
+            "plan(action=update|patch)",
+            "agent(action=delegate|explore|followup|status|result|cancel)",
+            "web(action=search|fetch|note)",
+            "history(action=list|undo|redo|recover)",
+            "acceptance / ask_user / finish / read_tool_result / tool_search",
+            "低频组（需要时先 tool_search 解锁）：visual / image / asset / audio / "
+            "workflow / utility / diagram",
         ]
     else:
         tools_block = [
@@ -5804,9 +6693,22 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "回传运行时错误 + 布局问题（溢出 / 遮挡 / 字号 / 对比度 / 零尺寸画布 / 点击区过小）；"
             "screenshot=true 额外截图交给视觉模型描述画面（更慢更贵，判断观感时才开）",
             "- visual_check {path, viewport?, viewports?, baseline?, save_baseline?, describe?}"
-            "  视觉 QA：控制台/资源错误、WebGL canvas 与 draw calls、帧率、"
-            "亮度/对比度/清晰度/边缘密度、截图；给 baseline 时与基线比 SSIM。"
-            "做页面 / canvas / 3D / 游戏 / 动画时用它量化「画面糊不糊、卡不卡」",
+            "  视觉 QA：控制台/资源错误、WebGL canvas 与 draw calls、三角面 / 着色器 / 绑定纹理、"
+            "帧率、亮度/对比度/清晰度/边缘密度、截图；给 baseline 时与基线比 SSIM。"
+            "做页面 / canvas / 3D / 游戏 / 动画时用它量化「画面糊不糊、卡不卡、几何量对不对」",
+            "- render_views {path, views?, viewport?}      多视图截图：按 ?view= 让页面切换相机；"
+            "页面没读 view 参数时会提示「所有截图相同」；产物在 data/visual 下",
+            "- geometry_compare {reference:[...], candidate:[...], names?, min_score?}  "
+            "多视图对照：逐视图轮廓 IoU / SSIM / 比例差 + 平均分与最差视图；"
+            "用来发现单视角看不出的比例 / 朝向 / 穿插问题",
+            "- scene_assert {path, assertions:[{kind, value?, name?}]}  场景断言："
+            "页面暴露 window.__VQA_SCENE_INFO__ 后检查对象 / 相机 FOV / 灯光 / 三角面 / 包围盒；"
+            "kind 支持 exists / objects_min / objects_max / hidden_max / lights_min / "
+            "camera_fov_min / camera_fov_max / triangles_max / bbox_x_max / bbox_y_max / bbox_z_max",
+            "- archify {action, type?, candidate?, candidate_path?, output?, quality?, repo_root?}"
+            "  把系统 / 流程 / 计划画成可验证的交互式 HTML（架构 / 工作流 / 时序 / 数据流 / 状态 / "
+            "ERD / 类图 / 树 / 时间线 / 瀑布图 / 一页式解释页）；先 action=schema 取 schema 与示例，"
+            "再 finalize；validate / 写入 / 严格检查 / 浏览器检查全过才交付",
             "- asset_scan   {path?, out?}                 扫描素材目录：图片尺寸/格式/哈希/重复、"
             "音频、模型、总大小；out 写清单 JSON，供 asset_validate 用",
             "- asset_convert {from, to, format?, width?, height?, quality?}  图片转换/缩放"
@@ -5817,6 +6719,10 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "（window.__ASSETS__）",
             "- asset_validate {manifest?}                 按清单检查文件是否存在、尺寸是否变化、"
             "图集是否缺失",
+            "- mesh_inspect  {path, units?}               3D 模型体检（glTF / GLB / OBJ）："
+            "节点 / mesh / primitive、三角面与顶点数、世界包围盒、材质与纹理引用、"
+            "法线 / UV 缺失、贴图文件是否存在；不渲染、不判断好不好看"
+            "（非流形 / 自交未检查）",
             "- audio_probe   {path}                       真的读一遍音频（WAV/FLAC/OGG/MP3）："
             "响度包络 / 起音 / RT60 混响 / 频谱形状 / 事件密度 + 四个代理分数；"
             "**它判断不了好不好听**，只能证明「结构上是不是你想的那样」",
@@ -5825,8 +6731,15 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "- see_image     {path, question?}            真的看一眼图片（PNG/JPG/WEBP/GIF/BMP），"
             "回传视觉模型对内容的文字描述；写完图 / 下载完图后用它确认实际长什么样。"
             "需要已配置视觉模型或聊天 API 密钥",
-            "- read_tool_result {handle, start?, end?}    精读上一条被截断的工具结果："
-            "结果里会给出 handle（如 r2），按字符区间取；比重新读一遍文件更省 token",
+            "- image_compare {reference, candidate, region?, max_side?}  参考物 vs 产物的客观对照："
+            "轮廓 IoU、宽高比、SSIM、主色分布、边缘密度、局部 3×3 差与总分 0–100；"
+            "只做像素 / 形状统计，不判断好不好看；有地面 / 阴影 / 图注时用 region 裁到主体",
+            "- image_analyze {path, region?, panels?}      单图测量：背景、前景占比、bbox、宽高比、"
+            "主色、行/列剖面、ASCII 剪影、面板切分（返回可直接给 image_compare 的 region）；"
+            "panels 可给 auto / none / 显式网格 2x2、1x3（多视图最稳）；只做统计",
+            "- read_tool_result {handle, start?, end?, query?}  精读 / 搜索上一条被截断的工具结果："
+            "知道位置给 start/end 取字符区间；不知道在哪先给 query 按行搜索（返回行号 + 绝对偏移"
+            "+ 上下文），再用 start=<偏移> 精读。比重新跑一遍工具省 token",
             "- find_symbol   {name, path?}                按符号名找定义与引用（.py/.js/.ts），"
             "返回 文件:行号 + 代码行；不记得在哪个文件、或想知道谁在调用它时用",
             "- code_context  {query, symbol?, path?}      **找实现的首选**：一次返回「定义（签名 + "
@@ -5837,14 +6750,19 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "- check_code    {path?}                      语法体检：对文件或目录跑 .py/.js/.json "
             "检查，返回所有报错位置；**不做类型检查**",
             "- ask_user     {questions:[{question, options[], multiple?}]}  向用户提问"
-            "（可一次问多个；允许多选的问题设 multiple:true，题目会自动标注（多选））并等待回答",
+            "（可一次问多个；允许多选的问题设 multiple:true，题目会自动标注（多选））并等待回答；"
+            "需要用户在本机**亲手做**的一步（登录 / 扫码 / 装依赖 / 点系统弹窗）设 "
+            "action:true + detail/items[]，会弹「等待你操作」卡，用户做完点「我已完成」再继续",
+            "- finish       {summary?, incomplete?}        **显式收尾**：确实做完（或交给用户拍板）"
+            "时调用，本轮立刻结束；只写正文不调工具会被判成未完成并要求继续",
             "- update_plan  {goal?, done_when?, milestones?, steps?}  执行计划（活文档）："
             "大型任务 2–6 个里程碑（每个 2–6 步、独立可验证），简单任务 1–8 步；每步带 verify",
             "- plan_patch   {reason?, add_steps?, update_steps?, remove_steps?, add_milestones?, log?}  "
             "中途改计划：只改受影响步骤 + 写 reason/log，不要重发整份",
-            "- acceptance {action, criteria?, id?, passed?, evidence?}  多步交付任务先定义机检验收项："
-            "每条 = 要验证什么 + 检查工具/期望；验收项按任务自己推导，不套模板；"
-            "run 跑安全只读项，命令类在主循环跑完后 record",
+            "- acceptance {action, criteria?, id?, passed?, evidence?, reason?, drop?}  "
+            "可选的机检验收项（不是开工门槛）：每条 = 要验证什么 + 检查工具/期望，按任务自己推导；"
+            "run 跑安全只读项，命令类在主循环跑完后 record；"
+            "标准过时用 revise（改 text/check/expect 或 drop=true，必须写 reason），不要硬凑通过",
             "- research_note {action, gaps?, ids?, claims?}  研究台账（跨轮保留，不会被上下文裁剪掉）："
             "action = gap_add 登记还不知道什么 / gap_done 关闭缺口 / claim_add 记录已核实的结论"
             "（带来源编号）/ status 查看 / clear 清空。复刻、还原类任务动笔前先用它列缺口",
@@ -5877,8 +6795,9 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "gm.help(name) 看参数，print 汇总后只回传一份；"
             "默认只读沙箱内文件（内置 open() / os.remove / subprocess 会被护栏拒绝），"
             "完全放权或设置开关后才可写文件 / 执行命令（写入仍限沙箱内；gm 已自动注入）",
-            "- run_workflow_script {code, timeout?}  脚本化工作流：用循环/条件/变量组合工具调用"
-            "与 DAG 工作流；脚本里 wf.call / wf.parallel / wf.workflow(spec) / wf.log，"
+            "- run_workflow_script {code, timeout?}  脚本化工作流：用循环/条件/变量组合工具调用、"
+            "DAG 工作流与命名子代理；脚本里 wf.call / wf.parallel / wf.workflow(spec) / "
+            "wf.agent(name, task) / wf.agents([...]) / wf.pipeline([...], task) / wf.log，"
             "只有 print 的最终输出回传（wf 已自动注入）",
             "- recover_file {path?, token?, force?, dry_run?}  从写后快照恢复丢失 / 被外部删除的文件；"
             "path 可以是文件或目录（目录按前缀批量恢复）；先用 list_steps 找步骤。"
@@ -5947,6 +6866,12 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
         "14. **改完多处代码用 check_code 体检**：write_file / edit_file 已有单文件写后自检，"
         "跨文件改动后再跑一次 check_code(路径)，不要等用户发现语法错误；"
         "不知道某个函数在哪、谁在调用它时，用 find_symbol 而不是全仓 grep。",
+        "15. **有参考物时先量再对照**：参考图 / 设计稿 / 截图 / 已有产物的还原类任务，"
+        "先用 image_analyze 量参考图的背景、面板、主体比例（多视图直接给 panels=\"2x2\" / "
+        "\"1x3\"，别自己从零写测量脚本），"
+        "产物出来后用 image_compare(reference, candidate, region=...) 逐面板拿客观指标"
+        "（轮廓、比例、主色、结构、局部差），按差距最大的 1–2 项迭代，再谈细节；"
+        "机检通过不等于还原完成。",
     ]
     if include_tree:
         lines += ["", "沙箱目录树（供你判断结构）：", _tree(sandbox)]
@@ -6040,6 +6965,10 @@ _ASK_PROMPT = "\n".join([
     "用户也可能在提问卡里**反问你**（如「xxx 是怎么做的？」）。反问不是回答："
     "先直接回答他的问题；原问题如果仍然缺少关键信息，就再次用 ask_user 把选项摆出来，"
     "不要替用户拍板、也不要把反问当成默认同意。",
+    "如果这一步**只能由用户亲手完成**（登录、扫码、装依赖、点系统弹窗、插设备），"
+    "不要让他去聊天框里回「好了」：用 ask_user 设 action:true（question 写标题，"
+    "detail 写一句为什么，items 写操作清单），前端会弹「等待你操作」卡，"
+    "用户点「我已完成」你再继续。",
     "%PROTO%",
     '- ask_user 的入参：{"questions":[{"question":"你的问题","options":["选项1","选项2"]}]}；',
     "**一次要把想问的问题全部放进 `questions` 数组**（最多 6 个），不要拆成多次提问；",
@@ -6077,19 +7006,37 @@ _REMINDER_PROMPT = "\n".join([
 # 联网搜索工具说明：由**主模型自己**决定要不要搜（不再另开一次「盲判」）。
 # 判据写得比旧版更细，并把「不该搜」的具体场景列出来 —— 这是治「乱搜」的关键。
 _PLAN_PROMPT = "\n".join([
-    "## 执行计划（update_plan / plan_patch）",
-    "1. 需要动手（改文件 / 跑命令 / 多步分析）先 update_plan；纯聊天、单次只读不要用。",
+    "## 执行计划（plan）",
+    "1. 需要动手（改文件 / 跑命令 / 多步分析）先 plan(action=update)；纯聊天、单次只读不要用。",
     "2. 大型任务：goal + done_when + 2–6 个里程碑（每个 2–6 步、独立可验证、有可演示产物）；"
     "简单任务 1–8 步。每步 = 动词 + 目标 + verify，有依赖写 deps。",
     "3. 先做最小可运行闭环，再逐块加深；未知点排最前，先做 spike。",
-    "4. 计划是活文档：发现新事实 / 失败 / 里程碑完成时，用 plan_patch 只改受影响步骤，"
+    "4. 计划是活文档：发现新事实 / 失败 / 里程碑完成时，用 plan(action=patch) 只改受影响步骤，"
     "reason 写原因、log 记发现；不要重发整份，也不要每轮重写。",
     "5. 完成一步立刻标 done；做不了标 blocked 并写清缺什么。",
     "6. 批量推进：一轮按「一个里程碑的一个切片」推进 —— 互不依赖的步骤**同一轮一起发工具**"
-    "（并行调用 / explore 子代理），整片做完再 plan_patch 一次标状态；"
+    "（并行调用 / agent(action=explore) 子代理），整片做完再 plan(action=patch) 一次标状态；"
     "不要一步一轮，也不要跨里程碑来回跳。",
-    "7. 有 acceptance 验收项时，把对应 id 写进步骤的 accept；整份计划做完后用 plan_patch "
+    "7. 有 acceptance 验收项时，把对应 id 写进步骤的 accept；整份计划做完后用 plan(action=patch) "
     "写 retro（实际结果 / 与计划的偏差 / 可复用经验）。",
+])
+
+# 工具名约定：原生 schema 已按 action 合并，正文里仍可能出现旧名。
+_META_ALIAS_PROMPT = "\n".join([
+    "## 工具名约定",
+    "高频工具按 action 合并：read / edit / run / code / git / plan / agent / web / history；"
+    "旧名仍兼容（read_file→read(file)、write_file→edit(write)、"
+    "update_plan→plan(update)、lsp_*→code、explore→agent、research_note→web）。",
+])
+
+
+# 显式收尾（对齐 Trae 的 task_done）：只写正文不算完成，必须调用 finish。
+_FINISH_PROMPT = "\n".join([
+    "## 收尾（finish）",
+    "用过工具就必须在收尾时调用 `finish`（summary 写清交付了什么）；"
+    "只写正文就停会被判成未完成并把你叫回来继续。",
+    "还有步骤没做完、或还要读 / 写 / 跑命令时不要调它；做不了就把后续写进 `incomplete`。"
+    "纯聊天、纯问答不需要 finish。",
 ])
 
 # /plan 规划轮：只读、先研究再出计划。和上面的常驻计划说明一起注入。
@@ -6099,21 +7046,13 @@ _PLAN_MODE_PROMPT = "\n".join([
     "先把上下文补齐（读关键文件、检索外部事实），再产出计划。",
     "输出顺序：",
     "1. 用 2–3 句写清 goal 与 done_when；",
-    "2. 列出未知点 / 风险（能用 research_note 记就记）；",
+    "2. 列出未知点 / 风险（能用 web(action=note) 记就记）；",
     "3. 给 2–6 个里程碑，每个都要独立可验证；",
     "4. 把第一个里程碑拆成 2–6 步，每步带 verify；",
-    "5. 指出哪些步骤可并行 / 可以交给 explore 子代理。",
-    "最后调用 update_plan（milestones 形态）把计划落成卡片，"
+    "5. 指出哪些步骤可并行 / 可以交给 agent(action=explore) 子代理。",
+    "最后调用 plan(action=update)（milestones 形态）把计划落成卡片，"
     "正文只给 5–8 行摘要，然后结束本轮；**不要开始执行**。"
     "需要用户拍板的选择用 ask_user，把选项摆出来。",
-])
-
-# 用户这轮在问「为什么 / 进度 / 是否完成」：先回答，别顺手继续执行。
-_META_TURN_PROMPT = "\n".join([
-    "## 本轮是提问 / 状态询问",
-    "用户在问「为什么中断 / 现在进度 / 是否完成」，不是让你继续执行。",
-    "先如实回答（可直接引用已有的工具结果），回答完就停；"
-    "不要顺手再开一批写操作，也不要反问「要不要继续」。",
 ])
 
 _SEARCH_PROMPT = "\n".join([
@@ -6135,16 +7074,16 @@ _SEARCH_PROMPT = "\n".join([
 ])
 
 _RESEARCH_PROMPT_SHORT = (
-    "## 研究纪律：复刻/还原类任务先用 research_note(gap_add) 按子系统列缺口；"
+    "## 研究纪律：复刻/还原类任务先用 web(action=note, op=gap_add) 按子系统列缺口；"
     "每轮搜 1–3 词补一块，结论 claim_add 带编号、补上就 gap_done；"
     "正文 [n] 必须来自台账。")
 
 # 「信息不够」时的行动纪律：复刻 / 还原类任务的失败几乎都在这一段。
 _RESEARCH_PROMPT = "\n".join([
     "## 研究纪律",
-    "1. 复刻 / 还原类任务：先用 research_note(action=\"gap_add\") 列出「还不知道什么」，"
-    "再逐条用 web_search 补；需要并行调研用 explore(research=true)。",
-    "2. 搜完把站得住的结论用 claim_add 记下（带来源编号），补上的缺口用 gap_done 关掉。",
+    "1. 复刻 / 还原类任务：先用 web(action=note, op=\"gap_add\") 列出「还不知道什么」，"
+    "再逐条用 web(action=search) 补；需要并行调研用 agent(action=explore, research=true)。",
+    "2. 搜完把站得住的结论用 note 的 claim_add 记下（带来源编号），补上的缺口用 gap_done 关掉。",
     "3. 没检索就开写 = 凭记忆硬写，会漏机制、错参数；正文里的 [n] 必须是台账已有的编号。",
 ])
 
@@ -6576,7 +7515,7 @@ def intent_hint_prompt(hint):
 
 
 def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=None,
-                       computer_on=False, plan_mode=False, meta_turn=False,
+                       computer_on=False, plan_mode=False,
                        allow_groups=None):
     """生成注入系统提示的「工具」说明（提问始终可用）。
 
@@ -6609,12 +7548,13 @@ def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=No
                  .replace("%PROTO%", proto))
     parts.append(_REMINDER_PROMPT.replace("%PROTO%", proto))
     parts.append(_PLAN_PROMPT)
+    if agent_on:
+        parts.append(_FINISH_PROMPT)
+        parts.append(_RESEARCH_PROMPT_SHORT if native_tools else _RESEARCH_PROMPT)
+        if native_tools:
+            parts.append(_META_ALIAS_PROMPT)
     if plan_mode:
         parts.append(_PLAN_MODE_PROMPT)
-    if meta_turn:
-        parts.append(_META_TURN_PROMPT)
-    if agent_on:
-        parts.append(_RESEARCH_PROMPT_SHORT if native_tools else _RESEARCH_PROMPT)
     if computer_on:
         parts.append(_COMPUTER_PROMPT)
     parts.append(_visual_prompt(bool(agent_on and sandbox)))
@@ -6633,6 +7573,9 @@ def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=No
                                        native=bool(native_tools), hall=_hall))
     if agent_on and sandbox:
         # 动态内容后置：项目规则与目录树都可能在文件改动后变化
+        prof = langs.profile_line(sandbox)   # 语言 / 包管理 / 构建 / 测试（只提示，不自动执行）
+        if prof:
+            parts.append(prof)
         rules = project_rules(sandbox)       # 每轮重读：压缩后也不会丢
         if rules:
             parts.append(rules)
@@ -6858,8 +7801,10 @@ def write_text(sandbox, rel, content):
     parent = os.path.dirname(p)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(p, "w", encoding=enc, newline="") as f:
-        f.write(content if content is not None else "")
+    # 编辑器保存也走全局写锁：避免和 agent / 子代理的写操作交错
+    with WRITE_LOCK:
+        with open(p, "w", encoding=enc, newline="") as f:
+            f.write(content if content is not None else "")
     return {"encoding": enc, "path": _rel(_sandbox_root(sandbox), p)}
 
 

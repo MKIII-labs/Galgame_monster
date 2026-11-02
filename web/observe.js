@@ -33,21 +33,16 @@ function observeValueText(raw) {
   return parts.join(' · ');
 }
 
-async function openObserve(days) {
+/* 面板现在挂在「功能大厅」里（见 web/hall-observe.js），不再有独立弹窗。 */
+async function observeSetDays(days) {
   if (days) observeDays = days;
-  showWithAnim($('#observe-modal'));
-  $$('#observe-modal .tab').forEach((t) => {
-    t.classList.toggle('active', Number(t.dataset.observeDays) === observeDays);
-  });
   await loadObserve();
 }
 
-function closeObserve() {
-  hideWithAnim($('#observe-modal'));
-}
-
 async function loadObserve() {
-  $('#observe-cards').innerHTML = '';
+  const cardsBox = $('#observe-cards');
+  if (!cardsBox) return;            // 已离开大厅卡片：没有可渲染的容器
+  cardsBox.innerHTML = '';
   $('#observe-groups').innerHTML = '<p class="observe-empty">加载中…</p>';
   $('#observe-items').innerHTML = '';
   const clear = $('#observe-clear-filter');

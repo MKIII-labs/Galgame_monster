@@ -33,8 +33,10 @@ function galCloseTip() {
 }
 
 function applyUiMode(mode) {
-  const m = (mode === 'ide' || mode === 'gal' || mode === 'hall' || mode === 'work')
-    ? mode : 'solo';
+  const m = (mode === 'ide' || mode === 'gal' || mode === 'hall' || mode === 'work'
+    || mode === 'plugins') ? mode : 'solo';
+  // 切模式时收起全屏看图浮层，否则它会盖在别的模式上
+  if (typeof imgZoomClose === 'function') imgZoomClose();
   state.uiMode = m;
   const main = $('#main');
   if (main) {
@@ -42,16 +44,24 @@ function applyUiMode(mode) {
     main.classList.toggle('gal-mode', m === 'gal');
     main.classList.toggle('hall-mode', m === 'hall');
     main.classList.toggle('work-mode', m === 'work');
+    main.classList.toggle('plugins-mode', m === 'plugins');
   }
   const panel = $('#ide-panel');
   if (panel) panel.classList.toggle('hidden', m !== 'ide');
+  // IDE 模式下侧栏宽度不做动画：Monaco 每帧 resize 都会重排，180ms 动画 = 明显卡顿
+  const appEl = $('#app');
+  if (appEl) appEl.classList.toggle('mode-ide', m === 'ide');
   const gp = $('#gal-panel');
   if (gp) gp.classList.toggle('hidden', m !== 'gal');
   const hp = $('#hall-panel');
   if (hp) hp.classList.toggle('hidden', m !== 'hall');
   const wp = $('#work-panel');
   if (wp) wp.classList.toggle('hidden', m !== 'work');
+  const pp = $('#plugins-panel');
+  if (pp) pp.classList.toggle('hidden', m !== 'plugins');
   $$('#mode-switch .ms-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
+  const pb = $('#btn-plugins');
+  if (pb) pb.classList.toggle('active', m === 'plugins');
   galApplyTheme();                     // GAL 主题随模式进入/退出切换
   applyIdeTheme();                     // IDE 主题同理（属性只在 IDE 模式存在，别的模式零影响）
   if (m !== 'gal') {
@@ -60,7 +70,8 @@ function applyUiMode(mode) {
     clearTimeout(_galCursorTimer); _galCursorTimer = null;
     const gp0 = $('#gal-panel'); if (gp0) gp0.classList.remove('gal-cursor-off');
   }
-  if (m === 'ide') { ideInitOnce(); loadIdeTree(); }
+  if (m === 'ide') { ideInitOnce(); loadIdeTree(); ideWatchStart(); }
+  else { ideWatchStop(); }
   if (m === 'gal') { galEnterMode(); }
   if (m === 'hall') {
     if (typeof hallEnterMode === 'function') hallEnterMode();
@@ -72,6 +83,7 @@ function applyUiMode(mode) {
   } else if (typeof workLeaveMode === 'function') {
     workLeaveMode();
   }
+  if (m === 'plugins' && typeof marketEnter === 'function') marketEnter();
   // 会话列表按模式过滤：进/出剧场时立刻换一份列表
   if (typeof renderSessions === 'function' && state.sessions && state.sessions.sessions) {
     renderSessions();
@@ -122,6 +134,19 @@ function ideBindWorkspace() {
   ws.onkeydown = (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); ws.click(); }
   };
+  // 拖到「工作区」这一行 = 移到沙箱根目录
+  ws.addEventListener('dragover', (e) => {
+    if (!state.ideDrag) return;
+    e.preventDefault();
+    ws.classList.add('drop-target');
+  });
+  ws.addEventListener('dragleave', () => ws.classList.remove('drop-target'));
+  ws.addEventListener('drop', (e) => {
+    e.preventDefault();
+    ws.classList.remove('drop-target');
+    const from = state.ideDrag || (e.dataTransfer && e.dataTransfer.getData('text/plain'));
+    if (from) ideMoveEntry(from, '');
+  });
 }
 
 function ideInitOnce() {
@@ -132,9 +157,33 @@ function ideInitOnce() {
   state.ideSideHidden = !!(state.config && state.config.ide_side_collapsed);   // 恢复上次的收起状态
   ideSyncSideUI();
   ideBindWorkspace();
+  ideIntelBindUI();
+  const repAll = $('#ide-replace-all');
+  if (repAll) repAll.onclick = () => ideReplaceAll();
+  const pvBtn = $('#ide-preview-btn');
+  if (pvBtn) pvBtn.onclick = () => idePreviewToggle();
+  const pvOpen = $('#ide-preview-open');
+  if (pvOpen) pvOpen.onclick = () => idePreviewOpen();
+  const pvReload = $('#ide-preview-reload');
+  if (pvReload) pvReload.onclick = () => idePreviewReload();
+  const pvClose = $('#ide-preview-close');
+  if (pvClose) pvClose.onclick = () => idePreviewToggle(false);
+  const pvUrl = $('#ide-preview-url');
+  if (pvUrl) pvUrl.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); idePreviewOpen(); }
+  };
+  const mdBtn = $('#ide-md-btn');
+  if (mdBtn) mdBtn.onclick = () => ideMdToggle();
+  const mdClose = $('#ide-md-close');
+  if (mdClose) mdClose.onclick = () => ideMdToggle(false);
+  const mdPdf = $('#ide-md-pdf');
+  if (mdPdf) mdPdf.onclick = () => ideMdExportPdf();
+  const texBtn = $('#ide-run-btn');
+  if (texBtn) texBtn.onclick = () => ideRunCurrent();
   loadMonaco().then((m) => {
     if (!m) return;                 // Monaco 加载失败则继续用内置 textarea，功能不受影响
     state.ideMonaco = m;
+    ideRegisterLatexLanguage(m);     // 必须在建 model 之前：否则 tex 会先被当成 plaintext
     ideRegisterMonacoThemes(m);
     ideApplyEditorKeybindings();     // 用户改过的编辑器快捷键（没改过则一条都不下发）
     ideEnsureEditor(m);
@@ -183,13 +232,70 @@ const IDE_LANGS = {
   css: 'css', scss: 'scss', less: 'less', md: 'markdown', markdown: 'markdown',
   sh: 'shell', bash: 'shell', zsh: 'shell', ps1: 'powershell', bat: 'bat', cmd: 'bat',
   yml: 'yaml', yaml: 'yaml', toml: 'ini', ini: 'ini', cfg: 'ini', conf: 'ini',
-  xml: 'xml', java: 'java', c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', hpp: 'cpp',
+  xml: 'xml', java: 'java',
+  // C / C++ 共用 Monaco 的 cpp 语言（它的注册扩展名就包含 .c / .h）
+  c: 'cpp', h: 'cpp', cc: 'cpp', cpp: 'cpp', cxx: 'cpp', hpp: 'cpp', hxx: 'cpp',
   cs: 'csharp', go: 'go', rs: 'rust', php: 'php', rb: 'ruby', sql: 'sql', lua: 'lua', txt: 'plaintext',
+  // LaTeX：内置 Monaco 没打包 latex，语法在 ideRegisterLatexLanguage 里自己注册
+  tex: 'latex', sty: 'latex', cls: 'latex', bib: 'latex',
 };
 function ideLangOf(rel) {
   const name = (rel || '').split('/').pop() || '';
   const ext = name.indexOf('.') >= 0 ? name.split('.').pop().toLowerCase() : '';
   return IDE_LANGS[ext] || 'plaintext';
+}
+
+/* LaTeX 语法高亮：内置 Monaco 没打包 latex，这里注册一份够用的（命令 / 环境 / 注释 / 数学）。
+   和 VS Code 内置 latex 扩展同级——只负责着色与括号配对，编译另走 /api/ide/tex/build。 */
+function ideRegisterLatexLanguage(M) {
+  if (!M || !M.languages || M.__gmLatexRegistered) return;
+  M.__gmLatexRegistered = true;
+  M.languages.register({ id: 'latex', extensions: ['.tex', '.sty', '.cls', '.bib'] });
+  M.languages.setLanguageConfiguration('latex', {
+    comments: { lineComment: '%' },
+    brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+    autoClosingPairs: [
+      { open: '{', close: '}' }, { open: '[', close: ']' },
+      { open: '(', close: ')' }, { open: '$', close: '$' },
+    ],
+    surroundingPairs: [{ open: '{', close: '}' }, { open: '[', close: ']' }],
+  });
+  M.languages.setMonarchTokensProvider('latex', {
+    defaultToken: '',
+    tokenPostfix: '.tex',
+    tokenizer: {
+      root: [
+        [/%.*$/, 'comment'],
+        [/\\(?:begin|end)\s*\{[^}]*\}/, 'keyword.control'],
+        [/\\(?:documentclass|usepackage|input|include|bibliography|bibliographystyle|label|ref|eqref|cite|item|chapter|section|subsection|subsubsection|paragraph|textbf|textit|emph)\b/, 'keyword'],
+        [/\\[a-zA-Z@]+\*?/, 'type'],
+        [/\$\$/, { token: 'string', next: '@displaymath' }],
+        [/\$/, { token: 'string', next: '@inlinemath' }],
+        [/\\\[/, { token: 'string', next: '@bracketmath' }],
+        [/\\\(/, { token: 'string', next: '@parenmath' }],
+        [/[{}]/, '@brackets'],
+        [/[\[\]()]/, '@brackets'],
+        [/\d+(?:\.\d+)?/, 'number'],
+        [/[&~^_]/, 'operator'],
+      ],
+      inlinemath: [
+        [/[^$]+/, 'string'],
+        [/\$/, { token: 'string', next: '@pop' }],
+      ],
+      displaymath: [
+        [/[^$]+/, 'string'],
+        [/\$\$/, { token: 'string', next: '@pop' }],
+      ],
+      bracketmath: [
+        [/[^\]]+/, 'string'],
+        [/\\\]/, { token: 'string', next: '@pop' }],
+      ],
+      parenmath: [
+        [/[^)]+/, 'string'],
+        [/\\\)/, { token: 'string', next: '@pop' }],
+      ],
+    },
+  });
 }
 
 // 可在 IDE 里预览的图片类型（SVG 仍按文本编辑）
@@ -261,6 +367,8 @@ function ideEnsureEditor(monaco) {
     automaticLayout: true,
     renderWhitespace: ideWhitespaceMode(),   // 由「设置 → 主题与外观 → 空白字符可视化」控制
     breadcrumbs: { enabled: true },          // 编辑器顶部的路径层级（VS Code 默认开启）
+    // AI 补全用 Monaco 原生的灰色 ghost text；不要悬浮工具条（Tab 接受 / Esc 关闭）
+    inlineSuggest: { enabled: true, showToolbar: 'never' },
   };
   if (d.fontSize) opt.fontSize = d.fontSize;
   if (d.tabSize) opt.tabSize = d.tabSize;
@@ -270,12 +378,147 @@ function ideEnsureEditor(monaco) {
   state.ideEditor = monaco.editor.create(host, opt);
   state.ideEditor.onDidChangeModelContent(() => {
     if (state.ideOpen) ideSetDirty(state.ideOpen, true);
+    ideMdSchedule();                       // Markdown 预览跟着打字实时刷新（节流）
   });
   state.ideEditor.onDidChangeCursorPosition((e) => {
     const el = $('#ide-status-pos');
     if (el) el.textContent = '行 ' + e.position.lineNumber + '，列 ' + e.position.column;
   });
+  ideAiInit(state.ideEditor, monaco);
+  ideIntelBindKeys(state.ideEditor, monaco);
+  debugBindEditor(state.ideEditor, monaco);
+  debugApplyDecorations();
   return state.ideEditor;
+}
+
+/* ============================================================
+   AI 内联补全（Tab 补全）
+   ------------------------------------------------------------
+   交互对齐 Trae / Copilot：光标停顿后出灰色 ghost text，Tab 接受、Esc 关闭。
+   · 只在行尾 / 后面只剩收尾符号时请求，避免在标识符中间乱补；
+   · 每次请求带取消：光标一动旧结果直接丢弃（Monaco 的 cancellation token）；
+   · 没配 light_model 时不生效（避免拿主模型每 350ms 烧一次 token）。
+   ============================================================ */
+const IDE_AI_LANGS = ['javascript', 'typescript', 'python', 'html', 'css', 'scss',
+  'less', 'json', 'shell', 'powershell', 'bat', 'yaml', 'java', 'c', 'cpp',
+  'csharp', 'go', 'rust', 'php', 'ruby', 'sql', 'lua', 'vue'];
+// 最近一次「已交给 Monaco 的建议」：用于判断 Tab 该不该被拦截。
+// 内容 / 光标一变就失效，不会出现「按 Tab 却没东西可接受」的死键位。
+const IDE_AI = { key: '', text: '', ver: -1, line: -1, col: -1 };
+
+function ideAiReady() {
+  const c = state.config || {};
+  if (c.ide_ai_complete === false) return false;
+  return !!String(c.light_model || '').trim();
+}
+
+function ideAiDelay() {
+  const n = Number((state.config || {}).ide_ai_complete_delay_ms);
+  return Number.isFinite(n) && n >= 0 ? n : 350;
+}
+
+function ideAiSleep(ms, token) {
+  return new Promise((resolve) => {
+    let done = false;
+    const fin = () => { if (!done) { done = true; resolve(); } };
+    const timer = setTimeout(fin, ms);
+    if (token && token.onCancellationRequested) {
+      token.onCancellationRequested(() => { clearTimeout(timer); fin(); });
+    }
+  });
+}
+
+async function ideAiFetch(rel, model, position, token) {
+  const full = model.getValue();
+  const offset = model.getOffsetAt(position);
+  const prefix = full.slice(Math.max(0, offset - 6000), offset);
+  const suffix = full.slice(offset, offset + 2000);
+  const key = rel + '|' + model.getVersionId() + '|' + offset;
+  if (key === IDE_AI.key) return IDE_AI.text;
+  const ctrl = new AbortController();
+  if (token && token.onCancellationRequested) token.onCancellationRequested(() => ctrl.abort());
+  let data = null;
+  try {
+    const res = await fetch('/api/ide/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Auth-Token': TOKEN },
+      body: JSON.stringify({
+        session_id: state.sessions.current, path: rel,
+        language: model.getLanguageId(), prefix: prefix, suffix: suffix,
+      }),
+      signal: ctrl.signal,
+    });
+    if (res.ok) data = await res.json();
+  } catch (e) {
+    return '';                       // 取消 / 断网 / 超时：静默，不打扰编辑
+  }
+  const text = (data && data.ok && data.text) ? String(data.text) : '';
+  IDE_AI.key = key;
+  IDE_AI.text = text;
+  return text;
+}
+
+async function ideAiProvide(model, position, token) {
+  if (!ideAiReady()) return { items: [] };
+  // 只服务主编辑区当前模型：diff / git-diff 那些编辑器也会命中同一个 provider
+  if (!state.ideEditor || state.ideEditor.getModel() !== model) return { items: [] };
+  if (IDE_AI_LANGS.indexOf(model.getLanguageId()) < 0) return { items: [] };
+  const line = model.getLineContent(position.lineNumber);
+  const before = line.slice(0, position.column - 1);
+  const after = line.slice(position.column - 1);
+  if (!/^[ \t]*[)\]};,]*[ \t]*$/.test(after)) return { items: [] };   // 只在行尾补
+  if (!before.trim() && !after.trim()) return { items: [] };          // 空行不补
+  await ideAiSleep(ideAiDelay(), token);
+  if (token && token.isCancellationRequested) return { items: [] };
+  const verAtStart = model.getVersionId();
+  const text = await ideAiFetch(state.ideOpen || '', model, position, token);
+  if (!text || (token && token.isCancellationRequested)) return { items: [] };
+  // 请求期间内容 / 光标可能已经变了：过期结果不交给 Monaco，也不写进 Tab 判定状态
+  const cur = state.ideEditor.getPosition();
+  if (model.getVersionId() !== verAtStart || !cur ||
+      cur.lineNumber !== position.lineNumber || cur.column !== position.column) {
+    return { items: [] };
+  }
+  IDE_AI.ver = model.getVersionId();
+  IDE_AI.line = position.lineNumber;
+  IDE_AI.col = position.column;
+  return { items: [{ insertText: text }] };
+}
+
+function ideAiInit(editor, monaco) {
+  const provider = {
+    provideInlineCompletions: (model, position, ctx, token) =>
+      ideAiProvide(model, position, token),
+    freeInlineCompletions: () => {},
+  };
+  IDE_AI_LANGS.forEach((lang) => {
+    try { monaco.languages.registerInlineCompletionsProvider(lang, provider); }
+    catch (e) { /* 旧版本 Monaco 没有这个 API：静默停用 */ }
+  });
+  // Tab 接受：只在「建议确实存在且位置没变」时劫持，否则保持缩进
+  editor.onKeyDown((e) => {
+    if (e.keyCode === monaco.KeyCode.Escape) { IDE_AI.text = ''; return; }
+    if (e.keyCode !== monaco.KeyCode.Tab) return;
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const model = editor.getModel();
+    const pos = editor.getPosition();
+    if (!model || !pos || !IDE_AI.text) return;
+    if (IDE_AI.ver !== model.getVersionId()) return;
+    if (IDE_AI.line !== pos.lineNumber || IDE_AI.col !== pos.column) return;
+    e.preventDefault();
+    e.stopPropagation();
+    IDE_AI.text = '';
+    editor.trigger('ide-ai', 'editor.action.inlineSuggest.commit', null);
+  });
+  // Alt+\ 手动触发一次（自动模式下用来「催」一下）
+  try {
+    editor.addAction({
+      id: 'ide-ai-trigger',
+      label: '触发 AI 补全',
+      keybindings: [monaco.KeyMod.Alt | 92],      // 92 = KeyCode.Backslash
+      run: (ed) => { ed.trigger('ide-ai', 'editor.action.inlineSuggest.trigger', null); },
+    });
+  } catch (e) { /* 忽略：快捷键注册失败不影响自动补全 */ }
 }
 
 // 编辑器主题跟随 IDE 主题（与 Solo 界面主题解耦；配置为空时才回落到界面的明暗）
@@ -714,6 +957,7 @@ async function loadIdeTree() {
   }
   state.ideTree = r.tree;
   renderIdeTree(r.tree);
+  ideWatchSig = JSON.stringify(r.tree);      // 监听基线：下一次不一致才重绘
 }
 
 // 文件树图标：内联 SVG + 按扩展名着色（VS Code / Seti 风格近似，离线可用）
@@ -750,6 +994,111 @@ function ideIcoEl(name, isDir) {
   return ico;
 }
 
+/* ---------------- 文件树：多选 / 拖拽移动 / 外部改动监听 ---------------- */
+
+function ideToggleSel(rel) {
+  if (!state.ideSel) state.ideSel = [];
+  const i = state.ideSel.indexOf(rel);
+  if (i >= 0) state.ideSel.splice(i, 1);
+  else state.ideSel.push(rel);
+  ideSyncSel();
+}
+
+function ideClearSel() {
+  if (!(state.ideSel || []).length) return;
+  state.ideSel = [];
+  ideSyncSel();
+}
+
+function ideSyncSel() {
+  const sel = state.ideSel || [];
+  $$('#ide-tree .ide-row').forEach((r) => {
+    r.classList.toggle('multi', sel.indexOf(r.dataset.path) >= 0);
+  });
+}
+
+/* 拖拽移动：后端只做「同一沙箱内的移动」，目标已存在会拒绝。
+   打开着的标签 / 缓存 / 未保存标记都要跟着换路径，否则会指向不存在的文件。 */
+async function ideMoveEntry(from, toDir) {
+  const name = String(from || '').split('/').pop();
+  if (!from) return;
+  let r = null;
+  try {
+    r = await api('/api/sandbox/move', {
+      session_id: state.sessions.current, from: from, to: toDir || '',
+    });
+  } catch (e) { return toast('移动失败：' + e); }
+  if (!r || !r.ok) return toast((r && r.error) || '移动失败');
+  if (r.unchanged) return;
+  const dest = r.path || (toDir ? (toDir + '/' + name) : name);
+  const i = (state.ideTabList || []).indexOf(from);
+  if (i >= 0) state.ideTabList[i] = dest;
+  if (state.ideModels[from]) {
+    try { state.ideModels[from].dispose(); } catch (e) { /* 忽略 */ }
+    delete state.ideModels[from];
+  }
+  if (state.ideCache[from]) { state.ideCache[dest] = state.ideCache[from]; delete state.ideCache[from]; }
+  if (state.ideDirtyMap[from]) {
+    state.ideDirtyMap[dest] = state.ideDirtyMap[from];
+    delete state.ideDirtyMap[from];
+  }
+  if (state.ideChanged && state.ideChanged.has(from)) {
+    state.ideChanged.delete(from);
+    state.ideChanged.add(dest);
+  }
+  if (state.ideOpen === from) state.ideOpen = dest;
+  await loadIdeTree();
+  renderIdeTabs();
+  if (state.ideOpen === dest && state.ideMonaco) ideActivate(dest);
+  toast('已移动到 ' + (toDir || '根目录'));
+}
+
+/* 外部改动监听：每 5 秒比一次目录树；当前打开的文件没改过且内容变了就重新载入。
+   Electron 里没有文件系统 watch，轮询是最省事又不会漏的做法（开销：一次 tree + 一次 file）。 */
+const IDE_WATCH_MS = 5000;
+let ideWatchTimer = 0;
+let ideWatchSig = '';
+
+function ideWatchStart() {
+  ideWatchStop();
+  ideWatchTimer = setInterval(ideWatchTick, IDE_WATCH_MS);
+}
+
+function ideWatchStop() {
+  if (ideWatchTimer) { clearInterval(ideWatchTimer); ideWatchTimer = 0; }
+}
+
+async function ideWatchTick() {
+  if (state.uiMode !== 'ide' || !state.sessions.current) return;
+  let r = null;
+  try { r = await api('/api/sandbox/tree', { session_id: state.sessions.current }); }
+  catch (e) { return; }
+  if (!r || !r.ok) return;
+  const sig = JSON.stringify(r.tree);
+  if (ideWatchSig && sig !== ideWatchSig) {
+    state.ideTree = r.tree;
+    renderIdeTree(r.tree);
+    ideSyncTreeActive();
+  }
+  ideWatchSig = sig;
+  const rel = state.ideOpen;
+  if (!rel || state.ideDirtyMap[rel] || !state.ideMonaco) return;
+  const model = state.ideModels[rel];
+  if (!model) return;
+  let f = null;
+  try { f = await api('/api/sandbox/file', { session_id: state.sessions.current, path: rel }); }
+  catch (e) { return; }
+  if (!f || !f.ok) return;
+  const text = f.text || '';
+  if (text === model.getValue()) return;
+  const pos = state.ideEditor && state.ideEditor.getPosition();
+  model.setValue(text);
+  if (state.ideCache[rel]) state.ideCache[rel].text = text;
+  if (pos && state.ideEditor) { try { state.ideEditor.setPosition(pos); } catch (e) { /* 忽略 */ } }
+  toast('「' + rel + '」已在外部修改，已重新载入');
+  if (ideLspEligible(rel)) ideIntelSchedule(rel);
+}
+
 function buildIdeNodes(items, prefix, depth) {
   const d = depth || 0;
   const wrap = document.createElement('div');
@@ -781,10 +1130,46 @@ function buildIdeNodes(items, prefix, depth) {
       kids.className = 'ide-children hidden';
       kids.appendChild(buildIdeNodes(it.children || [], rel, d + 1));
       node.appendChild(kids);
-      row.onclick = () => ideToggleDir(row, kids);
+      // 拖拽：拖到目录行 = 移进这个目录；拖到目录行本身不展开，避免误触
+      row.addEventListener('dragover', (e) => {
+        if (!state.ideDrag || state.ideDrag === rel) return;
+        e.preventDefault();
+        row.classList.add('drop-target');
+      });
+      row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+      row.addEventListener('drop', (e) => {
+        e.preventDefault();
+        row.classList.remove('drop-target');
+        const from = state.ideDrag || (e.dataTransfer && e.dataTransfer.getData('text/plain'));
+        if (from && from !== rel) ideMoveEntry(from, rel);
+      });
+      row.onclick = (e) => {
+        if (e.ctrlKey || e.metaKey) { ideToggleSel(rel); return; }
+        ideClearSel();
+        ideToggleDir(row, kids);
+      };
     } else {
-      row.onclick = () => openIdeFile(rel);
+      row.onclick = (e) => {
+        if (e.ctrlKey || e.metaKey) { ideToggleSel(rel); return; }
+        ideClearSel();
+        openIdeFile(rel);
+      };
     }
+    // 文件与目录都能被拖走；拖动源由 state.ideDrag 记录（dataTransfer 在部分环境为空）
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+      state.ideDrag = rel;
+      try {
+        e.dataTransfer.setData('text/plain', rel);
+        e.dataTransfer.effectAllowed = 'move';
+      } catch (err) { /* 忽略 */ }
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => {
+      state.ideDrag = '';
+      row.classList.remove('dragging');
+      $$('#ide-tree .ide-row.drop-target').forEach((r) => r.classList.remove('drop-target'));
+    });
     wrap.appendChild(node);
   });
   return wrap;
@@ -900,8 +1285,8 @@ function ideRevealInTree(rel) {
 }
 
 async function setUiMode(mode) {
-  const target = (mode === 'ide' || mode === 'gal' || mode === 'hall' || mode === 'work')
-    ? mode : 'solo';
+  const target = (mode === 'ide' || mode === 'gal' || mode === 'hall' || mode === 'work'
+    || mode === 'plugins') ? mode : 'solo';
   // 离开剧场：切回进场前的主会话（剧场会话不会出现在 Solo / IDE 列表里）
   if (state.uiMode === 'gal' && target !== 'gal') {
     const back = state.galReturnSession
@@ -1045,6 +1430,781 @@ function ideFlashStatus(text) {
   }, 2000);
 }
 
+/* ---------------- 语言服务前台化（pyright） ----------------
+   后端 app/api/ide_intel.py 把 lsp.py 的结构化接口暴露出来；这里做四件事：
+     1. 打开 / 保存 Python 文件后拉诊断 → Monaco 波浪线 + 问题面板
+     2. 大纲（documentSymbol）
+     3. 转到定义 / 查找引用（跨文件跳转；多条结果落到「结果」页签）
+     4. 重命名符号（先出方案，确认后一次写盘，走 undo 栈）
+   只接 Python；其它语言一次请求都不发，避免在没装 pyright 的机器上反复报错。 */
+const IDE_INTEL = {
+  tab: 'problems',      // problems | outline | results
+  open: false,
+  file: '',
+  items: [],
+  symbols: [],
+  results: [],
+  avail: null,          // null 未知 / true 可用 / false 不可用
+  error: '',
+  timer: 0,
+};
+
+function ideLspEligible(rel) { return /\.pyi?$/i.test(String(rel || '')); }
+
+function ideIntelUpdateBadge() {
+  const el = $('#ide-status-problems');
+  if (!el) return;
+  const errs = IDE_INTEL.items.filter((x) => x.severity === 8).length;
+  const warns = IDE_INTEL.items.length - errs;
+  el.classList.toggle('hidden', !IDE_INTEL.open && !IDE_INTEL.items.length);
+  el.textContent = '✖ ' + errs + '  ⚠ ' + warns;
+  el.classList.toggle('has-err', errs > 0);
+}
+
+function ideIntelClear(rel) {
+  const M = state.ideMonaco;
+  const model = state.ideModels[rel];
+  if (M && model) { try { M.editor.setModelMarkers(model, 'gm-lsp', []); } catch (e) { /* 忽略 */ } }
+  if (IDE_INTEL.file === rel) {
+    IDE_INTEL.items = [];
+    IDE_INTEL.symbols = [];
+    ideIntelUpdateBadge();
+  }
+}
+
+async function ideIntelDiagnose(rel) {
+  if (!rel || !ideLspEligible(rel) || !state.ideEditor) return;
+  let r = null;
+  try {
+    r = await api('/api/ide/lsp/diagnostics', { session_id: state.sessions.current, path: rel });
+  } catch (e) {
+    return;                              // 后端不可达：静默，别打断编辑
+  }
+  if (state.ideOpen !== rel) return;     // 期间切了文件：这次结果作废
+  if (!r || !r.ok) {
+    IDE_INTEL.avail = false;
+    IDE_INTEL.error = (r && r.error) || '语言服务不可用';
+    ideIntelClear(rel);
+    if (IDE_INTEL.open) ideIntelRender();
+    return;
+  }
+  IDE_INTEL.avail = true;
+  IDE_INTEL.error = '';
+  IDE_INTEL.file = rel;
+  IDE_INTEL.items = r.items || [];
+  const M = state.ideMonaco;
+  const model = state.ideModels[rel];
+  if (M && model) {
+    const markers = IDE_INTEL.items.map((it) => ({
+      severity: it.severity,                       // 8 错误 / 4 警告（Monaco 自己的枚举值）
+      message: it.message + (it.code ? '  [' + it.code + ']' : ''),
+      source: 'pyright',
+      startLineNumber: it.line + 1,
+      startColumn: it.col + 1,
+      endLineNumber: (it.endLine != null ? it.endLine : it.line) + 1,
+      endColumn: Math.max(it.endCol || 0, it.col + 1) + 1,
+    }));
+    try { M.editor.setModelMarkers(model, 'gm-lsp', markers); } catch (e) { /* 忽略 */ }
+  }
+  ideIntelUpdateBadge();
+  if (IDE_INTEL.open) ideIntelRender();
+}
+
+function ideIntelSchedule(rel) {
+  clearTimeout(IDE_INTEL.timer);
+  IDE_INTEL.timer = setTimeout(() => ideIntelDiagnose(rel), 260);
+}
+
+/* 切文件：面板里的数据换成本文件的；Python 才排一次诊断 */
+function ideIntelOnOpen(rel) {
+  IDE_INTEL.file = rel || '';
+  IDE_INTEL.items = [];
+  IDE_INTEL.symbols = [];
+  IDE_INTEL.results = [];
+  ideIntelUpdateBadge();
+  if (IDE_INTEL.open) {
+    if (IDE_INTEL.tab === 'outline') ideIntelLoadSymbols(rel);
+    else ideIntelRender();
+  }
+  if (ideLspEligible(rel)) ideIntelSchedule(rel);
+}
+
+async function ideIntelLoadSymbols(rel) {
+  // LaTeX 用正则抽章节（不编译、不依赖语言服务）
+  if (rel && /\.tex$/i.test(rel)) {
+    let t = null;
+    try {
+      t = await api('/api/ide/tex/outline', { session_id: state.sessions.current, path: rel });
+    } catch (e) { t = null; }
+    if (state.ideOpen !== rel) return;
+    IDE_INTEL.symbols = (t && t.ok && t.items) || [];
+    ideIntelRender();
+    return;
+  }
+  if (!rel || !ideLspEligible(rel)) { IDE_INTEL.symbols = []; ideIntelRender(); return; }
+  let r = null;
+  try {
+    r = await api('/api/ide/lsp/symbols', { session_id: state.sessions.current, path: rel });
+  } catch (e) { r = null; }
+  if (state.ideOpen !== rel) return;
+  IDE_INTEL.symbols = (r && r.ok && r.items) || [];
+  ideIntelRender();
+}
+
+function ideIntelToggle(tab, force) {
+  const box = $('#ide-intel');
+  if (!box) return;
+  const want = (typeof force === 'boolean') ? force : !IDE_INTEL.open;
+  if (want && tab) IDE_INTEL.tab = tab;
+  IDE_INTEL.open = want;
+  box.classList.toggle('hidden', !want);
+  if (want) {
+    if (IDE_INTEL.tab === 'outline') ideIntelLoadSymbols(state.ideOpen);
+    else ideIntelRender();
+  }
+  ideIntelUpdateBadge();
+}
+
+function ideIntelRender() {
+  const body = $('#ide-intel-body');
+  if (!body) return;
+  $$('#ide-intel .ide-intel-tab').forEach((b) => {
+    b.classList.toggle('active', b.dataset.intelTab === IDE_INTEL.tab);
+    if (b.dataset.intelTab === 'results') b.classList.toggle('hidden', !IDE_INTEL.results.length);
+  });
+  const pc = $('#ide-intel-pcount');
+  if (pc) pc.textContent = IDE_INTEL.items.length ? String(IDE_INTEL.items.length) : '';
+  const oc = $('#ide-intel-ocount');
+  if (oc) oc.textContent = IDE_INTEL.symbols.length ? String(IDE_INTEL.symbols.length) : '';
+  body.innerHTML = '';
+
+  if (IDE_INTEL.tab === 'problems') {
+    if (!IDE_INTEL.items.length) {
+      body.innerHTML = '<div class="ide-empty">' + (IDE_INTEL.avail === false
+        ? ('语言服务不可用：' + escapeHtml(IDE_INTEL.error || '未检测到 pyright'))
+        : '当前文件没有错误或警告') + '</div>';
+      return;
+    }
+    IDE_INTEL.items.forEach((it) => {
+      const row = document.createElement('div');
+      row.className = 'ide-intel-row ' + (it.severity === 8 ? 'err' : 'warn');
+      const where = (it.file && it.file !== IDE_INTEL.file) ? (it.file + ' · ') : '';
+      row.innerHTML = '<span class="ide-intel-ico">' + (it.severity === 8 ? '✖' : '⚠') + '</span>'
+        + '<span class="ide-intel-text">' + escapeHtml(it.message) + '</span>'
+        + '<span class="ide-intel-meta">' + (it.code ? escapeHtml(it.code) + ' · ' : '')
+        + escapeHtml(where) + 'L' + (it.line + 1) + '</span>';
+      row.onclick = () => ideIntelOpenLocation(it.file || IDE_INTEL.file || state.ideOpen,
+        it.line + 1, (it.col || 0) + 1);
+      body.appendChild(row);
+    });
+    return;
+  }
+
+  if (IDE_INTEL.tab === 'outline') {
+    if (!IDE_INTEL.symbols.length) {
+      body.innerHTML = '<div class="ide-empty">' + (ideLspEligible(state.ideOpen)
+        ? '没有符号（空文件，或语言服务还没分析完）' : '只有 Python 文件支持大纲') + '</div>';
+      return;
+    }
+    IDE_INTEL.symbols.forEach((s) => {
+      const row = document.createElement('div');
+      row.className = 'ide-intel-row';
+      row.style.paddingLeft = (10 + (s.depth || 0) * 14) + 'px';
+      row.innerHTML = '<span class="ide-intel-text">' + escapeHtml(s.name || '')
+        + (s.detail ? ' <span class="ide-intel-meta">' + escapeHtml(s.detail) + '</span>' : '')
+        + '</span><span class="ide-intel-meta">L' + (s.line || 0) + '</span>';
+      row.onclick = () => ideIntelOpenLocation(state.ideOpen, s.line, 1);
+      body.appendChild(row);
+    });
+    return;
+  }
+
+  // results：定义 / 引用
+  if (!IDE_INTEL.results.length) {
+    body.innerHTML = '<div class="ide-empty">没有结果</div>';
+    return;
+  }
+  IDE_INTEL.results.forEach((r) => {
+    const row = document.createElement('div');
+    row.className = 'ide-intel-row';
+    row.innerHTML = '<span class="ide-intel-text">' + escapeHtml(r.label) + '</span>'
+      + '<span class="ide-intel-meta">' + escapeHtml(r.meta || '') + '</span>';
+    row.onclick = () => ideIntelOpenLocation(r.path, r.line, r.col);
+    body.appendChild(row);
+  });
+}
+
+async function ideIntelOpenLocation(rel, line, col) {
+  if (!rel) return;
+  if (state.ideOpen !== rel || !state.ideModels[rel]) await openIdeFile(rel);
+  if (state.ideOpen !== rel) return;
+  const ed = state.ideEditor;
+  if (!ed) return;
+  const n = Math.max(1, parseInt(line, 10) || 1);
+  const c = Math.max(1, parseInt(col, 10) || 1);
+  ed.setPosition({ lineNumber: n, column: c });
+  ed.revealLineInCenter(n);
+  ed.focus();
+}
+
+async function ideIntelGoto(kind) {
+  const rel = state.ideOpen;
+  if (!rel) return;
+  if (!ideLspEligible(rel)) return toast('只有 Python 文件支持语言跳转');
+  const pos = state.ideEditor && state.ideEditor.getPosition();
+  if (!pos) return;
+  let r = null;
+  try {
+    r = await api('/api/ide/lsp/goto', {
+      session_id: state.sessions.current, path: rel, kind: kind,
+      line: pos.lineNumber, col: pos.column,
+    });
+  } catch (e) { return toast('跳转失败：' + e); }
+  if (!r) return;
+  if (!r.ok) return toast(r.error || '语言服务不可用');
+  const items = r.items || [];
+  if (!items.length) return toast(kind === 'references' ? '没有找到引用' : '没有找到定义');
+  if (kind !== 'references' && items.length === 1) {
+    return ideIntelOpenLocation(items[0].path, items[0].line, items[0].col);
+  }
+  IDE_INTEL.results = items.map((x) => ({
+    label: String(x.path || '').split('/').pop() + ':' + x.line,
+    meta: x.path, path: x.path, line: x.line, col: x.col,
+  }));
+  ideIntelToggle('results', true);
+}
+
+async function ideRenameSymbol() {
+  const rel = state.ideOpen;
+  if (!rel) return;
+  if (!ideLspEligible(rel)) return toast('只有 Python 文件支持重命名');
+  const ed = state.ideEditor;
+  const pos = ed && ed.getPosition();
+  const model = ed && ed.getModel();
+  if (!pos || !model) return;
+  const word = model.getWordAtPosition(pos);
+  if (!word) return toast('把光标放到要重命名的符号上');
+  const name = await appPrompt('把「' + word.word + '」重命名为：', word.word);
+  if (!name || name === word.word) return;
+  const base = { session_id: state.sessions.current, path: rel,
+                 line: pos.lineNumber, col: pos.column, new_name: name };
+  let plan = null;
+  try { plan = await api('/api/ide/lsp/rename', base); }
+  catch (e) { return toast('重命名失败：' + e); }
+  if (!plan || !plan.ok) return toast((plan && plan.error) || '没有拿到重命名方案');
+  const files = (plan.files || []).map((f) => f.path);
+  ideConfirm('重命名符号',
+    '将修改 ' + files.length + ' 个文件：\n' + files.slice(0, 12).join('\n')
+      + (files.length > 12 ? '\n…' : ''), '应用', async () => {
+      let done = null;
+      try { done = await api('/api/ide/lsp/rename', Object.assign({ apply: true }, base)); }
+      catch (e) { return toast('写入失败：' + e); }
+      if (!done || !done.ok) return toast((done && done.error) || '写入失败');
+      await ideReloadFiles(done.files || []);
+      toast('已重命名，影响 ' + (done.count || 0) + ' 个文件（可在 AI 变更里撤销）');
+      ideIntelSchedule(state.ideOpen);
+    });
+}
+
+/* 重命名会改多个文件：把已打开的那些模型作废再重新载入，避免编辑器里还是旧内容 */
+async function ideReloadFiles(list) {
+  (list || []).forEach((rel) => {
+    if (state.ideModels[rel]) {
+      try { state.ideModels[rel].dispose(); } catch (e) { /* 忽略 */ }
+      delete state.ideModels[rel];
+    }
+    delete state.ideCache[rel];
+    state.ideDirtyMap[rel] = false;
+  });
+  const cur = state.ideOpen;
+  if (cur && (list || []).indexOf(cur) >= 0) {
+    state.ideTabList = (state.ideTabList || []).filter((x) => x !== cur);
+    await openIdeFile(cur);
+  }
+  loadIdeTree();
+}
+
+/* 磁盘被外部改了（时间线回滚 / git 切换分支）：把打开的文件重新读一遍。
+   有未保存改动的标签跳过，避免把用户正在写的丢掉。 */
+async function ideReloadAll() {
+  if (state.uiMode !== 'ide' || !state.ideMonaco) return;
+  const cur = state.ideOpen;
+  const list = (state.ideTabList || []).slice();
+  const reload = list.filter((rel) => !state.ideDirtyMap[rel]);
+  // 先重读内容到缓存（标签不删，切回去时直接从缓存建模型）
+  for (const rel of reload) {
+    try {
+      const r = await api('/api/sandbox/file', { session_id: state.sessions.current, path: rel });
+      if (r && r.ok) state.ideCache[rel] = { text: r.text || '', enc: r.encoding || '' };
+    } catch (e) { /* 读不到就保留旧缓存 */ }
+    if (state.ideModels[rel]) {
+      try { state.ideModels[rel].dispose(); } catch (e) { /* 忽略 */ }
+      delete state.ideModels[rel];
+    }
+  }
+  if (cur && reload.indexOf(cur) >= 0) await ideActivate(cur);
+  loadIdeTree();
+  if (cur && reload.indexOf(cur) >= 0) ideIntelSchedule(cur);
+}
+
+/* ---------------- 内联编辑（Ctrl+I） ----------------
+   选中一段代码 → 一句要求 → 模型只返回替换后的片段 → 直接写进缓冲区。
+   不落盘：满意就 Ctrl+S；不满意 Ctrl+Z 一下回到原样。 */
+async function ideInlineEditAI() {
+  const rel = state.ideOpen;
+  const ed = state.ideEditor;
+  if (!rel || !ed) return;
+  const model = ed.getModel();
+  const sel = ed.getSelection();
+  if (!model || !sel || sel.isEmpty()) return toast('先选中要改的代码，再按 Ctrl+I');
+  const chosen = model.getValueInRange(sel);
+  if (!chosen.trim()) return toast('选区是空的');
+  const instruction = await appPrompt('让 AI 怎么改这段代码？（例如：改成列表推导 / 加上类型注解）', '');
+  if (!instruction || !instruction.trim()) return;
+  const full = model.getValue();
+  const startOff = model.getOffsetAt(sel.getStartPosition());
+  const endOff = model.getOffsetAt(sel.getEndPosition());
+  ideFlashStatus('AI 改写中…');
+  let r = null;
+  try {
+    r = await api('/api/ide/inline_edit', {
+      session_id: state.sessions.current, path: rel,
+      language: model.getLanguageId(), selection: chosen,
+      before: full.slice(Math.max(0, startOff - 4000), startOff),
+      after: full.slice(endOff, endOff + 2000),
+      instruction: instruction.trim(),
+    });
+  } catch (e) { return toast('内联编辑失败：' + e); }
+  if (!r || !r.ok) return toast((r && r.error) || '内联编辑失败');
+  if (state.ideOpen !== rel || ed.getModel() !== model) return;   // 期间切了文件
+  ed.pushUndoStop();
+  ed.executeEdits('gm-inline-edit', [{ range: sel, text: r.text, forceMoveMarkers: true }]);
+  ed.pushUndoStop();
+  ideSetDirty(rel, true);
+  toast('已替换选区（Ctrl+Z 撤销，Ctrl+S 保存）');
+}
+
+/* ---------------- 网页预览 ----------------
+   沙箱目录由后端临时挂到 127.0.0.1:<随机端口>（只读、只监听本机），
+   也可以直接填自己的 dev server 地址。关掉面板就把临时服务停掉。 */
+let idePreviewBase = '';
+
+async function idePreviewToggle(force) {
+  const box = $('#ide-preview');
+  if (!box) return;
+  const show = (typeof force === 'boolean') ? force : box.classList.contains('hidden');
+  if (!show) { await idePreviewClose(); return; }
+  box.classList.remove('hidden');
+  const inp = $('#ide-preview-url');
+  const frame = $('#ide-preview-frame');
+  const rel = state.ideOpen || '';
+  const isHtml = /\.html?$/i.test(rel);
+  // 输入框跟当前文件对齐；已经填了 dev server 地址就不覆盖
+  if (inp && (!inp.value || (isHtml && !/^https?:\/\//i.test(inp.value)))) {
+    inp.value = isHtml ? rel : 'http://localhost:5173';
+  }
+  // 当前打开的就是网页：直接渲染出来，不用再多点一次「打开」
+  if (isHtml && frame && !frame.getAttribute('src') && inp && inp.value === rel) {
+    await idePreviewOpen();
+    return;
+  }
+  if (inp) inp.focus();
+}
+
+async function idePreviewOpen() {
+  const inp = $('#ide-preview-url');
+  const frame = $('#ide-preview-frame');
+  if (!inp || !frame) return;
+  let v = (inp.value || '').trim();
+  if (!v) return toast('先填一个地址，或打开一个 html 文件');
+  // 习惯写法 localhost:5173 / 127.0.0.1:8000 没带协议：补 http://，别当成沙箱路径
+  if (/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(v)) {
+    v = 'http://' + v;
+    inp.value = v;
+  }
+  if (/^https?:\/\//i.test(v)) { frame.src = v; return; }
+  let r = null;
+  try {
+    r = await api('/api/ide/preview/start', { session_id: state.sessions.current, path: v });
+  } catch (e) { return toast('预览启动失败：' + e); }
+  if (!r || !r.ok) return toast((r && r.error) || '预览启动失败');
+  idePreviewBase = r.base || '';
+  frame.src = r.url;
+}
+
+function idePreviewReload() {
+  const frame = $('#ide-preview-frame');
+  if (!frame || !frame.src) return;
+  try {
+    const u = new URL(frame.src);
+    u.searchParams.set('_t', String(Date.now()));   // 静态服务禁了缓存，再加一层防浏览器缓存
+    frame.src = u.toString();
+  } catch (e) { frame.src = frame.src; }
+}
+
+async function idePreviewClose() {
+  const box = $('#ide-preview');
+  if (box) box.classList.add('hidden');
+  const frame = $('#ide-preview-frame');
+  if (frame) frame.removeAttribute('src');
+  if (idePreviewBase) {
+    idePreviewBase = '';
+    try { await api('/api/ide/preview/stop', { session_id: state.sessions.current }); }
+    catch (e) { /* 停不掉就下次启动时复用 */ }
+  }
+}
+
+/* ---------------- Markdown 预览（右半屏） ----------------
+   渲染复用聊天那套 renderMarkdown（含 KaTeX 公式），不另写解析器；
+   PDF 导出 = 把渲染结果包成完整 HTML，交给后端用 headless Edge 打印。 */
+const IDE_MD_RE = /\.(md|markdown)$/i;
+
+const IDE_MD_PRINT_CSS = [
+  'body{font-family:"MiSans","Microsoft YaHei",-apple-system,sans-serif;line-height:1.75;',
+  'color:#16181d;margin:26px 30px;font-size:13.5px}',
+  'h1{font-size:22px}h2{font-size:18px}h3{font-size:16px}h4{font-size:14px}',
+  'h1,h2,h3,h4{line-height:1.4;margin:18px 0 8px}',
+  'p{margin:8px 0}ul,ol{padding-left:24px}li{margin:3px 0}',
+  'pre{background:#f6f7f9;border:1px solid #e3e6ea;border-radius:6px;padding:10px;',
+  'overflow:auto;font-size:12px;white-space:pre-wrap;word-break:break-word}',
+  'code{font-family:Consolas,Menlo,monospace;font-size:12.4px}',
+  'table{border-collapse:collapse;margin:10px 0}th,td{border:1px solid #dcdfe4;padding:5px 9px}',
+  'th{background:#f6f7f9}blockquote{border-left:3px solid #dcdfe4;margin:10px 0;',
+  'padding:2px 12px;color:#555}img{max-width:100%}a{color:#2b5cd9;text-decoration:none}',
+  'h1,h2,h3,h4{page-break-after:avoid}pre,table,img,blockquote{page-break-inside:avoid}',
+].join('');
+
+function ideMdEligible(rel) { return IDE_MD_RE.test(String(rel || '')); }
+
+let ideMdTimer = 0;
+
+function ideMdToggle(force) {
+  const rel = state.ideOpen;
+  const wrap = document.querySelector('.ide-editor-wrap');
+  const box = document.getElementById('ide-md');
+  if (!wrap || !box) return;
+  if (!ideMdEligible(rel)) return toast('只有 Markdown 文件支持预览');
+  const show = (typeof force === 'boolean') ? force : box.classList.contains('hidden');
+  box.classList.toggle('hidden', !show);
+  wrap.classList.toggle('md-split', show);
+  const btn = document.getElementById('ide-md-btn');
+  if (btn) btn.classList.toggle('active', show);
+  if (show) ideMdRender();
+  else if (state.ideEditor) { try { state.ideEditor.layout(); } catch (e) { /* 忽略 */ } }
+}
+
+function ideMdClose() {
+  const box = document.getElementById('ide-md');
+  if (!box || box.classList.contains('hidden')) return;
+  ideMdToggle(false);
+}
+
+function ideMdSchedule() {
+  if (!ideMdEligible(state.ideOpen)) return;
+  const box = document.getElementById('ide-md');
+  if (!box || box.classList.contains('hidden')) return;
+  clearTimeout(ideMdTimer);
+  ideMdTimer = setTimeout(ideMdRender, 180);      // 打字时别每个字符都重排
+}
+
+function ideMdRender() {
+  const rel = state.ideOpen;
+  const body = document.getElementById('ide-md-body');
+  const model = rel && state.ideModels[rel];
+  if (!body || !model) return;
+  const text = model.getValue();
+  body.innerHTML = (typeof safeRenderMarkdown === 'function')
+    ? safeRenderMarkdown(text)
+    : ('<pre>' + escapeHtml(text) + '</pre>');
+}
+
+async function ideMdExportPdf() {
+  const rel = state.ideOpen;
+  const model = rel && state.ideModels[rel];
+  if (!rel || !model) return toast('先打开一个 Markdown 文件');
+  if (!model.getValue().trim()) return toast('文件是空的');
+  const bodyHtml = (typeof safeRenderMarkdown === 'function')
+    ? safeRenderMarkdown(model.getValue())
+    : ('<pre>' + escapeHtml(model.getValue()) + '</pre>');
+  const doc = '<!doctype html><html><head><meta charset="utf-8">'
+    + '<link rel="stylesheet" href="' + location.origin
+    + '/static/vendor/katex/katex.min.css">'
+    + '<style>' + IDE_MD_PRINT_CSS + '</style></head><body>'
+    + bodyHtml + '</body></html>';
+  ideFlashStatus('生成 PDF…');
+  let r = null;
+  try {
+    r = await api('/api/ide/export_pdf', {
+      session_id: state.sessions.current, name: rel, html: doc,
+    });
+  } catch (e) { return toast('生成失败：' + e); }
+  if (!r || !r.ok) return toast((r && r.error) || '生成失败');
+  toast('已生成 ' + r.path + '（' + Math.max(1, Math.round((r.size || 0) / 1024)) + ' KB）');
+  loadIdeTree();
+}
+
+/* ---------------- LaTeX 编译 ----------------
+   和 VS Code 的 LaTeX Workshop 同一个模型：只调用本机已有的 latexmk / xelatex，
+   我们只负责「探测 → 调起 → 解析日志 → 回填问题面板」。
+   编译前自动保存（编译器读的是磁盘）；成功后用临时静态服务把 PDF 嵌进预览面板。 */
+function ideTexEligible(rel) { return /\.tex$/i.test(String(rel || '')); }
+
+function ideTexShowProblems(rel, errors) {
+  const items = (errors || []).map((e) => {
+    const ln = Math.max(1, Number(e.line) || 1);
+    return {
+      line: ln - 1, col: 0, endLine: ln - 1, endCol: 1,
+      severity: 8, message: e.message || '编译错误',
+      code: e.context || '', file: e.file || rel,
+    };
+  });
+  ideToolProblems(rel, items, 'latex');
+}
+
+async function ideTexShowPdf(pdfRel) {
+  if (!pdfRel) return;
+  const box = $('#ide-preview');
+  const frame = $('#ide-preview-frame');
+  const inp = $('#ide-preview-url');
+  if (!box || !frame) return;
+  let r = null;
+  try {
+    r = await api('/api/ide/preview/start', {
+      session_id: state.sessions.current, path: pdfRel,
+    });
+  } catch (e) { return toast('打开 PDF 失败：' + e); }
+  if (!r || !r.ok) return toast((r && r.error) || '打开 PDF 失败');
+  idePreviewBase = r.base || '';
+  if (inp) inp.value = pdfRel;
+  box.classList.remove('hidden');
+  frame.src = r.url;
+}
+
+async function ideTexBuild() {
+  const rel = state.ideOpen;
+  if (!ideTexEligible(rel)) return toast('先打开一个 .tex 文件');
+  if (state.ideDirtyMap[rel]) await saveIdeFile();     // 编译器读磁盘，先落盘
+  if (state.ideDirtyMap[rel]) return;                  // 保存失败就别编了
+  const btn = $('#ide-run-btn');
+  if (btn) btn.classList.add('busy');
+  ideFlashStatus('编译中…');
+  let r = null;
+  try {
+    r = await api('/api/ide/tex/build', { session_id: state.sessions.current, path: rel });
+  } catch (e) {
+    if (btn) btn.classList.remove('busy');
+    return toast('编译失败：' + e);
+  }
+  if (btn) btn.classList.remove('busy');
+  if (!r) return;
+  const errors = r.errors || [];
+  if (errors.length) ideTexShowProblems(rel, errors);
+  if (!r.ok) {
+    toast((r.error || '编译失败') + (r.restored ? '（已保留上一版 PDF）' : ''));
+    if (!errors.length && r.log) {
+      const tail = String(r.log).trim().split('\n').pop() || '';
+      ideTexShowProblems(rel, [{ message: tail.slice(0, 200) }]);
+    }
+    return;
+  }
+  toast('编译完成 · ' + (r.engine || 'latex') + ' · '
+    + (((r.ms || 0) / 1000).toFixed(1)) + 's');
+  loadIdeTree();
+  await ideTexShowPdf(r.pdf);
+}
+
+async function ideTexClean() {
+  const rel = state.ideOpen;
+  if (!ideTexEligible(rel)) return toast('先打开一个 .tex 文件');
+  let r = null;
+  try {
+    r = await api('/api/ide/tex/clean', { session_id: state.sessions.current, path: rel });
+  } catch (e) { return toast('清理失败：' + e); }
+  if (!r || !r.ok) return toast((r && r.error) || '清理失败');
+  toast(r.count ? ('已清理 ' + r.count + ' 个辅助文件') : '没有需要清理的辅助文件');
+  loadIdeTree();
+}
+
+/* 重新打开上一次编译出的 PDF（切走文件后想再看一眼） */
+async function ideTexOpenPdf() {
+  const rel = state.ideOpen;
+  if (!ideTexEligible(rel)) return toast('先打开一个 .tex 文件');
+  const pdf = String(rel).replace(/\.tex$/i, '.pdf');
+  await ideTexShowPdf(pdf);
+}
+
+/* ---------------- Python / C：运行、构建、格式化 ----------------
+   同样是「调本机工具」：python 直接跑；C 用 gcc 编译成同名 exe 再跑。
+   跑在集成终端里（stdin 可用、能交互），不是在后台偷偷执行。 */
+function idePyEligible(rel) { return /\.py$/i.test(String(rel || '')); }
+function ideCEligible(rel) { return /\.(c|cc|cpp|cxx)$/i.test(String(rel || '')); }
+
+function ideQuote(rel) { return '"' + String(rel).replace(/"/g, '\\"') + '"'; }
+
+/* 拼沙箱内的绝对路径：终端是持久 shell，用户可能 cd 过，
+   用相对路径跑程序会在别的目录下找不到文件。 */
+function ideAbsPath(rel) {
+  const s = (typeof curSession === 'function') ? curSession() : null;
+  const root = (s && s.sandbox) ? String(s.sandbox) : '';
+  if (!root) return String(rel);
+  const sep = root.indexOf('\\') >= 0 ? '\\' : '/';
+  return root.replace(/[\\/]+$/, '') + sep + String(rel).replace(/[\\/]+/g, sep);
+}
+
+async function ideRunInTerminal(cmd) {
+  ideTermToggle(true);
+  for (let i = 0; i < 40; i++) {               // 等 PTY 就绪（最多 6 秒）
+    if (typeof ideTermState !== 'undefined' && ideTermState && ideTermState.alive) break;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  ideTermSend(cmd + '\r');
+}
+
+/* 工具输出 → 问题面板 + 波浪线（ruff / gcc / latex 共用） */
+function ideToolProblems(rel, items, engine) {
+  IDE_INTEL.file = rel;
+  IDE_INTEL.items = items || [];
+  IDE_INTEL.avail = true;
+  const M = state.ideMonaco;
+  const model = state.ideModels[rel];
+  if (M && model) {
+    const markers = IDE_INTEL.items.filter((it) => !it.file || it.file === rel).map((it) => ({
+      severity: it.severity || 8,
+      message: (it.message || '') + (it.code ? '  ' + it.code : ''),
+      source: engine || 'tool',
+      startLineNumber: (it.line || 0) + 1,
+      startColumn: (it.col || 0) + 1,
+      endLineNumber: ((it.endLine != null ? it.endLine : it.line) || 0) + 1,
+      endColumn: Math.max(it.endCol || 0, (it.col || 0) + 1) + 1,
+    }));
+    try { M.editor.setModelMarkers(model, 'gm-' + (engine || 'tool'), markers); } catch (e) { /* 忽略 */ }
+  }
+  ideIntelToggle('problems', true);
+}
+
+async function ideRunPython() {
+  const rel = state.ideOpen;
+  if (!idePyEligible(rel)) return toast('先打开一个 .py 文件');
+  if (state.ideDirtyMap[rel]) await saveIdeFile();
+  if (state.ideDirtyMap[rel]) return;          // 保存失败就别跑
+  await ideRunInTerminal('python ' + ideQuote(ideAbsPath(rel)));
+}
+
+async function ideCCheck(rel) {
+  if (!ideCEligible(rel)) return;
+  let r = null;
+  try {
+    r = await api('/api/ide/c/check', { session_id: state.sessions.current, path: rel });
+  } catch (e) { return; }
+  if (state.ideOpen !== rel) return;
+  if (!r || !r.ok) return;                     // 没装 gcc 时静默，不打扰编辑
+  ideToolProblems(rel, r.items || [], 'gcc');
+}
+
+async function ideBuildC() {
+  const rel = state.ideOpen;
+  if (!ideCEligible(rel)) return toast('先打开一个 .c / .cpp 文件');
+  if (state.ideDirtyMap[rel]) await saveIdeFile();
+  if (state.ideDirtyMap[rel]) return;
+  const btn = $('#ide-run-btn');
+  if (btn) btn.classList.add('busy');
+  ideFlashStatus('编译中…');
+  let r = null;
+  try {
+    r = await api('/api/ide/c/build', { session_id: state.sessions.current, path: rel });
+  } catch (e) {
+    if (btn) btn.classList.remove('busy');
+    return toast('构建失败：' + e);
+  }
+  if (btn) btn.classList.remove('busy');
+  if (!r) return;
+  if (r.errors && r.errors.length) ideToolProblems(rel, r.errors, 'gcc');
+  if (!r.ok) return toast(r.error || '构建失败');
+  toast('构建成功 · ' + r.exe);
+  loadIdeTree();
+  await ideRunInTerminal(ideQuote(ideAbsPath(r.exe)));
+}
+
+async function ideRuffCheck() {
+  const rel = state.ideOpen;
+  if (!idePyEligible(rel)) return toast('先打开一个 .py 文件');
+  let r = null;
+  try {
+    r = await api('/api/ide/py/lint', { session_id: state.sessions.current, path: rel });
+  } catch (e) { return toast('检查失败：' + e); }
+  if (!r || !r.ok) return toast((r && r.error) || '检查失败');
+  ideToolProblems(rel, r.items || [], 'ruff');
+  toast(r.items && r.items.length
+    ? ('ruff 发现 ' + r.items.length + ' 个问题') : 'ruff 没有发现问题');
+}
+
+async function ideFormatDoc() {
+  const rel = state.ideOpen;
+  if (!rel) return;
+  if (state.ideDirtyMap[rel]) await saveIdeFile();
+  let r = null;
+  try {
+    r = await api('/api/ide/format', { session_id: state.sessions.current, path: rel });
+  } catch (e) { return toast('格式化失败：' + e); }
+  if (!r || !r.ok) return toast((r && r.error) || '格式化失败');
+  await ideReloadFiles([rel]);                 // 磁盘已变，重读
+  toast(r.note || '已格式化');
+}
+
+function ideRunCurrent() {
+  const rel = state.ideOpen;
+  if (ideTexEligible(rel)) return ideTexBuild();
+  if (idePyEligible(rel)) return ideRunPython();
+  if (ideCEligible(rel)) return ideBuildC();
+  toast('这个文件类型不支持运行');
+}
+
+function ideIntelBindUI() {
+  $$('#ide-intel .ide-intel-tab').forEach((b) => {
+    b.onclick = () => {
+      IDE_INTEL.tab = b.dataset.intelTab;
+      if (IDE_INTEL.tab === 'outline') ideIntelLoadSymbols(state.ideOpen);
+      else ideIntelRender();
+      ideIntelUpdateBadge();
+    };
+  });
+  const x = $('#ide-intel-close');
+  if (x) x.onclick = () => ideIntelToggle(null, false);
+  const chip = $('#ide-status-problems');
+  if (chip) chip.onclick = () => ideIntelToggle('problems', true);
+}
+
+/* Monaco 快捷键 / 右键菜单：定义 F12、引用 Shift+F12、重命名 F2、大纲 Ctrl+Shift+O、问题 Ctrl+Shift+M */
+function ideIntelBindKeys(ed, M) {
+  if (!ed || !M || ed._gmIntelBound) return;
+  ed._gmIntelBound = true;
+  const add = (id, label, keys, run, order) => ed.addAction({
+    id: id, label: label, keybindings: keys,
+    contextMenuGroupId: 'navigation', contextMenuOrder: order || 1.5, run: run,
+  });
+  add('gm.gotoDef', '转到定义', [M.KeyCode.F12], () => { ideIntelGoto('definition'); }, 1);
+  add('gm.gotoRefs', '查找引用', [M.KeyMod.Shift | M.KeyCode.F12], () => { ideIntelGoto('references'); }, 2);
+  add('gm.renameSymbol', '重命名符号', [M.KeyCode.F2], () => { ideRenameSymbol(); }, 3);
+  add('gm.outline', '文件大纲', [M.KeyMod.CtrlCmd | M.KeyMod.Shift | M.KeyCode.KeyO],
+      () => { ideIntelToggle('outline', true); }, 4);
+  add('gm.problems', '问题面板', [M.KeyMod.CtrlCmd | M.KeyMod.Shift | M.KeyCode.KeyM],
+      () => { ideIntelToggle('problems'); }, 5);
+  add('gm.inlineEdit', 'AI 改写选中代码', [M.KeyMod.CtrlCmd | M.KeyCode.KeyI],
+      () => { ideInlineEditAI(); }, 0);
+  add('gm.mdPreview', 'Markdown 预览',
+      [M.KeyMod.CtrlCmd | M.KeyMod.Shift | M.KeyCode.KeyV],
+      () => { ideMdToggle(); }, 6);
+  add('gm.texBuild', '编译 LaTeX',
+      [M.KeyMod.CtrlCmd | M.KeyMod.Alt | M.KeyCode.KeyB],
+      () => { ideTexBuild(); }, 7);
+  add('gm.runFile', '运行 / 编译并运行',
+      [M.KeyMod.CtrlCmd | M.KeyMod.Alt | M.KeyCode.KeyR],
+      () => { ideRunCurrent(); }, 8);
+  add('gm.formatDoc', '格式化文档',
+      [M.KeyMod.Shift | M.KeyMod.Alt | M.KeyCode.KeyF],
+      () => { ideFormatDoc(); }, 9);
+}
+
 /* ---------- AI 变更审阅（Trae 式） ----------
    后端在写文件前用 agent._snap 留了原文；token 由 tool_done 事件带过来。
    同一轮里对同一文件的多次写入合并成一条，diff 取**第一次写入前**的快照，
@@ -1066,6 +2226,9 @@ function ideReviewCounts(name, args) {
   }
   if (name === 'write_file') {
     return { adds: lines(args.content), dels: 0 };
+  }
+  if (name === 'apply_worktree') {     // 隔离工作区回写：增删行数由后端算好
+    return { adds: Number(args.adds) || 0, dels: Number(args.dels) || 0 };
   }
   return { adds: 0, dels: 0 };
 }
@@ -1260,6 +2423,7 @@ async function ideReviewMarkExpired(it, surface, why) {
   ed.setModel(model);
   ed.updateOptions({ lineNumbers: () => '' });
   ed.deltaDecorations([], []);
+  ideReviewHideHunkBar();
   // 没有快照就没有可撤销的凭据：撤销置灰，保留仍可用
   ['ide-review-undo', 'review-undo'].forEach((id) => {
     const b = $('#' + id);
@@ -1299,6 +2463,7 @@ async function ideReviewRender(it, surface, focusHunk) {
     return;
   }
   it.expired = false;
+  it.newSha = r.new_sha || '';       // 逐段撤销时回传，后端据此判断文件有没有被外部改过
   // 上一条可能是过期占位，这里把按钮恢复成正常可用
   ['ide-review-undo', 'review-undo', 'ide-review-keep', 'review-keep'].forEach((id) => {
     const b = $('#' + id);
@@ -1346,7 +2511,110 @@ async function ideReviewRender(it, surface, focusHunk) {
   if (focusHunk != null && doc.hunkAt[focusHunk]) {
     ed.revealLineInCenter(doc.hunkAt[focusHunk]);
   }
+  ideReviewHunkBar(it, surface, doc);
   try { ed.focus(); } catch (e) { /* 忽略 */ }
+}
+
+/* ---- 逐段审阅（hunk 级） ----
+   工具条放在编辑器上方的独立一行，不用 Monaco contentWidget：
+   widget 是浮层、不占位，两个改动段相距两三行时按钮会互相盖住（实测重叠 12px）。
+   一行 chip 永远不重叠，也能一眼看到「一共几段」。 */
+function ideReviewHunkBar(it, surface, doc) {
+  const bar = $(surface === 'ide' ? '#ide-hunk-bar' : '#review-hunk-bar');
+  if (!bar) return;
+  const kept = it.kept || {};
+  const items = [];
+  (doc.hunkAt || []).forEach((line, hi) => {
+    if (!line || kept[hi]) return;
+    items.push({ hi: hi, line: line, n: items.length + 1 });
+  });
+  bar.innerHTML = '';
+  bar.classList.toggle('hidden', !items.length);
+  if (!items.length) return;
+  const label = document.createElement('span');
+  label.className = 'hunk-bar-label';
+  label.textContent = '改动段';
+  bar.appendChild(label);
+  items.forEach((x) => {
+    const chip = document.createElement('span');
+    chip.className = 'hunk-chip';
+    const name = document.createElement('button');
+    name.type = 'button';
+    name.className = 'hunk-chip-name';
+    name.textContent = '第 ' + x.n + ' 段';
+    name.title = '定位到这一段';
+    name.onclick = () => {
+      const ed = surface === 'ide' ? state.ideDiffEditor : state.ideReviewEditor;
+      if (!ed) return;
+      ed.revealLineInCenter(x.line);
+      ed.setPosition({ lineNumber: x.line, column: 1 });
+    };
+    const keep = document.createElement('button');
+    keep.type = 'button';
+    keep.className = 'hunk-keep';
+    keep.textContent = '保留';
+    keep.onclick = () => {
+      it.kept = it.kept || {};
+      it.kept[x.hi] = true;
+      chip.remove();
+      if (!bar.querySelector('.hunk-chip')) bar.classList.add('hidden');
+    };
+    const und = document.createElement('button');
+    und.type = 'button';
+    und.className = 'hunk-undo';
+    und.textContent = '撤销';
+    und.onclick = () => ideRevertHunk(it, surface, x.hi);
+    chip.appendChild(name);
+    chip.appendChild(keep);
+    chip.appendChild(und);
+    bar.appendChild(chip);
+  });
+}
+
+function ideReviewHideHunkBar() {
+  ['#ide-hunk-bar', '#review-hunk-bar'].forEach((sel) => {
+    const el = $(sel);
+    if (el) { el.innerHTML = ''; el.classList.add('hidden'); }
+  });
+}
+
+/* 撤销单独一段：后端按「同一份 old 快照 + 同样 context」重算 hunk，
+   只把选中的那段恢复成旧内容；文件被外部改过时后端会拒绝并给原因。 */
+async function ideRevertHunk(it, surface, hi) {
+  if (ideReviewBusy || !it) return;
+  ideReviewBusy = true;
+  try {
+    const r = await api('/api/sandbox/revert_hunks', {
+      session_id: it.sid || state.sessions.current,
+      undo: it.baseToken, path: it.path, hunks: [hi], context: ideDiffCtx,
+      sha: it.newSha || '',
+    });
+    if (!r || !r.ok) return toast((r && r.error) || '撤销这一段失败');
+    it.kept = {};                          // 段下标会变，保留标记作废
+    toast(r.changed ? '已撤销这一段，其余改动保留' : '这一段没有产生改动');
+    if (state.ideOpen === it.path) await ideReloadFiles([it.path]);
+    await ideReviewRender(it, surface);
+    if ((Number(it.adds) || 0) + (Number(it.dels) || 0) === 0) {
+      ideReviewDrop(it);
+    } else {
+      ideIntelSchedule(state.ideOpen);     // 文件变了，顺带刷新诊断
+    }
+  } finally {
+    ideReviewBusy = false;
+  }
+}
+
+/* 某条审阅已经没有任何改动：从队列里移除，并显示下一条 */
+function ideReviewDrop(it) {
+  const list = state.ideReview || [];
+  const i = list.indexOf(it);
+  if (i >= 0) list.splice(i, 1);
+  ideUpdateDiffBtn();
+  ideReviewCardRefresh();
+  ideReviewTipRefresh();
+  if (!list.length) { ideReviewClose(); return; }
+  state.ideReviewIdx = Math.min(state.ideReviewIdx, list.length - 1);
+  ideReviewRender(list[state.ideReviewIdx], state.ideReviewSurface || 'ide');
 }
 
 async function ideReviewShow(idx) {
@@ -1379,6 +2647,7 @@ async function ideReviewShow(idx) {
 function ideReviewClose() {
   const surface = state.ideReviewSurface;
   state.ideReviewSurface = '';
+  ideReviewHideHunkBar();
   if (surface === 'modal') {
     const modal = $('#review-modal');
     if (modal) {
@@ -1747,7 +3016,7 @@ function ideReviewKeydown(e) {
    另配 Ctrl+B（同 VS Code 的 Toggle Primary Side Bar）。
    收起时活动栏不再高亮 —— 否则会「看着是选中态，右边却空着」。
    显隐只用已有的 .hidden 类（`display:none`），所以编辑区会自动补上空间。 */
-const IDE_SIDE_LABEL = { explorer: '资源管理器', search: '沙箱内搜索', git: '源代码管理' };
+const IDE_SIDE_LABEL = { explorer: '资源管理器', search: '沙箱内搜索', git: '源代码管理', debug: '运行和调试' };
 
 // 把 state 同步到界面（显隐 + 活动栏高亮 + 悬停提示）
 function ideSyncSideUI() {
@@ -1755,9 +3024,11 @@ function ideSyncSideUI() {
   const ex = $('#ide-side-explorer');
   const se = $('#ide-side-search');
   const gi = $('#ide-side-git');
+  const db = $('#ide-side-debug');
   if (ex) ex.classList.toggle('hidden', hid || state.ideSide !== 'explorer');
   if (se) se.classList.toggle('hidden', hid || state.ideSide !== 'search');
   if (gi) gi.classList.toggle('hidden', hid || state.ideSide !== 'git');
+  if (db) db.classList.toggle('hidden', hid || state.ideSide !== 'debug');
   const sr = $('#ide-side-resizer');
   if (sr) sr.classList.toggle('hidden', hid);   // 侧栏收起时不留一条 4px 的拖拽条
   $$('#ide-panel .act-btn[data-act]').forEach((b) => {
@@ -1792,6 +3063,7 @@ function ideSwitchSide(which) {
   ideSyncSideUI();
   if (which === 'search') { const i = $('#ide-search-input'); if (i) i.focus(); }
   if (which === 'git' && typeof gitRefresh === 'function') gitRefresh();   // 每次切进来都拉一次最新状态
+  if (which === 'debug') debugRenderBreakpoints();
   idePersistSideHidden();
 }
 
@@ -1946,6 +3218,7 @@ function ideActivate(rel) {
     state.ideEditor.setModel(model);
     state.ideEditor.focus();
     ideShowView('editor');
+    debugApplyDecorations();
   } else {
     const t = $('#ide-text');
     if (t) { t.value = c.text; t.disabled = false; }
@@ -1956,6 +3229,25 @@ function ideActivate(rel) {
   ideUpdateStatus();
   ideRevealInTree(rel);
   ideUpdateDiffBtn();
+  ideIntelOnOpen(rel);
+  // 预览只对 Markdown 有意义：切到别的文件自动收起，切回来自动重画
+  if (!ideMdEligible(rel)) {
+    ideMdClose();
+  } else {
+    const mdBox = document.getElementById('ide-md');
+    if (mdBox && !mdBox.classList.contains('hidden')) ideMdRender();
+  }
+  // 「运行 / 编译」按钮：tex / py / c 才显示，标题按类型变
+  const runBtn = $('#ide-run-btn');
+  if (runBtn) {
+    const canTex = ideTexEligible(rel);
+    const canPy = idePyEligible(rel);
+    const canC = ideCEligible(rel);
+    runBtn.classList.toggle('hidden', !(canTex || canPy || canC));
+    runBtn.title = canTex ? '编译 LaTeX（Ctrl+Alt+B）'
+      : (canPy ? '运行（Ctrl+Alt+R）' : '编译并运行（Ctrl+Alt+R）');
+  }
+  if (ideCEligible(rel)) ideCCheck(rel);       // C：打开就做一次语法检查（gcc 很快）
 }
 
 function ideCloseTab(rel) {
@@ -2012,6 +3304,9 @@ async function saveIdeFile() {
     }
     renderIdeTabs(); ideUpdateStatus();
     ideFlashStatus('已保存');
+    // 语言服务读的是磁盘上的文件：保存后重跑一次诊断，错误才跟着更新
+    if (ideLspEligible(rel)) ideIntelSchedule(rel);
+    if (ideCEligible(rel)) ideCCheck(rel);
   } catch (e) {
     toast('保存失败：' + e);
   } finally {
@@ -2083,22 +3378,41 @@ async function ideRename() {
 }
 
 async function ideDelete() {
-  if (!state.ideOpen) return;
-  const rel = state.ideOpen;
-  ideConfirm('删除文件', '确定删除「' + rel + '」？此操作不可撤销。', '删除', async () => {
-    let r;
-    try { r = await api('/api/sandbox/delete', { session_id: state.sessions.current, path: rel }); }
-    catch (e) { return toast('删除失败：' + e); }
-    if (!r || !r.ok) { toast((r && r.error) || '删除失败'); return; }
-    toast('已删除');
-    const i = (state.ideTabList || []).indexOf(rel);
-    if (i >= 0) state.ideTabList.splice(i, 1);
-    if (state.ideModels[rel]) { try { state.ideModels[rel].dispose(); } catch (e) { /* 忽略 */ } delete state.ideModels[rel]; }
-    delete state.ideCache[rel]; delete state.ideDirtyMap[rel];
-    state.ideOpen = '';
-    if (state.ideEditor) state.ideEditor.setModel(null);
+  // 多选时批量删；没有多选就删当前文件（保持原来的单文件行为）
+  const sel = (state.ideSel || []).slice();
+  const list = sel.length ? sel : (state.ideOpen ? [state.ideOpen] : []);
+  if (!list.length) return;
+  const title = list.length > 1 ? ('删除 ' + list.length + ' 个项目') : '删除文件';
+  const text = list.length > 1
+    ? ('确定删除这 ' + list.length + ' 项？此操作不可撤销。\n'
+       + list.slice(0, 8).join('\n') + (list.length > 8 ? '\n…' : ''))
+    : ('确定删除「' + list[0] + '」？此操作不可撤销。');
+  ideConfirm(title, text, '删除', async () => {
+    let done = 0;
+    const failed = [];
+    for (const p of list) {
+      try {
+        const r = await api('/api/sandbox/delete', { session_id: state.sessions.current, path: p });
+        if (r && r.ok) done += 1;
+        else failed.push((r && r.error) || p);
+      } catch (e) { failed.push(String(e)); }
+      const i = (state.ideTabList || []).indexOf(p);
+      if (i >= 0) state.ideTabList.splice(i, 1);
+      if (state.ideModels[p]) {
+        try { state.ideModels[p].dispose(); } catch (e) { /* 忽略 */ }
+        delete state.ideModels[p];
+      }
+      delete state.ideCache[p];
+      delete state.ideDirtyMap[p];
+      if (state.ideOpen === p) state.ideOpen = '';
+    }
+    ideClearSel();
+    if (!state.ideOpen && state.ideEditor) state.ideEditor.setModel(null);
     renderIdeTabs(); ideUpdateStatus();
     await loadIdeTree();
+    toast(failed.length
+      ? ('已删除 ' + done + ' 项，' + failed.length + ' 项失败')
+      : ('已删除 ' + done + ' 项'));
   });
 }
 
@@ -2119,12 +3433,52 @@ function ideRevealLine(rel, line) {
   state.ideEditor.focus();
 }
 
+async function ideSemanticSearch(pat, box) {
+  box.innerHTML = '<div class="ide-empty">语义检索中…</div>';
+  try {
+    const r = await api('/api/codeindex/search', {
+      session_id: state.sessions.current, query: pat, limit: 20,
+    });
+    if (r && r.building) {
+      box.innerHTML = '<div class="ide-empty">全仓索引构建中（'
+        + escapeHtml(((r.status || {}).done || 0) + '/' + ((r.status || {}).total || '?'))
+        + ' 文件）…稍后再试</div>';
+      return;
+    }
+    if (!r || !r.ok) {
+      box.innerHTML = '<div class="ide-empty">'
+        + escapeHtml((r && r.error) || '语义检索失败') + '</div>';
+      return;
+    }
+    const items = r.items || [];
+    if (!items.length) { box.innerHTML = '<div class="ide-empty">没有语义命中</div>'; return; }
+    box.innerHTML = items.map((it, i) =>
+      '<div class="ide-hit" data-i="' + i + '" title="'
+      + escapeHtml(it.path + ':' + it.start) + '">'
+      + '<span class="ide-hit-path">' + escapeHtml(it.path) + ':' + Number(it.start)
+      + (it.symbol ? ' · ' + escapeHtml(it.symbol) : '') + '</span>'
+      + '<span class="ide-hit-text">' + escapeHtml((it.snippet || '').split('\n')[0] || '')
+      + '</span></div>').join('');
+    $$('#ide-search-hits .ide-hit').forEach((el) => {
+      el.onclick = () => {
+        const it = items[Number(el.dataset.i)];
+        if (!it) return;
+        openIdeFile(it.path).then(() => ideRevealLine(it.path, it.start));
+      };
+    });
+  } catch (e) {
+    box.innerHTML = '<div class="ide-empty">语义检索失败：' + escapeHtml(String(e)) + '</div>';
+  }
+}
+
 async function ideSearch() {
   const box = $('#ide-search-hits');
   const inp = $('#ide-search-input');
   if (!box || !inp) return;
   const pat = (inp.value || '').trim();
   if (!pat) { box.innerHTML = ''; return; }
+  const sem = $('#ide-search-semantic');
+  if (sem && sem.checked) return ideSemanticSearch(pat, box);
   box.innerHTML = '<div class="ide-empty">搜索中…</div>';
   try {
     const r = await api('/api/sandbox/search', { session_id: state.sessions.current, pattern: pat });
@@ -2155,6 +3509,309 @@ async function ideSearch() {
   }
 }
 
+/* ---------------- 运行和调试 ---------------- */
+function debugRel() { return state.ideOpen || ''; }
+
+function debugApplyDecorations() {
+  const ed = state.ideEditor;
+  const M = state.ideMonaco;
+  if (!ed || !M || !M.Range) return;
+  const rel = debugRel();
+  const deco = [];
+  (state.ideBreakpoints[rel] || []).forEach((line) => {
+    deco.push({ range: new M.Range(line, 1, line, 1),
+      options: { glyphMarginClassName: 'ide-bp-glyph' } });
+  });
+  const ds = state.debugState;
+  if (state.debugPaused && ds && (ds.frames || []).length) {
+    const top = ds.frames[0];
+    if (top && top.path === rel && top.line) {
+      deco.push({ range: new M.Range(top.line, 1, top.line, 1),
+        options: { isWholeLine: true, className: 'ide-debug-line' } });
+    }
+  }
+  state.debugDecorations = ed.deltaDecorations(state.debugDecorations || [], deco);
+}
+
+function debugBindEditor(ed, M) {
+  if (!ed || !M || !M.editor) return;
+  ed.onMouseDown((e) => {
+    const t = e.target && e.target.type;
+    if (t !== M.editor.MouseTargetType.GUTTER_GLYPH_MARGIN
+        && t !== M.editor.MouseTargetType.GUTTER_LINE_NUMBERS) return;
+    const rel = debugRel();
+    const line = e.target.position && e.target.position.lineNumber;
+    if (!rel || !line) return;
+    debugToggleBreakpoint(rel, line);
+  });
+}
+
+function debugToggleBreakpoint(rel, line) {
+  const arr = (state.ideBreakpoints[rel] || []).slice();
+  const i = arr.indexOf(line);
+  if (i >= 0) arr.splice(i, 1); else arr.push(line);
+  arr.sort((a, b) => a - b);
+  state.ideBreakpoints[rel] = arr;
+  debugApplyDecorations();
+  debugRenderBreakpoints();
+  debugSyncBreakpoints();
+}
+
+async function debugSyncBreakpoints() {
+  if (!state.debugActive) return;
+  const sid = (state.sessions && state.sessions.current) || '';
+  if (!sid) return;
+  try {
+    await api('/api/debug/breakpoints', {
+      session_id: sid, breakpoints: state.ideBreakpoints,
+    });
+  } catch (e) { /* 断点同步失败不打断编辑 */ }
+}
+
+function debugRenderBreakpoints() {
+  const box = $('#debug-breakpoints');
+  if (!box) return;
+  const items = [];
+  Object.keys(state.ideBreakpoints || {}).forEach((rel) => {
+    (state.ideBreakpoints[rel] || []).forEach((line) => items.push({ rel, line }));
+  });
+  if (!items.length) {
+    box.innerHTML = '<div class="ide-empty">在编辑器行号左侧点击添加</div>';
+    return;
+  }
+  box.innerHTML = items.map((it, i) =>
+    '<button type="button" class="ide-debug-bp" data-i="' + i + '">'
+    + '<span>●</span><span class="df-path">' + escapeHtml(it.rel) + ':' + it.line
+    + '</span></button>').join('');
+  $$('#debug-breakpoints .ide-debug-bp').forEach((el) => {
+    el.onclick = () => {
+      const it = items[Number(el.dataset.i)];
+      if (it) openIdeFile(it.rel).then(() => ideRevealLine(it.rel, it.line));
+    };
+  });
+}
+
+function debugRenderState(ds) {
+  state.debugState = ds || null;
+  state.debugPaused = !!(ds && ds.paused);
+  const stack = $('#debug-stack');
+  const vars = $('#debug-vars');
+  const out = $('#debug-output');
+  if (stack) {
+    const frames = (ds && ds.frames) || [];
+    stack.innerHTML = frames.length ? frames.map((f, i) =>
+      '<button type="button" class="ide-debug-frame' + (i === 0 ? ' on' : '')
+      + '" data-i="' + i + '"><span>' + escapeHtml(f.name || '(anonymous)')
+      + '</span><span class="df-path">' + escapeHtml((f.path || '') + ':' + (f.line || ''))
+      + '</span></button>').join('')
+      : '<div class="ide-empty">' + (state.debugActive ? '运行中…' : '未启动') + '</div>';
+    $$('#debug-stack .ide-debug-frame').forEach((el) => {
+      el.onclick = () => {
+        const f = frames[Number(el.dataset.i)];
+        if (f && f.path) openIdeFile(f.path).then(() => ideRevealLine(f.path, f.line));
+      };
+    });
+  }
+  if (vars) {
+    const scopes = (ds && ds.scopes) || [];
+    vars.innerHTML = scopes.length ? scopes.map((sc) =>
+      '<div class="ide-debug-scope"><b>' + escapeHtml(sc.name || 'scope') + '</b>'
+      + (sc.variables || []).map((v) =>
+        '<div class="ide-debug-var"><i>' + escapeHtml(v.name) + '</i><span>'
+        + escapeHtml(v.value) + '</span></div>').join('') + '</div>').join('')
+      : '<div class="ide-empty">—</div>';
+  }
+  if (out) out.textContent = ((ds && ds.output) || []).join('\n');
+  debugApplyDecorations();
+  // 停在某个文件时自动跳过去（只在最上方栈帧变化时跳，避免每 600ms 抢焦点）
+  if (state.debugPaused && ds && (ds.frames || []).length) {
+    const top = ds.frames[0];
+    const key = top.path + ':' + top.line;
+    if (top.path && key !== state.debugLastFrame) {
+      state.debugLastFrame = key;
+      openIdeFile(top.path).then(() => ideRevealLine(top.path, top.line));
+    }
+  }
+}
+
+async function debugPoll(force) {
+  if (!force && !state.debugActive) return;
+  clearTimeout(state.debugTimer);
+  const sid = (state.sessions && state.sessions.current) || '';
+  if (!sid) return;
+  try {
+    const r = await api('/api/debug/state', { session_id: sid });
+    if (r && r.ok) {
+      state.debugActive = !!r.running;
+      debugRenderState(r);
+    }
+  } catch (e) { /* 调试进程退出时接口可能先失败 */ }
+  if (state.debugActive) state.debugTimer = setTimeout(() => debugPoll(false), 600);
+}
+
+function debugParseArgs(text) {
+  const s = String(text || '').trim();
+  if (!s) return [];
+  const out = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(s))) out.push(m[1] != null ? m[1] : (m[2] != null ? m[2] : m[3]));
+  return out;
+}
+
+async function debugStart() {
+  const sid = (state.sessions && state.sessions.current) || '';
+  if (!sid) return toast('先打开一个会话');
+  const prog = ($('#debug-program') && $('#debug-program').value.trim()) || state.ideOpen;
+  if (!prog) return toast('先打开一个文件，或填写脚本路径');
+  const btn = $('#debug-start');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/debug/start', {
+      session_id: sid, program: prog,
+      args: debugParseArgs($('#debug-args') && $('#debug-args').value),
+      breakpoints: state.ideBreakpoints,
+      stop_on_entry: !!($('#debug-stop-entry') && $('#debug-stop-entry').checked),
+    });
+    if (!r || !r.ok) throw new Error((r && r.error) || '启动失败');
+    state.debugActive = true;
+    state.debugLastFrame = '';
+    debugPoll(true);
+    toast('调试已启动：' + (r.program || prog));
+  } catch (e) {
+    toastErr('启动调试', e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function debugStop() {
+  const sid = (state.sessions && state.sessions.current) || '';
+  if (!sid) return;
+  try { await api('/api/debug/stop', { session_id: sid }); } catch (e) { /* 忽略 */ }
+  state.debugActive = false;
+  state.debugPaused = false;
+  clearTimeout(state.debugTimer);
+  debugRenderState(null);
+}
+
+async function debugAction(act) {
+  const sid = (state.sessions && state.sessions.current) || '';
+  if (!sid) return toast('先打开一个会话');
+  try {
+    const r = await api('/api/debug/action', { session_id: sid, action: act });
+    if (!r || !r.ok) throw new Error((r && r.error) || '操作失败');
+    debugPoll(true);
+  } catch (e) {
+    toastErr('调试操作', e);
+  }
+}
+
+async function debugEvaluate() {
+  const sid = (state.sessions && state.sessions.current) || '';
+  const inp = $('#debug-eval-input');
+  const box = $('#debug-eval-result');
+  const expr = inp ? inp.value.trim() : '';
+  if (!sid || !expr) return;
+  try {
+    const r = await api('/api/debug/evaluate', { session_id: sid, expression: expr });
+    if (box) box.textContent = (r && r.ok) ? String(r.value) : ((r && r.error) || '求值失败');
+  } catch (e) {
+    if (box) box.textContent = '求值失败：' + e;
+  }
+}
+
+function debugBindControls() {
+  const start = $('#debug-start');
+  if (start) start.onclick = debugStart;
+  const stop = $('#debug-stop');
+  if (stop) stop.onclick = debugStop;
+  const refresh = $('#debug-refresh');
+  if (refresh) refresh.onclick = () => debugPoll(true);
+  $$('#ide-side-debug .ide-debug-toolbar [data-dact]').forEach((b) => {
+    b.onclick = () => debugAction(b.dataset.dact);
+  });
+  const prog = $('#debug-program');
+  if (prog) {
+    prog.addEventListener('focus', () => {
+      if (!prog.value && state.ideOpen) prog.value = state.ideOpen;
+    });
+  }
+  const ev = $('#debug-eval-input');
+  if (ev) {
+    ev.addEventListener('keydown', (e) => {
+      if (isImeComposing(e)) return;
+      if (e.key === 'Enter') { e.preventDefault(); debugEvaluate(); }
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (state.uiMode !== 'ide') return;
+    const tag = (e.target && e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if (e.key === 'F5') {
+      e.preventDefault();
+      if (state.debugPaused) debugAction('continue'); else debugStart();
+    } else if (e.key === 'F10') {
+      e.preventDefault(); debugAction('next');
+    } else if (e.key === 'F11') {
+      e.preventDefault();
+      if (e.shiftKey) debugAction('step_out'); else debugAction('step_in');
+    }
+  });
+  debugRenderBreakpoints();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', debugBindControls);
+} else {
+  debugBindControls();
+}
+
+
+/* 全局替换：先 dry_run 出方案（改几个文件、改哪几处），确认后才写盘。
+   写盘由后端登记 undo，可在「AI 变更」里撤销。 */
+async function ideReplaceAll() {
+  const pin = $('#ide-search-input');
+  const rin = $('#ide-replace-input');
+  const rxc = $('#ide-search-regex');
+  if (!pin || !rin) return;
+  const query = (pin.value || '').trim();
+  if (!query) return toast('先在搜索框输入要查找的内容');
+  const base = {
+    session_id: state.sessions.current, query: query,
+    replacement: rin.value || '', regex: !!(rxc && rxc.checked), dry_run: true,
+  };
+  const btn = $('#ide-replace-all');
+  if (btn) btn.disabled = true;
+  try {
+    const plan = await api('/api/ide/replace', base);
+    if (!plan || !plan.ok) return toast((plan && plan.error) || '算方案失败');
+    if (!plan.total) return toast('没有匹配到内容');
+    const files = plan.files || [];
+    const lines = files.slice(0, 10).map((f) => f.path + '（' + f.count + ' 处）');
+    const more = files.length > 10 ? '\n… 共 ' + files.length + ' 个文件' : '';
+    const skip = plan.skipped ? '\n（跳过 ' + plan.skipped + ' 个非 UTF-8 / 超大文件）' : '';
+    const cut = plan.truncated ? '\n（已达单次上限，剩余部分请再执行一次）' : '';
+    ideConfirm('全局替换',
+      '将在 ' + files.length + ' 个文件里替换 ' + plan.total + ' 处：\n'
+        + lines.join('\n') + more + skip + cut,
+      '全部替换', async () => {
+        let done = null;
+        try {
+          done = await api('/api/ide/replace', Object.assign({}, base, { dry_run: false }));
+        } catch (e) { return toast('替换失败：' + e); }
+        if (!done || !done.ok) return toast((done && done.error) || '替换失败');
+        await ideReloadFiles((done.files || []).map((x) => x.path));
+        toast('已替换 ' + done.total + ' 处（' + (done.files || []).length + ' 个文件，可在 AI 变更里撤销）');
+        ideSearch();
+      });
+  } catch (e) {
+    toast('替换失败：' + e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 /* ---------- 命令面板 / 快速打开（Ctrl+Shift+P / Ctrl+P） ---------- */
 const IDE_COMMANDS = [
   { title: '保存当前文件', key: 'Ctrl+S', run: () => saveIdeFile() },
@@ -2165,10 +3822,42 @@ const IDE_COMMANDS = [
   { title: '删除当前文件', run: () => ideDelete() },
   { title: '刷新目录树', run: () => loadIdeTree() },
   { title: '在沙箱内搜索', run: () => ideSwitchSide('search') },
+  { title: '全仓语义搜索', run: () => {
+    ideSwitchSide('search');
+    const c = $('#ide-search-semantic'); if (c) c.checked = true;
+    const i = $('#ide-search-input'); if (i) i.focus();
+  } },
+  { title: '开始 / 继续调试', key: 'F5', run: () => {
+    ideSwitchSide('debug');
+    if (state.debugActive && state.debugPaused) debugAction('continue');
+    else debugStart();
+  } },
+  { title: '单步跳过', key: 'F10', run: () => debugAction('next') },
+  { title: '单步进入', key: 'F11', run: () => debugAction('step_in') },
+  { title: '单步跳出', key: 'Shift+F11', run: () => debugAction('step_out') },
+  { title: '停止调试', key: 'Shift+F5', run: debugStop },
+  { title: '全局替换', run: () => { ideSwitchSide('search'); const i = $('#ide-replace-input'); if (i) i.focus(); } },
+  { title: '问题面板', key: 'Ctrl+Shift+M', run: () => ideIntelToggle('problems', true) },
+  { title: '文件大纲', key: 'Ctrl+Shift+O', run: () => ideIntelToggle('outline', true) },
+  { title: '转到定义', key: 'F12', run: () => ideIntelGoto('definition') },
+  { title: '查找引用', key: 'Shift+F12', run: () => ideIntelGoto('references') },
+  { title: '重命名符号', key: 'F2', run: () => ideRenameSymbol() },
+  { title: 'AI 改写选中代码', key: 'Ctrl+I', run: () => ideInlineEditAI() },
+  { title: '网页预览', run: () => idePreviewToggle(true) },
+  { title: 'Markdown 预览', key: 'Ctrl+Shift+V', run: () => ideMdToggle() },
+  { title: '导出当前 Markdown 为 PDF', run: () => ideMdExportPdf() },
+  { title: '编译 LaTeX（生成 PDF）', key: 'Ctrl+Alt+B', run: () => ideTexBuild() },
+  { title: '打开当前 LaTeX 的 PDF', run: () => ideTexOpenPdf() },
+  { title: '清理 LaTeX 辅助文件', run: () => ideTexClean() },
+  { title: '运行当前文件 / 编译并运行', key: 'Ctrl+Alt+R', run: () => ideRunCurrent() },
+  { title: '格式化文档', key: 'Shift+Alt+F', run: () => ideFormatDoc() },
+  { title: 'Python：ruff 检查', run: () => ideRuffCheck() },
+  { title: 'C：语法检查（gcc）', run: () => ideCCheck(state.ideOpen) },
   { title: '显示资源管理器', run: () => ideSwitchSide('explorer') },
   { title: '收起 / 展开文件管理区', key: 'Ctrl+B', run: () => ideToggleSidebar() },
   { title: '打开 / 关闭终端', key: 'Ctrl+`', run: () => ideTermToggle() },
   { title: '查看 AI 对当前文件的改动', run: () => ideShowDiff(state.ideOpen) },
+  { title: 'AI 改动时间线（回到某一步）', run: () => { if (typeof openStepsPanel === 'function') openStepsPanel(); } },
   { title: '在 VS Code 中打开当前沙箱', run: () => ideOpenInVsCode() },
   { title: '从 VS Code 导入设置与扩展清单', run: () => ideImportVsCode() },
   { title: '切换到 Solo 模式', run: () => setUiMode('solo') },
@@ -2312,7 +4001,8 @@ function ideOnToolDone(obj) {
     .map((p) => String(p).replace(/\\/g, '/'));
   paths.forEach((p) => { state.ideChanged.add(p); });
   // 记下这次写操作：同一轮同一文件合并成一条审阅记录
-  if (obj.undo && (obj.name === 'write_file' || obj.name === 'edit_file')) {
+  if (obj.undo && (obj.name === 'write_file' || obj.name === 'edit_file'
+                   || obj.name === 'apply_worktree')) {
     const p = String(a.path || '').replace(/\\/g, '/');
     if (p) ideReviewAdd(p, obj.undo, obj.name, a);
   }

@@ -77,7 +77,7 @@ def test_compact_prompt_is_shorter_but_has_tools(tmp_path):
     verbose = agent.build_agent_prompt(s, search_ready=True, native_tools=False)
     compact = agent.build_agent_prompt(s, search_ready=True, native_tools=True)
     assert len(compact) < len(verbose)
-    for name in ("read_file", "search_code", "repo_map", "edit_file"):
+    for name in ("read(action=", "search", "map", "edit(action="):
         assert name in compact
 
 
@@ -123,12 +123,12 @@ def test_approval_remember_flag():
 
 
 def test_normalize_approval_aliases():
-    assert agent.normalize_approval("") == "ask"
-    assert agent.normalize_approval("auto") == "ask"      # 旧默认值收紧为手动审批
+    assert agent.normalize_approval("") == "ai"
+    assert agent.normalize_approval("auto") == "ai"      # 旧默认值 = 自动审批
     assert agent.normalize_approval("once") == "ask"
-    assert agent.normalize_approval("always") == "ask"
+    assert agent.normalize_approval("always") == "ai"
     assert agent.normalize_approval("AI") == "ai"
-    assert agent.normalize_approval("nonsense") == "ask"
+    assert agent.normalize_approval("nonsense") == "ai"
 
 
 def test_judge_write_modes(tmp_path):
@@ -267,7 +267,8 @@ def test_unrestricted_flag_skips_even_ask_mode(tmp_path):
     """unrestricted 是执行侧的开关：档位即使不是 full 也不再校验。"""
     root = str(tmp_path)
     assert agent.judge_command(root, {"argv": ["pip", "install", "x"]}, "ask")[0] == "ask"
-    assert agent.judge_command(root, {"argv": ["cargo", "build"]}, "ask")[0] == "deny"
+    assert agent.judge_command(root, {"argv": ["curl", "http://x"]}, "ask")[0] == "deny"
+    assert agent.judge_command(root, {"argv": ["cargo", "build"]}, "ask")[0] == "ask"
     assert agent.judge_command(root, {"argv": ["cargo", "build"]}, "ask",
                                unrestricted=True)[0] == "allow"
 
@@ -583,7 +584,7 @@ def test_read_files_batches_and_keeps_errors(tmp_path):
     assert "文件不存在" in text
     assert text.index("a.txt") < text.index("b.txt") < text.index("nope.txt")
     names = [t["function"]["name"] for t in agent.native_tool_schemas(agent_on=True)]
-    assert "read_files" in names
+    assert "read" in names
     assert agent.normalize_tool_name("read_files") == "read_files"
 
 

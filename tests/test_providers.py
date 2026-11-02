@@ -64,3 +64,50 @@ def test_text_of_non_stream():
                         {"type": "thinking", "thinking": "x"},
                         {"type": "text", "text": "b"}]}
     assert providers.text_of(data) == "ab"
+
+
+def test_split_system_converts_images_to_anthropic_blocks():
+    """原生视觉：OpenAI 的 image_url 必须换成 Anthropic 的 base64 image 块。"""
+    body = providers.anthropic_body("claude-x", [
+        {"role": "system", "content": "规则"},
+        {"role": "user", "content": [
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64,AAAA"}},
+            {"type": "text", "text": "看图"},
+        ]},
+    ], 100)
+    parts = body["messages"][0]["content"]
+    assert parts[0] == {"type": "image", "source": {
+        "type": "base64", "media_type": "image/png", "data": "AAAA"}}
+    assert parts[1] == {"type": "text", "text": "看图"}
+
+
+def test_split_system_keeps_plain_string_content():
+    body = providers.anthropic_body("claude-x", [{"role": "user", "content": "hi"}], 10)
+    assert body["messages"][0]["content"] == "hi"
+
+
+def test_anthropic_body_converts_tools():
+    body = providers.anthropic_body(
+        "claude-x", [{"role": "user", "content": "hi"}], 10,
+        tools=[{"type": "function", "function": {
+            "name": "read_file", "description": "读文件",
+            "parameters": {"type": "object", "properties": {}}}}])
+    assert body["tools"][0]["name"] == "read_file"
+    assert body["tools"][0]["input_schema"]["type"] == "object"
+    assert "function" not in body["tools"][0]
+
+
+def test_anthropic_tool_event_stream():
+    start = providers.anthropic_tool_event({
+        "type": "content_block_start", "index": 1,
+        "content_block": {"type": "tool_use", "id": "tu_1", "name": "read_file"}})
+    assert start["kind"] == "start" and start["name"] == "read_file"
+    delta = providers.anthropic_tool_event({
+        "type": "content_block_delta", "index": 1,
+        "delta": {"type": "input_json_delta", "partial_json": '{"path":"a.py"}'}})
+    assert delta["kind"] == "delta" and delta["json"] == '{"path":"a.py"}'
+    # 文本块不是工具事件
+    assert providers.anthropic_tool_event({
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "text", "text": ""}}) is None

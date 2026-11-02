@@ -93,3 +93,61 @@ def test_call_limit(usage_file):
     data = usage.aggregate_usage("day", 7, call_limit=2)
     assert len(data["calls"]) == 2
     assert data["calls_total"] == 5
+
+
+def test_aggregate_daily_buckets(usage_file):
+    """daily 覆盖连续时间桶（空白日补 0），且各项之和等于 summary"""
+    now = time.time()
+    usage.record_usage({"ts": now, "source": "chat", "api": "chat", "endpoint": "e",
+                        "model": "m", "prompt": 100, "completion": 20,
+                        "total": 120, "cached": 60})
+    usage.record_usage({"ts": now, "source": "chat", "api": "chat", "endpoint": "e",
+                        "model": "m", "prompt": 100, "completion": 10,
+                        "total": 110, "cached": 40})
+    data = usage.aggregate_usage("day", 7)
+
+    daily = data["daily"]
+    assert len(daily) == 7 == len(data["labels"])
+    assert [r["bucket"] for r in daily] == data["labels"]          # 与折线图共用横轴
+    today = daily[-1]
+    assert (today["prompt"], today["completion"], today["total"],
+            today["cached"], today["calls"]) == (200, 30, 230, 100, 2)
+    assert sum(r["total"] for r in daily) == data["summary"]["total"]
+    assert sum(r["calls"] for r in daily) == data["summary"]["calls"]
+
+
+def test_aggregate_derived(usage_file):
+    now = time.time()
+    usage.record_usage({"ts": now, "source": "chat", "api": "chat", "endpoint": "e",
+                        "model": "m", "prompt": 100, "completion": 20,
+                        "total": 120, "cached": 60})
+    usage.record_usage({"ts": now, "source": "chat", "api": "chat", "endpoint": "e",
+                        "model": "m", "prompt": 100, "completion": 10,
+                        "total": 110, "cached": 40})
+    d = usage.aggregate_usage("day", 7)["derived"]
+    assert d["hit_rate"] == 50.0        # 100 / 200 输入
+    assert d["avg_call"] == 115         # 230 / 2 次
+    assert d["avg_active"] == 230       # 只按有消耗的 1 天
+    assert d["active"] == 1
+    assert d["peak"]["total"] == 230
+    assert d["peak"]["bucket"] == usage._bucket_keys("day", 7)[-1]
+
+
+def test_aggregate_derived_empty(usage_file):
+    """空区间不能除零：命中率给 None，其余给 0 / 空峰值"""
+    d = usage.aggregate_usage("day", 7)["derived"]
+    assert d["hit_rate"] is None
+    assert d["avg_call"] == 0 and d["avg_active"] == 0
+    assert d["active"] == 0 and d["peak"] is None
+
+
+def test_aggregate_by_api(usage_file):
+    now = time.time()
+    usage.record_usage({"ts": now, "source": "chat", "api": "chat", "endpoint": "e",
+                        "model": "m", "prompt": 10, "completion": 1, "total": 11})
+    usage.record_usage({"ts": now, "source": "char_profile", "api": "light",
+                        "endpoint": "e", "model": "s", "prompt": 5,
+                        "completion": 1, "total": 6})
+    rows = usage.aggregate_usage("day", 7)["by_api"]
+    assert [r["api"] for r in rows] == ["chat", "light"]     # 按 total 倒序
+    assert rows[0]["total"] == 11 and rows[1]["calls"] == 1

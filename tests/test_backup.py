@@ -79,3 +79,54 @@ def test_export_skips_missing_data(tmp_path):
     info = backup.inspect_backup(blob)
     assert info["summary"]["sessions"] == 0
     assert info["files"] >= 0
+
+
+def _export_with_file(root, name, data):
+    (root / "saves").mkdir(exist_ok=True)
+    (root / "saves" / name).write_bytes(data)
+    blob, _name = backup.export_backup(str(root), str(root / "assistant.db"))
+    return blob
+
+
+def test_limit_allows_gb_scale_backups():
+    # 回归：旧上限 512MB 会把用户自己导出的备份（解压后 1.8GB）判成非法
+    assert backup.MAX_BACKUP_BYTES >= 2 * 1024 ** 3
+
+
+def test_inspect_accepts_large_compressible_backup(tmp_path):
+    root = tmp_path / "data"
+    root.mkdir()
+    blob = _export_with_file(root, "save.json", b"0" * (20 * 1024 * 1024))
+    info = backup.inspect_backup(blob)
+    assert info["summary"]["saves"] == 1
+
+
+def test_inspect_rejects_over_limit(tmp_path, monkeypatch):
+    root = tmp_path / "data"
+    root.mkdir()
+    blob = _export_with_file(root, "save.json", b"0" * (2 * 1024 * 1024))
+    monkeypatch.setattr(backup, "MAX_BACKUP_BYTES", 1024 * 1024)
+    with pytest.raises(ValueError) as err:
+        backup.inspect_backup(blob)
+    assert "超过上限" in str(err.value)
+
+
+def test_inspect_rejects_zipbomb_ratio(tmp_path, monkeypatch):
+    root = tmp_path / "data"
+    root.mkdir()
+    blob = _export_with_file(root, "save.json", b"0" * (2 * 1024 * 1024))
+    monkeypatch.setattr(backup, "MAX_BACKUP_RATIO_MIN", 1024)
+    monkeypatch.setattr(backup, "MAX_BACKUP_RATIO", 2)
+    with pytest.raises(ValueError) as err:
+        backup.inspect_backup(blob)
+    assert "压缩比" in str(err.value)
+
+
+def test_inspect_rejects_too_many_entries(tmp_path, monkeypatch):
+    root = tmp_path / "data"
+    root.mkdir()
+    blob = _export_with_file(root, "save.json", b"{}")
+    monkeypatch.setattr(backup, "MAX_BACKUP_ENTRIES", 1)
+    with pytest.raises(ValueError) as err:
+        backup.inspect_backup(blob)
+    assert "条目过多" in str(err.value)

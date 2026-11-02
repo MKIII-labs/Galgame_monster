@@ -4,8 +4,10 @@
 // 顶栏（应用名 + 最小化 / 最大化 / 关闭）由网页里的 #titlebar 自绘，
 // 通过 preload 暴露的 window.gmWin 调用这里的 IPC。
 // 业务逻辑、页面、后端服务都不在这里改动。
-const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Notification, dialog, ipcMain, session, shell } = require('electron');
 const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
@@ -195,3 +197,124 @@ ipcMain.on('win:toggle-maximize', () => {
   else win.maximize();
 });
 ipcMain.on('win:close', () => { dlog('ipc win:close'); if (win) win.close(); });
+
+/** 把窗口提到前台：最小化就还原、隐藏就显示，再聚焦 */
+function focusWindow() {
+  if (!win) return;
+  try {
+    if (win.isMinimized()) win.restore();
+    if (!win.isVisible()) win.show();
+    win.focus();
+  } catch (e) { /* 窗口已销毁时忽略 */ }
+}
+
+ipcMain.on('win:focus', () => focusWindow());
+
+// 系统通知由主进程创建：Windows 上渲染进程的 HTML5 Notification 点击事件
+// 在部分版本里收不到，点完就等于没反应；主进程的 Notification 有稳定的
+// 'click' 事件，能先还原窗口，再通知页面切到对应会话 / 任务。
+const liveNotifs = new Set();
+ipcMain.on('notify:show', (_e, payload) => {
+  const p = payload || {};
+  try {
+    if (!Notification.isSupported()) return;
+    const n = new Notification({
+      title: String(p.title || 'Galgame_monster'),
+      body: String(p.body || ''),
+      // 提示音由渲染进程按类型（完成 / 待回答 / 提醒）现场合成播放；
+      // 这里必须静音，否则 Windows 会再加一声系统通知音，听起来就是两声。
+      silent: true,
+    });
+    liveNotifs.add(n);
+    n.on('close', () => liveNotifs.delete(n));
+    n.on('click', () => {
+      dlog('notify click ' + String(p.id || ''));
+      focusWindow();
+      try { if (win) win.webContents.send('notify:click', { id: p.id || '', target: p.target || null }); } catch (e) { /* 页面不在也先把窗口拉起来 */ }
+      liveNotifs.delete(n);
+    });
+    n.show();
+  } catch (e) {
+    dlog('notify failed: ' + (e && e.message));
+  }
+});
+
+// 导出文件：主进程弹保存框，并把 HTTP 响应直接流式写盘。
+// 之前是页面 fetch 成 blob 再 <a download>：500MB 的备份要在渲染进程内存里多存
+// 一份，打包 + 传输期间页面没有任何反馈，看起来就像「点了没反应」。
+// 地址只允许指向本应用（APP_URL 同源），避免页面把导出请求引到外部。
+ipcMain.handle('file:save-url', async (_e, payload) => {
+  const p = payload || {};
+  const url = String(p.url || '');
+  let target = null;
+  try {
+    target = new URL(url);
+  } catch (e) {
+    return { ok: false, error: '地址不合法' };
+  }
+  let base = '';
+  try { base = APP_URL ? new URL(APP_URL).origin : ''; } catch (e) { base = ''; }
+  if (!/^https?:$/i.test(target.protocol) || (base && target.origin !== base)) {
+    return { ok: false, error: '不允许导出到外部地址' };
+  }
+  const opts = {
+    title: String(p.title || '保存文件'),
+    defaultPath: path.join(app.getPath('downloads'), String(p.name || 'download.bin')),
+  };
+  let picked;
+  try {
+    picked = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts);
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || '无法打开保存框' };
+  }
+  if (!picked || picked.canceled || !picked.filePath) return { ok: false, canceled: true };
+
+  return await new Promise((resolve) => {
+    let finished = false;
+    const done = (v) => { if (!finished) { finished = true; resolve(v); } };
+    const mod = target.protocol === 'https:' ? https : http;
+    try {
+      const req = mod.request(target, {
+        method: String(p.method || 'POST').toUpperCase(),
+        headers: (p.headers && typeof p.headers === 'object') ? p.headers : {},
+      }, (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          let text = '';
+          res.on('data', (c) => { if (text.length < 400) text += c.toString('utf8'); });
+          res.on('end', () => done({
+            ok: false, error: 'HTTP ' + res.statusCode + (text ? '：' + text : ''),
+          }));
+          return;
+        }
+        const total = Number(res.headers['content-length']) || 0;
+        const out = fs.createWriteStream(picked.filePath);
+        let bytes = 0;
+        let lastSent = 0;
+        res.on('data', (c) => {
+          bytes += c.length;
+          const now = Date.now();
+          if (now - lastSent > 250) {          // 大文件别把 IPC 刷爆
+            lastSent = now;
+            try {
+              if (win) win.webContents.send('file:save-progress', { bytes, total });
+            } catch (e) { /* 窗口已关闭 */ }
+          }
+        });
+        res.on('error', (err) => {
+          try { out.destroy(); } catch (e) { /* ignore */ }
+          done({ ok: false, error: err.message });
+        });
+        out.on('error', (err) => {
+          try { req.destroy(); } catch (e) { /* ignore */ }
+          done({ ok: false, error: err.message });
+        });
+        out.on('finish', () => out.close(() => done({ ok: true, path: picked.filePath, bytes })));
+        res.pipe(out);
+      });
+      req.on('error', (err) => done({ ok: false, error: err.message }));
+      req.end();
+    } catch (e) {
+      done({ ok: false, error: (e && e.message) || '导出失败' });
+    }
+  });
+});

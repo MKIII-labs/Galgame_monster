@@ -24,7 +24,12 @@ from app.db import DB_FILE, get_db
 
 APP_NAME = "Galgame_monster"
 FORMAT_VERSION = 1
-MAX_BACKUP_BYTES = 512 * 1024 * 1024       # 解压后总大小上限，防止 zip bomb
+# 解压后总大小上限。GAL 存档是整份快照，单个 30MB 很常见，整套到 GB 级；
+# 512MB 会把「自己刚导出的备份」判成非法，所以放到 4GB，再用压缩比兜住 zip bomb。
+MAX_BACKUP_BYTES = 4 * 1024 * 1024 * 1024
+MAX_BACKUP_RATIO = 200          # 超过 MAX_BACKUP_RATIO_MIN 且压缩比大于该值，视为可疑
+MAX_BACKUP_RATIO_MIN = 512 * 1024 * 1024
+MAX_BACKUP_ENTRIES = 20000      # 防止海量小文件拖死预检
 
 _FILE_NAMES = ("sessions.json", "tasks.json", "user_profile.json",
                "chat_history.txt", "token_usage.jsonl")
@@ -179,13 +184,21 @@ def inspect_backup(data):
             raise ValueError("不是本程序的备份文件")
         if int(manifest.get("format") or 0) != FORMAT_VERSION:
             raise ValueError("备份格式版本不支持")
-        entries = {i.filename: i for i in zf.infolist()}
-        total = sum(i.file_size for i in zf.infolist())
+        infos = zf.infolist()
+        entries = {i.filename: i for i in infos}
+        if len(infos) > MAX_BACKUP_ENTRIES:
+            raise ValueError("备份文件条目过多（%d），已拒绝" % len(infos))
+        total = sum(i.file_size for i in infos)
         if total > MAX_BACKUP_BYTES:
-            raise ValueError("备份解压后超过 %d MB，已拒绝" % (MAX_BACKUP_BYTES // 1024 // 1024))
+            raise ValueError("备份解压后 %d MB，超过上限 %d MB，已拒绝"
+                             % (total // 1024 // 1024, MAX_BACKUP_BYTES // 1024 // 1024))
+        if total > MAX_BACKUP_RATIO_MIN and total > max(1, len(data)) * MAX_BACKUP_RATIO:
+            raise ValueError("备份压缩比异常（解压后 %d MB / 压缩后 %d MB），已拒绝"
+                             % (total // 1024 // 1024, len(data) // 1024 // 1024))
         files = manifest.get("files") or []
         if not isinstance(files, list):
             raise ValueError("manifest.files 格式错误")
+        seen = 0
         for item in files:
             if not isinstance(item, dict):
                 raise ValueError("manifest.files 条目格式错误")
@@ -195,8 +208,21 @@ def inspect_backup(data):
             info = entries.get(path)
             if info is None:
                 raise ValueError("备份缺少文件：%s" % path)
-            raw = zf.read(path)
-            if len(raw) != int(item.get("size") or 0) or _sha256(raw) != item.get("sha256"):
+            # 流式计算：不把 30MB 的存档整份读进内存，同时防止中央目录谎报大小
+            digest = hashlib.sha256()
+            size = 0
+            with zf.open(path) as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    seen += len(chunk)
+                    if seen > MAX_BACKUP_BYTES:
+                        raise ValueError("备份解压后超过 %d MB，已拒绝"
+                                         % (MAX_BACKUP_BYTES // 1024 // 1024))
+                    digest.update(chunk)
+            if size != int(item.get("size") or 0) or digest.hexdigest() != item.get("sha256"):
                 raise ValueError("文件校验失败：%s" % path)
         return {
             "manifest": manifest,
@@ -233,7 +259,23 @@ def _replace_file(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     tmp = dst + ".restore.tmp"
     shutil.copyfile(src, tmp)
-    os.replace(tmp, dst)
+    # 运行中的进程可能正开着 sessions.json（读句柄 / 杀软扫描），Windows 会抛
+    # WinError 5 拒绝访问；和 store.write_json 一样退避重试，避免恢复中途失败。
+    last = None
+    for i in range(3):
+        try:
+            os.replace(tmp, dst)
+            last = None
+            break
+        except OSError as e:
+            last = e
+            time.sleep(0.1 * (3 ** i))
+    if last is not None:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise last
 
 
 def _replace_dir(src, dst):

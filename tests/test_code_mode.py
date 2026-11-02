@@ -196,6 +196,19 @@ def test_outside_read_allowed_when_permitted(tmp_path):
     assert "OUT READABLE" in text
 
 
+def test_script_tool_call_outside_read_allowed(tmp_path):
+    """脚本里 gm.call('read_file') 也要拿到 allow_outside，不能只有内置 open() 放行。"""
+    box = os.path.join(str(tmp_path), "box")
+    os.makedirs(box)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("TOOL_READABLE", encoding="utf-8")
+    code = "print('OUT', gm.call('read_file', path=%r))\n" % str(outside)
+    text, _ = code_mode.run(box, code, timeout=20, allow_outside=True)
+    assert "TOOL_READABLE" in text
+    text2, _ = code_mode.run(box, code, timeout=20)
+    assert "TOOL_READABLE" not in text2
+
+
 def test_script_cannot_read_data_dir(tmp_path, monkeypatch):
     """沙箱里的 data/（运行数据、含 API Key）即使被沙箱包住也要拒绝。"""
     from app import store

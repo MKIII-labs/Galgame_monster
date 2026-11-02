@@ -2,13 +2,13 @@
 import json
 import re
 import time
-from app.context import (begin_compress, compress_busy, compress_history, context_limits,
-                         current_context, effective_output_cap, end_compress,
+from app.context import (begin_compress, compress_busy, compress_history,
+                         current_context, end_compress,
                          flush_summary_memory, keep_from_by_tokens, last_input_detail,
-                         restore_summary, save_summary, summary_info)
+                         manual_keep_budget, restore_summary, save_summary, summary_info)
 from app.store import _lock
-from app.knowledge import (MAX_KB_PROMPT, delete_kb, is_profile_kb, load_kb, load_kb_index,
-                           new_kb, save_kb, set_kb_write)
+from app.knowledge import (MAX_KB_PROMPT, delete_kb, edge_is_valid, is_profile_kb, load_kb,
+                           load_kb_index, new_kb, save_kb, set_kb_write)
 from app.sessions import (ensure_session_kb_fields, find_session, load_sessions, save_sessions, slim_sessions)
 from app.config import get_api_conf
 from app import mem_tool
@@ -70,23 +70,53 @@ def _api_kb_write(h):
         h._json({"ok": True, "kbs": idx["kbs"]})
 
 
+def _yaml_str(raw):
+        """YAML 双引号标量：用 JSON 转义即可（合法 YAML，且不怕标题里有冒号 / 引号）"""
+        return json.dumps(str(raw or ""), ensure_ascii=False)
+
+
+def _md_title(node):
+        return str(node.get("title") or "").strip() or "(无标题)"
+
+
 def _kb_markdown(kb):
-        """节点 + 关系拼成 Markdown：一个节点一个二级标题。"""
+        """节点 + 关系拼成 Markdown：YAML frontmatter + 节点正文 + 链接 + 事实清单。
+
+        - 节点内只放「链接」（`[[标题]]`），不重复陈述；
+        - 末尾「事实」区把每条**有效**边写一遍：`[[A]] --因果--> [[B]]：一句话依据`，
+          这样导出的 md 本身就是一份可检索的事实列表（失效边只留在图谱历史里）。
+        """
         nodes = [n for n in (kb.get("nodes") or []) if isinstance(n, dict)]
         by_id = {n.get("id"): n for n in nodes}
-        adj = {}
+        adj, facts = {}, []
         for e in (kb.get("edges") or []):
-            if not isinstance(e, dict):
-                continue
+            if not isinstance(e, dict) or not edge_is_valid(e):
+                continue          # 失效边只留作图谱历史，不进导出
             a, b = e.get("from"), e.get("to")
             label = e.get("label") or e.get("relation") or "相关"
+            fact = str(e.get("fact") or "").strip()
             if a in by_id and b in by_id:
-                adj.setdefault(a, []).append((label, by_id[b]))
-                if not e.get("directed"):
-                    adj.setdefault(b, []).append((label, by_id[a]))
-        lines = ["# " + (kb.get("name") or "知识库"), ""]
+                directed = bool(e.get("directed"))
+                adj.setdefault(a, []).append((label, by_id[b], directed, True))
+                if not directed:
+                    adj.setdefault(b, []).append((label, by_id[a], directed, False))
+                facts.append((by_id[a], label, by_id[b], directed, fact))
+        name = kb.get("name") or "知识库"
+        lines = ["---",
+                 "title: " + _yaml_str(name)]
+        if kb.get("id"):
+            lines.append("id: " + _yaml_str(kb.get("id")))
+        lines += ["nodes: %d" % len(nodes),
+                  "relations: %d" % len(facts),
+                  "exported: " + time.strftime("%Y-%m-%d %H:%M:%S"),
+                  "generator: Galgame_monster"]
+        tags = sorted({str(t).strip() for n in nodes for t in (n.get("tags") or [])
+                       if str(t).strip()})
+        if tags:
+            lines.append("tags: [" + ", ".join(_yaml_str(t) for t in tags) + "]")
+        lines += ["---", "", "# " + name, ""]
         for n in nodes:
-            lines.append("## " + (n.get("title") or "(无标题)"))
+            lines.append("## " + _md_title(n))
             meta = []
             if n.get("category"):
                 meta.append("分类：" + str(n["category"]))
@@ -94,15 +124,36 @@ def _kb_markdown(kb):
                 meta.append("标签：" + "、".join(str(t) for t in n["tags"]))
             if n.get("aliases"):
                 meta.append("别名：" + "、".join(str(t) for t in n["aliases"]))
+            if n.get("id"):
+                meta.append("id：" + str(n["id"]))
             if meta:
-                lines.append("> " + " · ".join(meta))
+                lines += ["", "> " + " · ".join(meta)]
             body = str(n.get("content") or "").strip()
             if body:
                 lines += ["", body]
+            notes = [x for x in (n.get("notes") or []) if isinstance(x, dict)]
+            if notes:
+                lines += ["", "**补充**"]
+                for note in notes:
+                    ts = note.get("created_at")
+                    when = time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else ""
+                    text = str(note.get("content") or "").strip()
+                    if text:
+                        lines.append("- " + (("[" + when + "] ") if when else "") + text)
             rels = adj.get(n.get("id")) or []
             if rels:
-                lines += ["", "关系："]
-                lines += ["- %s：%s" % (lb, o.get("title") or o.get("id")) for lb, o in rels]
+                lines += ["", "**关联**"]
+                for label, other, directed, out in rels:
+                    arrow = ("→" if out else "←") if directed else "⇄"
+                    lines.append("- %s %s [[%s]]" % (label, arrow, _md_title(other)))
+            lines.append("")
+        if facts:
+            lines += ["## 事实", ""]
+            for a, label, b, directed, fact in facts:
+                head = ("[[%s]] --%s--> [[%s]]" % (_md_title(a), label, _md_title(b))
+                        if directed else
+                        "[[%s]] ⇄ [[%s]]（%s）" % (_md_title(a), _md_title(b), label))
+                lines.append("- " + head + (("：" + fact) if fact else ""))
             lines.append("")
         return "\n".join(lines)
 
@@ -196,8 +247,7 @@ def _api_context_compress(h):
 
         msgs = s.get("messages") or []
         cut = int(s.get("summary_upto") or 0)
-        _limit = context_limits()[0]
-        _input_window = max(1, _limit - effective_output_cap(_limit))
+        _input_window = manual_keep_budget(msgs, cut)
         keep_from = keep_from_by_tokens(msgs, cut, _input_window)
         if keep_from <= cut:
             return reply(False, "可压缩的历史太少（需要更多较早的消息才能生成摘要，当前保留最近的部分）")

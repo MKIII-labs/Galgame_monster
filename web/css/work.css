@@ -247,6 +247,40 @@
 }
 .work-hint { font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
 
+/* ---------- 日期 / 时间选择器 ---------- */
+.work-dt { display: flex; flex-direction: column; gap: 7px; }
+.work-dt-days,
+.work-dt-quick,
+.work-dt-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.work-dt-chip {
+  padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-side); color: var(--text);
+  font-size: 12px; font-family: inherit; line-height: 1.45; cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease),
+              background var(--t-fast) var(--ease),
+              color var(--t-fast) var(--ease);
+}
+.work-dt-chip:hover { border-color: var(--border-strong); }
+.work-dt-chip.on {
+  border-color: var(--accent); background: var(--accent-soft); color: var(--accent);
+}
+.work-dt-date {
+  padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-side); color: var(--text);
+  font-size: 12.5px; font-family: inherit;
+}
+.work-dt-date:focus { outline: none; border-color: var(--accent); }
+.work-dt-time { display: flex; align-items: center; gap: 6px; }
+.work-dt-sel {
+  min-width: 62px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-side); color: var(--text);
+  font-size: 14px; font-family: inherit; text-align: center; cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.work-dt-sel:focus { outline: none; border-color: var(--accent); }
+.work-dt-unit { font-size: 11.5px; color: var(--text-dim); }
+
 /* ---------- 场景 / 工作流 / 记忆 / 预览 ---------- */
 .work-select {
   padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px;

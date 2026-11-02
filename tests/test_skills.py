@@ -66,6 +66,24 @@ def test_bad_id_rejected(skill_dir):
     assert skills.save("../evil", "x").startswith("❌")
 
 
+def test_unique_id_never_overwrites_existing(skill_dir):
+    """新建时同一 base 依次变成 -2 / -3……，不会覆盖已有的 Skill。"""
+    _write("skill", "甲")
+    assert skills.unique_id("skill") == "skill-2"
+    _write("skill-2", "乙")
+    assert skills.unique_id("skill") == "skill-3"
+    assert skills.unique_id("") == "skill-3"      # 空 base 退回 skill 系列
+    assert skills.unique_id("../evil") in ("skill", "skill-2", "skill-3")
+
+
+def test_unique_id_respects_length_limit(skill_dir):
+    base = "a" * 40
+    _write(base, "长名")
+    got = skills.unique_id(base)
+    assert len(got) <= 40 and got.endswith("-2")
+    assert skills.save(got, "---\nname: x\n---\n") == ""   # 生成出来的 id 合法可写
+
+
 def test_body_is_truncated(skill_dir):
     _write("long", "长文", body="x" * (skills.BODY_LIMIT + 50))
     text = skills.body("long")

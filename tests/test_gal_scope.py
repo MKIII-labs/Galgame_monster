@@ -60,10 +60,10 @@ def test_slim_sessions_exposes_approval_mode():
     item = sessions.slim_sessions({"current": "s1", "sessions": [s]})["sessions"][0]
     assert item["approval_mode"] == "ai"
 
-    # 旧会话没有这个字段：按手动审批兜底
+    # 旧会话没有这个字段：按新的默认「自动审批」兜底
     old = {"id": "s2", "messages": []}
     item2 = sessions.slim_sessions({"current": "s2", "sessions": [old]})["sessions"][0]
-    assert item2["approval_mode"] == "ask"
+    assert item2["approval_mode"] == "ai"
 
 
 def test_slim_sessions_exposes_compress_marks():
@@ -157,6 +157,14 @@ def test_memory_prompt_prefers_session_scope():
     assert "默认写本会话记忆" in text
     assert "本会话记忆不受此限" in text
     assert "对话历史随时可能被压缩" in text
+
+
+def test_memory_prompt_mentions_fact_and_unlink():
+    """S1/S2 之后，提示词必须让模型知道连线要写 fact、旧边可以失效 / 自动替代。"""
+    text = mem_tool.build_tool_prompt({"ai_write": True})
+    assert "fact 必填" in text
+    assert "unlink" in text
+    assert "自动替代旧边" in text
 
 
 def test_profile_guidance_has_counterweight(monkeypatch):

@@ -417,6 +417,9 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
     emit(obj) 用来把 script_log 推给前端（可选）。
     """
     emit = emit or (lambda obj: None)
+    # 沙箱外只读：脚本里的工具调用也要拿到同一个开关，否则只有内置 open() 能读
+    caps = dict(caps or {})
+    caps["allow_outside"] = bool(allow_outside)
     code = str(code or "")
     if not code.strip():
         return "❌ run_script：code 为空", {"calls": 0}
@@ -636,7 +639,9 @@ def _exec_tool(sandbox, tool, args, caps, allowed):
                        % (tool, "、".join(sorted(allowed)))), "TOOL_NOT_ALLOWED"
     try:
         from app import agent
-        text, undo, is_write = agent.run_tool(sandbox, tool, args, caps=caps)
+        text, undo, is_write = agent.run_tool(
+            sandbox, tool, args, caps=caps,
+            allow_outside=bool((caps or {}).get("allow_outside")))
         # 脚本内写入也要登记撤销：否则 Code Mode 打开写权限后无法回退
         if is_write and undo and (caps or {}).get("sid"):
             try:

@@ -133,8 +133,8 @@ def test_native_schema_is_strict_and_mentions_read():
     by_name = {s["function"]["name"]: s["function"] for s in schemas}
     for fn in by_name.values():
         assert fn["parameters"]["additionalProperties"] is False
-    assert "read_file" in by_name["write_file"]["description"]
-    assert "read_file" in by_name["edit_file"]["description"]
+    assert "action=" in by_name["edit"]["description"]
+    assert "action=" in by_name["read"]["description"]
 
 
 def test_limits_require_read():

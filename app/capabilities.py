@@ -11,6 +11,7 @@
 权限模型也不同。这里做一层薄注册表，两边各自调用，互不干扰。
 """
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -22,6 +23,7 @@ from app.store import DATA_DIR
 PLUGIN_DIR = os.path.join(DATA_DIR, "plugins")
 _PLUGIN_NAME = re.compile(r"^[A-Za-z0-9_-]+\.py$")
 _PLUGINS = {"loaded": False}
+_LOADED = {}          # id -> {"ok": bool, "error": str, "path": str}（插件页展示用）
 
 
 @dataclass
@@ -60,36 +62,85 @@ def capability(cid, description, schema=None, permission="read", chat=True):
     return deco
 
 
+def plugin_entries():
+    """列出 data/plugins 下可加载的插件：[(id, py 路径, 错误)]。
+
+    兼容两种形态：
+    - 老式单文件：`<id>.py`
+    - 目录包：`<id>/plugin.json` + `entry` 指向目录内的 .py
+    """
+    out = []
+    if not os.path.isdir(PLUGIN_DIR):
+        return out
+    for entry in sorted(os.listdir(PLUGIN_DIR)):
+        if entry.startswith("_"):
+            continue
+        full = os.path.join(PLUGIN_DIR, entry)
+        if os.path.isfile(full) and _PLUGIN_NAME.match(entry):
+            out.append((os.path.splitext(entry)[0], full, ""))
+            continue
+        if not os.path.isdir(full):
+            continue
+        meta_path = os.path.join(full, "plugin.json")
+        if not os.path.isfile(meta_path):
+            continue
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f) or {}
+        except Exception as e:                       # noqa: BLE001
+            out.append((entry, "", "plugin.json 解析失败：%s" % e))
+            continue
+        rel = str(meta.get("entry") or "plugin.py").replace("\\", "/").lstrip("/")
+        root = os.path.normpath(full)
+        target = os.path.normpath(os.path.join(full, rel))
+        if not target.startswith(root + os.sep) or not target.lower().endswith(".py"):
+            out.append((entry, "", "entry 必须是插件目录内的 .py"))
+            continue
+        if not os.path.isfile(target):
+            out.append((entry, "", "找不到入口文件：%s" % rel))
+            continue
+        out.append((entry, target, ""))
+    return out
+
+
+def loaded_plugins():
+    """本次进程实际加载过的插件：id -> {ok, error, path}。"""
+    return {k: dict(v) for k, v in _LOADED.items()}
+
+
 def _ensure_plugins():
-    """第一次访问能力表时加载 `data/plugins/*.py`。
+    """第一次访问能力表时加载 `data/plugins/**`。
 
-    插件是**任意 Python 代码**，所以默认关闭：只有 `config.plugins_enabled=true` 才加载，
-    且只认目录下形如 `name.py` 的文件（不递归、不加载 `_` 开头的）。
-    加载失败只打印，不影响启动与其他插件。
-
-    插件约定：模块里提供 `register()`，在里面用 `@capability(...)` 注册。
-    不热加载 —— 新增 / 修改插件后需要重启进程。
+    插件是**任意 Python 代码**，所以默认关闭：只有 `config.plugins_enabled=true` 才加载。
+    单文件与目录包都支持；`plugins_disabled` 里的 id 跳过。
+    加载失败只打印，不影响启动与其他插件。不热加载——启停/安装后需要重启进程。
     """
     if _PLUGINS["loaded"]:
         return
     _PLUGINS["loaded"] = True          # 先置位，避免导入期间递归进来
+    _LOADED.clear()
     try:
         from app.config import load_config
-        if not bool(load_config().get("plugins_enabled", False)):
-            return
+        cfg = load_config()
     except Exception as e:
         print("[插件] 读取开关失败，已跳过：%s" % e)
         return
-    if not os.path.isdir(PLUGIN_DIR):
+    if not bool(cfg.get("plugins_enabled", False)):
         return
-    for fn in sorted(os.listdir(PLUGIN_DIR)):
-        if not _PLUGIN_NAME.match(fn) or fn.startswith("_"):
+    disabled = set(cfg.get("plugins_disabled") or [])
+    for pid, path, err in plugin_entries():
+        if pid in disabled:
+            _LOADED[pid] = {"ok": False, "error": "已停用", "path": path}
             continue
-        path = os.path.join(PLUGIN_DIR, fn)
-        mod_name = "gm_plugin_" + os.path.splitext(fn)[0].replace("-", "_")
+        if err or not path:
+            _LOADED[pid] = {"ok": False, "error": err or "入口不可用", "path": path}
+            print("[插件] %s：%s" % (pid, err or "入口不可用"))
+            continue
+        mod_name = "gm_plugin_" + pid.replace("-", "_")
         try:
             spec = importlib.util.spec_from_file_location(mod_name, path)
             if spec is None or spec.loader is None:
+                _LOADED[pid] = {"ok": False, "error": "无法创建模块", "path": path}
                 continue
             mod = importlib.util.module_from_spec(spec)
             sys.modules[mod_name] = mod
@@ -97,10 +148,12 @@ def _ensure_plugins():
             reg = getattr(mod, "register", None)
             if callable(reg):
                 reg()
-                print("[插件] 已加载：%s" % fn)
-        except Exception as e:
+            _LOADED[pid] = {"ok": True, "error": "", "path": path}
+            print("[插件] 已加载：%s" % pid)
+        except Exception as e:                       # noqa: BLE001
             sys.modules.pop(mod_name, None)
-            print("[插件] %s 加载失败：%s" % (fn, e))
+            _LOADED[pid] = {"ok": False, "error": str(e), "path": path}
+            print("[插件] %s 加载失败：%s" % (pid, e))
 
 
 def get(cid):

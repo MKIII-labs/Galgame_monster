@@ -25,8 +25,6 @@ DEFAULT_CONFIG = {
     "chat_kind": "", "vision_kind": "",
     # 故障转移链：主服务商失败（且一个字都没输出）时，按顺序尝试这些预设名
     "chat_fallback": [],
-    # 各模型的上下文窗口（键是模型名前缀，如 "claude": 200000）；匹配不到用 chat_context_limit
-    "model_contexts": {},
     # 每日 token 上限：0 = 不限；达到后拒绝发起新请求（按本地用量流水统计）
     "usage_daily_tokens": 0,
     # 分级模型调度：轻量任务（摘要 / 记忆挑选 / GAL 判定 / 语音矫正）可选用的「小模型」。
@@ -34,8 +32,8 @@ DEFAULT_CONFIG = {
     "light_url": "", "light_api_key": "", "light_model": "",
     "chat_think_mode": "", "chat_think_enabled": False, "chat_think_level": "high",
     "chat_native_tools": True,       # 优先用模型原生 function calling；不支持时自动回退文本协议
-    # 0 = 按模型自动（用 model_contexts / 内置表 / 能力注册表）；
-    # 填具体值则以它为准（既能收紧也能放宽，只受 MAX_CONTEXT_HARD 防呆上限约束）
+    # 0 = 不限：不按窗口触发压缩（只有请求体字符硬上限兜底）；
+    # 填具体值（tokens）才启用「占用到阈值就压缩」。
     "chat_context_limit": 0, "chat_reserve_output": 16384,
     # 上下文压缩：占用达到 ratio 时后台预压缩；保留最近 keep_ratio 的原文；
     # 摘要输出 token 上限。比例按 0–1 存储，设置页用百分数。
@@ -92,10 +90,6 @@ DEFAULT_CONFIG = {
     # 请求体还没发完就断（上行写超时 / 连接被掐）时的独立重试次数。
     # 这种失败没有产出、重发无副作用，而弱网恢复常超过普通预算的 2 次；0 = 跟随普通预算。
     "chat_upload_retries": 4,
-    # 单次请求的字符硬上限（约等于 token×2）：超过就折叠旧工具结果 / 临时丢中间历史。
-    # 上下文上限配得很大时裁剪不会触发，请求体能涨到 2 MB 以上，上传阶段必然超时；
-    # 0 = 不限（只受上下文上限约束）。
-    "chat_request_max_chars": 500000,
     # Code Mode：单次脚本工具调用上限与并发上限；0 = 不限调用次数。
     "code_mode_max_calls": 2000,
     "code_mode_parallel": 16,
@@ -152,7 +146,16 @@ DEFAULT_CONFIG = {
     "speech_denoise": False,         # 语音输入是否开启流式降噪（DPDFNet）
     "speech_denoise_model": "",      # 降噪模型路径；留空则用 data/models/dpdfnet_baseline.onnx
     "speech_final_model_dir": "",    # 两遍识别的精修模型目录；留空则用 data/models 下的默认目录
-    "ui_mode": "solo",               # 界面模式：solo（纯对话）| ide（工作区）| gal（演出）| hall（功能大厅）| work（工作台）
+    "ui_mode": "solo",               # 界面模式：solo（纯对话）| ide（工作区）| gal（演出）| hall（功能大厅）| work（工作台）| plugins（插件）
+    "session_group_mode": "flat",    # 会话记录：flat = 平铺（默认）；dir = 按沙箱目录分组
+    "session_group_pins": [],        # 置顶的分组 key（归一化后的沙箱路径），只影响排序
+    "session_group_names": {},       # 分组显示名别名：key -> 名字（不改磁盘目录）
+    # ---- 提醒开关（总开关关闭时，下面四项全部不生效）----
+    "reminders_enabled": True,          # 总开关
+    "reminder_inapp_enabled": True,    # 到点后在会话里留消息 + 应用内提示
+    "reminder_system_enabled": True,   # 同时弹 Windows 系统通知（程序关闭也能弹）
+    "reminder_calendar_enabled": True, # 日程到点提醒
+    "auto_chat_enabled": True,         # 允许 AI 主动聊天（每个会话仍需单独开启）
     "theme": "light",                # 默认浅色（VS Code Light+）
     # ---- IDE 编辑器主题（与上面的界面主题完全解耦，两套配置各自独立）----
     # 空串 = 跟随界面主题；其余取值只在 IDE 模式下生效（见 web/css/ide.css）
@@ -204,18 +207,15 @@ DEFAULT_CONFIG = {
     "tts_voice": "",                 # edge: zh-CN-XiaoxiaoNeural 等；openai: alloy 等；留空用各自默认
     "tts_speed": 1.0,
     "tts_max_len": 80,               # 单句最大字数（按标点切句）
+    # ---- IDE 内联补全（Tab 补全）----
+    # 默认开，但没有配置 light_model 时不会触发（避免用主模型每 350ms 烧一次 token）。
+    "ide_ai_complete": True,
+    "ide_ai_complete_delay_ms": 350,  # 光标停顿多久后请求
+    "ide_ai_complete_max_lines": 8,   # 一次最多补几行
     # ---- Agent 执行上限（设置 → Agent；缺省值等于 agent.py 里的常量，不配置时行为不变）----
     # 下面五项都能填 0 = 不限：上限由你自己取舍，代码只守最小值（负数视为填错，回落默认）。
     "agent_max_rounds": 0,           # 单轮对话最多循环几次「调工具 → 再问模型」；0 = 不限
     "agent_auto_continue": 3,        # 任务没做完时自动续跑几次；0 = 关闭，-1 = 无上限（1–10）
-    # 空转刹车：连续几次「续跑后一个新工具都没执行」就停（默认 1 = 给一次机会）。
-    # 实测 844 个续跑后仍无工具的轮次约吃掉 95M prompt token，第二次机会基本没救回来过。
-    "agent_auto_idle_limit": 1,
-    # 阶段总结放行：一段正文达到这个字数、且带「已完成 / 结果 / 目前」等总结信号时，
-    # 允许本轮先收尾（给「继续输出」按钮），不再强制续跑。0 = 关闭。
-    "agent_summary_stop_chars": 180,
-    # 用户这轮问的是「为什么中断 / 进度 / 是否完成」时，不自动续跑，先让它回答。
-    "agent_meta_turn_stop": True,
     "agent_repeat_limit": 5,         # 同工具同参数连续几次就拦截；0 = 不拦截
     "agent_cmd_timeout": 60,         # 命令默认超时（秒）；0 = 不限，直到命令自己结束或你点停止
     # 只读工具并发预取：一轮里的多个读取一起跑（写之后的同文件读、命令之后的读除外）。
@@ -229,8 +229,23 @@ DEFAULT_CONFIG = {
     # 写前读：覆盖已有文件前必须先在会话里读过；读后文件被外部改动（mtime / size 变化）
     # 会要求重读，避免模型拿过期内容整体覆盖。新建文件不受影响。
     "agent_require_read": True,
-    # 多步交付任务开工前先定义机检验收项；拦两次后放行，避免搜索/工具不可用时死锁。
-    "agent_acceptance_gate": True,
+    # 验收：不再「开工前强制定义机检项」——标准会随产物漂移，而且容易为了过闸凑一条。
+    # 现在只在多步任务没定义时软提醒一次；收尾由验收子代理按实际产物核对。
+    # ---- 验收子代理（可信保真闸门）----
+    # finish 之前另起一个独立 AI：与主模型同等工具权限，自己做核对后打分。
+    # 覆盖所有任务（不再只限视觉）；没有证据的「通过」不算通过，客观事实会给分数封顶。
+    # 每回合最多复核几次；连续失败到第 3 次时允许模型用 quality_waiver 收尾。
+    "agent_acceptance_review": True,
+    "agent_acceptance_min": 70,
+    "agent_acceptance_max_reviews": 2,
+    "agent_acceptance_rounds": 12,     # 验收代理自己的工具轮次；0 = 不限
+    "agent_acceptance_timeout": 0,     # 单次验收超时秒数；0 = 用内置 180 秒
+    "agent_acceptance_model": "",      # 验收用的模型；留空 = 跟随子代理 / 主聊天模型
+    # ---- 计划审批（Claude 式 plan mode）----
+    # 第一份计划出现后先挂起，等用户批准 / 提意见 / 逐条改步骤，然后再执行。
+    # /plan 规划模式始终生效；普通任务可用本开关关闭。0 = 用内置 1800 秒超时。
+    "agent_plan_review": True,
+    "agent_plan_review_timeout": 0,
     # 同一目标连续失败几次后追加「先诊断、别只调参数」的熔断提示；0 = 关闭。
     "agent_fail_streak": 2,
     # 单轮任务时间预算（分钟）；0 = 不限。到 80% 提醒先交最小切片，到 100% 停止本轮。
@@ -248,19 +263,30 @@ DEFAULT_CONFIG = {
     "tool_spill_keep": 400,
     "tool_spill_mb": 256,
     # 单条工具结果回灌预算：超 max 时回灌「头 head + 尾 tail」，中间省略。
-    # 0 = 不截断；旧结果折叠保留最近 keep_recent 条原文，其余压成 fold_chars 以内的结构化摘要。
-    "tool_result_max": 8192,
+    # 0 = 不截断；超过这个字符数才头尾裁剪（默认 30000，对齐 Claude Code 的内联阈值）。
+    # 旧结果折叠保留最近 keep_recent 条原文，其余压成 fold_chars 以内的结构化摘要。
+    "tool_result_max": 30000,
     "tool_result_head": 4096,
     "tool_result_tail": 1024,
     "tool_result_keep_recent": 2,
     "tool_result_fold_chars": 240,
+    # 工具结果总量触发（真实 token）：最近一次响应返回的 prompt_tokens + 之后新增内容的估算
+    # 超过这个值，就按「单条结果」把较早的折叠成摘要。0 = 不按 token 触发。
+    "tool_result_trim_tokens": 100000,
+    # 子代理的独立上下文预算（tokens）：每个侦察兵只看自己的 messages，超预算就折自己的旧结果，
+    # 与主对话互不影响。0 = 不限。
+    "subagent_context_tokens": 60000,
+    # 子代理单次模型调用的输出上限（tokens）。0 = 不限，用服务商默认。
+    "subagent_max_tokens": 0,
+    # 子代理最多来回几轮（调工具 → 再问模型）。0 = 不限。
+    "subagent_max_rounds": 30,
     # 外联审计：记录命令（含子进程）连过哪些外部地址，只记录、不拦截。
     # 关掉后命令结果里不再附「外部连接」摘要。
     "agent_net_audit": True,
     # ---- 并行探索（子代理，只读）----
     # 主代理可派 1–N 个只读侦察兵并行查代码；每个只回 600 字结论，原文不进主上下文。
     "agent_explore_enabled": True,
-    "agent_explore_max": 8,          # 一次最多几个子代理（1–8）
+    "agent_explore_max": 8,          # 一次最多几个子代理（默认 8，硬上限 12）
     "agent_explore_budget": 160000,  # 整批子代理的 token 预算；0 = 不限
     "agent_explore_model": "",       # 子代理用的模型；留空 = 跟随主聊天模型
     "agent_explore_ttl": 600,        # 子会话保留秒数（explore_followup 追问）；0 = 关闭
@@ -276,12 +302,50 @@ DEFAULT_CONFIG = {
     # 嵌套：根 depth=0，子代理最多再往下 max_depth 层；max_total 是一棵子代理树的总数上限。
     # 嵌套层默认只读；nested_write 打开后仍走主循环审批。
     "agent_explore_max_depth": 5,
-    "agent_explore_max_total": 60,
+    "agent_explore_max_total": 100,
     "agent_explore_nested_write": False,
     # 后台批次：启动后立即返回；status / result / cancel 取用。并发与结果保留时间可调。
     "agent_explore_background": True,
     "agent_explore_background_max": 12,
     "agent_explore_background_ttl": 86400,
+    # ---- 自动派发（复用上面的子代理团队，只派只读代理）----
+    # route：系统提示里给出团队清单与派活时机；连续多次只读还没派活时提醒一次。
+    # plan：回合开始先跑 planner，把计划注入主上下文（不动手、不写文件）。
+    # review：本轮有写入时，finish 之前派 reviewer 复核（更慢、更贵，默认关）。
+    "agent_auto_route": True,
+    "agent_auto_plan": True,
+    "agent_auto_review": False,
+    # ---- 脚本编排 / 并行写隔离 ----
+    # 脚本（run_workflow_script）里用 wf.agent / wf.agents / wf.pipeline 调用命名子代理；
+    # 写权限跟随代理定义，每次写仍走审批。agent_script_agent_calls = 一段脚本最多调几次（0 = 不限）。
+    "agent_script_agents": True,
+    "agent_script_agent_calls": 8,
+    # off = 不登记；serial = 同批重复写同一文件时回灌提醒（默认）；strict = 拒绝第二次写。
+    "agent_write_isolation": "serial",
+    # 本地 worktree 隔离（只对 git 沙箱）：off = 关闭；auto = 本批 ≥2 个可写子代理时
+    # 每个代理各拿一份 git worktree，跑完产补丁、审批后回写主沙箱；always = 一律隔离。
+    # 非 git 沙箱自动退回上面的「串行写 + 冲突提示」，不做半套隔离。
+    "agent_worktree_isolation": "auto",
+    # ---- 通用还原质量（参考物 vs 产物）----
+    # 只在「本轮用过 image_compare 且最佳总分 < agent_fidelity_min」时生效，
+    # 与任务领域无关：off = 不拦；nudge = 第一次 finish 提醒一次；strict = 未达标一直拦。
+    # 模型可以在 finish 里传 quality_waiver 说明为什么不再迭代。
+    "agent_fidelity_gate": "nudge",
+    "agent_fidelity_min": 70,
+    # 原生视觉附图：see_image 默认把沙箱图片直接附到本轮上下文（主模型自己看像素），
+    # 而不是只返回一段文字描述。需要聊天模型支持图片；失败时请关掉此开关。
+    "agent_native_vision": True,
+    # ---- 轨迹（模型视角的追加式事件账本）----
+    # 记录系统提示、上下文注入、思考、工具调用/结果、子代理、计划与压缩；
+    # 只读旁路，不进入模型上下文。max_field 是单字段保留字符数（0 = 不限）。
+    "trajectory_enabled": True,
+    "trajectory_max_field": 200000,
+    # ---- 全仓代码库语义索引 ----
+    # 本地 embedding + BM25；默认不限文件 / 块数（0 = 不限），超大仓库可在这里收紧。
+    "codeindex_enabled": True,
+    "codeindex_max_files": 0,
+    "codeindex_max_chunks": 0,
+    "codeindex_max_file_kb": 512,
     # ---- 研究闸门（复刻 / 还原 / 从零实现类任务）----
     # 这类任务的信息缺口在外部（规格、机制、参数），光读本地代码会「凭记忆硬写」。
     # 打开后：写第一个文件之前，至少要先检索；缺口用 research_note 记账，跨轮保留。
@@ -318,6 +382,8 @@ DEFAULT_CONFIG = {
     "autonomy_question_policy": "smart",
     # 插件：加载 data/plugins/*.py（每个文件提供 register()）。默认关闭 —— 插件是任意 Python 代码。
     "plugins_enabled": False,
+    # 单个插件的停用名单（目录包 / 单文件插件的 id）；启停后需重启进程
+    "plugins_disabled": [],
     # ---- MCP（外部工具服务）----
     # 默认关闭：stdio server 是任意代码、权限与主进程相同；远程 server 意味着数据出境。
     # 每个 server 形如：
@@ -360,6 +426,8 @@ DEFAULT_CONFIG = {
     # ---- Computer Use（受控浏览器）----
     # 默认关闭：开启后模型多出 5 个浏览器工具，并且会真的弹出一个 Edge 窗口。
     "computer_enabled": False,
+    # 无限制：不再要求站点白名单（内置金融 / 邮箱 / 密码管理器等禁区仍拒绝）
+    "computer_browser_unrestricted": False,
     # 允许操作的站点（host 或 *.host）。留空 = 每个新站点都先问你。
     "computer_sites": [],
     # 额外禁止的站点（内置的银行 / 支付 / 邮箱 / 密码管理器名单不可解除）
@@ -369,6 +437,8 @@ DEFAULT_CONFIG = {
     # ---- Computer Use · 桌面（Windows UIA）----
     # 与浏览器开关独立：桌面能碰到一切，默认关，且必须先填白名单才有窗口可用。
     "computer_desktop_enabled": False,
+    # 无限制：不再检查桌面程序白名单（提权窗口、密码框等硬限制仍生效）
+    "computer_desktop_unrestricted": False,
     # 允许操作的桌面程序（exe 名，如 notepad.exe；支持 *.exe）
     "computer_apps": [],
     # 浏览器后端：local = 独立 profile 的受控窗口；extension = 扩展桥（复用登录态）
@@ -377,6 +447,17 @@ DEFAULT_CONFIG = {
     "computer_auto_shot": True,
     # 扩展桥配对密钥：首次生成后持久保存（扩展设置里粘贴一次即可）
     "computer_bridge_key": "",
+    # ---- 图片生成（本地 ComfyUI）----
+    # 默认关闭：需要单独安装 ComfyUI、下载 FLUX 3 Image Klein 权重与工作流；
+    # 不开启时接口直接报错，不占资源，也不影响其他功能。
+    "image_enabled": False,
+    "image_comfy_url": "http://127.0.0.1:8188",
+    # ComfyUI「另存为 API 格式」导出的工作流；留空 = data/image_workflow.json
+    "image_workflow": "",
+    # 单张图的整体等待上限（秒）：首次加载模型会慢，别设太小
+    "image_timeout": 180,
+    # 输出目录；留空 = data/generated
+    "image_dir": "",
 }
 
 
@@ -468,75 +549,22 @@ def get_api_conf(provider, cfg=None):
         url = resolve_endpoint(url)
     return key, url, model
 
-# 内置的常见模型窗口（用户没显式配 model_contexts 时用）。
-# 按最长前缀匹配，所以可以把同一家的新旧模型分开写。
-# deepseek-flash / deepseek-v4 = V4 系列，官方 1M；deepseek-chat / reasoner 还是
-# V3.2 的 128K（https://api-docs.deepseek.com/zh-cn/quick_start/pricing/）。
-_BUILTIN_CONTEXTS = {
-    "deepseek-flash": 1000000, "deepseek-v4": 1000000,
-    "deepseek-chat": 128000, "deepseek-reasoner": 128000,
-    "deepseek": 1000000,
-    "claude": 200000, "gpt-4o": 128000, "gpt-4": 128000,
-    "gemini": 1000000, "qwen": 131072, "glm": 128000, "kimi": 256000,
-    "llama": 131072, "mistral": 128000,
-}
-MAX_CONTEXT_HARD = 1000000      # 再大也不按超过这个值估算（1M 是当前主流最大窗口）
 MAX_RESERVE = 32000
 
 
-def _prefix_window(table, name):
-    """在 {前缀: 窗口} 表里按最长前缀匹配，返回窗口（没匹配到返回 0）。"""
-    best_key, best_val = "", 0
-    for k, v in (table or {}).items():
-        kk = str(k or "").strip().lower()
-        if not kk or kk not in name:
-            continue
-        try:
-            n = int(v)
-        except (TypeError, ValueError):
-            continue
-        if len(kk) > len(best_key) and n > 0:
-            best_key, best_val = kk, n
-    return best_val
-
-
 def model_context_limit(model="", cfg=None):
-    """按模型名匹配上下文窗口；用户显式填写的窗口优先。
+    """上下文窗口（tokens）：只认用户填的 `chat_context_limit`。
 
-    `chat_context_limit` 的语义：
-    - 0 = 自动：model_contexts → 内置表 → 能力注册表，取最匹配的那个；
-    - > 0 = 用户说了算（双向生效，既能收紧也能放宽），只受 MAX_CONTEXT_HARD
-      这个防呆上限约束 —— 填 1 亿这种值会被钳到 1M，而不是被静默忽略。
-
-    `model_contexts` 的键是前缀（如 "claude" / "deepseek"），取匹配到的最长前缀；
-    它是用户配置，优先级高于内置表（内置表只是「没配时的默认值」）。
+    0 = 不限：不做前缀猜测、不查任何内置表。调用方据此关掉所有「按窗口比例
+    压缩」的逻辑，只保留请求体字符上限兜底。
+    model 参数保留是为了兼容既有调用方，不再参与计算。
     """
     cfg = cfg or load_config()
     try:
-        base = int(cfg.get("chat_context_limit") or 0)
+        n = int(cfg.get("chat_context_limit") or 0)
     except (TypeError, ValueError):
-        base = 0
-    # 显式填写时不再被内置表单向压住：以前 min(内置值, 用户值) 只能收紧，
-    # deepseek 内置 128K 会把用户填的 1M 吃掉，参数形同虚设。
-    if base > 0:
-        return max(8000, min(base, MAX_CONTEXT_HARD))
-    name = str(model or "").lower()
-    user_tbl = cfg.get("model_contexts") or {}
-    best_val = _prefix_window(user_tbl, name)
-    if not best_val:
-        best_val = _prefix_window(_BUILTIN_CONTEXTS, name)
-    limit = best_val or 128000
-    # 能力注册表：模型名带 1m 等变体时由 model_caps 给出更准确的窗口。
-    # 用户显式配了 model_contexts 时以用户值为准，不被注册表顶掉。
-    try:
-        from app import model_caps
-        _cap_ctx = int(model_caps.caps_for(model, cfg).get("context") or 0)
-        _user_hit = any(str(k or "").strip().lower() in name for k in user_tbl)
-        if _cap_ctx and not _user_hit:
-            limit = max(limit, _cap_ctx)
-    except Exception:
-        pass
-    return max(8000, min(limit, MAX_CONTEXT_HARD))
+        n = 0
+    return max(0, n)
 
 
 def provider_chain(cfg=None):

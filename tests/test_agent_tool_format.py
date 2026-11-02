@@ -171,6 +171,12 @@ def test_tool_loop_user_stop_wins():
     assert _act(has_bad_block=True, stopped=True) == "stop"
 
 
+def test_tool_loop_finish_is_explicit_stop():
+    """显式 finish（Trae 的 task_done）：调过就直接收尾，不再等「没有工具调用」。"""
+    assert _act(finished=True) == "stop"
+    assert _act(finished=True, has_calls=True) == "stop"
+
+
 # ============================================================
 # 伪工具标签 / 空话核对
 # 真实踩坑：模型写 <tool调用> 而不是 ```tool，系统没执行，

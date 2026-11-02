@@ -12,12 +12,14 @@
 
 只做本地渲染，不联网。截图存在 data/visual/<session>/，不写进沙箱工程。
 """
+import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
 import time
+import urllib.parse
 
 from app import webprobe
 from app.store import DATA_DIR
@@ -25,8 +27,22 @@ from app.store import DATA_DIR
 _VQA_HEAD = r"""
 <script>
 (function(){
-  var V = window.__VQA__ = window.__VQA__ || {errors:[],warns:[],logs:[],resource:[],draw:0};
+  var V = window.__VQA__ = window.__VQA__ || {errors:[],warns:[],logs:[],resource:[],draw:0,tri:0,progs:[],texs:[]};
   function push(a, x, n){ if (a.length < n) a.push(String(x).slice(0, 300)); }
+  function track(a, x, n){
+    if (!x || a.length >= n) return;
+    for (var i = 0; i < a.length; i++) if (a[i] === x) return;
+    a.push(x);
+  }
+  // 从 WebGL 调用本身统计三角面：不依赖 three.js / Babylon 的内部对象，
+  // 所有渲染器（含自写的 gl 代码）都能算。
+  function triOf(mode, count, inst){
+    if (!count || count < 0) return 0;
+    inst = inst || 1;
+    if (mode === 4) return Math.floor(count / 3) * inst;          // TRIANGLES
+    if (mode === 5 || mode === 6) return Math.max(0, count - 2) * inst;  // STRIP / FAN
+    return 0;
+  }
   var ce = console.error, cw = console.warn;
   console.error = function(){ push(V.errors, Array.prototype.join.call(arguments,' '), 20); return ce.apply(console, arguments); };
   console.warn  = function(){ push(V.warns,  Array.prototype.join.call(arguments,' '), 20); return cw.apply(console, arguments); };
@@ -44,10 +60,31 @@ _VQA_HEAD = r"""
     [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function(C){
       if (C && C.prototype && C.prototype[n] && !C.prototype[n].__vqa) {
         var old = C.prototype[n];
-        var f = function(){ V.draw++; return old.apply(this, arguments); };
+        var f = function(){
+          V.draw++;
+          var a = arguments;
+          if (n === 'drawElements') V.tri += triOf(a[0], a[1], 1);
+          else if (n === 'drawElementsInstanced') V.tri += triOf(a[0], a[1], a[4]);
+          else if (n === 'drawArrays') V.tri += triOf(a[0], a[2], 1);
+          else V.tri += triOf(a[0], a[2], a[3]);
+          return old.apply(this, a);
+        };
         f.__vqa = 1; C.prototype[n] = f;
       }
     });
+  });
+  [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function(C){
+    if (!C || !C.prototype) return;
+    var up = C.prototype.useProgram;
+    if (up && !up.__vqa) {
+      var fp = function(p){ track(V.progs, p, 300); return up.apply(this, arguments); };
+      fp.__vqa = 1; C.prototype.useProgram = fp;
+    }
+    var bt = C.prototype.bindTexture;
+    if (bt && !bt.__vqa) {
+      var ft = function(t, x){ track(V.texs, x, 500); return bt.apply(this, arguments); };
+      ft.__vqa = 1; C.prototype.bindTexture = ft;
+    }
   });
   if (window.fetch) {
     var of = window.fetch;
@@ -73,7 +110,7 @@ _VQA_HEAD = r"""
 _VQA_TAIL = r"""
 <script>
 (function(){
-  var V = window.__VQA__ || (window.__VQA__ = {errors:[],warns:[],logs:[],resource:[],draw:0});
+  var V = window.__VQA__ || (window.__VQA__ = {errors:[],warns:[],logs:[],resource:[],draw:0,tri:0,progs:[],texs:[]});
   var frames = 0, t0 = performance.now(), last = t0, maxGap = 0;
   function finish(){
     if (V.done) return; V.done = 1;
@@ -100,6 +137,9 @@ _VQA_TAIL = r"""
       console_warns: V.warns.length,
       resource_errors: V.resource.length,
       draw_calls: V.draw,
+      triangles: Math.round(V.tri || 0),
+      programs: (V.progs || []).length,
+      textures_bound: (V.texs || []).length,
       canvases: canvases,
       gl: glInfo,
       title: document.title || '',
@@ -141,6 +181,24 @@ def _inject(text, base_dir):
         text = text[:i] + _VQA_TAIL + text[i:]
     else:
         text += _VQA_TAIL
+    return text
+
+
+def _inject_min(text, base_dir, tail=""):
+    """只注入 <base>（相对资源能加载）与可选尾脚本，不跑 VQA 的帧率采样。"""
+    text = str(text or "")
+    base = '<base href="%s/">' % webprobe._dir_uri(base_dir)
+    if not re.search(r"<meta[^>]+charset", text, re.I):
+        base += '<meta charset="utf-8">'
+    m = re.search(r"<head\b[^>]*>", text, re.I)
+    if m:
+        text = text[:m.end()] + base + text[m.end():]
+    else:
+        text = "<head>" + base + "</head>" + text
+    if tail:
+        low = text.lower()
+        i = low.rfind("</body>")
+        text = (text[:i] + tail + text[i:]) if i >= 0 else (text + tail)
     return text
 
 
@@ -285,6 +343,9 @@ def check(abs_path, viewport="", sid="", screenshots=True, describe=False,
                 "console_warns": data.get("console_warns"),
                 "resource_errors": data.get("resource_errors"),
                 "draw_calls": data.get("draw_calls"),
+                "triangles": data.get("triangles"),
+                "programs": data.get("programs"),
+                "textures_bound": data.get("textures_bound"),
                 "canvases": data.get("canvases") or [],
                 "gl": data.get("gl"),
                 "samples": data.get("samples") or {},
@@ -345,6 +406,10 @@ def _format_one(name, item, describe):
                         (gl.get("renderer") or "未知")[:80]))
     else:
         lines.append("Canvas：无（如果这是 canvas / WebGL 页面，说明渲染层没起来）")
+    if item.get("triangles") is not None:
+        lines.append("三角面 %s · 着色器 %s · 绑定纹理 %s"
+                     % (item.get("triangles"), item.get("programs"),
+                        item.get("textures_bound")))
     fps = item.get("fps")
     if fps is not None:
         lines.append("帧率 %.1f FPS（采样 %s 帧，最大间隔 %sms）"
@@ -378,3 +443,319 @@ def _format_one(name, item, describe):
         except Exception as e:
             lines.append("（视觉描述失败：%s）" % e)
     return "\n".join(lines)
+
+
+# ============================================================
+# 多视图渲染（render_views）：固定视角截图，供 geometry_compare 对照
+# ============================================================
+
+DEFAULT_VIEWS = ("front", "side", "top", "iso")
+MAX_VIEWS = 8
+
+
+def _parse_views(views):
+    """把参数收敛成 [{name, query, file}]。
+
+    页面需要自己读 `location.search`（例如 `?view=front`）来设置相机；
+    也支持显式给 query（`{"name":"45度","query":"view=iso&angle=45"}`）。
+    """
+    raw = views if isinstance(views, list) and views else list(DEFAULT_VIEWS)
+    out, seen = [], set()
+    for i, v in enumerate(raw[:MAX_VIEWS], 1):
+        if isinstance(v, str):
+            name, query = v.strip(), ""
+        elif isinstance(v, dict):
+            name = str(v.get("name") or v.get("id") or "").strip()
+            query = str(v.get("query") or "").strip().lstrip("?")
+        else:
+            continue
+        if not name:
+            name = "view%d" % i
+        key = re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]", "_", name)[:40] or ("view%d" % i)
+        while key in seen:
+            key += "_"
+        seen.add(key)
+        if not query:
+            query = "view=" + urllib.parse.quote(name)
+        out.append({"name": name, "query": query, "file": key})
+    return out
+
+
+def render_views(abs_path, views=None, viewport="1280x720", sid="", timeout=90):
+    """按多个视角截图，返回清单；页面不读 ?view= 时会提示「截图完全相同」。"""
+    edge = webprobe.edge_path()
+    if not edge:
+        return ("⚠️ 没找到 Edge / Chrome，无法渲染多视图。"
+                "可以设环境变量 GAL_EDGE 指向浏览器可执行文件。")
+    if not os.path.isfile(abs_path):
+        return "❌ 文件不存在：%s" % abs_path
+    if not abs_path.lower().endswith((".html", ".htm")):
+        return ("❌ render_views 只支持 .html / .htm（当前：%s）"
+                % os.path.basename(abs_path))
+    vw, vh = webprobe.parse_viewport(viewport)
+    parsed = _parse_views(views)
+    if not parsed:
+        return "❌ views 为空：给 1–%d 个视角（如 front / side / top / iso）" % MAX_VIEWS
+    work = tempfile.mkdtemp(prefix="gal_views_")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out_dir = os.path.join(_visual_dir(sid), "views", stamp)
+    rows = []
+    try:
+        copy = os.path.join(work, "page.html")
+        with open(copy, "w", encoding="utf-8") as f:
+            f.write(_inject_min(webprobe._read_html(abs_path),
+                                os.path.dirname(abs_path)))
+        url_base = "file:///" + copy.replace("\\", "/").lstrip("/")
+        for i, v in enumerate(parsed):
+            png = os.path.join(work, "v%d.png" % i)
+            b64 = webprobe._shot(
+                edge, url_base + "?" + v["query"], os.path.join(work, "prof%d" % i),
+                vw, vh, png, timeout)
+            if not b64:
+                rows.append({"name": v["name"], "query": v["query"],
+                             "screenshot": "", "ok": False})
+                continue
+            os.makedirs(out_dir, exist_ok=True)
+            dst = os.path.join(out_dir, v["file"] + ".png")
+            shutil.copyfile(png, dst)
+            with open(dst, "rb") as f:
+                sha = hashlib.sha1(f.read()).hexdigest()
+            rows.append({"name": v["name"], "query": v["query"],
+                         "screenshot": dst, "sha1": sha, "ok": True})
+    except Exception as e:                     # noqa: BLE001
+        return "❌ 多视图渲染失败：%s" % e
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    ok_rows = [r for r in rows if r.get("ok")]
+    if not ok_rows:
+        return "❌ 多视图渲染没有拿到任何截图（页面可能拒绝加载或浏览器会话异常）。"
+    identical = len(ok_rows) > 1 and len({r.get("sha1") for r in ok_rows}) == 1
+    manifest = {"created": stamp, "viewport": "%dx%d" % (vw, vh),
+                "page": os.path.basename(abs_path),
+                "views": [{"name": r["name"], "query": r["query"],
+                           "screenshot": r["screenshot"]} for r in ok_rows]}
+    try:
+        with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+    lines = ["【多视图渲染】%s · %d 个视角 · %dx%d"
+             % (os.path.basename(abs_path), len(ok_rows), vw, vh)]
+    for r in rows:
+        if r.get("ok"):
+            lines.append("  %s（?%s）→ %s" % (r["name"], r["query"], r["screenshot"]))
+        else:
+            lines.append("  %s（?%s）→ 截图失败" % (r["name"], r["query"]))
+    if identical:
+        lines.append("⚠️ 所有视角的截图完全相同：页面大概率没有读取 `location.search` "
+                     "里的 `view` 参数。给页面加一段「按 ?view= 设置相机」的逻辑后再跑；"
+                     "否则多视图对照没有意义。")
+    lines.append("下一步：把参考图与这些产物图按视角配对，用 geometry_compare 对照。")
+    lines.append("__RENDER_VIEWS__ " + json.dumps(manifest, ensure_ascii=False))
+    return "\n".join(lines)
+
+
+# ============================================================
+# 场景断言（scene_assert）：读页面暴露的场景事实，不靠截图猜
+# ============================================================
+
+_SCENE_TAIL = r"""
+<script>
+(function(){
+  function pick(){
+    try {
+      var f = window.__VQA_SCENE_INFO__;
+      var d = (typeof f === 'function') ? f() : (f || window.__VQA_SCENE__ || null);
+      if (!d || typeof d !== 'object') return null;
+      var objs = (d.objects || []).slice(0, 300).map(function(o){
+        o = o || {};
+        var b = o.bbox || null;
+        return {name: String(o.name || ''), type: String(o.type || ''),
+                visible: o.visible !== false,
+                bbox: (b && b.min && b.max) ? {min: b.min, max: b.max} : null};
+      });
+      return {objects: objs, camera: d.camera || null,
+              lights: (d.lights || []).slice(0, 50),
+              renderer: d.renderer || null};
+    } catch (e) { return {error: String(e)}; }
+  }
+  var tries = 0;
+  function done(data){
+    if (window.__VQA_SCENE_DONE__) return;
+    window.__VQA_SCENE_DONE__ = 1;
+    var pre = document.createElement('pre');
+    pre.id = 'vqa-scene'; pre.style.display = 'none';
+    pre.textContent = JSON.stringify({found: !!data && !data.error, data: data});
+    document.body.appendChild(pre);
+  }
+  function loop(){
+    var d = pick();
+    if (d || ++tries > 30) return done(d);
+    setTimeout(loop, 100);
+  }
+  setTimeout(loop, 300);
+})();
+</script>
+"""
+
+
+def _extract_scene(dom):
+    m = list(re.finditer(r'<pre id="vqa-scene"[^>]*>(.*?)</pre>', dom or "", re.S))
+    if not m:
+        return None
+    import html as htmllib
+    try:
+        return json.loads(htmllib.unescape(m[-1].group(1)))
+    except ValueError:
+        return None
+
+
+def _dump_scene(edge, url, profile, vw, vh, timeout):
+    args = ["--headless=new", "--disable-gpu", "--no-first-run", "--disable-extensions",
+            "--hide-scrollbars", "--user-data-dir=" + profile,
+            "--window-size=%d,%d" % (vw, vh),
+            "--virtual-time-budget=%d" % (webprobe.WAIT_MS + 3400),
+            "--dump-dom", url]
+    out = ""
+    for _ in range(2):
+        p = webprobe._run(edge, args, timeout)
+        out = p.stdout.decode("utf-8", "replace")
+        if _extract_scene(out) is not None:
+            return out
+    return out
+
+
+def _fnum(v, default=None):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def scene_checks(data, assertions):
+    """纯函数：按断言检查场景事实，返回 [{id, kind, ok, got, want, note}]。"""
+    data = data if isinstance(data, dict) else {}
+    objs = [o for o in (data.get("objects") or []) if isinstance(o, dict)]
+    names = [str(o.get("name") or "") for o in objs]
+    lights = data.get("lights") or []
+    cam = data.get("camera") or {}
+    renderer = data.get("renderer") or {}
+    tris = _fnum(renderer.get("triangles"))
+    if tris is None:
+        tris = _fnum(((renderer.get("info") or {}).get("render") or {}).get("triangles"))
+    mn, mx, has_box = [float("inf")] * 3, [float("-inf")] * 3, False
+    for o in objs:
+        if not o.get("visible"):
+            continue
+        b = o.get("bbox") or {}
+        lo, hi = b.get("min"), b.get("max")
+        if not (isinstance(lo, list) and len(lo) >= 3
+                and isinstance(hi, list) and len(hi) >= 3):
+            continue
+        for k in range(3):
+            mn[k] = min(mn[k], float(lo[k]))
+            mx[k] = max(mx[k], float(hi[k]))
+        has_box = True
+    size = [(mx[k] - mn[k]) if has_box else None for k in range(3)]
+
+    out = []
+    for i, a in enumerate((assertions or [])[:20], 1):
+        if not isinstance(a, dict):
+            continue
+        kind = str(a.get("kind") or a.get("type") or "").strip()
+        cid = str(a.get("id") or "c%d" % i)
+        want = a.get("value", a.get("min", a.get("max")))
+        got, ok, note = None, False, ""
+        if kind == "exists":
+            name = str(a.get("name") or a.get("value") or "").strip()
+            got = names
+            ok = bool(name) and any(name == n or name in n for n in names)
+        elif kind in ("objects_min", "objects_max"):
+            got = len(objs)
+            w = _fnum(want, 0)
+            ok = got >= w if kind == "objects_min" else got <= w
+        elif kind == "hidden_max":
+            got = sum(1 for o in objs if not o.get("visible"))
+            ok = got <= _fnum(want, 0)
+        elif kind == "lights_min":
+            got = len(lights)
+            ok = got >= _fnum(want, 0)
+        elif kind in ("camera_fov_min", "camera_fov_max"):
+            got = _fnum(cam.get("fov"))
+            w = _fnum(want, 0)
+            ok = got is not None and (got >= w if kind == "camera_fov_min" else got <= w)
+        elif kind == "triangles_max":
+            got = tris
+            ok = got is not None and got <= _fnum(want, 0)
+        elif kind in ("bbox_x_max", "bbox_y_max", "bbox_z_max"):
+            got = size[{"bbox_x_max": 0, "bbox_y_max": 1, "bbox_z_max": 2}[kind]]
+            ok = got is not None and got <= _fnum(want, 0)
+        else:
+            note = "未知检查类型：%s" % (kind or "（空）")
+        out.append({"id": cid, "kind": kind, "ok": bool(ok),
+                    "got": got, "want": want, "note": note})
+    return out
+
+
+def scene_assert(abs_path, assertions, viewport="1280x720", sid="", timeout=90):
+    """按页面暴露的场景事实做声明式断言（对象 / 相机 / 灯光 / 三角面 / 包围盒）。"""
+    edge = webprobe.edge_path()
+    if not edge:
+        return "⚠️ 没找到 Edge / Chrome，无法做场景断言。"
+    if not os.path.isfile(abs_path):
+        return "❌ 文件不存在：%s" % abs_path
+    if not abs_path.lower().endswith((".html", ".htm")):
+        return "❌ scene_assert 只支持 .html / .htm（当前：%s）" % os.path.basename(abs_path)
+    if not isinstance(assertions, list) or not assertions:
+        return "❌ scene_assert 需要 assertions 数组（1–20 条）。"
+    vw, vh = webprobe.parse_viewport(viewport)
+    work = tempfile.mkdtemp(prefix="gal_scene_")
+    try:
+        copy = os.path.join(work, "page.html")
+        with open(copy, "w", encoding="utf-8") as f:
+            f.write(_inject_min(webprobe._read_html(abs_path),
+                                os.path.dirname(abs_path), _SCENE_TAIL))
+        url = "file:///" + copy.replace("\\", "/").lstrip("/")
+        dom = _dump_scene(edge, url, os.path.join(work, "prof"), vw, vh, timeout)
+    except Exception as e:                     # noqa: BLE001
+        return "❌ 场景断言失败：%s" % e
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    payload = _extract_scene(dom)
+    if payload is None:
+        return "❌ 页面没有回传场景探针结果（可能加载失败或脚本报错）。"
+    if not payload.get("found"):
+        return ("❌ 页面没有暴露场景信息，无法断言。在页面脚本里加一段：\n"
+                "```js\nwindow.__VQA_SCENE_INFO__ = function(){\n"
+                "  return {objects: [{name:'ground', type:'Mesh', visible:true,\n"
+                "           bbox:{min:[x,y,z], max:[x,y,z]}}],\n"
+                "          camera: {fov: 50, position: [x,y,z]},\n"
+                "          lights: [{type:'DirectionalLight', intensity: 1}],\n"
+                "          renderer: {triangles: 1234}};\n};\n```\n"
+                "数据要来自真实场景对象，不要写死常量。")
+    data = payload.get("data") or {}
+    checks = scene_checks(data, assertions)
+    failed = [c for c in checks if not c["ok"]]
+    lines = ["【场景断言】%s · 通过 %d / %d" % (os.path.basename(abs_path),
+                                              len(checks) - len(failed), len(checks))]
+    for c in checks:
+        mark = "✓" if c["ok"] else "✗"
+        detail = "期望 %s，实际 %s" % (c.get("want"), c.get("got"))
+        if c["kind"] == "exists":
+            detail = "对象列表：%s" % "、".join(str(x) for x in (c.get("got") or [])[:8])
+        lines.append("  %s %s %s（%s）"
+                     % (mark, c.get("id"), c["kind"], c.get("note") or detail))
+    if failed:
+        lines.append("先修未通过的断言；确认是断言写错（场景本身没问题）时再改断言。")
+    lines.append("（只读页面暴露的场景事实；不渲染、不判断好不好看）")
+    lines.append("__SCENE_METRICS__ " + json.dumps({
+        "total": len(checks), "passed": len(checks) - len(failed),
+        "failed": len(failed),
+        "objects": len(data.get("objects") or []),
+        "lights": len(data.get("lights") or []),
+        "triangles": _fnum((data.get("renderer") or {}).get("triangles")),
+    }, ensure_ascii=False))
+    lines.append("__SCENE_CHECKS__ " + json.dumps(checks, ensure_ascii=False))
+    return "\n".join(lines)
+

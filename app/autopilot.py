@@ -623,6 +623,16 @@ def start(gid):
     return True
 
 
+def running_count():
+    """还活着的自动化驱动线程数（关窗保活用，见 main._background_job_count）。
+
+    只数线程、不看 goals.json 里的 status：进程重启后残留的
+    `status=running` 不一定有线程，拿它当保活依据会让进程永远退不出去。
+    """
+    with _LOCK:
+        return sum(1 for th in _THREADS.values() if th and th.is_alive())
+
+
 def _stop_thread(gid, join_timeout=0):
     ev = _STOP.get(gid)
     if ev:

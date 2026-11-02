@@ -169,8 +169,7 @@ def test_auto_continue_on_rewrite_phrasing():
 def test_auto_continue_requires_explicit_promise_after_tools():
     """动过手但什么都没承诺 → 不再无条件续跑。
 
-    旧实现是「动过手 + 没命中完成词」就续跑，长任务尾部会一路催到空转刹车
-    （用户看到的「连续多轮只输出占位文字或没有调用工具」）。
+    旧实现是「动过手 + 没命中完成词」就续跑，长任务尾部会一路被催着重复收尾。
     """
     assert stepctx.auto_continue_reason(None, "这一版看起来可以了。", 9, True,
                                         "改音效", agent_mode=True) is None
@@ -182,7 +181,7 @@ def test_auto_continue_requires_explicit_promise_after_tools():
 def test_auto_continue_stops_when_blocked_by_missing_material():
     """现场 s_2eed idx630：计划挂着 pending，正文写「第 5 题题面始终没拿到」。
 
-    这不是「没做完」而是「推不动」：续跑 3 轮无工具，最后撞上空转刹车。
+    这不是「没做完」而是「推不动」：续跑 3 轮也不会有新工具可调。
     """
     plan = {"steps": [{"text": "补第 3 题解答", "status": "pending"}]}
     text = ("这一步确实无法继续：第 5 题的题面我始终没有拿到。\n\n"
@@ -191,21 +190,24 @@ def test_auto_continue_stops_when_blocked_by_missing_material():
                                         agent_mode=True) is None
 
 
-def test_auto_continue_release_long_delivery_without_complete_words():
-    """成篇交付 + 结尾没有动作承诺 → 放行（即使计划没回标 done）。
+def test_long_delivery_released_only_without_pending_plan():
+    """成篇交付 + 结尾没有动作承诺：计划已无待办才放行。
 
-    现场 s_2809 idx678：2 万字说明，结尾是「双击 index.html，Ctrl+F5 强刷」，
-    因为计划 5 步没回标 done 被连推 3 轮，正文最后被判成「没有结论」。
+    现场 s_2809 idx678：2 万字说明，结尾是「双击 index.html，Ctrl+F5 强刷」。
+    现在的口径是「计划还有待办就继续做」——收尾由模型自己调 finish 负责，
+    不再因为「计划连续多轮没推进」而提前放行（该刹车已于 2026-10-30 移除）。
     """
-    plan = {"steps": [{"text": "修手柄", "status": "doing"},
-                      {"text": "补 e2e", "status": "pending"}]}
     text = "改动说明。" * 120 + "\n双击 `index.html`，**Ctrl+F5** 强刷。"
-    # 计划还没推进时仍会催（避免把中途总结当成完成）
-    assert stepctx.auto_continue_reason(plan, text, 144, True, "修手柄",
-                                        agent_mode=True) is not None
-    # 连续两轮计划一个字没变 → 不再拿「计划未完成」当理由
-    assert stepctx.auto_continue_reason(plan, text, 144, True, "修手柄",
-                                        agent_mode=True, plan_stale=2) is None
+    pending = {"steps": [{"text": "修手柄", "status": "doing"},
+                         {"text": "补 e2e", "status": "pending"}]}
+    r = stepctx.auto_continue_reason(pending, text, 144, True, "修手柄",
+                                     agent_mode=True)
+    assert r is not None and "计划" in r["why"]
+
+    done = {"steps": [{"text": "修手柄", "status": "done"},
+                      {"text": "补 e2e", "status": "done"}]}
+    assert stepctx.auto_continue_reason(done, text, 144, True, "修手柄",
+                                        agent_mode=True) is None
 
 
 def test_promise_words_drop_ambiguous_closings():
@@ -248,10 +250,11 @@ def test_pending_decision_recognizes_decision_section():
 
 
 def test_tool_progress_resets_plan_stale():
-    """刚执行过工具就不能算「计划停滞」。
+    """停滞计数只用于「计划体检」提示，不再决定要不要续跑。
 
     现场 s_2809 最新一轮：模型连续读/写文件但没回标计划，auto_continues=4
     后被 plan_stale 误判成停滞，正文停在「运行该核对脚本。」不再续跑。
+    现在只要计划还有未完成步骤就继续催；收尾交给模型自己调 finish。
     """
     from app.api.chat import _next_plan_stale
 
@@ -260,16 +263,16 @@ def test_tool_progress_resets_plan_stale():
     text = "运行该核对脚本。"
     sig = (("doing", "改 index.html"), ("pending", "跑回归"))
 
-    # 没有动作承诺的短句 + plan_stale >= 2：确实不再续跑
+    # 只有一句说明、没有动作承诺：计划还有 2 步 → 继续催
     assert stepctx.auto_continue_reason(plan, "说明。", 26, True, "开发",
-                                        agent_mode=True, plan_stale=2) is None
-    # 「运行该核对脚本。」现在命中句首动词表 → stale=2 也要按「说而不做」续跑
+                                        agent_mode=True) is not None
+    # 有句首动作承诺 → 同样继续（不再看停滞计数）
     assert stepctx.auto_continue_reason(plan, text, 26, True, "开发",
-                                        agent_mode=True, plan_stale=2) is not None
-    # 新行为：有工具进展 → 停滞计数归零 → 继续推计划
+                                        agent_mode=True) is not None
+    # 新行为：有工具进展 → 停滞计数归零
     assert _next_plan_stale(2, sig, sig, True) == 0
     r = stepctx.auto_continue_reason(plan, text, 26, True, "开发",
-                                     agent_mode=True, plan_stale=0)
+                                     agent_mode=True)
     assert r is not None and "计划" in r["why"]
     # 计划变了也算推进；两者都没有才累加
     assert _next_plan_stale(2, (("doing", "新描述"),), sig, False) == 0
@@ -291,9 +294,8 @@ def test_bare_action_promise_is_detected():
     plan = {"steps": [{"text": "写测试", "status": "doing"},
                       {"text": "回归", "status": "pending"}]}
     r = stepctx.auto_continue_reason(
-        plan, "查 `applyTech` 的调用点。", 34, True, "开发",
-        agent_mode=True, plan_stale=2)
-    assert r is not None and "没调用工具" in r["why"]
+        plan, "查 `applyTech` 的调用点。", 34, True, "开发", agent_mode=True)
+    assert r is not None and "计划" in r["why"]
 
 
 def test_pending_plan_end_reason_fallback():
@@ -369,43 +371,6 @@ def test_latest_plan_only_reads_last_assistant_message():
     assert _latest_plan(s) is old
 
 
-def test_meta_turn_detection():
-    """用户在问「为什么 / 进度 / 是否完成」时，不能当成任务继续推。"""
-    assert stepctx.is_meta_turn("为什么又中断了？任务到底完美完成") is True
-    assert stepctx.is_meta_turn("现在做到哪了？") is True
-    assert stepctx.is_meta_turn("总结一下这轮的进展") is True
-    assert stepctx.is_meta_turn("为什么失败？帮我修一下") is False
-    assert stepctx.is_meta_turn("继续做 S2") is False
-    assert stepctx.is_meta_turn("") is False
-    assert stepctx.is_meta_turn("为什么" + "x" * 300) is False   # 太长，按任务处理
-
-
-def test_checkpoint_summary_allows_stop():
-    """成段总结（默认 180 字）允许先收尾；一句「继续 S1」仍然续跑。"""
-    plan = {"steps": [{"text": "S1", "status": "done"},
-                      {"text": "S2", "status": "doing"},
-                      {"text": "S3", "status": "pending"}]}
-    summary = ("这一轮已完成 S1 与 S2：渲染循环已通过，键盘输入已接上，实测稳定 60fps。"
-               "目前剩下 S3 碰撞与 S4 方块交互；全量回归 36 套 / 943 PASS / 0 FAIL。"
-               "已经把探针测量值同步到日志，验证通过。") * 2
-    assert stepctx.is_checkpoint_summary(summary, 180) is True
-    assert stepctx.is_checkpoint_summary("继续。S1：核对 index.html。", 180) is False
-    assert stepctx.is_checkpoint_summary(summary, 0) is False        # 0 = 关闭
-
-    # 成段总结 + 计划还有未完成步骤 → 不续跑（允许先收尾）
-    assert stepctx.auto_continue_reason(
-        plan, summary, 10, True, "开发", agent_mode=True, plan_stale=0,
-        summary_stop_chars=180) is None
-    # 关闭阈值后回到旧行为：计划还有步骤 → 继续推
-    assert stepctx.auto_continue_reason(
-        plan, summary, 10, True, "开发", agent_mode=True, plan_stale=0,
-        summary_stop_chars=0) is not None
-    # 一句「继续 S1」不算总结，仍然续跑
-    assert stepctx.auto_continue_reason(
-        plan, "继续。S1：核对 index.html。", 10, True, "开发",
-        agent_mode=True, plan_stale=0, summary_stop_chars=180) is not None
-
-
 def test_plan_ready_steps_and_hint():
     """ready queue：doing 优先，deps 未完成的 pending 不能提前做。"""
     plan = {
@@ -442,7 +407,7 @@ def test_auto_continue_names_ready_step():
         {"id": "S2", "text": "改 B", "status": "pending", "verify": "跑测试"},
     ]}
     r = stepctx.auto_continue_reason(plan, "继续。S2：改 B。", 3, True, "开发",
-                                     agent_mode=True, plan_stale=0)
+                                     agent_mode=True)
     assert r is not None
     assert "S2" in r["msg"] and "跑测试" in r["msg"]
     assert "可同一轮并行" not in r["msg"]       # 只有一条 ready 时不该标并行
@@ -582,7 +547,7 @@ def test_plan_can_inherit_only_on_continuation():
     assert stepctx.plan_can_inherit("接着改 S2") is True
     assert stepctx.plan_can_inherit("好") is True
     assert stepctx.plan_can_inherit("开始") is True
-    assert stepctx.plan_can_inherit("为什么又中断了？", meta=True) is True
+    assert stepctx.plan_can_inherit("为什么又中断了？") is False   # 提问不继承旧计划
     assert stepctx.plan_can_inherit("继续", cont=True) is True
     assert stepctx.plan_can_inherit("把颜色改成蓝色") is False
     assert stepctx.plan_can_inherit("再做一个新游戏") is False
@@ -612,21 +577,6 @@ def test_plan_health_hint_triggers():
     assert stepctx.plan_health_hint(plan) == ""
     # 脏参数不炸
     assert stepctx.plan_health_hint(plan, recent_failures="x") == ""
-
-
-def test_plan_stagnant_needs_visible_reason():
-    """计划停滞且没有完成/受阻/待拍板说明 → 收尾必须给可见原因。"""
-    from app.api.chat import _plan_stagnant
-
-    plan = {"steps": [{"text": "写测试", "status": "doing"},
-                      {"text": "回归", "status": "pending"}]}
-    assert _plan_stagnant(plan, "查 `applyTech` 的调用点。", 2, None) is True
-    assert _plan_stagnant(plan, "已完成。", 2, None) is False
-    assert _plan_stagnant(plan, "无法继续，缺少文件。", 2, None) is False
-    assert _plan_stagnant(plan, "要不要按 A 做？", 2, None) is False
-    assert _plan_stagnant(plan, "随便", 1, None) is False
-    assert _plan_stagnant({"steps": [{"text": "a", "status": "done"}]},
-                          "随便", 2, None) is False
 
 
 def test_auto_continue_release_complete_with_long_summary():
@@ -659,7 +609,7 @@ def test_memory_organize_hint_triggers_on_limit_and_rounds():
     # 到 20 的倍数 + 超软上限 → 提醒
     text = stepctx.memory_organize_hint(20, 60, 5, 60, 20)
     assert "【记忆整理】" in text and "60 条" in text and "5 条关系" in text
-    assert "purpose" in text and "sequence" in text
+    assert "purpose" in text and "cause" in text and "fact" in text
     # 没到倍数 → 不提醒
     assert stepctx.memory_organize_hint(19, 60, 5, 60, 20) == ""
     # 到倍数但没超上限、也有关系 → 不提醒
@@ -671,3 +621,31 @@ def test_memory_organize_hint_triggers_on_limit_and_rounds():
     assert stepctx.memory_organize_hint(20, 999, 5, 0, 20) == ""
     # 脏参数不炸
     assert stepctx.memory_organize_hint(None, "x", [], 60, 20) == ""
+
+def test_tail_promise_detects_immediate_single_action():
+    """「现在查 X」这种紧邻引导词 + 单字动作要算承诺（现场 23:23:39 漏判）。"""
+    assert stepctx._tail_promises_work("现在查 `showShop` 和 `gameOver` 的真实包裹情况。") is True
+    assert stepctx._tail_promises_work("接下来你先跑一遍回归。") is True
+    # 不要误伤：让用户自己试 / 交付说明
+    assert stepctx._tail_promises_work("接下来你可以自己试一下效果。") is False
+    assert stepctx._tail_promises_work("现在可以查看效果了。") is False
+
+
+def test_tail_promise_detects_after_done_then_action():
+    """「X 完后再 Y」也要算承诺（现场 00:36:27：末句被判成已收尾）。"""
+    assert stepctx._tail_promises_work("修完后再跑一次确认。") is True
+    assert stepctx._tail_promises_work("改好后再验证一遍。") is True
+    assert stepctx._tail_promises_work("README 修完之后，再核对一次规模数字。") is True
+    # 不要误伤：中间插了「你」「可以」的交付说明（注意句首不能是动作词，
+    # 否则会先被 _BARE_ACTION_RE 判成承诺）
+    assert stepctx._tail_promises_work("等这批全部改完之后，你可以再看一下效果。") is False
+    assert stepctx._tail_promises_work("都做完了，你可以再跑一次看看。") is False
+
+
+def test_tail_promise_detects_semicolon_chained_actions():
+    """分号连写的两个动作也要算承诺（现场 01:57:02：「运行 A；同时并行运行 B。」）。"""
+    assert stepctx._tail_promises_work(
+        "运行最终核对脚本；同时并行运行全量回归。") is True
+    assert stepctx._tail_promises_work("先跑一遍回归；再核对三处文档数字。") is True
+    # 不要误伤：第二段不是动作
+    assert stepctx._tail_promises_work("核心改动已完成；剩下的等你有空决定。") is False

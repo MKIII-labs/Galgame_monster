@@ -404,6 +404,7 @@ const END_REASON_LABEL = {
   max_rounds: '工具轮数达上限',
   length: '输出被截断',
   plan: '计划已生成',
+  done: '本轮已完成',
   resume: '任务未完成，可继续',
 };
 
@@ -422,8 +423,10 @@ function notifyChatDone(info) {
     .replace(/[#*`>|\-]/g, ' ')
     .replace(/\s+/g, ' ').trim();
   const tone = (kind === 'billing' || kind === 'network') ? 'error'
+             : kind === 'done' ? 'done'
              : kind ? 'warn' : (opts.error ? 'error' : 'done');
-  showSystemNotify(who + ' · ' + label, clean.slice(0, 90) || ('本轮' + label), tone);
+  showSystemNotify(who + ' · ' + label, clean.slice(0, 90) || ('本轮' + label), tone,
+                   { sessionId: opts.sessionId });
 }
 
 function syncSearchPill() {
@@ -465,6 +468,25 @@ async function sendMessage(payload) {
   }
   const text = String(
     (replay ? payload.text : (fromQueue ? payload : input.value)) || '').trim();
+  // `#web` / `#web <url>`：用户显式指定本轮联网（对齐 Trae 的 #Web）。
+  //   `#web 问题`        → 强制本轮开放 web_search，并要求先检索再回答
+  //   `#web <url> 问题`  → 直接抓该页正文当上下文，不搜索
+  // 标记只用于解析：送给模型的正文里去掉，气泡仍显示你打的原文。
+  let webForce = false, webUrl = '';
+  let sendText = text;
+  if (state.uiMode !== 'gal') {
+    const mWeb = /(?:^|\s)#web(?:\s+(https?:\/\/\S+))?\s*/i.exec(text);
+    if (mWeb) {
+      webForce = true;
+      webUrl = mWeb[1] || '';
+      sendText = (text.slice(0, mWeb.index) + ' ' +
+                  text.slice(mWeb.index + mWeb[0].length)).trim();
+      if (!sendText) {
+        if (!webUrl) { toast('#web 后面写一句你要查什么'); return; }
+        sendText = '请阅读这个页面，概括要点并指出与我任务相关的部分。';
+      }
+    }
+  }
   const imgs = fromQueue
     ? (replay ? (payload.imgs || []) : [])
     : ((state.pendingImages && state.pendingImages.length)
@@ -481,6 +503,7 @@ async function sendMessage(payload) {
       && editTarget.sid === String(state.sessions.current || '')) {
     if (state.streaming) { toast('正在生成回复，稍后再发送这次修改', 'error'); return; }
     if (!text) return;
+    if (webForce) { toast('「修改」不支持 #web，请作为新消息发送', 'error'); return; }
     if (!hasChatKey()) { toast('请先在「设置 → 模型接入」中填写密钥', 'error'); return; }
     const idx = editTarget.index;
     const s0 = curSession();
@@ -551,7 +574,11 @@ async function sendMessage(payload) {
   // 发新消息前，把还处于「预览」的用户消息恢复为当前版本
   if (verPreview && verPreview.sid === state.sessions.current) refreshUserRow(verPreview.index);
   verPreview = null;
-  const extra = { content: text };
+  const extra = { content: sendText };
+  if (webForce) {
+    extra.web_search_force = true;
+    if (webUrl) extra.web_fetch_url = webUrl;
+  }
   if (planMode) extra.plan_mode = true;
   if (state.uiMode === 'gal') {
     extra.mode = 'gal';
@@ -614,13 +641,29 @@ async function streamChat(extra, resume) {
   if (resume && resume.row) {
     row = resume.row;
     base = resume.base || '';
-    // 续写：把旧的「多段正文 / 提问卡」并回当前段，否则收尾重排会留下重复内容
-    (row._secs || []).slice(1).forEach((n) => n.remove());
+    // 续写：把旧的「多段正文 / 提问卡」并回**一段仍然挂在文档里的**正文节点，
+    // 否则收尾重排会留下重复内容。
+    // 这里以前写的是「删掉第 2 段起的全部，再把 row._content 当保留段」——
+    // 但收尾重排后 `_content` 指向的是**最后一段**（buildBlocksView 的 parts 末尾），
+    // 多段正文时被删掉的正是它自己：整轮续写的 token 全写进一个脱离文档的节点，
+    // 界面一直不变化，只有切会话 / 刷新重建才看得到（现场 00:30 的「继续输出」）。
+    let keep = row._content;
+    const secs = (row._secs || []).filter((n) => n && n.parentNode);
+    if (secs.length && secs.indexOf(keep) < 0) keep = secs[secs.length - 1];
+    (row._secs || []).forEach((n) => { if (n !== keep) n.remove(); });
     (row._asks || []).forEach((n) => n.remove());
-    row._secs = [row._content];
+    if (!keep || !keep.parentNode) {
+      // 极端情况（行被别处重排过）：新建一段正文再接流，别把输出写进死节点
+      keep = document.createElement('div');
+      keep.className = 'content';
+      const anchor = row._wrap.querySelector('.msg-actions, .live-bar, .end-note');
+      row._wrap.insertBefore(keep, anchor || null);
+    }
+    row._secs = [keep];
     row._asks = [];
-    row._content.style.display = '';
-    row._content.textContent = base;              // 清掉旧的 markdown 渲染，改为纯文本起点
+    row._content = keep;
+    keep.style.display = '';
+    keep.textContent = base;                      // 清掉旧的 markdown 渲染，改为纯文本起点
     row._raw = base;
     const oldBar = row._wrap.querySelector('.msg-actions');
     if (oldBar) oldBar.remove();                  // 移除旧操作条，流结束后统一重建
@@ -672,18 +715,53 @@ async function streamChat(extra, resume) {
   const keepLiveLast = () => { if (row._wrap) row._wrap.appendChild(typing); };
   // 探索小队（只读子代理）：独立小卡片，放在正文外层，不会被正文重绘冲掉
   let subagentBox = null;
-  const subagentRows = {};
+  let subagentTimer = 0;
+  const subagentRows = {};        // id -> {el, done, fail, t0}
+  const SUB_ROLE = { searcher: '侦察', reader: '阅读', finder: '定位', worker: '执行',
+    critic: '复核', researcher: '调研', reviewer: '审查' };
+  // 运行中的行每 0.4 秒刷一次耗时：子代理常常几十秒没有任何事件，
+  // 没有秒数用户分不清「在跑」和「卡死」。卡片被重绘掉就自动停表。
+  const subAgentTick = () => {
+    if (!subagentBox || !subagentBox.isConnected) {
+      if (subagentTimer) { clearInterval(subagentTimer); subagentTimer = 0; }
+      return;
+    }
+    Object.keys(subagentRows).forEach((id) => {
+      const s = subagentRows[id];
+      if (s.done || !s.el) return;
+      const t = s.el.querySelector('.subagent-time');
+      if (t) t.textContent = ((Date.now() - s.t0) / 1000).toFixed(1) + 's';
+    });
+  };
+  const subagentSummary = () => {
+    if (!subagentBox) return;
+    const ids = Object.keys(subagentRows);
+    const done = ids.filter((id) => subagentRows[id].done).length;
+    const fail = ids.filter((id) => subagentRows[id].fail).length;
+    const sum = subagentBox.querySelector('.subagent-sum');
+    if (sum) {
+      sum.textContent = '完成 ' + done + '/' + ids.length + (fail ? ' · 失败 ' + fail : '');
+    }
+  };
   const ensureSubagentBox = () => {
     if (subagentBox) return subagentBox;
     if (state.uiMode === 'gal' || !isCur()) return null;
     const box = document.createElement('div');
     box.className = 'subagent-card';
     box.innerHTML = '<div class="subagent-head">'
+      + '<button type="button" class="subagent-fold" title="收起 / 展开">'
+      + '<span class="subagent-caret">▾</span></button>'
       + '<span class="subagent-title">探索小队</span>'
-      + '<span class="subagent-sum"></span></div>'
+      + '<span class="subagent-sum">启动中…</span></div>'
       + '<div class="subagent-body"></div>';
+    const fold = box.querySelector('.subagent-fold');
+    fold.onclick = () => {
+      const folded = box.classList.toggle('folded');
+      fold.querySelector('.subagent-caret').textContent = folded ? '▸' : '▾';
+    };
     row._wrap.insertBefore(box, typing);
     subagentBox = box;
+    if (!subagentTimer) subagentTimer = setInterval(subAgentTick, 400);
     return box;
   };
   const subagentRow = (id) => {
@@ -691,11 +769,29 @@ async function streamChat(extra, resume) {
     if (!box) return null;
     if (!subagentRows[id]) {
       const r = document.createElement('div');
-      r.className = 'subagent-row';
-      r.innerHTML = '<span class="subagent-ico">⋯</span>'
-        + '<span class="st"></span><span class="sm"></span>';
+      r.className = 'subagent-row running';
+      r.innerHTML = '<div class="subagent-top">'
+        + '<span class="subagent-dot"></span>'
+        + '<span class="subagent-role"></span>'
+        + '<div class="subagent-main">'
+        + '<div class="subagent-ask"></div>'
+        + '<div class="subagent-step">排队中…</div>'
+        + '</div>'
+        + '<span class="subagent-time"></span>'
+        + '<span class="subagent-ico">⋯</span>'
+        + '</div>'
+        + '<div class="subagent-detail" hidden>'
+        + '<div class="subagent-metrics"></div>'
+        + '<div class="subagent-result"></div>'
+        + '</div>';
+      // 点一行展开：看完整问题、指标与结论预览（默认收起，不抢正文）
+      r.querySelector('.subagent-top').onclick = () => {
+        const open = r.classList.toggle('open');
+        const d = r.querySelector('.subagent-detail');
+        if (d) d.hidden = !open;
+      };
       box.querySelector('.subagent-body').appendChild(r);
-      subagentRows[id] = r;
+      subagentRows[id] = { el: r, done: false, fail: false, t0: Date.now() };
     }
     return subagentRows[id];
   };
@@ -1138,6 +1234,7 @@ async function streamChat(extra, resume) {
     notifyChatDone({
       text: '', error: null, stopped: false, reason: recReason,
       title: cur0 ? '' : ((s0 && s0.title) || '新对话'),
+      sessionId: sid,
     });
   };
 
@@ -1295,11 +1392,13 @@ async function streamChat(extra, resume) {
             row._usageEl.className = 'usage-line';
             row._wrap.appendChild(row._usageEl);
           }
-          row._usageEl.textContent = usageText(obj.usage, row._doneAt);
+          setUsage(row._usageEl, obj.usage, row._doneAt,
+                   usageCalls({ timing: row._timing || {} }), row._timing || null);
           if (state.uiMode === 'gal') galExecUsage(obj.usage);
         } else if (obj.type === 'timing') {
           // 请求链路埋点：分段耗时（load / assemble / doc / compress / first_token / total），
-          // 只输出到控制台供排查，不打扰界面
+          // 只输出到控制台供排查，不打扰界面；同时留给用量行标「N 次调用累计」。
+          row._timing = obj.timing || null;
           if (window.console && console.debug) console.debug('[timing]', obj.timing);
         } else if (obj.type === 'step') {
           // 每一步开始：上一步的思考收尾、工具组换新，过程按时间线往下排
@@ -1321,39 +1420,70 @@ async function streamChat(extra, resume) {
           ensureFlow().appendChild(thinkBox);
           scrollToBottom();
         } else if (obj.type === 'subagent_start') {
-          const r = subagentRow(obj.id);
-          if (r) {
-            r.querySelector('.st').textContent = '[' + (obj.role || '?') + '] ' + (obj.ask || '');
-            r.querySelector('.sm').textContent = '开始';
+          const s = subagentRow(obj.id);
+          if (s) {
+            s.t0 = Date.now();
+            s.el.style.setProperty('--depth', String(Math.max(0, Number(obj.depth) || 0)));
+            const role = s.el.querySelector('.subagent-role');
+            role.textContent = obj.name || SUB_ROLE[obj.role]
+              || (obj.role ? String(obj.role) : '子代理');
+            role.dataset.role = obj.role || 'reader';
+            const askEl = s.el.querySelector('.subagent-ask');
+            askEl.textContent = obj.ask || '';
+            askEl.title = obj.ask || '';
+            s.el.querySelector('.subagent-step').textContent =
+              (obj.fork && obj.prefix_tokens)
+                ? ('继承上下文 ' + Math.round(obj.prefix_tokens / 1000) + 'k …')
+                : '开始…';
+            subagentSummary();
           }
           scrollToBottom();
         } else if (obj.type === 'subagent_step') {
-          const r = subagentRows[obj.id];
-          if (r) {
-            r.querySelector('.sm').textContent = (obj.tool || '')
-              + (obj.target ? ' · ' + obj.target : '');
+          const s = subagentRows[obj.id];
+          if (s && s.el) {
+            s.el.querySelector('.subagent-step').textContent =
+              (obj.tool || '') + (obj.target ? ' · ' + obj.target : '');
           }
         } else if (obj.type === 'subagent_done') {
-          const r = subagentRows[obj.id];
-          if (r) {
+          const s = subagentRows[obj.id];
+          if (s && s.el) {
             const ok = !!obj.ok;
-            r.classList.add(ok ? 'done' : 'fail');
-            r.querySelector('.subagent-ico').textContent = ok ? '✓' : '✕';
-            r.querySelector('.sm').textContent = ok
-              ? (((obj.ms || 0) / 1000).toFixed(1) + 's · ' + (obj.tools || 0) + ' 次')
+            s.done = true;
+            s.fail = !ok;
+            s.el.classList.remove('running');
+            s.el.classList.add(ok ? 'done' : 'fail');
+            s.el.querySelector('.subagent-ico').textContent = ok ? '✓' : '✕';
+            const secs = ((obj.ms || 0) / 1000).toFixed(1) + 's';
+            s.el.querySelector('.subagent-time').textContent = secs;
+            s.el.querySelector('.subagent-step').textContent = ok
+              ? ('完成 · ' + secs + ' · ' + (obj.rounds || 0) + ' 轮 · '
+                 + (obj.tools || 0) + ' 次工具 · ' + (obj.chars || 0) + ' 字')
               : (obj.error || '失败');
-          }
-          if (subagentBox) {
-            const total = Object.keys(subagentRows).length;
-            const fin = subagentBox.querySelectorAll('.subagent-row.done, .subagent-row.fail').length;
-            subagentBox.querySelector('.subagent-sum').textContent = fin + '/' + total;
+            // 展开后的指标栏：只放这一行真正有的数，不补 0 占位
+            const mt = [['轮次', obj.rounds || 0], ['工具', obj.tools || 0],
+                        ['字数', obj.chars || 0]];
+            if (obj.tokens) mt.push(['token', obj.tokens]);
+            if (obj.evidence != null) mt.push(['证据分', obj.evidence]);
+            if (obj.missing) mt.push(['缺失引用', obj.missing]);
+            s.el.querySelector('.subagent-metrics').innerHTML = mt.map((x) =>
+              '<span class="subagent-metric"><b>' + escapeHtml(String(x[1])) + '</b>'
+              + escapeHtml(String(x[0])) + '</span>').join('');
+            const res = s.el.querySelector('.subagent-result');
+            res.textContent = ok ? String(obj.preview || '') : String(obj.error || '');
+            subagentSummary();
           }
         } else if (obj.type === 'subagent_all') {
           if (subagentBox) {
             const title = subagentBox.querySelector('.subagent-title');
             if (title) title.textContent = '探索小队 · ' + (obj.n || 0) + ' 个';
-            subagentBox.querySelector('.subagent-sum').textContent =
-              (((obj.ms || 0) / 1000).toFixed(1) + 's · ' + (obj.tokens || 0) + ' token');
+            const sum = subagentBox.querySelector('.subagent-sum');
+            if (sum) {
+              sum.textContent = '完成 ' + (obj.ok != null ? obj.ok : 0) + '/'
+                + (obj.n || 0) + ' · ' + (((obj.ms || 0) / 1000).toFixed(1)) + 's'
+                + (obj.tokens ? ' · ' + obj.tokens + ' token' : '')
+                + (obj.accept === false ? ' · 验收未过' : '');
+            }
+            subagentBox.classList.add('all-done');
           }
         } else if (obj.type === 'auto_continue') {
           // 自动续跑：在过程流里留一条轻提示，让用户知道不是卡住了，是它自己在往下做
@@ -1479,6 +1609,29 @@ async function streamChat(extra, resume) {
           // 执行计划：模型通过 update_plan / plan_patch 维护，独立成一张清单卡
           if (typeof planRender === 'function') planRender(row, obj);
           scrollToBottom();
+        } else if (obj.type === 'plan_review') {
+          // 计划审批：后端已挂起，等这里点「批准并执行 / 按意见重排」
+          if (typeof planReviewRender === 'function') planReviewRender(row, obj);
+          setLive('计划待你批准');
+          setLiveSec('');
+          keepLiveLast();
+          waitingApproval = true;
+          phase = 'idle';
+          scrollToBottom();
+        } else if (obj.type === 'plan_review_done') {
+          if (typeof planReviewDone === 'function') planReviewDone(row, obj);
+          scrollToBottom();
+        } else if (obj.type === 'acceptance_review') {
+          // 验收子代理的判定卡（独立 AI 打分 + 证据 + 差距）
+          if (typeof acceptanceReviewRender === 'function') {
+            acceptanceReviewRender(row, obj.report || {});
+          }
+          scrollToBottom();
+        } else if (obj.type === 'review_tool') {
+          // 验收代理正在做核对（读文件 / 跑命令），只是状态提示
+          setLive('验收代理正在核对 · ' + String(obj.name || '工具'));
+          setLiveSec('');
+          scrollToBottom();
         } else if (obj.type === 'tool_stream') {
           // 原生工具调用参数正在生成：整轮结束前先把名字 / 大小显示出来。
           // 否则界面只有「思考中」或「尚未产出」，用户不知道它在写工具参数。
@@ -1562,9 +1715,10 @@ async function streamChat(extra, resume) {
               ? 'AI 有 ' + qs.length + ' 个问题等你回答' : 'AI 在等你回答';
             const body = String((qs[0] || {}).question || '').slice(0, 90);
             if (typeof notifyOnce === 'function') {
-              notifyOnce(obj.qid ? 'ask:' + obj.qid : '', title, body, 'ask');
+              notifyOnce(obj.qid ? 'ask:' + obj.qid : '', title, body, 'ask',
+                         { sessionId: sid });
             } else if (typeof showSystemNotify === 'function') {
-              showSystemNotify(title, body, 'ask');
+              showSystemNotify(title, body, 'ask', { sessionId: sid });
             }
           }
           const askCard = buildAskGroup(obj.questions, obj.qid);
@@ -1621,9 +1775,18 @@ async function streamChat(extra, resume) {
           if (obj.type === 'done') {
             gotDone = true;
             row._doneAt = obj.done_at || row._doneAt;
-            if (row._usageEl && row._usageData) {
-              // 输出完成时间挂在缓存命中后面：排查「这轮什么时候结束的」不用再翻日志
-              row._usageEl.textContent = usageText(row._usageData, row._doneAt);
+            const timingNow = obj.timing || row._timing || null;
+            // 没有 usage（例如本轮没产出 token）时也要显示「完成耗时」：只建一行即可
+            if (!row._usageEl && (row._usageData
+                || (timingNow && Number(timingNow.total_ms) > 0))) {
+              row._usageEl = document.createElement('div');
+              row._usageEl.className = 'usage-line';
+              row._wrap.appendChild(row._usageEl);
+            }
+            if (row._usageEl && (row._usageData || timingNow)) {
+              // 输出完成时间 + 完成耗时挂在缓存命中后面：排查「这轮什么时候结束 / 花了多久」
+              setUsage(row._usageEl, row._usageData || null, row._doneAt,
+                       usageCalls({ timing: timingNow || {} }), timingNow);
             }
             clearToolPending();
             phase = 'idle';
@@ -1748,6 +1911,10 @@ async function streamChat(extra, resume) {
         }
         c.innerHTML = safeRenderMarkdown(shown);
       }
+      // 后台探索批次：回合结束后仍在跑，单独成卡并轮询进度（不放进过程折叠）
+      if (typeof appendExploreBatchCards === 'function') {
+        appendExploreBatchCards(row._wrap, doneTools);
+      }
       // 多段正文都要走富媒体增强（公式 / 图表），所以按整条消息扫一遍
       if (window.enhanceRichMedia) window.enhanceRichMedia(row._wrap);
       idx = (!bg && mine && Array.isArray(mine.messages))
@@ -1786,6 +1953,7 @@ async function streamChat(extra, resume) {
         stopped: stopped,
         reason: endReason,
         title: bgTitle,
+        sessionId: sid,
       });
     }
     if (state.uiMode === 'gal' && isCur()) galFlushOptions();   // 流已结束 → 若有暂存选项则显示
@@ -1828,6 +1996,7 @@ async function keepRecovering(sid, err) {
       notifyChatDone({
         text: '', error: err || null, stopped: false, reason: r.reason || null,
         title: cur ? '' : ((s && s.title) || '新对话'),
+        sessionId: sid,
       });
       return;
     }
@@ -1993,7 +2162,10 @@ async function regenerateReply(index) {
 // 继续输出：复用最后一条被打断的 AI 气泡，从断点接着写（仅 Solo/IDE）
 // isResume = true 时是「进程重启后的断点续跑」：后端会附带已完成步骤摘要。
 async function continueReply(index, isResume) {
-  if (state.streaming || typeof index !== 'number') return;
+  if (typeof index !== 'number') return;
+  // 用实时状态判断，不要用缓存的 state.streaming：它只在 register/unregister 时刷新，
+  // 过期时会「点了完全没反应」，看起来就像按钮坏了（现场 00:30）。
+  if (isStreaming()) { toast('这一轮还在生成，等它结束再点「继续输出」'); return; }
   if (state.uiMode === 'gal') return;                 // GAL 模式不提供
   if (!hasChatKey()) { toast('请先在「设置 → 模型接入」中填写密钥', 'error'); return; }
   const s = curSession();
@@ -2146,10 +2318,6 @@ let imageLoads = 0;                           // 正在读取、还没 onload �
 
 function attachImageBlob(blob) {
   if (!blob) return;
-  if (state.pendingDoc) {
-    toast('已有待发送文档，请先发送或移除后再添加图片', 'error');
-    return;
-  }
   const loaded = (state.pendingImages || []).length;
   if (loaded + imageLoads >= MAX_PENDING_IMAGES) {
     toast('一次最多发送 ' + MAX_PENDING_IMAGES + ' 张图片', 'error');
@@ -2184,11 +2352,6 @@ function attachImageBlob(blob) {
 // 文档附件：读成 base64 暂存，正文由后端在发送时抽取（界面只显示文件名）
 function attachDocBlob(file) {
   if (!file) return;
-  if (state.pendingDoc || state.pendingImage
-      || (state.pendingImages && state.pendingImages.length) || imageLoads) {
-    toast('已有待发送附件，请先发送或移除后再添加文档', 'error');
-    return;
-  }
   if (file.size > DOC_MAX_BYTES) { toast('附件太大（上限 2GB）', 'error'); return; }
   const name = file.name || '附件';
   const epoch = attachEpoch;
@@ -2202,8 +2365,6 @@ function attachDocBlob(file) {
       b64: s.split(',')[1] || '',
       size: file.size || 0,
     };
-    state.pendingImage = null;
-    state.pendingImages = [];
     renderAttach();
     toast('已附带 ' + name + '，可继续输入文字后一起发送');
   };
@@ -2235,6 +2396,9 @@ function renderAttach() {
       thumb.className = 'attach-thumb';
       thumb.src = im.url;
       thumb.alt = '待发送图片 ' + (i + 1);
+      thumb.title = '点击查看大图';
+      thumb.style.cursor = 'zoom-in';
+      thumb.onclick = () => imgZoomOpen(im.url, '待发送图片');
       const x = document.createElement('button');
       x.type = 'button';
       x.className = 'attach-thumb-x';
@@ -2250,13 +2414,19 @@ function renderAttach() {
   if (chip) {
     chip.classList.toggle('hidden', !doc);
     chip.innerHTML = doc ? (icon('attach') + ' ' + escapeHtml(doc.name) + docChipSuffix(doc)) : '';
+    chip.title = doc ? '点击预览' : '';
+    chip.style.cursor = doc ? 'pointer' : '';
+    chip.onclick = doc ? () => docPreviewPending(doc) : null;
   }
   const txt = $('#attach-text');
   if (txt) {
-    txt.textContent = imgs.length > 1
-      ? ('已附带 ' + imgs.length + ' 张图片 · 可继续输入文字后一起发送')
-      : (imgs.length ? '已附带图片 · 可继续输入文字后一起发送'
-      : (doc ? '已附带文档（发送时自动抽取正文）· 可继续输入文字后一起提问' : ''));
+    const parts = [];
+    if (imgs.length > 1) parts.push(imgs.length + ' 张图片');
+    else if (imgs.length) parts.push('图片');
+    if (doc) parts.push('文档（发送时自动抽取正文）');
+    txt.textContent = parts.length
+      ? ('已附带 ' + parts.join(' + ') + ' · 可继续输入文字后一起发送')
+      : '';
   }
   syncSendBtn();
 }

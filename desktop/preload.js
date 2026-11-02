@@ -5,10 +5,29 @@ contextBridge.exposeInMainWorld('gmWin', {
   minimize: () => ipcRenderer.send('win:minimize'),
   toggleMaximize: () => ipcRenderer.send('win:toggle-maximize'),
   close: () => ipcRenderer.send('win:close'),
+  focus: () => ipcRenderer.send('win:focus'),
+  // 系统通知走主进程创建：点击事件可靠，且能在点击时还原 / 聚焦窗口
+  notify: (payload) => ipcRenderer.send('notify:show', payload || {}),
+  onNotifyClick: (fn) => {
+    if (typeof fn !== 'function') return;
+    ipcRenderer.on('notify:click', (_e, payload) => {
+      try { fn(payload || {}); } catch (err) { /* 页面异常不影响壳 */ }
+    });
+  },
   onMaximized: (fn) => {
     if (typeof fn !== 'function') return;
     ipcRenderer.on('win:maximized', (_e, v) => {
       try { fn(!!v); } catch (err) { /* 页面自己的异常不影响壳 */ }
     });
+  },
+  // 导出文件：主进程弹保存框并直接写盘（不把大文件先读进渲染进程内存）
+  saveUrl: (payload) => ipcRenderer.invoke('file:save-url', payload || {}),
+  onSaveProgress: (fn) => {
+    if (typeof fn !== 'function') return () => {};
+    const h = (_e, p) => {
+      try { fn(p || {}); } catch (err) { /* 页面自己的异常不影响壳 */ }
+    };
+    ipcRenderer.on('file:save-progress', h);
+    return () => ipcRenderer.removeListener('file:save-progress', h);
   },
 });

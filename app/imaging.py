@@ -66,27 +66,35 @@ def recognize_image_auto(mime, b64, question=""):
     return "⚠️ 尚未配置「视觉模型」或「聊天模型」的 API 密钥，无法识别图片。"
 
 
-def recognize_image_fallback(mime, b64, question="", prefer=None):
+def recognize_image_fallback(mime, b64, question="", prefer=None, images=None, meta=None):
     """识图；首选通道**实际失败**时自动换另一条通道。
 
     与 recognize_image_auto 的区别：那个只看「哪条配置了 key」。
     截图回灌时首选可能是聊天模型，而纯文本聊天模型收到 image_url 会直接报错 ——
     必须按结果回落，否则截图永远识不出来。
     失败判定沿用本模块的约定：返回以 ❌ / ⚠️ 开头即视为没成功。
+
+    images 给出多张图时一次请求里一起发（用于参考 vs 产物的直接对照）；
+    meta 传入 dict 时写入实际通道（provider / first / fallback），便于排查。
     """
     first = prefer if prefer in ("chat", "vision") else (
         "chat" if use_chat_for_vision() else "vision")
     second = "vision" if first == "chat" else "chat"
     out = ""
     for provider in (first, second):
-        out = _recognize_with(provider, mime, b64, question)
+        out = _recognize_with(provider, mime, b64, question, images=images)
         if not str(out).startswith(("❌", "⚠️")):
+            if isinstance(meta, dict):
+                meta.update({"provider": provider, "first": first,
+                             "fallback": provider != first})
             return out
+    if isinstance(meta, dict):
+        meta.update({"provider": "", "first": first, "fallback": True})
     return out
 
 
-def _recognize_with(provider, mime, b64, question="", max_tokens=None):
-    """按指定通道（'chat' | 'vision'）识别一张图。返回识别文本或 ⚠️/❌ 说明。"""
+def _recognize_with(provider, mime, b64, question="", max_tokens=None, images=None):
+    """按指定通道（'chat' | 'vision'）识别一张或多张图。返回识别文本或 ⚠️/❌ 说明。"""
     use_chat = (provider == "chat")
     api_key, api_url, api_model = get_api_conf(provider)
     if not api_key:
@@ -94,24 +102,28 @@ def _recognize_with(provider, mime, b64, question="", max_tokens=None):
         return f"⚠️ 尚未配置{who} API 密钥，请在「设置 → {who} API」中填写。"
     # 用聊天模型识图时固定走 OpenAI 兼容的多模态格式
     protocol = "openai" if use_chat else get_api_protocol("vision")
-    data_url = f"data:{mime};base64,{b64}"
+    items = [it for it in (images or [(mime, b64)]) if it and it[1]]
+    data_urls = [f"data:{m};base64,{b}" for m, b in items]
     question = (question or "").strip()
+    many = len(data_urls) > 1
+    prefix = ("下面按顺序给出了 %d 张图片（第 1 张、第 2 张…）。"
+              "回答时请用「第 N 张」指明你说的是哪一张。\n" % len(data_urls)) if many else ""
     if question:
         # 带着用户的问题识图，让描述贴着他的提问走
-        prompt = (f"用户对这张图片的提问：{question}\n\n"
+        prompt = (prefix + f"用户对图片的提问：{question}\n\n"
                   "请结合图片内容回答这个提问。若图片含数学公式，请用 LaTeX（$$...$$）输出；"
                   "若含手写或印刷文字，请一并识别。请用中文回答。")
     else:
-        prompt = """请分析这张图片，完成以下任务：
+        prompt = prefix + """请分析这些图片，完成以下任务：
 1. 如果图片中包含数学公式，请用 LaTeX 格式输出所有公式
 2. 如果图片是物体/场景照片，请识别并描述其中的主要内容
 3. 如果图片包含手写文字，请尽可能识别并输出
 请用中文回答，公式部分用 $$...$$ 包裹。"""
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if protocol == "openai":
-        payload = {"model": api_model, "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": data_url}},
-            {"type": "text", "text": prompt}]}]}
+        payload = {"model": api_model, "messages": [{"role": "user", "content": (
+            [{"type": "image_url", "image_url": {"url": u}} for u in data_urls]
+            + [{"type": "text", "text": prompt}])}]}
         if max_tokens:
             payload["max_tokens"] = int(max_tokens)
         if use_chat:
@@ -122,8 +134,8 @@ def _recognize_with(provider, mime, b64, question="", max_tokens=None):
             payload.update(thinking_payload(effective_think_mode(api_url), False,
                                             cfg.get("chat_think_level") or "high"))
     else:
-        payload = {"model": api_model, "input": {"messages": [{"role": "user", "content": [
-            {"image": data_url}, {"text": prompt}]}]}}
+        payload = {"model": api_model, "input": {"messages": [{"role": "user", "content": (
+            [{"image": u} for u in data_urls] + [{"text": prompt}])}]}}
         if max_tokens:
             payload["max_tokens"] = int(max_tokens)
     try:

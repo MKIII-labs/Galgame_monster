@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 from app.registry import route
 from app.store import (ACTIVE_STREAMS, APP_VERSION, DATA_DIR, ROOT, _lock)
-from app import open_request, open_session, win_context_menu
+from app import open_request, open_session, session_status, win_context_menu
 from app.learning import (BUILTIN_PRESET_LABEL, load_builtin_learning_presets)
 from app.search import (SEARCH_PROVIDERS, chat_search_available,
                         effective_search_provider)
@@ -15,11 +15,18 @@ from app.usage import aggregate_usage
 from app.context import current_context
 from app.config import (default_config, get_api_conf, load_config, save_config)
 from app.knowledge import (load_kb_index, relations_payload)
-from app.profile import (DEFAULT_PROFILE, load_profile, save_profile)
+from app.profile import (DEFAULT_PROFILE, clean_rules, load_profile, save_profile)
 from app.sessions import (load_sessions, slim_sessions)
 from app.balance import query_balance
 from app import llm, mem_tool, observe as observe_store, winframe
 from app import expression
+
+# 提醒开关相关的配置键：保存这些键时要同步 Windows 计划任务
+REMINDER_SWITCH_KEYS = {
+    "reminders_enabled", "reminder_inapp_enabled", "reminder_system_enabled",
+    "reminder_calendar_enabled", "auto_chat_enabled",
+}
+
 
 def _api_state(h):
         data = load_sessions()
@@ -40,6 +47,8 @@ def _api_state(h):
             # 哪些会话正在生成：断线重连时前端据此判断「任务真的结束了没」，
             # 避免 attach 一失败就提前收尾（表现成回答说到一半没了）。
             "streaming": sorted(ACTIVE_STREAMS.keys()),
+            # 会话运行态：sid -> approval / ask；侧栏据此显示「待批准 / 待回答」
+            "pending": session_status.snapshot(),
             # 右键菜单冷启动时的待打开目录（SSE 还没连上，走这里兜底）
             "pending_open": str((open_request.pending() or {}).get("path") or ""),
             # 资源管理器右键菜单是否已注册（设置页按钮的初始文案）
@@ -120,7 +129,42 @@ def _api_save_config(h):
             hooks.clear_cache()
         except Exception:                    # noqa: BLE001  保存成功不能被清理失败拖累
             pass
+        # 提醒开关变更：同步注销 / 恢复 Windows 计划任务（否则程序关了仍会弹）
+        if REMINDER_SWITCH_KEYS & set(incoming):
+            try:
+                from app import calendar as calendar_lib
+                from app import scheduler
+                scheduler.apply_switches()
+                calendar_lib.apply_system_switch()
+            except Exception:                # noqa: BLE001
+                pass
         h._json({"ok": True})
+
+
+@route("/api/open/folder")
+def _api_open_folder(h):
+    """在文件管理器里打开一个目录（只允许当前会话实际用过的沙箱路径）。"""
+    path = str(h._body().get("path") or "").strip()
+    if not path or len(path) > 1000:
+        return h._json({"ok": False, "error": "缺少目录路径"}, 400)
+    target = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(target):
+        return h._json({"ok": False, "error": "目录不存在"}, 404)
+    known = set()
+    for s in (load_sessions().get("sessions") or []):
+        raw = str(s.get("sandbox") or "").strip()
+        if raw:
+            known.add(os.path.normcase(os.path.abspath(raw)))
+    if os.path.normcase(target) not in known:
+        return h._json({"ok": False, "error": "只能打开当前会话用过的目录"}, 403)
+    opener = getattr(os, "startfile", None)
+    if opener is None:
+        return h._json({"ok": False, "error": "当前系统不支持打开文件夹"}, 500)
+    try:
+        opener(target)
+    except OSError as e:
+        return h._json({"ok": False, "error": "打开失败：%s" % e}, 500)
+    return h._json({"ok": True, "path": target})
 
 
 @route("/api/mcp/test")
@@ -139,9 +183,11 @@ def _api_save_profile(h):
         for k in ("manual", "auto", "auto_learn_enabled", "learning_prompt_custom"):
             if k in incoming:
                 profile[k] = incoming[k]
+        if "rules" in incoming:
+            profile["rules"] = clean_rules(incoming.get("rules"))
         with _lock:
             save_profile(profile)
-        h._json({"ok": True})
+        h._json({"ok": True, "rules": profile.get("rules") or []})
 
 
 def _api_window_theme(h):

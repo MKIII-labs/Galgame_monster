@@ -280,6 +280,32 @@ def _active_stream_count():
         return 0
 
 
+def _background_job_count():
+    """还有几个后台长任务在跑：子代理批次 + 自动化目标。
+
+    它们不在 ACTIVE_STREAMS 里（不是对话回合），但同样是用户交给程序的任务；
+    关窗后如果只等对话流，回合一结束进程就退出，后台线程会被一起杀掉。
+    任何一个模块读失败都按 0 计——保活逻辑不能反过来把进程卡死。
+    """
+    n = 0
+    try:
+        from app import explore
+        n += int(explore.running_count() or 0)
+    except Exception:
+        pass
+    try:
+        from app import autopilot
+        n += int(autopilot.running_count() or 0)
+    except Exception:
+        pass
+    return n
+
+
+def _pending_job_count():
+    """对话回合 + 后台长任务的合计，退出判断统一用它。"""
+    return _active_stream_count() + _background_job_count()
+
+
 def _wait_streams_grace(minutes, keep_alive=False):
     """窗口退出后给正在生成的任务留一段保活时间。
 
@@ -298,12 +324,12 @@ def _wait_streams_grace(minutes, keep_alive=False):
         return
     deadline = None if keep_alive else time.monotonic() + minutes * 60
     while True:
-        n = _active_stream_count()
+        n = _pending_job_count()
         if n <= 0:
-            _log("grace: streams finished")
+            _log("grace: streams/background jobs finished")
             return
         if deadline is not None and time.monotonic() >= deadline:
-            _log("grace: timeout with %d active stream(s)" % n)
+            _log("grace: timeout with %d pending job(s)" % n)
             return
         time.sleep(2)
 
@@ -571,10 +597,10 @@ def main():
         except Exception:
             _grace, _keep = 10, True
         while True:
-            _n = _active_stream_count()
+            _n = _pending_job_count()
             if _n > 0:
-                _log("window closed with %d active stream(s); keep_alive=%s grace=%s min"
-                     % (_n, _keep, _grace))
+                _log("window closed with %d pending job(s) (streams+background); "
+                     "keep_alive=%s grace=%s min" % (_n, _keep, _grace))
                 _wait_streams_grace(_grace, keep_alive=_keep)
                 continue          # 任务结束后再看一眼：这段时间可能已经重开了窗口
             # 没有任务：给 5 秒重连窗口（关窗后立刻重开 / 刷新都算）。

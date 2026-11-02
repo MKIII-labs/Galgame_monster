@@ -8,6 +8,7 @@
   关键词检索，并在结果里注明，工具不会因此报错。
 - 索引按「沙箱根 + 文件签名」持久化到 `data/codeindex/`；文件改动后签名变化会自动重建。
 """
+import fnmatch
 import hashlib
 import json
 import math
@@ -23,17 +24,23 @@ from app.store import DATA_DIR
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 MODEL_CACHE = os.path.join(DATA_DIR, "models", "fastembed")
 INDEX_DIR = os.path.join(DATA_DIR, "codeindex")
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 
-CHUNK_LINES = 40           # 每块多少行
-CHUNK_OVERLAP = 8          # 相邻块重叠行数
-MAX_FILE_BYTES = 200 * 1024
-MAX_FILES = 1200           # 超过就只索引较小的文件，避免首次建索引过慢
-MAX_CHUNKS = 1500
-MAX_TOTAL_BYTES = 24 * 1024 * 1024
+CHUNK_LINES = 80           # 每块多少行（符号边界会进一步切开）
+CHUNK_OVERLAP = 10         # 相邻块重叠行数
+MAX_FILE_BYTES = 512 * 1024
+MAX_FILES = 0              # 0 = 不限；可在设置里用 codeindex_max_files 覆盖
+MAX_CHUNKS = 0             # 0 = 不限
+MAX_TOTAL_BYTES = 0
 TOP_K = 6
 MIN_SCORE = 0.34
 RESULT_CHARS = 7000
+
+# 依赖目录 / 构建产物不参与索引；项目自己的 .gitignore 也会被读取
+IGNORE_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
+               ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build",
+               "target", "out", ".next", ".nuxt", ".cache", ".idea", ".vs"}
+
 
 CODE_EXT = {
     ".py", ".pyw", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue",
@@ -42,6 +49,8 @@ CODE_EXT = {
     ".sql", ".java", ".kt", ".c", ".h", ".cc", ".cpp", ".hpp", ".go", ".rs",
     ".php", ".rb", ".lua", ".xml", ".csv", ".env",
 }
+ALLOW_NO_EXT = {"Makefile", "makefile", "Dockerfile", "Rakefile", "Gemfile",
+                "Procfile", "LICENSE", "README"}
 
 _LOCK = threading.Lock()
 _CACHE = {}                 # root -> {"sig": str, "meta": [...], "vec": np.ndarray}
@@ -76,7 +85,7 @@ def _bm25_index(meta):
         for t in tf:
             df[t] = df.get(t, 0) + 1
     n = len(docs)
-    avg = (sum(l for _tf, l in docs) / n) if n else 0.0
+    avg = (sum(ln for _tf, ln in docs) / n) if n else 0.0
     return {"docs": docs, "df": df, "n": n, "avg": avg or 1.0}
 
 
@@ -181,37 +190,122 @@ def _looks_binary(path, probe=4096):
         return True
 
 
-def _collect_files(root):
-    """返回 [(abs, rel, size)]，跳过二进制、超大文件与扩展名白名单之外的。"""
+def _limits():
+    """索引预算：设置里可覆盖；0 = 不限（全仓）。"""
+    try:
+        from app.config import load_config
+        c = load_config() or {}
+    except Exception:                         # noqa: BLE001
+        c = {}
+
+    def _int(key, default):
+        try:
+            return int(c.get(key, default) or 0)
+        except (TypeError, ValueError):
+            return default
+    return {
+        "enabled": bool(c.get("codeindex_enabled", True)),
+        "max_files": _int("codeindex_max_files", MAX_FILES),
+        "max_chunks": _int("codeindex_max_chunks", MAX_CHUNKS),
+        "max_file_bytes": _int("codeindex_max_file_kb", MAX_FILE_BYTES // 1024) * 1024,
+    }
+
+
+def _gitignore_patterns(root):
+    p = os.path.join(root, ".gitignore")
     out = []
-    for dirpath, _dirnames, filenames in os.walk(root):
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("!"):
+                    continue
+                out.append(line.lstrip("/"))
+    except OSError:
+        pass
+    return out
+
+
+def _ignored(rel, patterns):
+    if not patterns:
+        return False
+    base = rel.rsplit("/", 1)[-1]
+    for pat in patterns:
+        p = pat.rstrip("/")
+        if pat.endswith("/") and (rel == p or rel.startswith(p + "/")):
+            return True
+        if fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(base, p):
+            return True
+        if rel.startswith(p + "/"):
+            return True
+    return False
+
+
+def _scan(root):
+    """扫描沙箱：返回 [(abs, rel, size, mtime_ns)]，遵守 .gitignore 与依赖目录。"""
+    lim = _limits()
+    if not lim["enabled"]:
+        return []
+    pats = _gitignore_patterns(root)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in IGNORE_DIRS and not d.startswith(".git")]
         for fn in filenames:
             ext = os.path.splitext(fn)[1].lower()
             if ext and ext not in CODE_EXT:
                 continue
+            if not ext and fn not in ALLOW_NO_EXT:
+                continue
             full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            if _ignored(rel, pats):
+                continue
             try:
-                size = os.path.getsize(full)
+                st = os.stat(full)
             except OSError:
                 continue
-            if size <= 0 or size > MAX_FILE_BYTES:
+            if st.st_size <= 0 or st.st_size > lim["max_file_bytes"]:
                 continue
-            rel = os.path.relpath(full, root).replace("\\", "/")
-            out.append((full, rel, size))
-    out.sort(key=lambda x: x[2])                 # 小文件优先，保证覆盖率
-    return out[:MAX_FILES]
+            out.append((full, rel, st.st_size, st.st_mtime_ns))
+    out.sort(key=lambda x: x[2])
+    if lim["max_files"] > 0:
+        out = out[:lim["max_files"]]
+    return out
+
+
+def _collect_files(root):
+    """兼容旧调用：返回 [(abs, rel, size)]。"""
+    return [(full, rel, size) for full, rel, size, _m in _scan(root)]
 
 
 def _signature(files):
     h = hashlib.sha1()
-    h.update(("%s|%s|%s" % (INDEX_VERSION, CHUNK_LINES, CHUNK_OVERLAP)).encode())
-    for full, rel, size in files:
-        try:
-            mtime = os.stat(full).st_mtime_ns
-        except OSError:
-            mtime = 0
+    h.update(("%s|%s|%s|%s" % (INDEX_VERSION, CHUNK_LINES, CHUNK_OVERLAP,
+                               _limits()["max_file_bytes"])).encode())
+    for item in files:
+        rel, size = item[1], item[2]
+        mtime = item[3] if len(item) > 3 else 0
         h.update(("%s|%d|%d\n" % (rel, size, mtime)).encode("utf-8", "ignore"))
     return h.hexdigest()
+
+
+# 符号边界：跨语言的常见定义写法；只用于「把长文件切成语义块」，不做精确解析
+_SYMBOL_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:async\s+)?(?:def|class|function|fn|func|struct|interface"
+    r"|trait|enum|type)\s+([A-Za-z_$][\w$]*)"
+    r"|^\s*(?:(?:public|private|protected|internal|static|final|abstract|synchronized"
+    r"|native|virtual|override|async|const|extern|inline)\s+)+"
+    r"[A-Za-z_][\w:<>\[\],.?*&]*\s+([A-Za-z_$][\w$]*)\s*\("
+    r"|^\s*(?:public|private|protected|internal)\s+"
+    r"(?:class|interface|enum|struct)\s+([A-Za-z_$][\w$]*)")
+
+
+def _symbol_of(line):
+    m = _SYMBOL_RE.match(line or "")
+    if not m:
+        return ""
+    return next((g for g in m.groups() if g), "")
 
 
 def _chunk_file(full, rel):
@@ -222,20 +316,28 @@ def _chunk_file(full, rel):
         return []
     if _looks_binary(full):
         return []
+    # 先按顶层定义切段，再按行数切块：比固定 40 行更贴近「一个函数一块」
+    bounds, start = [], 0
+    for i, line in enumerate(lines):
+        if i > start + 8 and _SYMBOL_RE.match(line):
+            bounds.append((start, i))
+            start = i
+    if start < len(lines):
+        bounds.append((start, len(lines)))
+
     out = []
     step = max(1, CHUNK_LINES - CHUNK_OVERLAP)
-    for start in range(0, max(1, len(lines)), step):
-        block = lines[start:start + CHUNK_LINES]
-        text = "\n".join(block).strip()
-        if not text:
-            continue
-        # 路径也参与 embedding：问「chat.js 里怎么折叠」时能影响排序
-        emb_text = "# %s:%d\n%s" % (rel, start + 1, text)
-        out.append({"path": rel, "start": start + 1,
-                    "end": min(len(lines), start + CHUNK_LINES),
-                    "text": text, "emb": emb_text})
-        if len(lines) <= start + CHUNK_LINES:
-            break
+    for s, e in bounds:
+        for cstart in range(s, max(s + 1, e), step):
+            cend = min(e, cstart + CHUNK_LINES)
+            text = "\n".join(lines[cstart:cend]).strip()
+            if text:
+                symbol = _symbol_of(lines[cstart] if cstart < len(lines) else "")
+                emb_text = "# %s%s\n%s" % (rel, (":" + symbol) if symbol else "", text)
+                out.append({"path": rel, "start": cstart + 1, "end": cend,
+                            "text": text, "symbol": symbol, "emb": emb_text})
+            if cend >= e:
+                break
     return out
 
 
@@ -245,20 +347,23 @@ def _cache_path(root):
     return os.path.join(INDEX_DIR, key + ".npz")
 
 
-def _load_disk(root, sig):
+def _load_disk(root, sig=None):
     path = _cache_path(root)
     if not os.path.isfile(path):
         return None
     try:
         data = np.load(path, allow_pickle=False)
-        if str(data["sig"]) != sig:
+        if "version" in data and int(data["version"]) != INDEX_VERSION:
+            return None
+        if sig is not None and str(data["sig"]) != sig:
             return None
         meta = json.loads(str(data["meta"]))
         vec = data["vec"]
+        files = json.loads(str(data["files"])) if "files" in data else {}
         if len(meta) != len(vec):
             return None
-        return {"sig": sig, "meta": meta, "vec": vec}
-    except Exception:
+        return {"sig": str(data["sig"]), "meta": meta, "vec": vec, "files": files}
+    except Exception:                         # noqa: BLE001
         return None
 
 
@@ -266,49 +371,153 @@ def _save_disk(root, idx):
     try:
         os.makedirs(INDEX_DIR, exist_ok=True)
         path = _cache_path(root)
-        tmp = path + ".tmp"
-        np.savez_compressed(tmp, sig=np.array(idx["sig"]),
+        tmp = path + ".tmp.npz"
+        np.savez_compressed(tmp, version=np.array(INDEX_VERSION),
+                            sig=np.array(idx["sig"]),
                             meta=np.array(json.dumps(idx["meta"], ensure_ascii=False)),
+                            files=np.array(json.dumps(idx.get("files") or {},
+                                                      ensure_ascii=False)),
                             vec=idx["vec"])
         os.replace(tmp, path)
-    except Exception:
-        pass                                     # 缓存失败不影响本次检索
+    except Exception:                         # noqa: BLE001
+        pass                                  # 缓存失败不影响本次检索
 
 
-def _build(root, files, sig):
-    chunks = []
-    for full, rel, _size in files:
-        chunks.extend(_chunk_file(full, rel))
-        if len(chunks) >= MAX_CHUNKS:
-            chunks = chunks[:MAX_CHUNKS]
+def _empty_vec():
+    return np.zeros((0, 1), dtype=np.float32)
+
+
+def _chunks_for(root, files, max_chunks, progress=None):
+    chunks, indexed = [], 0
+    for i, (full, rel, _size, _mtime) in enumerate(files):
+        got = _chunk_file(full, rel)
+        if got:
+            indexed += 1
+            chunks.extend(got)
+        if max_chunks and len(chunks) >= max_chunks:
+            chunks = chunks[:max_chunks]
             break
+        if progress:
+            progress(i + 1, len(files), len(chunks))
+    return chunks, indexed
+
+
+def _build(root, files, sig, progress=None):
+    lim = _limits()
+    chunks, indexed = _chunks_for(root, files, lim["max_chunks"], progress)
+    manifest = {f[1]: [f[2], f[3]] for f in files}
     if not chunks:
-        return {"sig": sig, "meta": [], "vec": np.zeros((0, 1), dtype=np.float32)}
+        return {"sig": sig, "meta": [], "vec": _empty_vec(), "files": manifest,
+                "indexed": 0}
     vec = _embed_texts([c.pop("emb") for c in chunks])
-    return {"sig": sig, "meta": chunks, "vec": vec}
+    return {"sig": sig, "meta": chunks, "vec": vec, "files": manifest,
+            "indexed": indexed}
 
 
-def get_index(root):
-    """取（必要时构建）索引。返回 (idx, files_total, files_indexed)。"""
-    files = _collect_files(root)
+def _incremental(root, files, sig, old, progress=None):
+    """只重算变更文件；未变文件的向量直接复用。"""
+    lim = _limits()
+    old_files = old.get("files") or {}
+    cur = {f[1]: [f[2], f[3]] for f in files}
+    changed = {rel for rel, meta in cur.items()
+               if old_files.get(rel) != list(meta)}
+    removed = set(old_files) - set(cur)
+    if not changed and not removed:
+        old["sig"] = sig
+        return old
+    keep = [i for i, m in enumerate(old.get("meta") or [])
+            if m.get("path") not in changed and m.get("path") not in removed]
+    keep_meta = [old["meta"][i] for i in keep]
+    keep_vec = old["vec"][keep] if keep else _empty_vec()
+    new_files = [f for f in files if f[1] in changed]
+    new_chunks, _ = _chunks_for(root, new_files, lim["max_chunks"], progress)
+    if not new_chunks:
+        meta, vec = keep_meta, keep_vec
+    else:
+        new_vec = _embed_texts([c.pop("emb") for c in new_chunks])
+        if keep_vec.size and keep_vec.shape[1] != new_vec.shape[1]:
+            return _build(root, files, sig, progress)   # 维度变了：整库重建
+        meta = keep_meta + new_chunks
+        vec = np.vstack([keep_vec, new_vec]) if keep_vec.size else new_vec
+    return {"sig": sig, "meta": meta, "vec": vec, "files": cur,
+            "indexed": len({m.get("path") for m in meta})}
+
+
+def get_index(root, force=False, progress=None):
+    """取（必要时增量构建）索引。返回 (idx, files_total, files_indexed)。"""
+    files = _scan(root)
     sig = _signature(files)
     cached = _CACHE.get(root)
-    if cached and cached["sig"] == sig:
-        return cached, len(files), cached.get("files", len(files))
+    if not force and cached and cached["sig"] == sig:
+        return cached, len(files), cached.get("indexed", len(files))
     with _LOCK:
         cached = _CACHE.get(root)
-        if cached and cached["sig"] == sig:
-            return cached, len(files), cached.get("files", len(files))
-        disk = _load_disk(root, sig)
-        if disk:
-            disk["files"] = len(files)
-            _CACHE[root] = disk
-            return disk, len(files), len(files)
-        idx = _build(root, files, sig)
-        idx["files"] = len(files)
+        if not force and cached and cached["sig"] == sig:
+            return cached, len(files), cached.get("indexed", len(files))
+        old = None if force else _load_disk(root)
+        if old and old.get("files"):
+            idx = _incremental(root, files, sig, old, progress)
+        else:
+            idx = _build(root, files, sig, progress)
         _CACHE[root] = idx
         _save_disk(root, idx)
-        return idx, len(files), len(files)
+        return idx, len(files), idx.get("indexed", len(files))
+
+
+# ---------------------------------------------------------------- 后台索引 / 状态
+_JOBS = {}
+_JOB_LOCK = threading.Lock()
+
+
+def status(root):
+    """索引状态：idle / running / ready / error。"""
+    with _JOB_LOCK:
+        job = _JOBS.get(root)
+        if job and job.get("state") == "running":
+            return dict(job)
+    idx = _CACHE.get(root)
+    if idx:
+        return {"state": "ready", "files": len(idx.get("files") or {}),
+                "chunks": len(idx.get("meta") or []),
+                "indexed": idx.get("indexed", 0), "error": ""}
+    if job and job.get("state") == "error":
+        return dict(job)
+    return {"state": "idle", "files": 0, "chunks": 0, "indexed": 0, "error": ""}
+
+
+def _run_job(root):
+    def progress(done, total, chunks):
+        with _JOB_LOCK:
+            job = _JOBS.get(root)
+            if job is not None:
+                job.update({"done": done, "total": total, "chunks": chunks})
+    try:
+        idx, total, indexed = get_index(root, force=True, progress=progress)
+        with _JOB_LOCK:
+            _JOBS[root] = {"state": "ready", "files": total,
+                           "chunks": len(idx.get("meta") or []),
+                           "indexed": indexed, "error": "", "done": total,
+                           "total": total}
+    except Exception as e:                    # noqa: BLE001
+        with _JOB_LOCK:
+            _JOBS[root] = {"state": "error", "files": 0, "chunks": 0,
+                           "indexed": 0, "error": str(e), "done": 0, "total": 0}
+
+
+def reindex(root, background=True):
+    """重建索引；background=True 时立刻返回 running 状态。"""
+    with _JOB_LOCK:
+        cur = _JOBS.get(root)
+        if cur and cur.get("state") == "running":
+            return dict(cur)
+        _JOBS[root] = {"state": "running", "files": 0, "chunks": 0,
+                       "indexed": 0, "error": "", "done": 0, "total": 0}
+    if not background:
+        _run_job(root)
+        return status(root)
+    threading.Thread(target=_run_job, args=(root,), daemon=True).start()
+    return status(root)
+
 
 
 # ---------------------------------------------------------------- 检索
@@ -344,6 +553,11 @@ def search(sandbox, query, limit=TOP_K, boost=None):
         limit = TOP_K
 
     t0 = time.time()
+    job = status(root)
+    if job.get("state") == "running" and not _CACHE.get(root):
+        return ("代码库索引正在后台构建（%s/%s 文件，%s 块）。完成后可重试，"
+                "或先用 search_files 按关键字查找。"
+                % (job.get("done") or 0, job.get("total") or "?", job.get("chunks") or 0))
     try:
         idx, total, _ = get_index(root)
     except Unavailable as e:
@@ -392,6 +606,11 @@ def search(sandbox, query, limit=TOP_K, boost=None):
             w = low.get((idx["meta"][i].get("path") or "").lower())
             if w:
                 fused[i] += w
+    # 精确符号命中：查 setToolGroupOpen 时，定义它的块排在前面
+    for i in list(fused):
+        sym = str(idx["meta"][i].get("symbol") or "").lower()
+        if sym and sym in q_tokens:
+            fused[i] += 0.08
 
     picked, seen = [], {}
     for i in sorted(fused, key=lambda k: -fused[k]):
@@ -427,6 +646,70 @@ def search(sandbox, query, limit=TOP_K, boost=None):
         used += len(block)
         out.append(block)
     return "\n\n".join(out)
+
+
+def search_items(sandbox, query, limit=20, boost=None):
+    """结构化检索结果（IDE 语义搜索用）：[{path,start,end,symbol,score,snippet}]。"""
+    from app import agent
+    query = str(query or "").strip()
+    if not query:
+        return {"items": [], "error": "请提供 query"}
+    try:
+        root = agent._real(agent._sandbox_root(sandbox))
+    except Exception as e:                    # noqa: BLE001
+        return {"items": [], "error": "沙箱不可用：%s" % e}
+    job = status(root)
+    if job.get("state") == "running" and not _CACHE.get(root):
+        return {"items": [], "building": True, "status": job}
+    try:
+        idx, total, indexed = get_index(root)
+        qv = _embed_texts([query])[0]
+    except Unavailable as e:
+        return {"items": [], "error": str(e), "fallback": True}
+    if not idx["meta"]:
+        return {"items": [], "total": total, "indexed": indexed}
+    dense = idx["vec"] @ qv
+    bm = idx.get("bm25")
+    if bm is None:
+        bm = _bm25_index(idx["meta"])
+        idx["bm25"] = bm
+    sparse = _bm25_scores(bm, query)
+    n = len(idx["meta"])
+    cand = min(n, max(limit * 10, 60))
+    w_sparse = 1.6 if _identifier_query(query) else 1.0
+    fused = {}
+    for r, i in enumerate(np.argsort(-dense)[:cand]):
+        fused[int(i)] = fused.get(int(i), 0.0) + 1.0 / (60 + r + 1)
+    for r, i in enumerate(sorted(range(n), key=lambda k: -sparse[k])[:cand]):
+        fused[i] = fused.get(i, 0.0) + w_sparse / (60 + r + 1)
+    q_tokens = set(_tokens(query))
+    if boost:
+        low = {str(k).replace("\\", "/").lower(): float(v) for k, v in boost.items()}
+        for i in list(fused):
+            w = low.get((idx["meta"][i].get("path") or "").lower())
+            if w:
+                fused[i] += w
+    for i in list(fused):
+        sym = str(idx["meta"][i].get("symbol") or "").lower()
+        if sym and sym in q_tokens:
+            fused[i] += 0.08
+    picked, seen = [], {}
+    for i in sorted(fused, key=lambda k: -fused[k]):
+        meta = idx["meta"][i]
+        path = meta["path"]
+        if agent.is_secret_path(path) or seen.get(path, 0) >= 2:
+            continue
+        seen[path] = seen.get(path, 0) + 1
+        lines = (meta.get("text") or "").splitlines()[:12]
+        snippet = "\n".join(lines)
+        picked.append({"path": path, "start": meta["start"], "end": meta["end"],
+                       "symbol": meta.get("symbol") or "",
+                       "score": round(float(dense[i]), 3),
+                       "keyword": bool(sparse[i] > 0), "snippet": snippet})
+        if len(picked) >= limit:
+            break
+    return {"items": picked, "total": total, "indexed": indexed,
+            "chunks": len(idx["meta"])}
 
 
 def _keyword_fallback(root, query, limit, why):

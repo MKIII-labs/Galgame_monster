@@ -12,9 +12,13 @@
     wf.parallel([("read_file", {"path": "a"}), ...]) -> [str|None]
     wf.workflow(spec) -> dict        # 同步跑一个 DAG，返回结果
     wf.workflow_text(spec) -> str    # 同上，返回人话摘要
+    wf.agent("reviewer", "审查 app/api") -> str        # 单个命名子代理
+    wf.agents([{"agent": "tester", "task": "..."}]) -> str   # 并行派活
+    wf.pipeline(["planner", "implementer"], "任务") -> str    # 串行交接
     wf.log(...)
 
 安全边界与 Code Mode 一致：默认只读；写/命令由调用方按权限档位打开。
+子代理的写权限跟随各自定义（implementer / documenter 等），每次写仍走审批。
 """
 import json
 import os
@@ -32,6 +36,7 @@ from app import code_mode
 
 MAX_CALLS = 2000
 MAX_WORKFLOWS = 16
+MAX_AGENT_CALLS = 8            # 一段脚本里最多调用几次子代理
 MAX_OUTPUT = 12000
 DEFAULT_TIMEOUT = 300
 MAX_TIMEOUT = 600
@@ -147,6 +152,34 @@ def workflow(spec):
 
 def workflow_text(spec):
     return _workflow(spec, detail=False)
+
+
+def _agents(payload):
+    rid = next(_IDS)
+    _send({"type": "agents", "id": rid, "payload": payload})
+    obj = _wait(rid, "agents_result")
+    if not obj.get("ok"):
+        raise ToolError(obj.get("error") or "agents failed",
+                        obj.get("code") or "AGENTS_FAILED", "agents")
+    return obj.get("text") or ""
+
+
+def agent(name, task, goal="", verify=False):
+    """跑一个命名子代理，返回结论文本（写权限跟随代理定义，写入仍走审批）。"""
+    return _agents({"agents": [{"agent": str(name), "task": str(task)}],
+                    "goal": str(goal or ""), "verify": bool(verify)})
+
+
+def agents(items, goal="", verify=False):
+    """并行跑多个命名子代理；items 形如 [{"agent": "reviewer", "task": "..."}]。"""
+    return _agents({"agents": items, "goal": str(goal or ""),
+                    "verify": bool(verify)})
+
+
+def pipeline(names, task, goal=""):
+    """串行交接：上一阶段的结论作为下一阶段的背景。"""
+    return _agents({"pipeline": [str(x) for x in (names or [])],
+                    "task": str(task), "goal": str(goal or "")})
 '''
 
 
@@ -195,14 +228,17 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
     写 / 命令由开关放行，且写入仍限制在沙箱内。
     """
     emit = emit or (lambda obj: None)
+    # 沙箱外只读：脚本里的工具调用也要拿到同一个开关
+    caps = dict(caps or {})
+    caps["allow_outside"] = bool(allow_outside)
     code = str(code or "")
     if not code.strip():
-        return "❌ run_workflow_script：code 为空", {"calls": 0, "workflows": 0}
+        return "❌ run_workflow_script：code 为空", {"calls": 0, "workflows": 0, "agents": 0}
     if not re.search(r"(?m)^\s*(?:import\s+wf\b|from\s+wf\s+import\b)", code):
         code = "import wf  # run_workflow_script 自动注入\n" + code
     sandbox = str(sandbox or "").strip()
     if not sandbox or not os.path.isdir(sandbox):
-        return "❌ run_workflow_script：需要先设置 Agent 沙箱目录", {"calls": 0, "workflows": 0}
+        return "❌ run_workflow_script：需要先设置 Agent 沙箱目录", {"calls": 0, "workflows": 0, "agents": 0}
     code = code_mode.GUARD_SRC + "\n" + code
     try:
         timeout = int(timeout or 0) or DEFAULT_TIMEOUT
@@ -227,6 +263,14 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
     except (TypeError, ValueError):
         max_wf = MAX_WORKFLOWS
     max_wf = max(1, max_wf)
+    try:
+        max_agents = int((caps or {}).get("agent_script_agent_calls")
+                         if (caps or {}).get("agent_script_agent_calls") is not None
+                         else MAX_AGENT_CALLS)
+    except (TypeError, ValueError):
+        max_agents = MAX_AGENT_CALLS
+    if max_agents < 0:
+        max_agents = MAX_AGENT_CALLS
 
     bridge = _bridge_dir(code_mode._tool_catalog(allowed))
     work = os.path.join(tempfile.gettempdir(), "gm_wf_run", uuid.uuid4().hex[:10])
@@ -236,7 +280,7 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
         with open(script, "w", encoding="utf-8") as f:
             f.write(code)
     except OSError as e:
-        return "❌ run_workflow_script：写入脚本失败：%s" % e, {"calls": 0, "workflows": 0}
+        return "❌ run_workflow_script：写入脚本失败：%s" % e, {"calls": 0, "workflows": 0, "agents": 0}
 
     try:
         proc = subprocess.Popen(
@@ -248,10 +292,11 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
             text=True, encoding="utf-8", errors="replace", bufsize=1)
     except Exception as e:
         shutil.rmtree(work, ignore_errors=True)
-        return "❌ run_workflow_script：启动失败：%s" % e, {"calls": 0, "workflows": 0}
+        return "❌ run_workflow_script：启动失败：%s" % e, {"calls": 0, "workflows": 0, "agents": 0}
 
     q = queue.Queue()
     outputs, errors, calls, workflows = [], [], [], []
+    agent_calls = []
     t0 = time.time()
     aborted = {"v": False}
 
@@ -351,6 +396,38 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
                     "data": res, "code": "" if res.get("ok") else "WORKFLOW_FAILED",
                     "error": "" if res.get("ok") else str(res.get("error") or "")})
             continue
+        if isinstance(obj, dict) and obj.get("type") == "agents":
+            payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+            if max_agents > 0 and len(agent_calls) >= max_agents:
+                _reply({"type": "agents_result", "id": obj.get("id"), "ok": False,
+                        "code": "AGENT_BUDGET",
+                        "error": "子代理调用超过上限 %d 次" % max_agents})
+                continue
+            fn = (caps or {}).get("run_agents")
+            if not callable(fn):
+                _reply({"type": "agents_result", "id": obj.get("id"), "ok": False,
+                        "code": "AGENT_UNAVAILABLE",
+                        "error": "当前环境不支持在脚本里调用子代理"
+                                 "（检查设置 → 子代理 → 脚本编排）"})
+                continue
+            try:
+                res = fn(payload) or {}
+            except Exception as e:         # noqa: BLE001
+                res = {"ok": False, "error": str(e)}
+            ok = bool(res.get("ok"))
+            text = str(res.get("text") or ("" if ok else res.get("error") or "子代理没有结果"))
+            names = []
+            for it in (payload.get("agents") or []):
+                if isinstance(it, dict) and it.get("agent"):
+                    names.append(str(it.get("agent")))
+            for it in (payload.get("pipeline") or []):
+                names.append(str(it))
+            agent_calls.append((names, ok))
+            _reply({"type": "agents_result", "id": obj.get("id"),
+                    "ok": ok, "text": text,
+                    "code": "" if ok else "AGENTS_FAILED",
+                    "error": "" if ok else text})
+            continue
         if isinstance(obj, dict) and obj.get("type") == "log":
             emit({"type": "script_log", "text": str(obj.get("text") or "")[:500]})
             continue
@@ -379,8 +456,9 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
     err = code_mode._clip(code_mode.trim_guard_trace("\n".join(errors).strip()), 2000)
     failed = aborted["v"] or rc != 0
     status = "已中止" if aborted["v"] else ("执行失败" if failed else "执行完成")
-    lines = ["%s【run_workflow_script】%s（%.1f 秒，%d 次工具调用，%d 个工作流）"
-             % ("❌ " if failed else "", status, cost, len(calls), len(workflows))]
+    lines = ["%s【run_workflow_script】%s（%.1f 秒，%d 次工具调用，%d 个工作流，%d 次子代理）"
+             % ("❌ " if failed else "", status, cost, len(calls), len(workflows),
+                len(agent_calls))]
     if out:
         lines.append("---- 输出 ----\n" + out)
     else:
@@ -388,6 +466,10 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
     if workflows:
         lines.append("---- 工作流 ----\n" + "\n".join(
             "- %s %s（%d 步）" % w for w in workflows[:12]))
+    if agent_calls:
+        lines.append("---- 子代理 ----\n" + "\n".join(
+            "- %s%s" % ("、".join(n) or "?", "" if ok else "（失败）")
+            for n, ok in agent_calls[:12]))
     if calls:
         shown = calls[:code_mode.MAX_SUMMARY]
         lines.append("---- 工具调用 ----\n" + "\n".join(
@@ -398,5 +480,6 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
         lines.append("（%s）" % ("用户已停止" if (stop_event is not None and stop_event.is_set())
                                  else "超过 %d 秒超时" % timeout))
     return "\n\n".join(lines), {"calls": len(calls), "workflows": len(workflows),
+                                "agents": len(agent_calls),
                                 "seconds": cost, "aborted": aborted["v"],
                                 "exit_code": rc, "ok": not failed}

@@ -14,8 +14,8 @@ import time
 import uuid
 
 from app.config import load_config
-from app.knowledge import (MAX_KB_PROMPT, RELATIONS, apply_memory_ops, get_profile_kb,
-                           load_kb, load_kb_index, save_kb)
+from app.knowledge import (MAX_KB_PROMPT, RELATIONS, apply_memory_ops, edge_is_valid,
+                           get_profile_kb, load_kb, load_kb_index, save_kb)
 from app.profile import load_profile
 from app.sessions import find_session, load_sessions, save_sessions
 from app.store import _lock
@@ -26,7 +26,7 @@ FENCE = "```memory"
 DSML_OPEN = "<\uff5c\uff5cDSML\uff5c\uff5c calls>"
 DSML_CLOSE = "</\uff5c\uff5cDSML\uff5c\uff5c>"
 OP_NAMES = {"add": "新增", "update": "修改", "delete": "删除",
-            "link": "连线", "append_note": "追加"}
+            "link": "连线", "unlink": "断开", "append_note": "追加"}
 MAX_OPS = 20          # 单轮最多执行多少条操作
 MAX_UNDO = 20         # 保留多少条撤销快照
 
@@ -148,7 +148,9 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
         list_recent = 40
     list_recent = max(12, min(80, list_recent))
     session_nodes = (s.get("memory") or {}).get("nodes") or []
-    session_edges = (s.get("memory") or {}).get("edges") or []
+    # 只算有效关系：失效边留作历史，不该让模型以为「关系已经够了」
+    session_edges = [e for e in ((s.get("memory") or {}).get("edges") or [])
+                     if edge_is_valid(e)]
     over_limit = soft_limit > 0 and len(session_nodes) >= soft_limit
     # 超限时多列一些，模型才能看到同主题的旧条目并合并；平时仍只列 12 条省 token。
     recent_n = list_recent if over_limit else 12
@@ -191,9 +193,9 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
         "本会话记忆现有 %d 条、%d 条关系。" % (len(session_nodes), len(session_edges)),
         "输出格式（只有确实需要变更时才输出；没有变更就完全不要输出这个块）：",
         "```memory",
-        '{"ops":[{"scope":"<作用域ID>","op":"add|update|delete|link|append_note",'
+        '{"ops":[{"scope":"<作用域ID>","op":"add|update|delete|link|unlink|append_note",'
         '"id":"","title":"","content":"","category":"","tags":[],"aliases":[],"size":0,"color":"",'
-        '"from":"","to":"","relation":"","directed":true}]}',
+        '"from":"","to":"","relation":"","fact":"","directed":true}]}',
         "```",
         "字段说明：",
         "- scope：只填作用域 ID（如 `session` 或 `kb:xxx`），**不要带 `scope=` 前缀**",
@@ -204,7 +206,13 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
         "- size：8–60 的整数；color：红 / 橙 / 黄 / 绿 / 青 / 蓝 / 紫 / 粉 / 灰。"
         "两者只表达分组与重要程度，同类条目用同一种颜色，不要每条都染色",
         "- link：from / to 从下面列出的条目里取，relation 从词表选：" + rel_desc +
-        "；directed 不填时，相关 / 同义 / 对立 自动双向，其余单向",
+        "；directed 不填时，相关 / 同义 / 对立 自动双向，其余单向。**fact 必填**："
+        "用一句话写清这条关系为什么成立（依据 / 具体表现），只写「有关系」等于没连——"
+        "fact 会被随关系一起注入后续对话，是这条边唯一有用的部分；"
+        "同一对节点同一关系只保留一条有效边，陈述变了会自动替代旧边（旧边标失效、不删除），"
+        "所以**不需要**先 unlink 再 link 同一对节点；",
+        "- unlink：让一条已有关系失效（旧结论被推翻 / 不再成立），用 edge_id 或 from+to 指定；"
+        "边不会被删除，只是不再参与检索——需要时再 link 一条新的",
         "规则：",
         "1. 用户明确说「记住 / 帮我记下 / 删掉那条 / 改一下」时**直接执行**，不要推辞。",
         "2. 冲突判断：新信息与旧条目矛盾时，以更晚、更明确、更具体者为真，"
@@ -218,7 +226,9 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
         "**不要用 add 覆盖同名条目来假装追加**。",
         "6. **事件必须连关系**：本会话记忆里的「事件 / 进展 / 结论 / 卡点」类条目，"
         "新增或更新时，只要能在已有条目里找到相关目标、前置步骤、原因或结果，"
-        "就必须输出至少一条 link（优先 purpose=目的 / sequence=顺承 / cause=因果 / condition=条件）；"
+        "就必须输出至少一条 link（优先 purpose=目的 / cause=因果 / condition=条件 / means=手段），"
+        "并写清 fact；旧结论被推翻时：同一对节点同一关系直接 link 新陈述（自动替代），"
+        "关系本身不再成立时用 unlink。"
         "确实找不到相关条目才跳过，不要因为「关系不明确」就一条都不连。"
         "from / to 必须已存在；要连的节点若还没有，先 add 再 link（同一块内按顺序执行）。",
     ]
@@ -229,7 +239,7 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
                                                               len(session_edges)),
             "- 本轮新增前先整理：合并同主题重复（保留信息最全的一条，update 合并正文/别名，其余 delete）；",
             "- 删除过时、被推翻、过于笼统的条目；",
-            "- 给关键事件补关系：新进展至少连一条 purpose / sequence / cause / condition；",
+            "- 给关键事件补关系：新进展至少连一条 purpose / cause / condition / means，并写清 fact；",
             "- 整理目标：≤ %d 条。" % soft_limit,
         ]
     extra = (_profile_guidance(s, scopes) + _kb_guidance(scopes)).strip()
@@ -452,7 +462,7 @@ def apply_chat_ops(sid, ops):
             while len(_UNDO) > MAX_UNDO:
                 _UNDO.pop(next(iter(_UNDO)))
     summary = " · ".join("%s %d" % (OP_NAMES.get(k, k), counts[k])
-                        for k in ("add", "update", "delete", "link", "append_note")
+                        for k in ("add", "update", "delete", "link", "unlink", "append_note")
                         if counts.get(k))
     uniq = []
     for p in problems:              # 去重并限长，避免标记里刷屏

@@ -45,3 +45,29 @@ def test_disable_limits(d):
         spill.save("s", "t", "x", data_dir=d, keep=0, max_mb=0)
     left = [n for n in os.listdir(os.path.join(d, "spills")) if n.endswith(".txt")]
     assert len(left) == 5
+
+
+def test_find_offsets_returns_line_and_absolute_offset():
+    text = "alpha\nbeta ERROR here\ngamma\nERROR again\n"
+    total, hits = spill.find_offsets(text, "ERROR", context=1)
+    assert total == 2 and len(hits) == 2
+    assert hits[0]["line"] == 2
+    assert hits[0]["offset"] == text.index("ERROR")
+    assert hits[0]["before"] == ["alpha"]
+    assert hits[0]["after"] == ["gamma"]
+    # 偏移是绝对位置：拿它去切片能直接读到命中处
+    assert text[hits[1]["offset"]:].startswith("ERROR")
+
+
+def test_find_offsets_case_and_regex_and_cap():
+    text = "Warn: a\nwarn: b\nfatal: c\n"
+    assert spill.find_offsets(text, "warn", ignore_case=True)[0] == 2
+    assert spill.find_offsets(text, "warn")[0] == 1
+    assert spill.find_offsets(text, r"fa[a-z]+", regex=True)[0] == 1
+    total, hits = spill.find_offsets(text * 10, "warn", max_hits=2)
+    assert total == 10 and len(hits) == 2
+
+
+def test_find_offsets_rejects_bad_regex():
+    with pytest.raises(ValueError):
+        spill.find_offsets("abc", "(", regex=True)

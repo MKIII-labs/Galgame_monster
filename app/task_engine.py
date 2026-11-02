@@ -185,6 +185,34 @@ def _artifact_abs(path, task):
     return os.path.join(sandbox, path) if sandbox else ""
 
 
+def _upsert_artifact(task_id, path, kind, name, real=""):
+    """登记 / 更新一条产物记录，返回产物 id。"""
+    size = 0
+    try:
+        if real and os.path.isfile(real):
+            size = os.path.getsize(real)
+    except OSError:
+        size = 0
+    conn = get_db()
+    row = conn.execute("SELECT id FROM artifacts WHERE task_id=? AND path=?",
+                       (str(task_id), path)).fetchone()
+    if row:
+        # 同一任务重复写同一路径：更新，不再插一条
+        aid = row["id"]
+        conn.execute(
+            "UPDATE artifacts SET name=?,kind=?,size=?,created_at=? WHERE id=?",
+            (name, kind, size, _now(), aid))
+    else:
+        aid = "a_" + uuid.uuid4().hex[:12]
+        conn.execute(
+            "INSERT INTO artifacts (id,task_id,kind,name,path,size,created_at,meta) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (aid, task_id, kind, name, path, size, _now(), "{}"))
+    conn.commit()
+    events_bus.publish({"type": "artifact_update"})
+    return aid
+
+
 def _add_artifact(task_id, step):
     tool = str(step.get("tool") or "")
     # 只有「产出文件」的工具才算产物：删除文件、建目录不该出现在产物栏
@@ -198,30 +226,26 @@ def _add_artifact(task_id, step):
     real = _artifact_abs(path, task)
     if real and not os.path.isfile(real):
         return                              # 目录 / 已被删除，不登记
-    size = 0
-    if real:
-        try:
-            size = os.path.getsize(real)
-        except OSError:
-            size = 0
     kind = _artifact_kind(path)
     name = os.path.basename(path.rstrip("/\\")) or path
-    conn = get_db()
-    row = conn.execute("SELECT id FROM artifacts WHERE task_id=? AND path=?",
-                       (str(task_id), path)).fetchone()
-    if row:
-        # 同一任务重复写同一路径：更新，不再插一条
-        conn.execute(
-            "UPDATE artifacts SET name=?,kind=?,size=?,created_at=? WHERE id=?",
-            (name, kind, size, _now(), row["id"]))
-    else:
-        conn.execute(
-            "INSERT INTO artifacts (id,task_id,kind,name,path,size,created_at,meta) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            ("a_" + uuid.uuid4().hex[:12], task_id, kind, name, path, size,
-             _now(), "{}"))
-    conn.commit()
-    events_bus.publish({"type": "artifact_update"})
+    _upsert_artifact(str(task_id), path, kind, name, real)
+
+
+def register_artifact(path, name="", kind="deliverable", task_id=""):
+    """登记「不是任务步骤产出」的文件（例如本地生成的图片）。
+
+    文件必须真实存在，否则不登记；返回产物记录，失败返回 None。
+    """
+    path = str(path or "").strip()
+    if not path:
+        return None
+    task = get_task(task_id) if task_id else None
+    real = _artifact_abs(path, task)
+    if not real or not os.path.isfile(real):
+        return None
+    name = name or (os.path.basename(path.rstrip("/\\")) or path)
+    aid = _upsert_artifact(str(task_id), path, kind, name, real)
+    return get_artifact(aid)
 
 
 def _control(tid):

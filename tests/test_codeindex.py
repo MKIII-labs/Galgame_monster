@@ -101,7 +101,7 @@ def test_fallback_when_model_unavailable(tmp_path, monkeypatch):
 
 def test_binary_and_oversized_files_skipped(tmp_path):
     (tmp_path / "bin.dat").write_bytes(b"\x00\x01\x02")
-    (tmp_path / "big.py").write_text("x = 1\n" * 40000, encoding="utf-8")
+    (tmp_path / "big.py").write_text("x = 1\n" * 100000, encoding="utf-8")
     (tmp_path / "ok.py").write_text("print('ok')\n", encoding="utf-8")
     files = codeindex._collect_files(str(tmp_path))
     rels = [rel for _full, rel, _size in files]

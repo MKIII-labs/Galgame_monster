@@ -27,8 +27,8 @@ _SYSTEM = """你是被定时唤醒的巡检助手，只做只读调查。规则�
 
 def _schemas():
     """从主 Agent 的工具表里筛出只读那几项（不自己重写 schema，避免两处漂移）。"""
-    return [t for t in agent.native_tool_schemas(agent_on=True)
-            if (t.get("function") or {}).get("name") in READONLY_TOOLS]
+    return agent.native_tool_schemas(agent_on=True,
+                                     allowed_tools=set(READONLY_TOOLS))
 
 
 def _findings(text):
@@ -99,6 +99,9 @@ def run(prompt, sandbox="", max_rounds=6, timeout=180, model=""):
         for call in calls:
             name = str(call.get("tool") or "").strip()
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            _meta = agent.tool_meta.normalize(name, args)
+            if _meta:
+                name, args = _meta
             if name not in READONLY_TOOLS:
                 # 模型偶尔会自作主张调写工具：明确拒绝并告知边界，让它改用只读手段
                 results.append("【%s】\n❌ 自动化任务只允许只读工具：%s"

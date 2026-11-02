@@ -87,6 +87,65 @@ def meta(locator, data_dir=None):
         return None
 
 
+def find_offsets(text, query, regex=False, ignore_case=False, context=2, max_hits=20):
+    """在超长工具结果里按行搜索，返回 (命中总数, 命中块列表)。
+
+    为什么按行：长文本 + 用户给的模式做整段正则可能灾难性回溯；逐行匹配天然有行号，
+    也和 grep 的心智一致。每块带绝对字符偏移，模型可直接用 read_tool_result 的
+    start/end 精确精读。
+    """
+    body = str(text or "")
+    q = str(query or "")
+    if not body or not q:
+        return 0, []
+    if len(q) > 200:
+        q = q[:200]
+    try:
+        ctx = max(0, min(int(context or 0), 5))
+    except (TypeError, ValueError):
+        ctx = 2
+    try:
+        cap = max(1, min(int(max_hits or 0) or 20, 50))
+    except (TypeError, ValueError):
+        cap = 20
+    pat = None
+    if regex:
+        try:
+            pat = re.compile(q, re.IGNORECASE if ignore_case else 0)
+        except re.error as e:
+            raise ValueError("正则非法：%s" % e)
+    needle = q.lower() if ignore_case else q
+    lines = body.splitlines(keepends=True)
+    starts, off = [], 0
+    for ln in lines:
+        starts.append(off)
+        off += len(ln)
+    hits, total = [], 0
+    for i, raw in enumerate(lines):
+        line = raw.rstrip("\r\n")
+        pos = -1
+        if pat is not None:
+            m = pat.search(line)
+            pos = m.start() if m else -1
+        else:
+            hay = line.lower() if ignore_case else line
+            pos = hay.find(needle)
+        if pos < 0:
+            continue
+        total += 1
+        if len(hits) >= cap:
+            continue
+        hits.append({
+            "line": i + 1,
+            "offset": starts[i] + pos,
+            "text": line.strip()[:300],
+            "before": [x.rstrip("\r\n").strip()[:200] for x in lines[max(0, i - ctx):i]],
+            "after": [x.rstrip("\r\n").strip()[:200]
+                      for x in lines[i + 1:i + 1 + ctx]],
+        })
+    return total, hits
+
+
 def _gc(data_dir, keep, max_mb):
     """按最旧优先清理：文件数超过 keep 或总量超过 max_mb 时删掉最老的。"""
     if keep <= 0 and max_mb <= 0:

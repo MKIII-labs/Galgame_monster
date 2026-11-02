@@ -13,7 +13,7 @@ import urllib3
 from app import agent, mem_tool
 from app.config import (effective_think_mode, load_config, normalize_content, thinking_payload)
 from app.knowledge import (get_profile_kb, load_kb)
-from app.profile import load_profile
+from app.profile import load_profile, manual_block
 from app.usage import record_llm_usage
 
 # 轻量调用统一调度：同一 prompt 短时间内直接命中缓存；并发上限避免
@@ -102,9 +102,13 @@ def _post_retry(url, headers, json_body, timeout, tries=2):
 
 
 def _quick_chat(api_key, api_url, api_model, messages, max_tokens=96, source="gal",
-                timeout=(10, 60)):
+                timeout=(10, 60), tries=2, use_cache=True, temperature=0.2):
     """一次非流式聊天调用（用于 GAL 剧情节点判定 / 摘要 / 语音矫正等轻量请求）。
-    顺带把响应里的 usage 计入用量流水（按 source 标注来源）。"""
+    顺带把响应里的 usage 计入用量流水（按 source 标注来源）。
+
+    `tries` / `use_cache` / `temperature` 供 IDE 内联补全这类「要快、要不打扰」的
+    场景调小：补全不重试、不走缓存、温度 0。默认值与旧行为一致。
+    """
     cfg = load_config() or {}
     # 分级模型调度：配置了 light_model 时，这些轻量任务改用它（可另配 light_url / light_api_key）；
     # 三项都留空 = 沿用主 chat 模型，行为与从前完全一致。
@@ -118,15 +122,16 @@ def _quick_chat(api_key, api_url, api_model, messages, max_tokens=96, source="ga
         if (cfg.get("light_api_key") or "").strip():
             api_key = cfg["light_api_key"].strip()
     body = {"model": api_model, "messages": messages, "stream": False,
-            "max_tokens": max_tokens, "temperature": 0.2}
+            "max_tokens": max_tokens, "temperature": temperature}
     # 轻量调用不该「思考」：思考 token 也算进 max_tokens，会把正文挤成空
     # （踩坑记录见 docs/NOTES.md「轻量调用被思考吃光 max_tokens」）
     body.update(thinking_payload(effective_think_mode(api_url), False,
                                  cfg.get("chat_think_level") or "high"))
     cache_key = _quick_cache_key(api_url, api_model, messages, max_tokens)
-    cached = _quick_cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if use_cache:
+        cached = _quick_cache_get(cache_key)
+        if cached is not None:
+            return cached
     from app import providers
     from app.config import get_api_kind
     kind = get_api_kind("chat")
@@ -137,14 +142,14 @@ def _quick_chat(api_key, api_url, api_model, messages, max_tokens=96, source="ga
                 headers=providers.anthropic_headers(api_key),
                 json_body=providers.anthropic_body(api_model, messages, max_tokens,
                                                    None, stream=False),
-                timeout=timeout)
+                timeout=timeout, tries=tries)
         else:
             resp = _post_retry(
                 api_url,
                 headers={"Authorization": f"Bearer {api_key}",
                          "Content-Type": "application/json; charset=utf-8"},
                 json_body=body,
-                timeout=timeout)
+                timeout=timeout, tries=tries)
     resp.raise_for_status()
     data = resp.json()
     if kind == "anthropic":
@@ -177,7 +182,7 @@ def user_profile_text(limit=30):
     parts = []
     try:
         p = load_profile() or {}
-        manual = str(p.get("manual") or "").strip()
+        manual = manual_block(p)
         if manual:
             parts.append("【用户手动偏好】\n" + manual)
     except Exception:
@@ -638,7 +643,7 @@ def _http_failure(status, detail_raw):
 def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event=None,
                 emit=None, on_visible=None, on_flush=None, allow_tool=True,
                 tools=None, timeout=(10, 300), max_tokens=None, kind=None,
-                idle_timeout=None, stall_timeout=None):
+                idle_timeout=None, stall_timeout=None, temperature=None):
     """一次流式聊天调用：转发 SSE 增量，并顺手摘掉 ```memory / ```tool 代码块。
 
     P1-step5b：原来这是 api/chat.py 里的一个闭包 `call_model`，
@@ -711,6 +716,12 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
         _mt = 0
     if _mt > 0:
         req["max_tokens"] = _mt
+    # 评测需要固定随机性：显式传 0 时才下发，正常对话保持服务商默认
+    if temperature is not None:
+        try:
+            req["temperature"] = float(temperature)
+        except (TypeError, ValueError):
+            pass
     if think:
         req.update(think)
 
@@ -727,7 +738,7 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
         if kind == "anthropic":
             body = providers.anthropic_body(
                 api_model, messages, _mt, think, stream=True,
-                tools=(tools if with_tools else None))
+                tools=(tools if with_tools else None), temperature=temperature)
             return _http().post(providers.anthropic_url(api_url),
                                 headers=providers.anthropic_headers(api_key),
                                 data=json.dumps(body, ensure_ascii=False).encode("utf-8"),

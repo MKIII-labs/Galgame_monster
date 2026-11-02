@@ -19,20 +19,20 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, wait
 
 from app import agent
-from app.config import effective_think_mode, thinking_payload
+from app import worktree
+from app import write_guard
+from app.config import effective_think_mode, load_config, thinking_payload
+from app.context import (TOOL_MSG_PREFIX, estimate_messages_tokens, real_used_tokens,
+                         trim_tool_results)
 from app.store import DATA_DIR
 
 MAX_QUESTIONS = 12
 MAX_DEPTH = 5                  # 子代理最多再往下派 5 层（根 depth=0）
 MAX_TOTAL = 100                # 一棵子代理树最多派几个（0 = 不限）
-MAX_SUB_ROUNDS = 10
-SUB_MAX_TOKENS = 2000
-SUB_TIMEOUT = 60.0             # 单个侦察兵最长多久
-CRITIC_TIMEOUT = 45.0          # 反证者只核对证据，给更短的时间
-TOTAL_TIMEOUT = 90.0           # 一批侦察兵最长多久
-OUT_CHARS = 600                # 每个子代理回传上限
-TOTAL_CHARS = 1800             # 汇总给主模型的上限
-TOOL_RESULT_CHARS = 3000       # 单个工具结果喂给子代理的上限
+MAX_SUB_ROUNDS = 30            # 兜底轮次（实际取配置 subagent_max_rounds；0 = 不限）
+SUB_TIMEOUT = 180.0            # 单个侦察兵最长多久
+CRITIC_TIMEOUT = 180.0         # 反证者同样给足时间（它要读完别人的结论）
+TOTAL_TIMEOUT = 360.0          # 一批侦察兵最长多久
 SEARCH_RESULT_CHARS = 9000     # 调研员单次搜索结果的回灌上限（要装得下正文片段）
 FOLLOWUP_TTL = 600             # 子会话内存保留秒数（explore_followup 追问用）；0 = 关闭
 MAX_BATCHES = 32               # 内存里最多保留几批子会话
@@ -66,7 +66,7 @@ _COMMON = (
     "你的权限在分叉时已固定：越权操作一律被拒绝，不要重试，"
     "直接在结论里说明限制。只输出结论，不要复述文件原文。"
     "每条结论后用（文件:行号）标注证据，系统会重新读取核对；引用不存在会被打回。"
-    "信息不足就写「未查清」，不要编造。结论控制在 600 字以内。"
+    "信息不足就写「未查清」，不要编造。结论写到够用即可，不要复述原文。"
     "最后一行固定写：`置信度: high|medium|low；未查清: ...`（没有就写「无」）。"
 )
 # 真 fork 的边界声明：父历史只是背景，子代理不要接着回答父对话
@@ -100,7 +100,7 @@ ROLE_PROMPTS = {
         "每条结论后面必须带上来源 URL（或台账编号 + URL），系统会核对 URL 是否真的来自本批搜索结果，"
         "编造链接会被打回。优先官方文档 / 规范 / 源码仓库 / 百科；论坛二手转述只作补充。"
         "关键参数尽量找第二个独立来源；两个来源冲突时把两边都写出来并注明冲突。"
-        "查不到的不要猜：写「未查清」，并列出还缺哪几条信息。结论控制在 600 字以内，不要复述原文。"
+        "查不到的不要猜：写「未查清」，并列出还缺哪几条信息。结论写到够用即可，不要复述原文。"
     ),
 }
 
@@ -161,21 +161,55 @@ def normalize_args(args, max_questions=MAX_QUESTIONS):
             "acceptance": acceptance}, ""
 
 
-def build_schemas(research=False):
+def normalize_agents(args, max_agents=MAX_QUESTIONS):
+    """delegate 专用：{agents:[{agent, task}], goal} -> 和 questions 同构的结构。"""
+    args = args if isinstance(args, dict) else {}
+    raw = args.get("agents")
+    if not isinstance(raw, list) or not raw:
+        return None, "缺少 agents：请给出 1–%d 个 {agent, task}" % max_agents
+    out = []
+    for i, item in enumerate(raw[:max_agents]):
+        if not isinstance(item, dict):
+            continue
+        aid = str(item.get("agent") or item.get("role") or "").strip()
+        task = str(item.get("task") or item.get("ask") or "").strip()
+        if not aid or not task:
+            continue
+        out.append({"id": "a%d" % (i + 1), "ask": _clip(task, 300), "role": aid,
+                    "scope": [], "hint_files": []})
+    if not out:
+        return None, "agents 里没有可用的 agent / task"
+    deliverable = _clip(args.get("deliverable") or "", 200)
+    acc = args.get("acceptance")
+    if isinstance(acc, str):
+        acc = [acc]
+    acceptance = [_clip(a, 120) for a in (acc if isinstance(acc, list) else [])[:4]
+                  if str(a or "").strip()]
+    return {"goal": _clip(args.get("goal") or out[0]["ask"], 200),
+            "questions": out, "verify": bool(args.get("verify")),
+            "allow_write": False, "research": False,
+            "deliverable": deliverable, "acceptance": acceptance}, ""
+
+
+def build_schemas(research=False, extra_tools=None):
     """子代理可用的工具 schema（原生 function calling 用）。
 
-    research=True 时把 web_search 一并下发（资料调研模式）。
+    research=True 或自定义角色包含 web_search 时，把联网搜索一并下发。
+    角色白名单按旧工具名声明；native_tool_schemas 会把 meta 工具收敛成
+    只包含被授权 action 的版本（例如只授权 read_file 时，read 只暴露 file）。
     """
-    try:
-        all_s = agent.native_tool_schemas(agent_on=True, search_ready=bool(research),
-                                          cap_domains=set(), computer_on=False,
-                                          lsp_on=False, git_commit_mode="off")
-    except Exception:
-        return []
+    extra = set(extra_tools or [])
     names = set()
     for tools in ROLE_TOOLS.values():
         names |= set(tools)
-    return [s for s in all_s if (s.get("function") or {}).get("name") in names]
+    names |= extra
+    try:
+        return agent.native_tool_schemas(
+            agent_on=True, search_ready=bool(research or "web_search" in extra),
+            cap_domains=set(), computer_on=False,
+            lsp_on=True, git_commit_mode="off", allowed_tools=names)
+    except Exception:
+        return []
 
 
 class Budget:
@@ -205,8 +239,9 @@ class Budget:
 class ReadCache:
     """同一轮里所有子代理共享的只读结果缓存：同一文件只读一次。"""
 
-    def __init__(self, sandbox, max_entries=24):
+    def __init__(self, sandbox, allow_outside=False, max_entries=24):
         self.sandbox = sandbox
+        self.allow_outside = bool(allow_outside)
         self.max_entries = max(4, int(max_entries or 24))
         self._items = {}
         self._lock = threading.Lock()
@@ -216,7 +251,8 @@ class ReadCache:
         with self._lock:
             if key in self._items:
                 return self._items[key]
-        text, _undo, _write = agent.run_tool(self.sandbox, name, args or {})
+        text, _undo, _write = agent.run_tool(self.sandbox, name, args or {},
+                                             allow_outside=self.allow_outside)
         with self._lock:
             self._items[key] = text
             while len(self._items) > self.max_entries:
@@ -529,18 +565,17 @@ def _task_prompt(q, goal, user_goal, brief="", parent_brief="", deliverable=""):
         parts.append("交付形态：" + deliverable)
     if q["role"] == "critic":
         parts.append("下面是其它侦察兵的结论，请核对它们引用的证据：\n" + (brief or "（没有结论）"))
-        parts.append("只核对、不重新探索；严格按系统要求的四行格式输出，总共不超过 500 字。")
+        parts.append("只核对、不重新探索；严格按系统要求的四行格式输出。")
     elif q["role"] == "worker":
         parts.append("要求：可以检索与阅读；需要改代码就用 write_file / edit_file，"
                      "每次写入都会经过用户审批；被拒绝就停下说明，不要换写法绕过。"
-                     "结论控制在 600 字以内，列出改了哪些文件、关键改动在哪些行。")
+                     "结论里列出改了哪些文件、关键改动在哪些行。")
     elif q["role"] == "searcher":
         parts.append("要求：只用 web_search 联网查外部资料；不要读本地文件、不要写。"
-                     "每条结论后面带来源 URL；找不到就写「未查清」并列出还缺什么。"
-                     "结论控制在 600 字以内。")
+                     "每条结论后面带来源 URL；找不到就写「未查清」并列出还缺什么。")
     else:
         parts.append("要求：只做检索与阅读；不要写文件、不要执行命令；"
-                     "结论控制在 600 字以内，每条结论后面标「文件:行号」；"
+                     "每条结论后面标「文件:行号」；"
                      "查不到就直说，不要猜。")
     return "\n".join(parts)
 
@@ -572,15 +607,16 @@ def _target_of(name, args):
     return ""
 
 
-def _default_chat(ctx, messages, schemas, stop_event):
+def _default_chat(ctx, messages, schemas, stop_event, model=None):
     """默认用主聊天模型跑子代理；thinking 关掉，省钱也更快。"""
     from app import llm
     return llm.stream_chat(
-        ctx["api_key"], ctx["api_url"], ctx["model"], messages,
+        ctx["api_key"], ctx["api_url"], model or ctx["model"], messages,
         think=thinking_payload(effective_think_mode(ctx["api_url"]), False,
                                ctx.get("think_level") or "high"),
         stop_event=stop_event, allow_tool=True, tools=schemas,
-        max_tokens=SUB_MAX_TOKENS, timeout=(10, 45),
+        max_tokens=int(ctx.get("sub_max_tokens") or 0),
+        timeout=(10, SUB_TIMEOUT),
         idle_timeout=0, stall_timeout=0)
 
 
@@ -620,6 +656,7 @@ def _remember(batch, goal, ctx, results, ttl):
            "parent_brief": ctx.get("parent_brief") or "",
            "session": ctx.get("session_id") or "",
            "research": bool(ctx.get("research")),
+           "roles": ctx.get("roles") or {},
            "items": items}
     with _BATCH_LOCK:
         _BATCHES[batch] = rec
@@ -627,11 +664,160 @@ def _remember(batch, goal, ctx, results, ttl):
     _gc(ttl)
 
 
+def _can_write(q, ctx):
+    """这个子代理有没有可能写文件（角色带写工具 + 本批允许写）。"""
+    role = str((q or {}).get("role") or "")
+    custom = (ctx.get("roles") or {}).get(role)
+    if custom:
+        tools = set(custom.get("tools") or ())
+        allowed = bool(ctx.get("allow_write")) or bool(custom.get("allow_write"))
+    else:
+        tools = set(ROLE_TOOLS.get(role) or ())
+        allowed = bool(ctx.get("allow_write"))
+    return allowed and bool(tools & set(SUB_WRITE_TOOLS))
+
+
+def _worktree_enabled(ctx, writers):
+    """是否给可写子代理开 worktree：off / auto（≥2 个写者）/ always。"""
+    mode = str(ctx.get("worktree_isolation") or "off").strip().lower()
+    if mode not in ("auto", "always"):
+        return False
+    if mode == "auto" and writers < 2:
+        return False
+    if not ctx.get("sandbox"):
+        return False
+    return (callable(ctx.get("worktree_write_tool"))
+            and callable(ctx.get("worktree_apply")))
+
+
+def _open_worktree(q, ctx, emit, depth):
+    """给一个可写子代理建隔离工作区；失败返回 None（退回共享沙箱）。"""
+    if depth > 0 or not _can_write(q, ctx):
+        return None
+    build = ctx.get("worktree_write_tool")
+    if not callable(build):
+        return None
+    shared = ctx.get("sandbox") or ""
+    try:
+        wt = worktree.create(shared, q.get("id") or "agent",
+                             batch=ctx.get("write_batch") or "")
+    except Exception as e:                     # noqa: BLE001  隔离失败不影响主流程
+        wt = worktree.Worktree()
+        wt.error = "创建隔离工作区失败：%s" % e
+    if not wt:
+        emit({"type": "subagent_step", "id": q.get("id"), "tool": "worktree",
+              "target": "回退到共享沙箱（%s）" % (wt.error or "不可用")})
+        return None
+    try:
+        write_tool = build(wt.sandbox)
+    except Exception as e:                     # noqa: BLE001
+        worktree.remove(wt)
+        emit({"type": "subagent_step", "id": q.get("id"), "tool": "worktree",
+              "target": "回退到共享沙箱（%s）" % e})
+        return None
+    emit({"type": "worktree_start", "id": q.get("id"), "role": q.get("role"),
+          "name": wt.name, "base": (wt.base or "")[:8]})
+    return {"wt": wt, "sandbox": wt.sandbox, "shared": shared,
+            "write_tool": write_tool}
+
+
+def _finish_worktree(q, ctx, iso, emit, ok):
+    """收集改动 -> 交给主循环回写（审批 / 撤销）-> 清理工作区。"""
+    wt = iso["wt"]
+    info = {"name": wt.name, "path": wt.display(), "files": [],
+            "applied": False, "skipped": "", "error": "",
+            "patch_path": wt.patch_path}
+    try:
+        files = worktree.changes(wt)
+        if not files:
+            info["skipped"] = "隔离工作区里没有改动"
+            return info
+        info["files"] = files
+        if any(f.get("outside") for f in files):
+            info["error"] = "改动落在沙箱外，已跳过回写"
+            return info
+        data, perr = worktree.patch(wt)
+        if perr:
+            info["error"] = perr
+            return info
+        if not data:
+            info["skipped"] = "没有可回写的补丁"
+            return info
+        if not ok:
+            info["skipped"] = "子代理未正常收尾，改动未回写（补丁已保留）"
+            return info
+        fn = ctx.get("worktree_apply")
+        if not callable(fn):
+            info["skipped"] = "没有配置回写回调"
+            return info
+        res = fn({"agent": q.get("id"), "role": q.get("role"),
+                  "sandbox": iso.get("shared") or "",
+                  "repo": wt.repo, "rel": wt.rel, "files": files,
+                  "patch": data, "patch_path": wt.patch_path,
+                  "batch": ctx.get("write_batch") or ""})
+        if not isinstance(res, dict):
+            info["error"] = "回写失败：没有回调结果"
+        elif res.get("applied"):
+            info["applied"] = True
+            info["undo"] = res.get("undo") or ""
+            info["skipped"] = res.get("note") or ""
+        else:
+            info["skipped"] = (res.get("reason") or res.get("error")
+                               or "未回写")
+            if res.get("conflict"):
+                info["conflict"] = True
+            if res.get("error") and not res.get("reason"):
+                info["error"] = res.get("error")
+    except Exception as e:                     # noqa: BLE001
+        info["error"] = "回写失败：%s" % e
+    finally:
+        try:
+            worktree.remove(wt)
+        except Exception:                      # noqa: BLE001
+            pass
+        emit({"type": "worktree_done", "id": q.get("id"),
+              "applied": bool(info.get("applied")),
+              "files": [{"path": f.get("path"), "status": f.get("status"),
+                         "add": f.get("add"), "del": f.get("del")}
+                        for f in info.get("files") or []],
+              "skipped": info.get("skipped") or "",
+              "error": info.get("error") or ""})
+    return info
+
+
 def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
     """跑一个侦察兵。seed_messages 非空 = 在同一子会话上继续追问。"""
     t0 = time.monotonic()
     role = q["role"]
-    tools = ROLE_TOOLS[role]
+    custom = (ctx.get("roles") or {}).get(role)
+    if custom:
+        tools = list(custom.get("tools") or [])
+        base_prompt = str(custom.get("prompt") or "")
+    # 轮次：配置 0 = 不限（用一个极大值让 while 条件永远成立，仍受超时 / 预算约束）
+    try:
+        _cfg_rounds = int(ctx.get("sub_max_rounds") or 0)
+    except (TypeError, ValueError):
+        _cfg_rounds = MAX_SUB_ROUNDS
+    _round_cap = _cfg_rounds if _cfg_rounds > 0 else 10 ** 9
+    if custom:
+        agent_model = str(custom.get("model") or "")
+        try:
+            max_rounds = max(1, int(custom.get("max_turns") or _round_cap))
+        except (TypeError, ValueError):
+            max_rounds = _round_cap
+    else:
+        if role not in ROLE_TOOLS:
+            return {"id": q.get("id") or role, "role": role, "ask": q.get("ask") or "",
+                    "ok": False, "text": "", "error": "未知子代理角色：%s" % role,
+                    "files": [], "sources": []}
+        tools = ROLE_TOOLS[role]
+        base_prompt = ROLE_PROMPTS[role]
+        agent_model = ""
+        max_rounds = _round_cap
+    if ctx.get("allow_outside"):
+        base_prompt += (
+            "\n\n【边界】用户已授权只读沙箱外文件：仅在任务明确要求时用**绝对路径**读取，"
+            "不要主动翻沙箱外目录；写入仍然只能在沙箱内。")
     try:
         depth = max(0, int(ctx.get("depth") or 0))
     except (TypeError, ValueError):
@@ -642,17 +828,25 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
         max_depth = max(0, max_depth)
     except (TypeError, ValueError):
         max_depth = MAX_DEPTH
-    schemas = [s for s in ctx.get("schemas") or []
-               if (s.get("function") or {}).get("name") in tools]
+    # 每个子代理只拿到自己角色被授权的 action：
+    # 直接按旧工具名重建 schema，meta 工具（read/edit/code/…）只会暴露对应 action。
+    try:
+        schemas = agent.native_tool_schemas(
+            agent_on=True, search_ready=("web_search" in set(tools)),
+            cap_domains=set(), computer_on=False, lsp_on=True,
+            git_commit_mode="off", allowed_tools=set(tools))
+    except Exception:                     # noqa: BLE001  退回到调用方给的并集
+        schemas = [s for s in ctx.get("schemas") or []
+                   if (s.get("function") or {}).get("name") in tools]
     if seed_messages:
         # 追问：沿用子会话的历史（含已读片段），换掉 system 以放宽读权限；
         # 调研员保持"只上网"的角色，别让它突然去读代码。
         messages = [{"role": "system",
-                     "content": ROLE_PROMPTS["searcher" if role == "searcher" else "reader"]}]
+                     "content": base_prompt}]
         messages += [m for m in seed_messages if m.get("role") != "system"]
     else:
         fork = ctx.get("fork_prefix") or []
-        messages = [{"role": "system", "content": ROLE_PROMPTS[role]}]
+        messages = [{"role": "system", "content": base_prompt}]
         if fork:
             # 真 fork：父会话的完整对话前缀 + 边界声明，再接本次任务
             messages.append({"role": "user", "content": FORK_NOTE})
@@ -663,32 +857,77 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
             ctx.get("parent_brief") or "",
             ctx.get("deliverable") or "")})
     hard_timeout = CRITIC_TIMEOUT if role == "critic" else SUB_TIMEOUT
-    emit({"type": "subagent_start", "id": q["id"], "role": role, "ask": q["ask"],
+    emit({"type": "subagent_start", "id": q["id"], "role": role,
+          "name": (custom or {}).get("name") or role,
+          "ask": q["ask"], "depth": depth,
           "fork": bool(ctx.get("fork_prefix")) or bool(seed_messages),
           "prefix_tokens": int(ctx.get("fork_tokens") or 0)})
 
+    # worktree 隔离：可写子代理拿一份独立工作区，跑完产补丁交回主沙箱
+    iso = _open_worktree(q, ctx, emit, depth) if ctx.get("worktree_enabled") else None
+    if iso:
+        ctx = dict(ctx)                 # 只改这个子代理的沙箱，不污染同批其他人
+        ctx["sandbox"] = iso["sandbox"]
+        ctx["write_tool"] = iso["write_tool"]
+        ctx["worktree_isolated"] = iso
+        cache = ReadCache(iso["sandbox"], bool(ctx.get("allow_outside")))
+
     def _write_tool(name, args):
-        """写入走主循环的审批回调；本批次数用尽直接拒绝（0 = 不限）。"""
+        """写入走主循环的审批回调；本批次数用尽直接拒绝（0 = 不限）。
+
+        并行写隔离：同一批次里同一路径被别的代理写过时，serial 模式回灌提醒，
+        strict 模式直接拒绝第二次写入（见 app/write_guard.py）。
+        """
         raw = ctx.get("write_max")
         cap = int(WRITE_MAX if raw is None else raw)
         counter = ctx.get("write_count")
         if cap > 0 and counter is not None and counter[0] >= cap:
             return False, "本批写入已达上限 %d 次" % cap
+        mode = str(ctx.get("write_isolation") or "serial").strip().lower()
+        if ctx.get("worktree_isolated"):
+            mode = "off"          # 各写各的副本，同文件不构成冲突
+        batch = ctx.get("write_batch") or ""
+        warn = []
+        for p in write_guard.paths_of(name, args, ctx.get("sandbox")):
+            okw, prev_owner, recent_owner = write_guard.claim(batch, p, q["id"], mode)
+            if not okw:
+                return False, ("写冲突：%s 在本批次里已由 %s 修改。"
+                               "严格写隔离拒绝了第二次写入；请改为提出补丁建议，"
+                               "或让主代理串行处理这个文件。" % (p, prev_owner))
+            who = prev_owner or recent_owner
+            if who:
+                warn.append("%s 刚由 %s 修改" % (p, who))
+        if warn and counter is not None:
+            conflicts = ctx.get("write_conflicts")
+            if conflicts is not None:
+                conflicts[0] += len(warn)
         if counter is not None:
             counter[0] += 1
         fn = ctx.get("write_tool")
         if not callable(fn):
             return False, "写入未配置"
         try:
-            return fn(name, args)
+            okw, out = fn(name, args)
         except Exception as e:
             return False, "写入失败：%s" % e
+        if warn:
+            out = ("（并行写提醒：%s；如果改的是同一处，先重读确认没覆盖对方的改动）\n%s"
+                   % ("、".join(warn), out))
+        return okw, out
 
     rounds, used, text, err, told_fallback = 0, [], "", "", False
+    tok = 0                     # 这个侦察兵自己烧了多少 token（前端逐行展示）
     board = ctx.get("board")
     last_board = 0
+    # 独立上下文：每个侦察兵只看自己的 messages，超预算就折自己的旧结果，
+    # 与主对话完全隔离（对齐 Claude 的子代理独立窗口）。
     try:
-        while rounds < MAX_SUB_ROUNDS:
+        _ctx_budget = int((load_config() or {}).get("subagent_context_tokens", 60000) or 0)
+    except (TypeError, ValueError):
+        _ctx_budget = 60000
+    _last_prompt, _msgs_at_call, _tok_ratio = 0, 0, 1.0
+    try:
+        while rounds < max_rounds:
             if stop_event is not None and stop_event.is_set():
                 err = "用户已停止"
                 break
@@ -698,9 +937,23 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
             if time.monotonic() - t0 > hard_timeout:
                 err = "超时"
                 break
-            rr = ctx["chat_fn"](ctx, messages, schemas, stop_event)
+            rr = (ctx["chat_fn"](ctx, messages, schemas, stop_event, model=agent_model)
+                  if agent_model else ctx["chat_fn"](ctx, messages, schemas, stop_event))
             rounds += 1
-            budget.spend((rr.get("usage") or {}).get("total_tokens") or 0)
+            _usage = rr.get("usage") or {}
+            budget.spend(_usage.get("total_tokens") or 0)
+            tok += int(_usage.get("total_tokens") or 0)
+            _p = int(_usage.get("prompt_tokens") or 0)
+            if _p > 0:
+                # 用真实 prompt_tokens 校准本地估算；记录「发请求时的消息数」，
+                # 之后新增的部分（本轮工具结果）用估算补上。
+                _est_now = estimate_messages_tokens(messages)
+                if _est_now > 0:
+                    _r = _p / _est_now
+                    if 0.2 <= _r <= 8:
+                        _tok_ratio = _r
+                _last_prompt = _p
+                _msgs_at_call = len(messages)
             if rr.get("native_fallback") and not told_fallback:
                 told_fallback = True
                 messages[0]["content"] += "\n\n" + agent.proto_block(False)
@@ -757,7 +1010,7 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
                                            % (sub_res.get("error") or "子代理没有结果"))
                         else:
                             results.append("【explore】\n"
-                                           + format_results(sub_res)[:TOOL_RESULT_CHARS])
+                                           + format_results(sub_res))
                         continue
                     if name == "web_search":
                         fn = ctx.get("search_fn")
@@ -776,7 +1029,8 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
                                        % str(out)[:SEARCH_RESULT_CHARS])
                         continue
                     if name in SUB_WRITE_TOOLS:
-                        if not ctx.get("allow_write"):
+                        if not (ctx.get("allow_write")
+                                or (custom and custom.get("allow_write"))):
                             results.append("【%s】本批探索没有开启写入，请只做检索与阅读。" % name)
                             continue
                         lock = ctx.get("write_lock")
@@ -789,7 +1043,7 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
                             out = "❌ " + str(out)
                         if board:
                             board.note(name, args, out)
-                        results.append("【%s】\n%s" % (name, str(out)[:TOOL_RESULT_CHARS]))
+                        results.append("【%s】\n%s" % (name, str(out)))
                         continue
                     try:
                         out = cache.call(name, args)
@@ -797,15 +1051,25 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
                         out = "工具执行失败：%s" % e
                     if board:
                         board.note(name, args, out)
-                    results.append("【%s】\n%s" % (name, out[:TOOL_RESULT_CHARS]))
-                body = ("工具执行结果如下，请据此继续；"
-                        "查清后直接给结论，不要复述原文：\n\n" + "\n\n".join(results))
+                    results.append("【%s】\n%s" % (name, out))
+                for _r in results:
+                    messages.append({"role": "user",
+                                     "content": TOOL_MSG_PREFIX + "\n" + str(_r)})
                 if board:
                     brief, ver = board.brief()
                     if brief and ver != last_board:
                         last_board = ver
-                        body += "\n\n【" + brief + "】"
-                messages.append({"role": "user", "content": body})
+                        messages.append({"role": "user", "content": "【" + brief + "】"})
+                # 独立窗口的压力控制：真实输入（上一轮 prompt_tokens）+ 本轮新增估算
+                # 超过子代理预算，就把自己较早的工具结果折成摘要；只动自己的 messages。
+                if _ctx_budget > 0 and _last_prompt > 0:
+                    _real_now = real_used_tokens(_last_prompt, messages,
+                                                 _msgs_at_call, _tok_ratio)
+                    if _real_now >= _ctx_budget:
+                        trim_tool_results(
+                            messages,
+                            max(1000, int(_ctx_budget / max(1.0, _tok_ratio))),
+                            keep_recent=2, fold_chars=240)
                 continue
             text = str(rr.get("visible") or "").strip()
             break
@@ -814,7 +1078,7 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
 
     # 证据硬校验：代码场景核对「文件:行号」，调研场景核对来源 URL；对不上就重试一次
     evidence = None
-    searcher = role == "searcher"
+    searcher = role == "searcher" or "web_search" in tools
     verify_on = searcher or bool(ctx.get("verify_evidence", True))
     if text and not err and verify_on:
         def _verify(t):
@@ -825,7 +1089,7 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
         evidence = _verify(text)
         fixed = 0
         while (evidence.get("missing") and fixed < 1
-               and rounds < MAX_SUB_ROUNDS
+               and rounds < max_rounds
                and not (stop_event is not None and stop_event.is_set())
                and not budget.exhausted()
                and time.monotonic() - t0 <= hard_timeout):
@@ -841,12 +1105,15 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
                            "也不要把整个文件贴回来。" % "、".join(evidence["missing"][:4]))
             messages.append({"role": "user", "content": fix_msg})
             try:
-                rr = ctx["chat_fn"](ctx, messages, schemas, stop_event)
+                rr = (ctx["chat_fn"](ctx, messages, schemas, stop_event, model=agent_model)
+                      if agent_model else ctx["chat_fn"](ctx, messages, schemas, stop_event))
             except Exception as e:
                 err = "证据重试失败：%s" % e
                 break
             rounds += 1
-            budget.spend((rr.get("usage") or {}).get("total_tokens") or 0)
+            _usage = rr.get("usage") or {}
+            budget.spend(_usage.get("total_tokens") or 0)
+            tok += int(_usage.get("total_tokens") or 0)
             new_text = str(rr.get("visible") or "").strip()
             if not new_text:
                 break
@@ -857,18 +1124,36 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
                 else ("引用无法核对：%s" % "、".join(evidence["missing"][:3]))
 
     ms = int((time.monotonic() - t0) * 1000)
-    text = _clip(text, OUT_CHARS)
+    text = str(text or "").strip()
     if not text and not err:
         err = "没有得出结论"
     ok = bool(text) and not err
     emit({"type": "subagent_done", "id": q["id"], "role": role, "ok": ok,
           "ms": ms, "rounds": rounds, "tools": len(used), "chars": len(text),
+          "tokens": tok,
           "evidence": (evidence or {}).get("score"),
           "missing": len((evidence or {}).get("missing") or []),
+          # 结论预览：前端展开这一行时直接看得到，不必等主模型汇总
+          "preview": text[:400],
           "error": err})
-    return {"id": q["id"], "role": role, "ask": q["ask"], "ok": ok, "text": text,
-            "error": err, "ms": ms, "rounds": rounds, "tools": used,
-            "evidence": evidence, "messages": messages}
+    out = {"id": q["id"], "role": role, "ask": q["ask"], "ok": ok, "text": text,
+           "error": err, "ms": ms, "rounds": rounds, "tools": used,
+           "evidence": evidence, "messages": messages}
+    # 隔离工作区留到整批跑完再回写（见 _settle_worktrees）：审批卡不会互相抢
+    if ctx.get("worktree_isolated"):
+        out["_wt"] = ctx["worktree_isolated"]
+    return out
+
+
+def _settle_worktrees(results, ctx, emit):
+    """整批跑完后逐个回写隔离工作区，再把结果塞回各子代理的记录。"""
+    for r in results or []:
+        iso = r.pop("_wt", None)
+        if not iso:
+            continue
+        r["worktree"] = _finish_worktree(
+            {"id": r.get("id"), "role": r.get("role")}, ctx, iso, emit,
+            bool(r.get("ok")))
 
 
 def _run_many(questions, ctx, cache, budget, emit, stop_event, seeds=None):
@@ -917,6 +1202,14 @@ def _run_many(questions, ctx, cache, budget, emit, stop_event, seeds=None):
 
 def run(args, ctx):
     """执行一批探索。ctx 需要 sandbox / api_key / api_url / model / emit / stop_event。"""
+    ctx = dict(ctx or {})
+    # 子代理的预算从配置读一次，随 ctx 传给每个侦察兵（嵌套批次自然继承）。
+    try:
+        _lim = load_config() or {}
+        ctx["sub_max_tokens"] = int(_lim.get("subagent_max_tokens", 0) or 0)
+        ctx["sub_max_rounds"] = int(_lim.get("subagent_max_rounds", MAX_SUB_ROUNDS) or 0)
+    except (TypeError, ValueError):
+        ctx["sub_max_tokens"], ctx["sub_max_rounds"] = 0, MAX_SUB_ROUNDS
     try:
         depth = max(0, int(ctx.get("depth") or 0))
     except (TypeError, ValueError):
@@ -935,7 +1228,10 @@ def run(args, ctx):
         limit = max(1, min(int(limit), MAX_QUESTIONS))
     except (TypeError, ValueError):
         limit = MAX_QUESTIONS
-    norm, err = normalize_args(args, limit)
+    if isinstance(args.get("agents"), list):
+        norm, err = normalize_agents(args, limit)      # delegate：按名字派活
+    else:
+        norm, err = normalize_args(args, limit)
     if err:
         return {"ok": False, "error": err, "results": [], "goal": "",
                 "tokens": 0, "ms": 0}
@@ -949,23 +1245,52 @@ def run(args, ctx):
         return {"ok": False, "error": "资料调研需要联网搜索，但本轮没有可用的搜索配置",
                 "results": [], "goal": norm["goal"], "tokens": 0, "ms": 0}
     ctx["deliverable"] = norm.get("deliverable") or ""
+    # 直接 explore.run({"agents": ...}) 时没经过 delegate：按定义补齐角色配置，
+    # 否则命名代理（implementer / documenter）会落到「未知角色」。
+    if isinstance(args.get("agents"), list) and not ctx.get("roles"):
+        try:
+            from app import agent_defs
+            _roles = {}
+            for _it in args.get("agents") or []:
+                if not isinstance(_it, dict):
+                    continue
+                _aid = str(_it.get("agent") or _it.get("role") or "").strip()
+                if not _aid or _aid in _roles:
+                    continue
+                _spec = agent_defs.get_agent(_aid)
+                if _spec:
+                    _roles[_aid] = agent_defs.role_spec(_spec)
+            if _roles:
+                ctx["roles"] = _roles
+        except Exception:            # noqa: BLE001  定义坏了按未知角色处理
+            pass
     ctx.setdefault("chat_fn", _default_chat)
-    ctx.setdefault("schemas", build_schemas(ctx["research"]))
+    extra_tools = set()
+    for spec in (ctx.get("roles") or {}).values():
+        extra_tools |= set((spec or {}).get("tools") or [])
+    ctx.setdefault("schemas", build_schemas(ctx["research"], extra_tools))
     ctx.setdefault("web_urls", set())
     ctx.setdefault("board", Blackboard())
     ctx.setdefault("verify_evidence", VERIFY_EVIDENCE)
     ctx.setdefault("write_lock", threading.Lock())
     ctx.setdefault("write_count", [0])
+    # 并行写隔离：同一批次共享一个写者表（见 app/write_guard.py）
+    ctx.setdefault("write_batch", uuid.uuid4().hex[:12])
+    ctx.setdefault("write_conflicts", [0])
     # 写入需要同时满足：模型要求写 + 设置允许 + 主循环提供了审批回调
     ctx["allow_write"] = bool(norm.get("allow_write")) and bool(ctx.get("allow_write", True)) \
         and callable(ctx.get("write_tool"))
     emit = ctx.get("emit") or (lambda o: None)
     budget = ctx.get("budget_obj") or Budget(ctx.get("budget") or 0)
-    cache = ReadCache(ctx["sandbox"])
+    cache = ReadCache(ctx["sandbox"], bool(ctx.get("allow_outside")))
     questions = norm["questions"][:limit]
+    # 写隔离开不开：auto = 本批有 ≥2 个可写子代理时才建 worktree（单写者没冲突）
+    ctx["worktree_enabled"] = _worktree_enabled(
+        ctx, sum(1 for q in questions if _can_write(q, ctx)))
     stop_event = ctx.get("stop_event")
     t0 = time.monotonic()
     results = _run_many(questions, ctx, cache, budget, emit, stop_event)
+    _settle_worktrees(results, ctx, emit)
     # 反证者：主代理明确要求（verify），或侦察兵自己提到矛盾时追加一个
     verify = bool(norm.get("verify")) or _looks_conflicted(results)
     if verify and any((r.get("text") or "").strip() for r in results):
@@ -995,6 +1320,7 @@ def run(args, ctx):
             "batch": batch, "ttl": ttl,
             "acceptance": acceptance,
             "writes": (ctx.get("write_count") or [0])[0],
+            "write_conflicts": len(write_guard.conflicts(ctx.get("write_batch"))),
             "verify": bool(any(r.get("role") == "critic" for r in results))}
 
 
@@ -1050,16 +1376,21 @@ def followup(args, ctx):
     ctx["goal"] = rec.get("goal") or "追问"
     ctx.setdefault("user_goal", rec.get("user_goal") or "")
     ctx.setdefault("parent_brief", rec.get("parent_brief") or "")
+    if not ctx.get("roles"):
+        ctx["roles"] = rec.get("roles") or {}
     ctx.setdefault("chat_fn", _default_chat)
     research = bool(rec.get("research"))
     ctx["research"] = research
-    ctx.setdefault("schemas", build_schemas(research))
+    _extra = set()
+    for _spec in (ctx.get("roles") or {}).values():
+        _extra |= set((_spec or {}).get("tools") or [])
+    ctx.setdefault("schemas", build_schemas(research, _extra))
     ctx.setdefault("web_urls", set())
     ctx.setdefault("verify_evidence", VERIFY_EVIDENCE)
     ctx.setdefault("allow_write", False)
     emit = ctx.get("emit") or (lambda o: None)
     budget = Budget(ctx.get("budget") or 0)
-    cache = ReadCache(ctx["sandbox"])
+    cache = ReadCache(ctx["sandbox"], bool(ctx.get("allow_outside")))
     stop_event = ctx.get("stop_event")
     keys = list(rec["items"].keys())
     seeds, questions = {}, []
@@ -1067,10 +1398,16 @@ def followup(args, ctx):
         key = it["target"] if it["target"] in rec["items"] else keys[i % len(keys)]
         item = rec["items"][key]
         qid = "%s+%d" % (key, i + 1)
-        item_role = "searcher" if item.get("role") == "searcher" else "reader"
-        tail = ("只补充新增信息；仍按「结论 + 来源 URL」输出，600 字以内；查不到就说未查清。"
-                if item_role == "searcher" else
-                "只补充新增信息；仍按「结论 + 文件:行号」输出，600 字以内；查不到就说查不到。")
+        item_role = item.get("role") or "reader"
+        _custom = (ctx.get("roles") or {}).get(item_role)
+        if not _custom and item_role != "searcher":
+            item_role = "reader"
+            _custom = None
+        is_web = item_role == "searcher" or bool(
+            _custom and "web_search" in (_custom.get("tools") or []))
+        tail = ("只补充新增信息；仍按「结论 + 来源 URL」输出；查不到就说未查清。"
+                if is_web else
+                "只补充新增信息；仍按「结论 + 文件:行号」输出；查不到就说查不到。")
         seeds[qid] = item["messages"] + [{
             "role": "user",
             "content": ("追问（沿用你已读过的内容，不要从头重新探索）：" + it["ask"]
@@ -1111,11 +1448,11 @@ def format_followup(res):
         state = "" if r.get("ok") else "（%s）" % (r.get("error") or "未完成")
         lines.append("[%s]%s %s" % (r.get("id") or "?", state,
                                     r.get("text") or "（无结论）"))
-    return _clip("\n".join(lines), TOTAL_CHARS)
+    return "\n".join(lines)
 
 
 def format_results(res):
-    """压成给主模型看的一段文本（≤1800 字）。"""
+    """拼成给主模型看的一段文本（不截断）。"""
     res = res or {}
     if not res.get("results"):
         return "【探索】%s" % (res.get("error") or "没有结果")
@@ -1126,10 +1463,12 @@ def format_results(res):
         if ("反驳" in ct or "无法判断" in ct
                 or ("冲突：" in ct and "冲突：无" not in ct)):
             warn = "⚠ 复核发现反驳或冲突，先看 [critic] 再行动。\n"
-    lines = [warn + "【探索小队】%s（%d 个子代理 · %d token · %.1fs%s）"
+    lines = [warn + "【探索小队】%s（%d 个子代理 · %d token · %.1fs%s%s）"
              % (res.get("goal") or "", len(res["results"]),
                 res.get("tokens") or 0, (res.get("ms") or 0) / 1000.0,
-                (" · 写入 %d 次" % res["writes"]) if res.get("writes") else "")]
+                (" · 写入 %d 次" % res["writes"]) if res.get("writes") else "",
+                (" · 写冲突 %d 处" % res["write_conflicts"])
+                if res.get("write_conflicts") else "")]
     for r in res["results"]:
         state = "" if r.get("ok") else "（%s）" % (r.get("error") or "未完成")
         ev = r.get("evidence") or {}
@@ -1139,6 +1478,18 @@ def format_results(res):
             if ev.get("weak"):
                 tag += "，%d 条待核对" % len(ev["weak"])
             tag += "）"
+        wt = r.get("worktree") or {}
+        if wt:
+            if wt.get("applied"):
+                tag += "（隔离工作区：%d 个文件已回写" % len(wt.get("files") or [])
+                tag += "，可撤销）" if wt.get("undo") else "）"
+            elif wt.get("files"):
+                tag += "（隔离工作区：%d 个文件未回写：%s）" % (
+                    len(wt.get("files") or []),
+                    wt.get("skipped") or wt.get("error") or "已跳过")
+            else:
+                tag += "（隔离工作区：%s）" % (wt.get("error") or wt.get("skipped")
+                                              or "无改动")
         lines.append("[%s/%s]%s %s%s" % (r.get("id") or "?", r.get("role") or "?",
                                          state, r.get("text") or "（无结论）", tag))
     acc = res.get("acceptance") or {}
@@ -1154,7 +1505,7 @@ def format_results(res):
         lines.append("（批次 %s｜%d 秒内可用 explore_followup 直接追问细节，别重新探索）"
                      % (res["batch"], res.get("ttl") or 0))
     lines.append("提示：以上结论都带文件:行号；需要展开某个文件时再用 read_file 精读。")
-    return _clip("\n".join(lines), TOTAL_CHARS)
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -1206,7 +1557,9 @@ def start_background(args, ctx):
         running = sum(1 for j in _JOBS.values() if j.get("status") == "running")
         if cap > 0 and running >= cap:
             return {"ok": False, "error": "后台子代理并发已满（%d）" % cap}
-    norm, _err = normalize_args(args, MAX_QUESTIONS)
+    norm, _err = (normalize_agents(args, MAX_QUESTIONS)
+                  if isinstance(args.get("agents"), list)
+                  else normalize_args(args, MAX_QUESTIONS))
     batch = _new_batch_id()
     cancel = threading.Event()
     rec = {"batch": batch, "status": "running", "started": time.time(),
@@ -1352,6 +1705,12 @@ def list_jobs():
                  "done": j["done"], "total": j["total"],
                  "ms": int(((j["finished"] or now) - j["started"]) * 1000)}
                 for b, j in _JOBS.items()]
+
+
+def running_count():
+    """还有几个后台批次在跑（关窗保活用，见 main._background_job_count）。"""
+    with _JOB_LOCK:
+        return sum(1 for j in _JOBS.values() if j.get("status") == "running")
 
 
 def format_jobs():

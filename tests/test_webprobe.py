@@ -98,10 +98,11 @@ def test_aliases_fold_to_render_check():
 
 
 def test_native_schema_gated_by_agent():
-    on = [t["function"]["name"] for t in agent.native_tool_schemas(agent_on=True)]
+    on = [t["function"]["name"] for t in agent.native_tool_schemas(
+        agent_on=True, allow_groups={"visual"})]
     off = [t["function"]["name"] for t in agent.native_tool_schemas(agent_on=False)]
-    assert "render_check" in on
-    assert "render_check" not in off
+    assert "visual" in on
+    assert "visual" not in off
 
 
 def test_describe_call_is_readonly():

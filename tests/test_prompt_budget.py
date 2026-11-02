@@ -39,7 +39,9 @@ def test_agent_prompt_without_domains_is_compact(tmp_path):
                                     native_tools=True, cap_domains=set())
     # 43.201：计划 v2 增加「里程碑 / verify / plan_patch」说明，阈值从 7000 调到 7400
     # 2026-10-29：读类工具新增 raw / 上下文 / 计数说明（减少「看文件写脚本」），7400 → 7600
-    assert len(text) < 7600, "Agent 提示 %d 字" % len(text)
+    # 2026-10-30：新增「收尾必须调用 finish」一段（Trae 式显式完成），7600 → 7700
+    # 2026-11-01：新增 image_compare（参考物 vs 产物对照）工具说明与使用纪律，7700 → 8000
+    assert len(text) < 8000, "Agent 提示 %d 字" % len(text)
     assert "沙箱目录树" not in text            # 有历史 + 原生工具 → 不再每轮塞树
     assert "calendar.create" in text           # 提醒约定必须保留
     assert "bili.analyze" not in text          # 未命中 B 站域 → 相关长约定不注入
@@ -75,23 +77,23 @@ def test_tool_schema_groups_hidden_by_default():
                                       cap_domains=set(), allow_groups=set())
     names = lambda xs: {t["function"]["name"] for t in xs}
     assert len(gated) < len(full)
-    assert "read_file" in names(gated)          # 核心工具始终在
-    assert "render_check" not in names(gated)   # 低频组被收起
-    assert "tool_search" in names(gated)        # 但给了按需解锁入口
+    assert "read" in names(gated)             # 核心工具始终在（文件读取已合并为 read(action=…)）
+    assert "visual" not in names(gated)       # 低频组被收起
+    assert "tool_search" in names(gated)      # 但给了按需解锁入口
     vis = agent.native_tool_schemas(agent_on=True, search_ready=True,
                                     cap_domains=set(), allow_groups={"visual"})
-    assert "render_check" in names(vis)
+    assert "visual" in names(vis)
     unl = agent.native_tool_schemas(agent_on=True, search_ready=True,
                                     cap_domains=set(), allow_groups=set(),
                                     unlocked={"asset"})
-    assert "asset_scan" in names(unl)
+    assert "asset" in names(unl)
 
 
 def test_tool_search_unlocks_group():
     caps = {}
     text = agent._t_tool_search({"query": "素材"}, caps)
     assert "asset" in caps.get("tool_unlock", set())
-    assert "asset_scan" in text
+    assert "asset" in text and "scan" in text
     hidden = agent.hidden_tools(set(), caps["tool_unlock"])
     assert hidden.isdisjoint(set(agent.TOOL_GROUPS["asset"]))
 

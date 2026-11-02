@@ -126,10 +126,14 @@ def test_export_markdown():
         "edges": [{"from": "a", "to": "b", "relation": "cause", "label": "因果",
                    "directed": True}]}
     md = knowledge_api_markdown(kb)
-    assert md.startswith("# 测试库")
+    assert md.startswith("---")
+    assert 'title: "测试库"' in md
     assert "## 量子计算" in md
     assert "分类：概念" in md and "别名：QC" in md
-    assert "因果：芯片工艺" in md
+    # 节点内是链接，陈述统一放在末尾「事实」区
+    assert "- 因果 → [[芯片工艺]]" in md
+    assert "## 事实" in md
+    assert "- [[量子计算]] --因果--> [[芯片工艺]]" in md
 
 
 def knowledge_api_markdown(kb):

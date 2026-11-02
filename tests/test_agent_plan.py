@@ -96,16 +96,16 @@ def test_plan_patch_requires_existing_plan():
 def test_plan_schema_exposed():
     names = [t["function"]["name"]
              for t in agent.native_tool_schemas(agent_on=True, search_ready=True)]
-    assert "update_plan" in names and "plan_patch" in names
-    assert "search_code" in names and "repo_map" in names
+    assert "plan" in names
+    assert "read" in names and "code" in names
 
     # /plan 只读：写 / 命令 / 工作流 schema 都不下发
     ro = [t["function"]["name"]
           for t in agent.native_tool_schemas(agent_on=True, search_ready=True,
                                              plan_mode=True)]
-    assert "update_plan" in ro and "plan_patch" in ro and "read_file" in ro
-    assert "write_file" not in ro and "run_command" not in ro
-    assert "run_workflow" not in ro and "run_script" not in ro
+    assert "plan" in ro and "read" in ro
+    assert "edit" not in ro and "run" not in ro
+    assert "workflow" not in ro
 
 
 def test_plan_step_ref_roundtrip():

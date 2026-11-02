@@ -4,9 +4,10 @@ import time
 from app.uploads import (_MIME_BY_EXT, _upload_path, delete_session_uploads, drop_upload_files)
 from app.store import _lock
 from app.export_md import (_md_name, session_markdown)
+from app.config import load_config, save_config
 from app.sessions import (ensure_session_kb_fields, find_session, invalidate_compression,
-                          load_sessions, new_id, save_sessions, set_current,
-                          trim_compress_marks)
+                          load_sessions, new_id, reorder_sessions, sandbox_group,
+                          save_sessions, set_current, trim_compress_marks)
 from app import (gal, saves)
 
 def _api_session_new(h):
@@ -122,6 +123,91 @@ def _api_session_pin(h):
             with _lock:
                 save_sessions(data)
         h._ok_sessions(data)
+
+
+def _api_session_reorder(h):
+        """拖拽排序：前端只提交当前分组里的 id，未列出的会话保持原位置。"""
+        body = h._body()
+        ids = body.get("ids")
+        if not isinstance(ids, list) or not ids:
+            return h._json({"ok": False, "error": "缺少 ids"}, 400)
+        data = load_sessions()
+        with _lock:
+            err = reorder_sessions(data, ids)
+            if err:
+                return h._json({"ok": False, "error": err}, 400)
+            save_sessions(data)
+        h._ok_sessions(data)
+
+
+def _api_session_group(h):
+        """分组级操作。
+
+        pin / rename 只动 config 里的展示元数据（分组是从 sandbox 派生的，
+        改显示名不能去改磁盘目录）；delete 才是真的删除组内全部会话。
+        """
+        body = h._body()
+        op = str(body.get("op") or "").strip()
+        key = str(body.get("key") or "").strip()[:500]
+        cfg = load_config()
+
+        if op == "pin":
+            if not key:
+                return h._json({"ok": False, "error": "缺少分组 key"}, 400)
+            pins = [x for x in (cfg.get("session_group_pins") or []) if x != key]
+            if body.get("pinned"):
+                pins.append(key)
+            cfg["session_group_pins"] = pins
+            save_config(cfg)
+            return h._json({"ok": True, "group_pins": pins})
+
+        if op == "rename":
+            if not key:
+                return h._json({"ok": False, "error": "缺少分组 key"}, 400)
+            names = dict(cfg.get("session_group_names") or {})
+            name = str(body.get("name") or "").strip()[:40]
+            if name:
+                names[key] = name
+            else:
+                names.pop(key, None)
+            cfg["session_group_names"] = names
+            save_config(cfg)
+            return h._json({"ok": True, "group_names": names})
+
+        if op == "delete":
+            ids = [str(x).strip() for x in (body.get("ids") or []) if str(x).strip()]
+            if not ids:
+                return h._json({"ok": False, "error": "缺少要删除的会话"}, 400)
+            data = load_sessions()
+            rows = data.get("sessions") or []
+            drop = set(ids)
+            removed = [s for s in rows if s.get("id") in drop]
+            if not removed:
+                return h._json({"ok": False, "error": "没有匹配的会话"}, 400)
+            # key 只是保险：传来的会话必须真的属于这个分组，防止前端算错批量误删
+            if key and any(sandbox_group(s.get("sandbox"))[0] != key for s in removed):
+                return h._json({"ok": False, "error": "会话不属于该分组"}, 400)
+            remain = [s for s in rows if s.get("id") not in drop]
+            if not remain:
+                return h._json({"ok": False, "error": "至少保留一个会话"}, 400)
+            data["sessions"] = remain
+            if data.get("current") in drop:
+                data["current"] = remain[0]["id"]
+            with _lock:
+                save_sessions(data)
+            for sid in drop:
+                delete_session_uploads(sid)      # 附件
+                saves.drop_saves(sid)            # 存档
+            if key:                              # 分组没了，展示元数据一并清掉
+                cfg["session_group_pins"] = [x for x in (cfg.get("session_group_pins") or [])
+                                             if x != key]
+                names = dict(cfg.get("session_group_names") or {})
+                names.pop(key, None)
+                cfg["session_group_names"] = names
+                save_config(cfg)
+            return h._ok_sessions(data)
+
+        return h._json({"ok": False, "error": "未知操作：%s" % op}, 400)
 
 
 def _api_session_delete(h):

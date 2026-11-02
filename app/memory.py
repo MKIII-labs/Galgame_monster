@@ -447,6 +447,56 @@ def stats():
     return {"total": total, "by_source": {r["source"]: r["n"] for r in rows}}
 
 
+def estimate(session_id=""):
+    """估算「会话记忆 / 用户画像」注入时的 token 负担。
+
+    只读现有索引表，不触发 ensure_fresh（那里会写库，不该被一个「看一眼」的请求触发）。
+    口径与 `context.estimate_tokens` 一致；两个来源的注入规则不同：
+    - 用户画像：每轮固定注入最多 PROFILE_INJECT_LIMIT 条（其余靠检索）
+    - 会话记忆：和知识库共用 INJECT_MAX_TOKENS 的检索预算
+    """
+    from app.context import estimate_tokens
+    from app import knowledge
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT scope, text FROM memory_items WHERE source='session'"
+    ).fetchall()
+    sid = str(session_id or "").strip()
+    want_scope = ("session:" + sid) if sid else ""
+    out = {
+        "session": {"items": 0, "chars": 0, "tokens": 0},
+        "profile": {"items": 0, "chars": 0, "tokens": 0},
+    }
+    for r in rows:
+        if want_scope and str(r["scope"] or "") != want_scope:
+            continue
+        text = str(r["text"] or "")
+        out["session"]["items"] += 1
+        out["session"]["chars"] += len(text)
+        out["session"]["tokens"] += estimate_tokens(text)
+    # 画像存在「用户画像」知识库里，不在 memory_items；这里只读索引，不调用 get_profile_kb
+    #（那个函数找不到会**新建**一个库，一个「看一眼」的请求不该有副作用）
+    try:
+        idx = knowledge.load_kb_index()
+        pid = ""
+        for item in (idx.get("kbs") or []):
+            if item.get("name") == knowledge.PROFILE_KB_NAME:
+                pid = item.get("id") or ""
+                break
+        kb = knowledge.load_kb(pid) if pid else None
+        for n in ((kb or {}).get("nodes") or []):
+            text = ("%s\n%s" % (n.get("title") or "", n.get("content") or "")).strip()
+            out["profile"]["items"] += 1
+            out["profile"]["chars"] += len(text)
+            out["profile"]["tokens"] += estimate_tokens(text)
+    except Exception:                        # noqa: BLE001  画像读失败不影响会话记忆的估算
+        pass
+    out["profile_inject_limit"] = knowledge.PROFILE_INJECT_LIMIT
+    out["inject_max_tokens"] = knowledge.INJECT_MAX_TOKENS
+    return out
+
+
+
 # ------------------------------------------------------------
 # 能力
 # ------------------------------------------------------------

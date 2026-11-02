@@ -956,3 +956,122 @@ def call_hierarchy(root, path, line, symbol="", direction="incoming"):
     for name, rel, line, hits in rows:
         lines.append("  %s  %s:%d  （%d 处）" % (name, rel, line, hits))
     return "\n".join(lines), None
+
+
+# ============================================================
+# 给编辑器用的**结构化**接口（前端画波浪线 / 问题面板 / 大纲 / 右键跳转）
+# 上面的函数返回给人看的文本，这里返回可直接落进 Monaco 的数据。
+# 行列口径：诊断用 **0 基**（Monaco Marker 要求），位置跳转用 **1 基**（和 UI 一致）。
+# ============================================================
+
+def diagnostics_items(root, path, wait=DIAG_WAIT, limit=MAX_DIAG_ITEMS):
+    """单文件诊断 → (items, error)。items 带 Monaco 的 severity（8 错误 / 4 警告）。"""
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        return [], "文件不存在：%s" % _rel(root, abs_path)
+    try:
+        s = session(root)
+        uri, version = s.sync(abs_path)
+        item = s.wait_diagnostics(uri, version, wait=wait)
+    except Unavailable as e:
+        return [], str(e)
+    out = []
+    for d in item.get("items") or []:
+        code = str(d.get("code") or d.get("rule") or "")
+        if code in _NOISE_CODES:            # 缺第三方库的噪音，和 CLI 口径保持一致
+            continue
+        sev = int(d.get("severity") or 1)
+        if sev > 2:
+            continue
+        rng = d.get("range") or {}
+        st = rng.get("start") or {}
+        en = rng.get("end") or {}
+        line0 = int(st.get("line") or 0)
+        char0 = int(st.get("character") or 0)
+        out.append({
+            "line": line0, "col": char0,
+            "endLine": int(en.get("line") or line0),
+            "endCol": int(en.get("character") or (char0 + 1)),
+            "severity": 8 if sev == 1 else 4,
+            "message": str(d.get("message") or "").replace("\n", " "),
+            "code": code,
+        })
+        if len(out) >= limit:
+            break
+    return out, ""
+
+
+def symbol_items(root, path):
+    """文件内符号（大纲）→ (items, error)；items = {name, detail, line, depth}。"""
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        return [], "文件不存在：%s" % _rel(root, abs_path)
+    try:
+        s = session(root)
+        uri, _v = s.sync(abs_path)
+        res = s.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+    except Unavailable as e:
+        return [], str(e)
+    rows = _flat_symbols(res)
+    return [{"name": name, "detail": detail, "line": line, "depth": depth}
+            for depth, name, detail, line in rows], ""
+
+
+def _caret(text, line, char, symbol):
+    """光标位置 → (line0, char0)。前端给了列就用列，否则按符号名在该行找一次。"""
+    try:
+        if int(char) > 0:
+            return int(line) - 1, int(char) - 1
+    except (TypeError, ValueError):
+        pass
+    return _symbol_column(text, line, symbol)
+
+
+def goto_items(root, kind, path, line, char=0, symbol=""):
+    """定义 / 引用 / 实现 → (items, error)；items = {path, line, col}（1 基）。
+
+    前端“跳到定义”需要能跨文件跳，所以不返回拼好的文本。
+    """
+    methods = {
+        "definition": "textDocument/definition",
+        "references": "textDocument/references",
+        "implementation": "textDocument/implementation",
+    }
+    method = methods.get(str(kind or "definition").strip().lower())
+    if not method:
+        return [], "未知的 kind：%s" % kind
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        return [], "文件不存在：%s" % _rel(root, abs_path)
+    try:
+        line0, char0 = _caret(_read_text(abs_path), line, char, symbol)
+        s = session(root)
+        uri, _v = s.sync(abs_path)
+        params = {"textDocument": {"uri": uri},
+                  "position": {"line": line0, "character": char0}}
+        if method.endswith("/references"):
+            params["context"] = {"includeDeclaration": True}
+        res = s.request(method, params)
+    except Unavailable as e:
+        return [], str(e)
+    locs = _collect_locations(root, res)
+    return [{"path": rel, "line": l0 + 1, "col": c0 + 1} for rel, l0, c0 in locs], ""
+
+
+def hover_text(root, path, line, char=0, symbol=""):
+    """悬停内容（纯文本）→ (text, error)。"""
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        return "", "文件不存在：%s" % _rel(root, abs_path)
+    try:
+        line0, char0 = _caret(_read_text(abs_path), line, char, symbol)
+        s = session(root)
+        uri, _v = s.sync(abs_path)
+        res = s.request("textDocument/hover", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line0, "character": char0},
+        })
+    except Unavailable as e:
+        return "", str(e)
+    return _markup_text((res or {}).get("contents")).strip()[:4000], ""
+

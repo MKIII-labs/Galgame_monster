@@ -425,6 +425,12 @@ def _sync_legacy_notify(ev):
         if not notify.available():
             return
         key = ev.get("source_id") or ev["id"]
+        system_on = (scheduler.switch_on("reminders_enabled")
+                     and scheduler.switch_on("reminder_system_enabled"))
+        if not system_on:
+            notify.unregister(key)
+            notify.cleanup_payload(key)
+            return
         when = _next_occurrence(ev, time.time())
         if not when:
             notify.unregister(key)
@@ -434,6 +440,35 @@ def _sync_legacy_notify(ev):
                         ev.get("title") or "提醒", ev.get("notes") or "")
     except Exception as e:
         print("[日程] 同步系统提醒失败：%s" % e)
+
+
+def apply_system_switch():
+    """提醒总开关 / 系统通知开关变化后，同步旧提醒的 Windows 计划任务。
+
+    新提醒（source != legacy_reminder）本来就不注册系统任务，由调度器在程序
+    运行时处理；这里只需要管迁移过来的旧提醒。
+    """
+    from app import notify
+    on = (scheduler.switch_on("reminders_enabled")
+          and scheduler.switch_on("reminder_system_enabled"))
+    try:
+        rows = get_db().execute(
+            "SELECT * FROM events WHERE status='active' AND source='legacy_reminder'"
+        ).fetchall()
+    except Exception as e:               # noqa: BLE001
+        print("[日程] 读取旧提醒失败：%s" % e)
+        return
+    for row in rows:
+        ev = dict(row)
+        if on:
+            _sync_legacy_notify(ev)
+        else:
+            key = ev.get("source_id") or ev["id"]
+            try:
+                notify.unregister(key)
+                notify.cleanup_payload(key)
+            except Exception:            # noqa: BLE001
+                pass
 
 
 def update_event(eid, **fields):
@@ -551,6 +586,10 @@ def due_reminders(now=None):
     提醒窗口：``occurrence - remind_before <= now < occurrence``。
     程序关着时错过的提醒不补（与一次性提醒的 STALE_AFTER 策略一致）。
     """
+    if not scheduler.switch_on("reminders_enabled") \
+            or not scheduler.switch_on("reminder_calendar_enabled"):
+        return []                        # 总开关 / 日程提醒关闭：不触发，也不落已提醒记录
+    inapp = scheduler.switch_on("reminder_inapp_enabled")
     now = float(now or time.time())
     cur = get_db().execute(
         "SELECT * FROM events WHERE status='active' AND "
@@ -582,17 +621,18 @@ def due_reminders(now=None):
                 # 一次性提醒结束后标记 done，重复提醒重新注册下一次系统任务。
                 body = (ev.get("notes") or "").strip() or "时间到了"
                 sid = ev.get("session_id") or ""
-                if sid:
+                if inapp and sid:
                     try:
                         from app import scheduler as sched
                         sched._append_message(sid, "⏰ **提醒**：" + body)
                     except Exception as e:
                         print("[日程] 追加提醒消息失败：%s" % e)
-                events_bus.publish({"type": "notify", "kind": "reminder",
-                                    "session_id": sid,
-                                    "task_id": ev.get("source_id") or ev["id"],
-                                    "title": ev.get("title") or "提醒",
-                                    "text": body})
+                if inapp:
+                    events_bus.publish({"type": "notify", "kind": "reminder",
+                                        "session_id": sid,
+                                        "task_id": ev.get("source_id") or ev["id"],
+                                        "title": ev.get("title") or "提醒",
+                                        "text": body})
                 text = body
                 if ev.get("rrule"):
                     _sync_legacy_notify(ev)
@@ -602,16 +642,17 @@ def due_reminders(now=None):
                 text = "%s（%s）" % (ev["title"], fmt_time(occ))
                 if ev.get("location"):
                     text += " · " + ev["location"]
-                events_bus.publish({"type": "notify", "kind": "calendar",
-                                    "session_id": ev.get("session_id") or "",
-                                    "title": "日程提醒", "text": text})
-                if ev.get("session_id"):
-                    try:
-                        from app import scheduler as sched
-                        sched._append_message(ev["session_id"],
-                                              "⏰ **日程提醒**：" + text)
-                    except Exception as e:
-                        print("[日程] 追加日程消息失败：%s" % e)
+                if inapp:
+                    events_bus.publish({"type": "notify", "kind": "calendar",
+                                        "session_id": ev.get("session_id") or "",
+                                        "title": "日程提醒", "text": text})
+                    if ev.get("session_id"):
+                        try:
+                            from app import scheduler as sched
+                            sched._append_message(ev["session_id"],
+                                                  "⏰ **日程提醒**：" + text)
+                        except Exception as e:
+                            print("[日程] 追加日程消息失败：%s" % e)
 
             try:
                 from app import workflow

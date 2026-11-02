@@ -114,4 +114,5 @@ def test_visual_check_headless(tmp_path, monkeypatch):
     assert "__VISUAL_METRICS__" in text
     assert "Canvas 1 个" in text
     assert "控制台错误 0" in text
+    assert "三角面 0 · 着色器 0 · 绑定纹理 0" in text
 

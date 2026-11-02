@@ -11,6 +11,8 @@ pypdf>=4.0
 pypdfium2>=4.0
 # 代码库语义检索：本地 ONNX embedding（模型需运行 scripts/fetch_embed_model.py 下载）
 fastembed>=0.4
+# IDE 调试器（Python）：提供 DAP 适配器；未安装时调试面板会给出安装提示
+debugpy>=1.8
 # IDE 内置终端：Windows ConPTY 伪终端（自带 winpty 回退；仅 Windows 需要）
 pywinpty>=3.1.0; sys_platform == "win32"
 # Computer Use · 桌面后端：Windows UIA 控件树（仅 Windows；不用桌面功能时不会初始化 COM）

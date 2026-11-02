@@ -13,6 +13,26 @@ $text = [string]$data.text
 if (-not $title) { $title = 'Galgame_monster' }
 if (-not $text) { $text = 'Reminder' }
 
+# If the app is already running it shows its own clickable notification
+# (click = restore window + jump to the session). This scheduled toast cannot
+# be clicked through to the app, so showing it too would just be a dead toast.
+$dataDir = Split-Path -Parent (Split-Path -Parent $Payload)
+$portFile = Join-Path $dataDir 'app_port.txt'
+if (Test-Path -LiteralPath $portFile) {
+    $portText = (Get-Content -LiteralPath $portFile -Raw -ErrorAction SilentlyContinue)
+    $port = 0
+    if ([int]::TryParse(([string]$portText).Trim(), [ref]$port)) {
+        $client = New-Object System.Net.Sockets.TcpClient
+        try {
+            $iar = $client.BeginConnect('127.0.0.1', $port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(300)) {
+                $client.EndConnect($iar)
+                if ($client.Connected) { exit 0 }
+            }
+        } catch { } finally { $client.Close() }
+    }
+}
+
 # XML-escape so &, <, > in the text cannot break the toast markup
 $title = [System.Security.SecurityElement]::Escape($title)
 $text = [System.Security.SecurityElement]::Escape($text)

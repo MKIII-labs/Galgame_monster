@@ -327,6 +327,45 @@ def save_sessions(data):
         print("[事件] %s" % e)
 
 
+def sandbox_group(path):
+    """会话列表分组用：(归一化 key, 显示名)。
+
+    同一个目录可能被写成 D:\\Proj / d:/proj / 带尾斜杠，直接按字符串分组会裂成多组；
+    Windows 上用 normcase + normpath 收敛。空路径表示「还没选目录」。
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        return "", ""
+    p = os.path.normpath(raw)
+    return os.path.normcase(p), (os.path.basename(p) or p)
+
+
+def reorder_sessions(data, ids):
+    """按 ids 的顺序重排这些会话在数组中的相对位置；未列出的会话留在原位。
+
+    只置换「已列出的这些 id 占用的槽位」——不同目录的会话、GAL 会话都不受影响，
+    所以前端可以只提交当前分组里的 id，不用回传全量列表。
+    返回错误文本，空串表示成功。
+    """
+    rows = (data or {}).get("sessions") or []
+    index = {str(s.get("id") or ""): i for i, s in enumerate(rows)}
+    want = []
+    for x in (ids or []):
+        sid = str(x or "").strip()
+        if not sid or sid not in index:
+            return "有会话不存在：%s" % (sid or "(空)")
+        if sid in want:
+            return "会话 id 重复：%s" % sid
+        want.append(sid)
+    if not want:
+        return "缺少要排序的会话"
+    slots = sorted(index[sid] for sid in want)
+    picked = [rows[index[sid]] for sid in want]
+    for slot, item in zip(slots, picked):
+        rows[slot] = item
+    return ""
+
+
 def slim_sessions(data, msg_limit=MSG_WINDOW):
     """只保留当前会话的消息，其余会话 messages 置为 None（前端切换时再按需拉取），
     避免每次进页面都把全部历史塞进 payload。
@@ -365,9 +404,10 @@ def slim_sessions(data, msg_limit=MSG_WINDOW):
         item["compress_marks"] = compress_marks_for(s)
         item["agent_enabled"] = s.get("agent_enabled", False)
         item["sandbox"] = s.get("sandbox", "")
+        item["sandbox_key"], item["sandbox_name"] = sandbox_group(s.get("sandbox"))
         item["allow_outside_read"] = s.get("allow_outside_read", False)
         # 审批档位必须回传：否则前端 applySessions 后读不到，会永远显示「手动审批」
-        item["approval_mode"] = s.get("approval_mode", "ask")
+        item["approval_mode"] = s.get("approval_mode", "ai")
         item["auto_chat"] = s.get("auto_chat", False)
         item["scene"] = s.get("scene", "general")
         item["gal_enabled"] = s.get("gal_enabled", False)

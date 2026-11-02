@@ -5,10 +5,11 @@
 完全复用，所以这里只做最薄的一层转换。
 
 设计取舍：
-- Anthropic 分支**不下发原生 tools**，强制走项目自己的 ```tool 文本协议。
-  原因：原生 tool_use / tool_result 必须严格成对回传，而本项目的历史消息里
-  工具结果是以普通 user 文本追加的，改造面很大且容易 400。
-  文本协议在所有服务商上行为一致，是更稳的选择。
+- 两种协议都下发原生 tools；Anthropic 的 tool_use / tool_result 由流式事件解析后
+  收敛成项目统一的调用结构（见 anthropic_tool_event）。工具结果仍以普通 user 文本
+  回灌，历史里不会留下悬空的 tool_use，所以不需要严格成对回传。
+- 富内容（图片）在 _to_anthropic_content 里换算：Anthropic 不认 OpenAI 的
+  image_url，必须拆成 base64 image 块；其余块降级成文本，绝不 json.dumps 成字符串。
 - Anthropic 的 usage 字段与 OpenAI 不同，这里统一映射，避免用量统计错位。
 - 失败一律抛给调用方处理，不在这里吞异常。
 """
@@ -46,8 +47,46 @@ def anthropic_headers(api_key):
     }
 
 
+def _to_anthropic_content(content):
+    """OpenAI 风格 content -> Anthropic content。
+
+    字符串原样返回；列表逐块转换：text 直接映射，image_url 的 data URL 拆成
+    base64 image 块（Anthropic 不认 image_url）。认不出的块降级成文本，
+    避免整条消息被 json.dumps 成「看得见但读不懂」的字符串。
+    """
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    if not isinstance(content, list):
+        return json.dumps(content, ensure_ascii=False)
+    blocks = []
+    for part in content:
+        if not isinstance(part, dict):
+            blocks.append({"type": "text", "text": str(part)})
+            continue
+        t = part.get("type")
+        if t == "text":
+            blocks.append({"type": "text", "text": str(part.get("text") or "")})
+        elif t == "image_url":
+            src = part.get("image_url")
+            url = str((src.get("url") if isinstance(src, dict) else src) or "")
+            if url.startswith("data:"):
+                head, _, data = url.partition(",")
+                mime = (head[5:].split(";")[0] or "image/png").strip()
+                blocks.append({"type": "image", "source": {
+                    "type": "base64", "media_type": mime, "data": data}})
+            elif url:
+                blocks.append({"type": "image", "source": {"type": "url", "url": url}})
+        elif t == "image" and isinstance(part.get("source"), dict):
+            blocks.append(part)
+        else:
+            blocks.append({"type": "text", "text": json.dumps(part, ensure_ascii=False)})
+    return blocks
+
+
 def _split_system(messages):
-    """Anthropic 的 system 是独立字段，不在 messages 里。"""
+    """Anthropic 的 system 是独立字段，不在 messages 里；图片块要换算成原生结构。"""
     sys_text, conv = [], []
     for m in messages or []:
         if not isinstance(m, dict):
@@ -60,8 +99,7 @@ def _split_system(messages):
             if text.strip():
                 sys_text.append(text)
         elif role in ("user", "assistant"):
-            conv.append({"role": role, "content": content if isinstance(content, str)
-                         else json.dumps(content, ensure_ascii=False)})
+            conv.append({"role": role, "content": _to_anthropic_content(content)})
     return "\n\n".join(sys_text), conv
 
 
@@ -80,10 +118,15 @@ def _thinking(think, max_tokens):
 
 
 def anthropic_body(model, messages, max_tokens=0, think=None, stream=True,
-                   tools=None, tool_choice=None):
+                   tools=None, tool_choice=None, temperature=None):
     sys_text, conv = _split_system(messages)
     mt = int(max_tokens or 0) or DEFAULT_MAX_TOKENS
     body = {"model": model, "max_tokens": mt, "messages": conv}
+    if temperature is not None:
+        try:
+            body["temperature"] = float(temperature)
+        except (TypeError, ValueError):
+            pass
     if stream:
         body["stream"] = True
     if sys_text:

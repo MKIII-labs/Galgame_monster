@@ -393,12 +393,14 @@ function hkHudRefresh() {
 function initHotkeys() {
   const hud = $('#hk-hud');
   if (hud) {
-    let open = false;
-    try { open = localStorage.getItem(HK_HUD_KEY) === '1'; } catch (e) { open = false; }
-    hud.classList.toggle('collapsed', !open);
+    // 这个入口现在直接打开「设置 → 功能说明」，不再展开快捷键清单
+    hud.classList.add('collapsed');
     const tg = $('#hk-hud-toggle');
-    if (tg) tg.onclick = () => hkHudToggle();
-    if (open) { hkHudRefresh(); hkHudTimerStart(); }
+    if (tg) {
+      tg.onclick = () => {
+        if (typeof openModal === 'function') openModal({ tab: 'help' });
+      };
+    }
   }
   const p = $('#hk-panel');
   if (p) {

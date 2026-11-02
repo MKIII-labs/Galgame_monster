@@ -25,6 +25,7 @@ const CMP_COMMANDS = [
   { cmd: '/kb',        desc: '打开知识库 / 记忆图谱',   kind: 'local', group: '视图' },
   { cmd: '/settings',  desc: '打开设置',                kind: 'local', group: '视图' },
   { cmd: '/theme',     desc: '切换明暗主题',            kind: 'local', group: '视图' },
+  { cmd: '/plan',      desc: '先出计划（本轮只读，不执行）', kind: 'local', group: 'AI' },
   { cmd: '/polish',    desc: 'AI 润色当前输入',         kind: 'ai', action: 'polish', group: 'AI' },
   { cmd: '/spec',      desc: 'AI 改成规格（目标/范围/边界/验收）', kind: 'ai', action: 'spec', group: 'AI' },
   { cmd: '/shorten',   desc: 'AI 精简当前输入',         kind: 'ai', action: 'shorten', group: 'AI' },
@@ -306,6 +307,7 @@ function cmpAccept(i) {
   cmpClosePop();
   if (it.kind === 'command') { cmpRunCommand(it.cmd, it.action); return; }
   if (it.kind === 'ref') { cmpInsertRef(it.insert || it.label); return; }
+  if (it.kind === 'hash') { cmpInsertHash(it.insert || '#web '); return; }
   const inp = cmpInput();                       // history
   if (inp) {
     inp.value = it.label;
@@ -331,6 +333,17 @@ function cmpDetect() {
       .map((c) => ({ kind: 'command', cmd: c.cmd, action: c.action, label: c.cmd, hint: c.desc, group: c.group }));
     cmpShow(cmpWithGroups(items));
     return;
+  }
+
+  // `#` 显式联网：行首或空白后的 #（对齐 Trae 的 #Web）
+  const hash = line.lastIndexOf('#');
+  if (hash >= 0 && (hash === 0 || /\s/.test(line[hash - 1]))) {
+    const q = line.slice(hash + 1).toLowerCase();
+    if (!q || 'web'.indexOf(q) === 0) {
+      cmpShow([{ kind: 'hash', label: '#web', insert: '#web ',
+                 hint: '本轮强制联网搜索；写成 #web <URL> 则直接读该页', group: '联网' }]);
+      return;
+    }
   }
 
   // `@` 引用：光标前最近的 @，且其前为空白或行首；沙箱文件 + 记忆条目
@@ -380,6 +393,22 @@ function cmpInsertRef(text) {
   inp.focus();
 }
 
+/* ---------- `#web` 插入 ---------- */
+function cmpInsertHash(text) {
+  const inp = cmpInput();
+  if (!inp) return;
+  const pos = inp.selectionStart || 0;
+  const before = inp.value.slice(0, pos);
+  const h = before.lastIndexOf('#');
+  if (h < 0) return;
+  const after = inp.value.slice(pos);
+  inp.value = before.slice(0, h) + text + after;
+  const np = h + text.length;
+  try { inp.setSelectionRange(np, np); } catch (e) { /* 忽略 */ }
+  autoGrow(); cmpUpdateHint(); cmpUpdateClear();
+  inp.focus();
+}
+
 /* ---------- 指令执行 ---------- */
 function cmpCommandArg(cmd) {
   const inp = cmpInput();
@@ -406,6 +435,16 @@ function cmpRunCommand(cmd, action) {
     case '/kb': if (typeof openKbModal === 'function') openKbModal(); break;
     case '/settings': if (typeof openModal === 'function') openModal(); break;
     case '/theme': { const b = $('#btn-theme'); if (b) b.click(); break; }
+    case '/plan': {
+      // 不立刻执行：把前缀留在输入框里，等用户补完目标再回车（发送时前端识别 /plan）
+      if (inp) {
+        inp.value = '/plan ';
+        autoGrow(); cmpUpdateHint(); cmpUpdateClear();
+        try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch (e) { /* 忽略 */ }
+        inp.focus();
+      }
+      break;
+    }
     case '/translate': {
       const lang = cmpCommandArg('/translate');
       cmpStripCommand('/translate');

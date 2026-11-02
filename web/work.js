@@ -61,6 +61,154 @@ function workLocalInput(ts) {
     + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
 }
 
+/* ---------------- 时间选择器 ----------------
+   原生 datetime-local 的时/分要靠键盘和小箭头微调，点选很别扭。
+   这里拆成「日期快捷 chips + 日期输入 + 时/分下拉 + 常用时间」，全部点选完成。
+   simple: true 时只保留日期 + 时分（用于「自定义结束时间」这类次要场景）。 */
+function workPad2(n) { return String(n).padStart(2, '0'); }
+
+function workDateValue(d) {
+  return d.getFullYear() + '-' + workPad2(d.getMonth() + 1) + '-' + workPad2(d.getDate());
+}
+
+function workDateTimePicker(initTs, opts) {
+  const o = opts || {};
+  const base = new Date(Number(initTs) * 1000);
+  const cur = isNaN(base.getTime()) ? new Date() : base;
+  cur.setSeconds(0, 0);
+
+  const wrap = workElNew('div', 'work-dt');
+  const dayRow = workElNew('div', 'work-dt-days');
+  const dateIn = document.createElement('input');
+  dateIn.type = 'date';
+  dateIn.className = 'work-dt-date';
+  dateIn.value = workDateValue(cur);
+  const dayChips = [];
+  if (!o.simple) {
+    [['今天', 0], ['明天', 1], ['后天', 2]].forEach(([label, off]) => {
+      const b = workElNew('button', 'work-dt-chip', label);
+      b.type = 'button';
+      b.onclick = () => {
+        const d = new Date();
+        d.setDate(d.getDate() + off);
+        dateIn.value = workDateValue(d);
+        sync(true);
+      };
+      dayChips.push([b, off]);
+      dayRow.appendChild(b);
+    });
+  }
+  dayRow.appendChild(dateIn);
+  wrap.appendChild(dayRow);
+
+  const timeRow = workElNew('div', 'work-dt-time');
+  const hourSel = document.createElement('select');
+  hourSel.className = 'work-dt-sel';
+  hourSel.setAttribute('aria-label', '时');
+  for (let h = 0; h < 24; h++) {
+    const op = document.createElement('option');
+    op.value = workPad2(h);
+    op.textContent = workPad2(h);
+    hourSel.appendChild(op);
+  }
+  hourSel.value = workPad2(cur.getHours());
+  const minSel = document.createElement('select');
+  minSel.className = 'work-dt-sel';
+  minSel.setAttribute('aria-label', '分');
+  // 分钟按 5 分钟步进；编辑到 09:07 这种非整档时间时把当前值补进列表
+  const fillMinutes = (m) => {
+    const val = Number(m);
+    const list = [];
+    for (let i = 0; i < 60; i += 5) list.push(i);
+    if (Number.isFinite(val) && list.indexOf(val) < 0) list.push(val);
+    list.sort((a, b) => a - b);
+    minSel.innerHTML = '';
+    list.forEach((v) => {
+      const op = document.createElement('option');
+      op.value = workPad2(v);
+      op.textContent = workPad2(v);
+      minSel.appendChild(op);
+    });
+    if (Number.isFinite(val)) minSel.value = workPad2(val);
+  };
+  fillMinutes(cur.getMinutes());
+  timeRow.appendChild(hourSel);
+  timeRow.appendChild(workElNew('span', 'work-dt-unit', '时'));
+  timeRow.appendChild(minSel);
+  timeRow.appendChild(workElNew('span', 'work-dt-unit', '分'));
+  wrap.appendChild(timeRow);
+
+  const quickChips = [];
+  if (!o.simple) {
+    const quickRow = workElNew('div', 'work-dt-quick');
+    [['09:00', 9, 0], ['12:00', 12, 0], ['14:00', 14, 0], ['19:00', 19, 0]]
+      .forEach(([label, h, m]) => {
+        const b = workElNew('button', 'work-dt-chip', label);
+        b.type = 'button';
+        b.onclick = () => {
+          if (!dateIn.value) dateIn.value = workDateValue(new Date());
+          hourSel.value = workPad2(h);
+          fillMinutes(m);
+          sync(true);
+        };
+        quickChips.push([b, h, m]);
+        quickRow.appendChild(b);
+      });
+    wrap.appendChild(quickRow);
+  }
+
+  let lastTs = cur.getTime() / 1000;
+
+  function readTs() {
+    const p = String(dateIn.value || '').split('-').map(Number);
+    if (p.length !== 3 || !p[0] || !p[1] || !p[2]) return NaN;
+    return new Date(p[0], p[1] - 1, p[2],
+      Number(hourSel.value), Number(minSel.value), 0, 0).getTime() / 1000;
+  }
+
+  function sync(notify) {
+    const ts = readTs();
+    if (isFinite(ts)) lastTs = ts;
+    const dv = dateIn.value;
+    dayChips.forEach(([b, off]) => {
+      const d = new Date();
+      d.setDate(d.getDate() + off);
+      b.classList.toggle('on', dv === workDateValue(d));
+    });
+    const h = Number(hourSel.value);
+    const m = Number(minSel.value);
+    const todayStr = workDateValue(new Date());
+    quickChips.forEach(([b, qh, qm]) => {
+      b.classList.toggle('on', dv === todayStr && h === qh && m === qm);
+    });
+    if (notify && o.onChange) o.onChange(lastTs);
+  }
+
+  dateIn.onchange = () => sync(true);
+  hourSel.onchange = () => sync(true);
+  minSel.onchange = () => sync(true);
+  sync(false);
+
+  return {
+    el: wrap,
+    get() {
+      const ts = readTs();
+      if (isFinite(ts)) lastTs = ts;
+      return lastTs;
+    },
+    set(ts) {
+      const d = new Date(Number(ts) * 1000);
+      if (isNaN(d.getTime())) return;
+      d.setSeconds(0, 0);
+      dateIn.value = workDateValue(d);
+      hourSel.value = workPad2(d.getHours());
+      fillMinutes(d.getMinutes());
+      lastTs = d.getTime() / 1000;
+      sync(false);
+    },
+  };
+}
+
 /* ---------------- 生命周期 ---------------- */
 function workEnterMode() {
   if (!WORK.bound) workBind();
@@ -482,6 +630,15 @@ function workField(box, label, input) {
   return input;
 }
 
+// 时间选择器包含多个控件，用 div 包一层：label 会把点击转发给第一个控件
+function workFieldBox(box, label, el) {
+  const wrap = workElNew('div', 'work-field');
+  wrap.appendChild(workElNew('span', 'work-field-label', label));
+  wrap.appendChild(el);
+  box.appendChild(wrap);
+  return wrap;
+}
+
 function workRruleKind(rrule) {
   const s = String(rrule || '').toLowerCase();
   if (s.includes('daily')) return 'daily';
@@ -495,27 +652,71 @@ function workOpenEventDialog(ev) {
   const now = Date.now() / 1000;
   const start = editing ? Number(ev.occurrence_at) : Math.ceil(now / 3600) * 3600;
   const end = editing ? Number(ev.occurrence_end || start + 3600) : start + 3600;
+  // 常用时长：命中整档就直接选中，否则落到「自定义」
+  const DURS = [[30, '30 分钟'], [60, '1 小时'], [120, '2 小时'], [180, '3 小时']];
+  let titleEl, locEl, repeatEl, remindEl, startPick, endPick, endField;
   workOpenDialog(editing ? '编辑日程' : '新建日程', (body) => {
-    const title = workField(body, '标题', workElNew('input', 'work-input'));
-    title.placeholder = '例如：产品周会';
-    title.value = editing ? (ev.title || '') : '';
-    const startIn = workField(body, '开始', workElNew('input', 'work-input'));
-    startIn.type = 'datetime-local';
-    startIn.value = workLocalInput(start);
-    const endIn = workField(body, '结束', workElNew('input', 'work-input'));
-    endIn.type = 'datetime-local';
-    endIn.value = workLocalInput(end);
-    const loc = workField(body, '地点（可选）', workElNew('input', 'work-input'));
-    loc.placeholder = '例如：3 楼会议室';
-    loc.value = editing ? (ev.location || '') : '';
-    const repeat = workField(body, '重复', workElNew('select', 'work-input'));
+    titleEl = workField(body, '标题', workElNew('input', 'work-input'));
+    titleEl.placeholder = '例如：产品周会';
+    titleEl.value = editing ? (ev.title || '') : '';
+
+    let mode = 'custom';
+    DURS.forEach(([m]) => {
+      if (Math.round((end - start) / 60) === m) mode = String(m);
+    });
+    // 结束时间由「开始 + 时长」算出来；只有自定义模式才让用户直接改
+    endPick = workDateTimePicker(end, { simple: true });
+    startPick = workDateTimePicker(start, {
+      onChange: (ts) => {
+        if (mode === 'custom') {
+          if (endPick.get() <= ts) endPick.set(ts + 1800);
+        } else {
+          endPick.set(ts + Number(mode) * 60);
+        }
+      },
+    });
+    workFieldBox(body, '开始', startPick.el);
+
+    const durChips = workElNew('div', 'work-dt-chips');
+    workFieldBox(body, '时长', durChips);
+    const durBtns = DURS.map(([m, label]) => {
+      const b = workElNew('button', 'work-dt-chip', label);
+      b.type = 'button';
+      b.onclick = () => {
+        mode = String(m);
+        endPick.set(startPick.get() + m * 60);
+        durBtns.forEach(([btn, v]) => btn.classList.toggle('on', v === mode));
+        endField.hidden = true;
+      };
+      durChips.appendChild(b);
+      return [b, String(m)];
+    });
+    const customBtn = workElNew('button', 'work-dt-chip', '自定义');
+    customBtn.type = 'button';
+    customBtn.onclick = () => {
+      mode = 'custom';
+      durBtns.forEach(([btn, v]) => btn.classList.toggle('on', v === mode));
+      if (endPick.get() <= startPick.get()) endPick.set(startPick.get() + 3600);
+      endField.hidden = false;
+    };
+    durChips.appendChild(customBtn);
+    durBtns.push([customBtn, 'custom']);
+    durBtns.forEach(([b, v]) => b.classList.toggle('on', v === mode));
+
+    endField = workFieldBox(body, '结束', endPick.el);
+    endField.hidden = mode !== 'custom';
+
+    locEl = workField(body, '地点（可选）', workElNew('input', 'work-input'));
+    locEl.placeholder = '例如：3 楼会议室';
+    locEl.value = editing ? (ev.location || '') : '';
+    repeatEl = workField(body, '重复', workElNew('select', 'work-input'));
     [['', '不重复'], ['daily', '每天'], ['weekly', '每周'], ['monthly', '每月']]
       .forEach(([v, t]) => {
         const o = document.createElement('option');
-        o.value = v; o.textContent = t; repeat.appendChild(o);
+        o.value = v; o.textContent = t; repeatEl.appendChild(o);
       });
-    repeat.value = editing ? workRruleKind(ev.rrule) : '';
-    const remind = workField(body, '提醒', workElNew('select', 'work-input'));
+    repeatEl.value = editing ? workRruleKind(ev.rrule) : '';
+    remindEl = workField(body, '提醒', workElNew('select', 'work-input'));
     const remindOpts = [[0, '不提醒'], [5, '提前 5 分钟'], [10, '提前 10 分钟'],
       [30, '提前 30 分钟'], [60, '提前 1 小时']];
     const curRemind = editing ? Number(ev.remind_before || 0) : 10;
@@ -524,26 +725,27 @@ function workOpenEventDialog(ev) {
     }
     remindOpts.forEach(([v, t]) => {
       const o = document.createElement('option');
-      o.value = String(v); o.textContent = t; remind.appendChild(o);
+      o.value = String(v); o.textContent = t; remindEl.appendChild(o);
     });
-    remind.value = String(curRemind);
+    remindEl.value = String(curRemind);
     if (editing && ev.rrule) {
       body.appendChild(workElNew('div', 'work-hint',
         '这是一条重复日程，保存后会修改整个系列的时间。'));
     }
   }, async () => {
-    const body = workEl('work-dialog-body');
-    const inputs = body.querySelectorAll('input, select');
-    const title = inputs[0].value.trim();
+    const title = titleEl.value.trim();
     if (!title) { toast('请填写标题', 'error'); return false; }
+    const startTs = startPick.get();
+    const endTs = endPick.get();
+    if (endTs <= startTs) { toast('结束时间必须晚于开始时间', 'error'); return false; }
     const payload = {
       op: editing ? 'update' : 'create',
       title,
-      start_at: inputs[1].value.replace('T', ' '),
-      end_at: inputs[2].value.replace('T', ' '),
-      location: inputs[3].value.trim(),
-      rrule: inputs[4].value,
-      remind_before: Number(inputs[5].value || 0),
+      start_at: workLocalInput(startTs).replace('T', ' '),
+      end_at: workLocalInput(endTs).replace('T', ' '),
+      location: locEl.value.trim(),
+      rrule: repeatEl.value,
+      remind_before: Number(remindEl.value || 0),
     };
     if (editing) payload.id = ev.id;
     try {
@@ -564,6 +766,7 @@ function workOpenEventDialog(ev) {
 }
 
 function workOpenTaskDialog() {
+  let duePick = null;
   workOpenDialog('新建任务', (body) => {
     const title = workField(body, '任务标题', workElNew('input', 'work-input'));
     title.id = 'work-task-title';
@@ -572,10 +775,19 @@ function workOpenTaskDialog() {
     ta.id = 'work-task-steps';
     ta.rows = 6;
     ta.placeholder = '收集材料\n写初稿\n校对并发出';
-    const due = workField(body, '截止时间（可选，会同步到日程并提醒）',
-      workElNew('input', 'work-input'));
-    due.id = 'work-task-due';
-    due.type = 'datetime-local';
+    // 截止时间默认关闭：不勾选就不建截止日程
+    const dueOn = workElNew('label', 'work-check');
+    const dueCb = document.createElement('input');
+    dueCb.type = 'checkbox';
+    dueCb.id = 'work-task-due-on';
+    dueOn.appendChild(dueCb);
+    dueOn.appendChild(document.createTextNode(' 设置截止时间（会同步到日程并提醒）'));
+    body.appendChild(dueOn);
+    duePick = workDateTimePicker(Math.ceil(Date.now() / 3600000) * 3600 + 3600,
+      { simple: true });
+    const dueField = workFieldBox(body, '截止时间', duePick.el);
+    dueField.hidden = true;
+    dueCb.onchange = () => { dueField.hidden = !dueCb.checked; };
     const pri = workField(body, '优先级', workSelect(
       [['0', '普通'], ['1', '低'], ['2', '中'], ['3', '高']]));
     pri.id = 'work-task-priority';
@@ -603,7 +815,8 @@ function workOpenTaskDialog() {
     const title = workEl('work-task-title').value.trim();
     const steps = workEl('work-task-steps').value.split('\n')
       .map((s) => s.trim()).filter(Boolean);
-    const due = workEl('work-task-due').value.replace('T', ' ').trim();
+    const hasDue = workEl('work-task-due-on').checked;
+    const due = hasDue ? workLocalInput(duePick.get()).replace('T', ' ') : '';
     const remindMin = Number(workEl('work-task-remind').value || 0);
     const auto = workEl('work-task-auto').checked;
     if (!title) { toast('请填写任务标题', 'error'); return false; }
@@ -628,6 +841,58 @@ function workOpenTaskDialog() {
       return false;
     }
   });
+}
+
+/* ---------- 图片生成 ---------- */
+function workOpenImageDialog() {
+  let size = 'square';
+  let promptEl = null;
+  workOpenDialog('生成图片', (body) => {
+    promptEl = workField(body, '提示词',
+      workElNew('textarea', 'work-input work-textarea'));
+    promptEl.rows = 5;
+    promptEl.placeholder = '描述你想要的画面，例如：雨夜的霓虹街道，电影感，35mm';
+    const chips = workElNew('div', 'work-dt-chips');
+    workFieldBox(body, '尺寸', chips);
+    const opts = [
+      ['square', '方形 1024²'],
+      ['portrait', '竖图 832×1216'],
+      ['landscape', '横图 1216×832'],
+    ];
+    const btns = opts.map(([v, label]) => {
+      const b = workElNew('button', 'work-dt-chip' + (v === size ? ' on' : ''), label);
+      b.type = 'button';
+      b.onclick = () => {
+        size = v;
+        btns.forEach(([btn, val]) => btn.classList.toggle('on', val === size));
+      };
+      chips.appendChild(b);
+      return [b, v];
+    });
+    body.appendChild(workElNew('div', 'work-hint',
+      '本地 FLUX 3 Image Klein（16 步）。首次生成要加载模型，可能多等十几秒；'
+      + '结果会放进右侧「产物」栏，点开可预览。'));
+  }, async () => {
+    const prompt = promptEl.value.trim();
+    if (!prompt) { toast('请填写提示词', 'error'); return false; }
+    const okBtn = workEl('work-dialog-ok');
+    const label = okBtn ? okBtn.textContent : '生成';
+    if (okBtn) { okBtn.disabled = true; okBtn.textContent = '生成中…'; }
+    try {
+      const r = await api('/api/image/generate', { prompt, size });
+      if (!r.ok) throw new Error(r.error || '生成失败');
+      await workLoad(true);
+      toast('图片已生成，见「产物」栏', 'success');
+      const art = r.artifact;
+      workCloseDialog();
+      if (art && art.id) workPreviewArtifact(art.id).catch(() => {});
+      return false;                       // 弹窗已在上面关掉
+    } catch (e) {
+      toastErr('生成图片失败', e);
+      if (okBtn) { okBtn.disabled = false; okBtn.textContent = label || '生成'; }
+      return false;
+    }
+  }, { okText: '生成' });
 }
 
 async function workOpenTask(id) {
@@ -911,22 +1176,117 @@ async function workCleanupEvents() {
 }
 
 /* ---------------- 数据备份 ---------------- */
-async function workBackupExport() {
+function workBackupName() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return 'galgame-backup-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate())
+    + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.zip';
+}
+
+function workBackupProgress(btn, bytes, total) {
+  if (!btn) return;
+  const mb = (bytes / 1048576).toFixed(1);
+  btn.textContent = total
+    ? ('导出中 ' + mb + ' / ' + (total / 1048576).toFixed(1) + ' MB')
+    : ('导出中 ' + mb + ' MB');
+}
+
+async function workBackupExport(btn) {
+  const name = workBackupName();
+  const label = btn ? btn.textContent : '';
+  const reset = () => { if (btn) { btn.disabled = false; btn.textContent = label || '导出备份'; } };
+  if (btn) { btn.disabled = true; btn.textContent = '正在打包…'; }
+
+  // Electron 壳：主进程弹保存框并把响应流式写盘。
+  // 不先把 500MB 的 zip 读进渲染进程，也不会出现「点了没反应」。
+  const gw = window.gmWin;
+  if (gw && typeof gw.saveUrl === 'function') {
+    let off = null;
+    try {
+      if (typeof gw.onSaveProgress === 'function') {
+        off = gw.onSaveProgress((p) => workBackupProgress(btn, p.bytes || 0, p.total || 0));
+      }
+      const r = await gw.saveUrl({
+        url: location.origin + '/api/backup/export',
+        name,
+        method: 'POST',
+        headers: { 'X-Auth-Token': TOKEN },
+        title: '保存备份',
+      });
+      if (r && r.ok) toast('备份已保存：' + r.path, 'success');
+      else if (r && r.canceled) toast('已取消导出');
+      else throw new Error((r && r.error) || '导出失败');
+    } catch (e) {
+      toastErr('导出备份失败', e);
+    } finally {
+      if (off) off();
+      reset();
+    }
+    return;
+  }
+
+  // 浏览器：先选保存位置再请求。showSaveFilePicker 需要用户手势，
+  // 必须放在 await fetch 之前，否则会被当成「非用户触发」而失败。
+  if (typeof window.showSaveFilePicker === 'function') {
+    let handle = null;
+    try {
+      handle = await window.showSaveFilePicker({
+        suggestedName: name,
+        types: [{ description: 'ZIP 备份', accept: { 'application/zip': ['.zip'] } }],
+      });
+    } catch (e) {
+      if (e && e.name === 'AbortError') { reset(); toast('已取消导出'); return; }
+      handle = null;                     // 选择器不可用就退回普通下载
+    }
+    if (handle) {
+      try {
+        const res = await fetch('/api/backup/export', {
+          method: 'POST', headers: { 'X-Auth-Token': TOKEN },
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const total = Number(res.headers.get('Content-Length')) || 0;
+        const writable = await handle.createWritable();
+        const reader = res.body.getReader();
+        let got = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await writable.write(value);
+          got += value.length;
+          workBackupProgress(btn, got, total);
+        }
+        await writable.close();
+        toast('备份已保存', 'success');
+      } catch (e) {
+        toastErr('导出备份失败', e);
+      } finally {
+        reset();
+      }
+      return;
+    }
+  }
+
   try {
     const res = await fetch('/api/backup/export', {
       method: 'POST', headers: { 'X-Auth-Token': TOKEN },
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const blob = await res.blob();
-    const cd = res.headers.get('Content-Disposition') || '';
-    const m = /filename="?([^"]+)"?/.exec(cd);
-    const name = m ? m[1] : 'galgame-backup.zip';
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = name; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    toast('备份已导出', 'success');
-  } catch (e) { toastErr('导出备份失败', e); }
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // 大文件还没下完就 revoke 可能中断下载，留足时间
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    toast('已开始下载到浏览器默认下载目录', 'success');
+  } catch (e) {
+    toastErr('导出备份失败', e);
+  } finally {
+    reset();
+  }
 }
 
 async function workBackupPreflight(file) {
@@ -964,8 +1324,9 @@ async function workBackupPreflight(file) {
 async function workBackupRestore() {
   const file = WORK.backupFile;
   if (!file) { toast('请先选择并预检备份文件', 'error'); return; }
-  if (!window.confirm('恢复会用备份覆盖当前知识库、会话、笔记、附件和任务/日程。\n'
-    + '备份中不存在的文件会保留；恢复前会自动生成一份安全备份。继续？')) return;
+  if (!window.confirm('恢复会用备份覆盖知识库、会话、笔记、附件、GAL 存档和任务/日程。\n'
+    + 'knowledge / notes / uploads / saves 目录会被备份整体替换（备份里没有的文件会删除）。\n'
+    + '恢复前会自动生成一份安全备份。继续？')) return;
   try {
     const buf = await file.arrayBuffer();
     const res = await fetch('/api/backup/restore', {
@@ -991,7 +1352,7 @@ function workOpenBackupDialog() {
       + '不包含 API Key 和浏览器缓存。'));
     const exportBtn = workElNew('button', 'work-btn primary', '导出备份');
     exportBtn.type = 'button';
-    exportBtn.onclick = workBackupExport;
+    exportBtn.onclick = () => workBackupExport(exportBtn);
     body.appendChild(exportBtn);
     body.appendChild(workElNew('div', 'work-hint', '选择备份文件（会先预检，不会立即写入）：'));
     const file = workElNew('input', 'work-input');
@@ -1052,6 +1413,7 @@ function workBind() {
   const bind = (id, fn) => { const el = workEl(id); if (el) el.onclick = fn; };
   bind('work-refresh', () => workLoad(true));
   bind('work-new-event', () => workOpenEventDialog());
+  bind('work-new-image', workOpenImageDialog);
   bind('work-clean-events', workCleanupEvents);
   bind('work-new-task', workOpenTaskDialog);
   bind('work-workflows', workOpenWorkflows);

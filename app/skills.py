@@ -215,6 +215,25 @@ def safe_id(sid):
     return s
 
 
+def unique_id(base):
+    """给「新建」分配一个不撞车的 id：base、base-2、base-3…
+
+    只做 id 计算，不落盘；save() 仍会重新校验。这样连续点「新建」不会互相覆盖
+    （旧接口按 name 生成 id，默认名「新 Skill」每次都得到 skill，结果只剩一个 Skill）。
+    """
+    s = (safe_id(base) or "skill")[:40]
+    if not os.path.isdir(os.path.join(SKILLS_DIR, s)):
+        return s
+    n = 2
+    while n <= 999:
+        suffix = "-%d" % n
+        cand = s[:40 - len(suffix)] + suffix
+        if not os.path.isdir(os.path.join(SKILLS_DIR, cand)):
+            return cand
+        n += 1
+    return s
+
+
 def save(sid, text):
     """写入（覆盖）一个 Skill，返回空串表示成功。"""
     s = safe_id(sid)

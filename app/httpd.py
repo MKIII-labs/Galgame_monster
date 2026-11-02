@@ -39,6 +39,13 @@ from app.api import gal_tts
 from app.api import sandbox
 from app.api import media_in
 from app.api import terminal as term_api        # noqa: F401  自注册 /api/ide/term/* 路由
+from app.api import ide_intel as ide_intel_api  # noqa: F401  自注册 /api/ide/lsp/* 路由（编辑器诊断 / 大纲 / 跳转 / 重命名）
+from app.api import ide_edit as ide_edit_api    # noqa: F401  自注册 /api/ide/replace 路由（全局搜索替换）
+from app.api import ide_tex as ide_tex_api      # noqa: F401  自注册 /api/ide/tex/* 路由（LaTeX 编译）
+from app.api import ide_tools as ide_tools_api  # noqa: F401  自注册 /api/ide/{py,c,format} 路由（ruff / gcc）
+from app.api import codeindex as codeindex_api  # noqa: F401  自注册 /api/codeindex/* 路由（全仓语义索引）
+from app.api import debugger as debugger_api    # noqa: F401  自注册 /api/debug/* 路由（IDE 调试器）
+from app.api import kb_stats as kb_stats_api    # noqa: F401  自注册 /api/kb/stats 路由（知识库 token 预估）
 from app.api import git as git_api              # noqa: F401  自注册 /api/git/* 路由
 from app.api import hall
 from app import orchestrator
@@ -48,6 +55,7 @@ from app.api import autopilot as autopilot_api
 from app.api import tasks as tasks_api
 # 以下两个模块通过 @route 自注册（新功能按这个模式加，不用改本文件的路由表）
 from app.api import work as work_api          # noqa: F401
+from app.api import trajectory as trajectory_api  # noqa: F401  轨迹（模型视角的事件账本）
 from app.api import calendar as calendar_api  # noqa: F401
 from app.api import workflow as workflow_api  # noqa: F401
 from app.api import memory as memory_api      # noqa: F401
@@ -57,6 +65,11 @@ from app.api import hall_stock as hall_stock_api  # noqa: F401
 from app.api import hall_interview as hall_interview_api  # noqa: F401
 from app.api import dojo as dojo_api  # noqa: F401
 from app.api import skills as skills_api  # noqa: F401
+from app.api import market as market_api  # noqa: F401  插件市场：DSH 生态只读索引
+from app.api import plugins as plugins_api  # noqa: F401  插件：工具插件 / MCP / 内置发现源
+from app.api import explore as explore_api  # noqa: F401  后台探索批次：前端轮询进度
+from app.api import image as image_api  # noqa: F401  自注册 /api/image/* 路由（本地 ComfyUI 出图）
+from app.api import agents as agents_api  # noqa: F401  自注册 /api/agents 路由（子代理定义）
 from app.api import computer_bridge
 
 TOKEN = secrets.token_urlsafe(24)
@@ -346,6 +359,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/app/context-menu": misc._api_app_context_menu,
             "/api/session/rename": sessions._api_session_rename,
             "/api/session/pin": sessions._api_session_pin,
+            "/api/session/reorder": sessions._api_session_reorder,
+            "/api/session/group": sessions._api_session_group,
             "/api/session/delete": sessions._api_session_delete,
             "/api/session/select": sessions._api_session_select,
             "/api/session/messages": sessions._api_session_messages,
@@ -381,6 +396,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/agent/undo": sandbox._api_agent_undo,
             "/api/agent/turn_undo": sandbox._api_agent_turn_undo,
             "/api/agent/approve": sandbox._api_agent_approve,
+            "/api/plan/review": sandbox._api_plan_review,
             "/api/agent/explain": sandbox._api_agent_explain,
             "/api/agent/rules": sandbox._api_agent_rules,
             "/api/agent/rules/preset": sandbox._api_agent_rules_preset,

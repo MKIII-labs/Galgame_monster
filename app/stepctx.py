@@ -193,7 +193,8 @@ def memory_organize_hint(rounds, nodes, edges, soft_limit=60, every=20):
     return ("【记忆整理】本会话记忆已有 %d 条、%d 条关系。"
             "若本轮新增了事件 / 进展，先合并同主题重复（保留信息最全的一条，"
             "update 合并正文与别名、其余 delete），删除过时条目，"
-            "并给关键事件补一条 purpose / sequence / cause / condition 关系；"
+            "并给关键事件补一条 purpose / cause / condition / means 关系，"
+            "每条连线都要写清 fact（一句话说明依据）；旧结论被推翻时用 link 写新陈述即可自动替代旧边。"
             "整理完再继续当前任务。" % (nodes, edges))
 
 
@@ -257,68 +258,39 @@ _FUTURE_ACTION_RE = re.compile(
 # 和「扫描文档里实际存在的规模数字。」，所以把「运行 / 扫描 / 执行 / 统计 /
 # 同步 / 对比 / 更新 / 搜索」这类同义动词一并收进来。
 # 只认句首动词，避免把「你可以查看文档」这种交付说明算成承诺。
+# 现场 01:57:02：末句「运行最终核对脚本；同时并行运行全量回归。」被判成已交付 ——
+# 分号后的第二段以「同时并行」开头，既不是动词也没法跨过分号，结果整句漏判。
+# 所以动词前允许连接词，并允许「；+ 第二段动作」这种连写结尾。
+_BARE_VERBS = (r"查|读|改|写|跑|验证|确认|检查|修复|重写|替换|删"
+               r"|扫描|运行|执行|统计|同步|对比|更新|搜索")
+_BARE_LINKS = r"(?:同时|并行|顺带|一并|再|然后)"
 _BARE_ACTION_RE = re.compile(
-    r"(?:^|[。；\n])\s*(?:查|读|改|写|跑|验证|确认|检查|修复|重写|替换|删"
-    r"|扫描|运行|执行|统计|同步|对比|更新|搜索)"
-    r"[^。；\n]{0,50}(?:。|；)?\s*$")
+    r"(?:^|[。；\n])\s*" + _BARE_LINKS + r"?\s*(?:" + _BARE_VERBS + r")"
+    r"[^。；\n]{0,50}"
+    r"(?:[。；][^。；\n]{0,20}" + _BARE_LINKS + r"?\s*(?:" + _BARE_VERBS + r")"
+    r"[^。；\n]{0,50})?"
+    r"(?:。|；)?\s*$")
 
-# 用户这轮在问「为什么 / 进度 / 是否完成」：不是让模型继续执行。
-# 反例：「为什么失败？帮我修一下」带明确任务动词 → 不算提问轮。
-_META_TURN_RE = re.compile(
-    r"为什么|为啥|怎么回事|什么原因|咋回事|"
-    r"(?:刚才|上次|上一?轮|这一?轮|这次).{0,12}(?:停|断|中断|卡|失败|结束)|"
-    r"(?:现在|目前|当前|到底).{0,12}(?:做到|到哪|进度|状态|完成)|"
-    r"总结一下|汇总一下|复盘|解释一下|说明一下|分析一下|进度如何|做到哪|"
-    r"完成了?[吗嘛?？]|做完了?[吗嘛?？]|完美完成|全部完成[了吗嘛?？]")
-_TASK_CONTINUE_RE = re.compile(
-    r"继续(?:做|改|写|跑|执行|任务|开发|实现)|接着(?:做|改|写|跑)|"
-    r"开始(?:做|改|写|实现|开发)|去(?:做|改|写|实现|跑)|"
-    r"帮我(?:做|改|写|实现|修|加|删)|把.{0,20}(?:改|修|加|删|实现)")
+# 「现在查 X」这类**紧邻**的时间引导词 + 单字动作：_ACTION_RE 只收了「重写 / 验证」
+# 这类双字动词，于是「现在查 `showShop` 的包裹情况。」被判成已收尾（现场 23:23:39）。
+# 只允许「先 / 再 / 就」夹在中间，避免把「接下来你可以自己试」算成承诺。
+_ACTION_NEAR_RE = re.compile(
+    r"(?:现在|接下来|下一步|然后|接着|下面|随后)\s*(?:先|再|就)?\s*"
+    r"(?:查|看|读|写|跑|扫|测|改|删|加|补|核对|定位|检查|生成|运行|执行|统计"
+    r"|对比|修复|修正|确认|处理|验证)")
 
-# 阶段总结的信号：成段正文里出现这些词，说明它在汇报「已经发生了什么」，
-# 不是一句「继续做 X」的占位承诺。
-_SUMMARY_MARK = ("已完成", "已通过", "已修复", "已改完", "已生成", "已跑",
-                 "结果", "目前", "现在已经", "实测", "验证通过", "PASS",
-                 "0 FAIL", "全部通过", "已经改", "已经修")
-
-
-def is_meta_turn(text):
-    """这一轮用户是不是在问「为什么 / 进度 / 是否完成」，而不是让模型继续做。
-
-    命中时调用方应关闭自动续跑与计划体检，允许模型用一段文字作答后收尾。
-    """
-    t = str(text or "").strip()
-    if not t or len(t) > 240:
-        return False
-    if _TASK_CONTINUE_RE.search(t):
-        return False
-    return bool(_META_TURN_RE.search(t))
-
-
-def is_checkpoint_summary(text, chars=180):
-    """成段的阶段总结：够长 + 带进度/结论信号，允许先收尾再等用户决定。
-
-    一句「继续。S1：核对…」既不够长、也没有总结信号，仍然会被自动续跑。
-    `chars=0` 关闭这个放行。
-    """
-    t = str(text or "").strip()
-    try:
-        chars = int(chars)
-    except (TypeError, ValueError):
-        chars = 180
-    if chars <= 0 or len(t) < chars:
-        return False
-    if t.endswith(("：", ":")):
-        return False
-    if _pending_decision(t) or _tail_asks(t):
-        return False
-    # 总结信号必须在**尾部**：一段长叙述开头写「已完成」、结尾却在承诺下一步时，
-    # 仍然按「说要做」续跑；真正的阶段总结通常把结论放在最后。
-    return any(k in t[-300:] for k in _SUMMARY_MARK)
+# 「修完后再跑一次确认」这类「完成前缀 + 再 + 动作」：
+# _ACTION_NEAR_RE 只认句首的引导词，_BARE_ACTION_RE 只认句首动词，两边都漏
+# （现场 00:36:27：末句就是这句，被判成已收尾，回合正常结束，界面看起来像被中断）。
+# 只认紧邻结构，且必须有「完 / 好 / 掉 / 毕」这个完成前缀 ——
+# 否则「你可以再跑一次看看」这种交付说明会被误判成承诺。
+_AFTER_DONE_RE = re.compile(
+    r"(?:完|好|掉|毕)(?:之后|以后|后)?\s*[，,]?\s*再\s*"
+    r"(?:跑|查|看|测|试|验证|确认|核对|执行|运行|生成|扫|统计|对比|修|改|读|写|补)")
 
 # 明确「做不下去 / 等用户补材料」的话术：这不是「没做完」，催也做不出来。
 # 现场：计划里挂着 1 步 pending，正文写「第 5 题的题面我始终没有拿到」，
-# 自动续跑 3 轮都没有工具可调，最后撞上空转刹车 —— 提示就是这么反复出现的。
+# 自动续跑 3 轮都没有工具可调，提示就是这么反复出现的。
 _BLOCKED_RE = re.compile(
     r"无法(?:继续|完成|写出|进行)|没法(?:继续|完成)|不能继续|做不下去"
     r"|(?:拿不到|没有拿到|无法获取|获取不到)(?:题面|题干|文件|内容|图片|数据|素材|参数)?"
@@ -541,9 +513,9 @@ _CONT_PREFIX_RE = re.compile(
     r"|开始[，,。!！\s]*$)", re.I)
 
 
-def plan_can_inherit(text, cont=False, resume=False, meta=False):
+def plan_can_inherit(text, cont=False, resume=False):
     """这一轮要不要把上一版计划装回 `plan_state`（供 plan_patch 继续改）。"""
-    if cont or resume or meta:
+    if cont or resume:
         return True
     t = str(text or "").strip()
     if not t or len(t) > 240:
@@ -608,7 +580,9 @@ def _tail_promises_work(text, width=120):
     tail = t[-width:]
     if any(k in tail for k in _PROMISE_WORK):
         return True
-    if _ACTION_RE.search(tail) or _FUTURE_ACTION_RE.search(tail) or _BARE_ACTION_RE.search(t):
+    if (_ACTION_RE.search(tail) or _ACTION_NEAR_RE.search(tail)
+            or _AFTER_DONE_RE.search(tail)
+            or _FUTURE_ACTION_RE.search(tail) or _BARE_ACTION_RE.search(t)):
         return True
     return False
 
@@ -617,8 +591,7 @@ def _claims_blocked(text):
     """结尾是否明确表示「做不下去 / 等用户补材料」。
 
     这一类不是「任务没做完」，而是「再推也没有工具可调」。
-    以前它落进「计划还有未完成步骤」→ 续跑，模型只能反复写叙述，
-    三轮后触发空转刹车，用户看到的就是那条「本轮没有结论」。
+    以前它落进「计划还有未完成步骤」→ 续跑，模型只能反复写同样的叙述。
     """
     t = (text or "").strip()
     if not t:
@@ -630,7 +603,7 @@ def _claims_blocked(text):
 
 
 def auto_continue_reason(plan, visible, tool_count, wrote, goal, first=False,
-                         agent_mode=False, plan_stale=0, summary_stop_chars=180):
+                         agent_mode=False):
     """判断「模型想收尾，但任务其实没做完」，返回 {why, msg} 或 None。
 
     四类触发：
@@ -645,9 +618,11 @@ def auto_continue_reason(plan, visible, tool_count, wrote, goal, first=False,
     放行条件（任一）：
       - 结尾明确表示受阻 / 需要用户补材料（催也做不出来）；
       - 结尾是在等用户拍板的决策问句（交给提问卡，不替用户决定）；
-      - 写成篇的结论且结尾没有动作承诺；
-      - 明确说了「已完成 / 改完了」；
-      - 计划连续 plan_stale 次续跑一个字没变 —— 不再拿「计划未完成」当理由。
+      - 写成篇的结论、结尾没有动作承诺、且计划里已经没有待办；
+      - 明确说了「已完成 / 改完了」。
+
+    注意：**不再**因为「计划连续多轮没推进」就放行。模型现在会自己调 `finish`
+    收尾；计划只要还有未完成步骤，就继续催（2026-10-30 按实际使用情况去掉该刹车）。
     """
     text = visible or ""
     todo = _pending_steps(plan)
@@ -668,23 +643,16 @@ def auto_continue_reason(plan, visible, tool_count, wrote, goal, first=False,
                     "（不可逆操作、涉及偏好）时才用 ask_user。"
                     "如果已经完成，明确说「已完成」并给出结论。"),
         }
-    # 阶段总结：成段 + 带进度/结论信号 → 允许先收尾（用户要「先输出一段总结」）。
-    # 一句「继续。S1：核对…」不够长 / 没有总结信号，仍然按下面的规则续跑。
-    if is_checkpoint_summary(text, summary_stop_chars):
-        return None
     # 模型明确宣布完成、且写了成篇的结论 → 放行，即使计划里还有没标 done 的步骤。
-    # 计划状态是模型自己维护的，它经常忘记回标；这时再续跑只会换来一段重复总结，
-    # 连续两次后反而撞上「空转」刹车（实测：5155 字正文，结尾仍在描述下一步）。
+    # 计划状态是模型自己维护的，它经常忘记回标；这时再续跑只会换来一段重复总结。
+    # 注意：这条要求「结尾没有动作承诺」—— 只要末句还说要做，就必须继续跑。
     if _claims_complete(text) and len(text) >= 300 and not _tail_promises_work(text):
         return None
-    # 成篇总结 + 结尾没有动作承诺 = 已经给出结论，即使没命中完成词表。
-    # 实测一次完整交付（2 万字，结尾是「双击 index.html，Ctrl+F5 强刷」）
-    # 因为计划 5 步没回标 done，被连推 3 轮后撞上刹车，正文反而被判成「没有结论」。
-    # 计划迟迟不推进时（plan_stale ≥ 2）也不再拿它当理由。
-    if (len(text) >= 300 and not _tail_promises_work(text)
-            and (not todo or plan_stale >= 2)):
+    # 成篇总结 + 结尾没有动作承诺 + 计划已无待办 = 已经给出结论。
+    # 计划里还有待办时不算交付：继续按计划做（模型自己调 finish 才算收尾）。
+    if (len(text) >= 300 and not _tail_promises_work(text) and not todo):
         return None
-    if agent_mode and todo and plan_stale < 2:
+    if agent_mode and todo:
         lines = "\n".join("- " + t for t in todo[:8])
         ready = plan_ready_hint(plan, 3)
         if ready:
@@ -702,7 +670,7 @@ def auto_continue_reason(plan, visible, tool_count, wrote, goal, first=False,
         return None
     # 「说而不做」：这一轮动过手（tool_count≥1），却没有对应的工具调用就收尾了。
     # 只认明确承诺（词表 / 句首引导词 / 将来时动作）：以前「动过手 + 没命中完成词」
-    # 是无条件续跑，长任务尾部会一路催到空转刹车。
+    # 是无条件续跑，长任务尾部会一路被催着重复收尾。
     if agent_mode and tool_count >= 1 and _tail_promises_work(text):
         return {
             "why": "结尾说了要做但没调用工具",

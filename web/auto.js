@@ -12,6 +12,9 @@ const AUTO = {
   retry: 0,        // 连续失败次数（用于退避）
   notified: false, // 是否已问过通知权限
   notifiedKeys: new Set(),   // 同一件事只提醒一次（任务确认 / 任务完成等）
+  liveNotifs: [],  // 浏览器模式下持有 Notification 引用，避免 onclick 随 GC 丢失
+  notifyTargets: {},         // 通知 id -> 点击后的落点（Electron 主进程点击回调按 id 找回）
+  notifySeq: 0,
   // 自动化看板：回合跑在服务端，这里靠 autopilot_live 事件堆出实时状态
   live: {
     sid: '', gid: '', goal: null, state: '', phase: '', act: '', turn: 0,
@@ -19,6 +22,21 @@ const AUTO = {
     fetchAt: 0, timer: 0,
   },
 };
+
+/** Electron 壳是否可用（主进程通知点击可靠，且能还原最小化窗口） */
+function nativeNotify() {
+  return (typeof window !== 'undefined' && window.gmWin
+          && typeof window.gmWin.notify === 'function') ? window.gmWin : null;
+}
+
+function rememberNotifyTarget(target) {
+  AUTO.notifySeq += 1;
+  const id = 'n' + AUTO.notifySeq + '_' + Date.now().toString(36);
+  AUTO.notifyTargets[id] = target || null;
+  const keys = Object.keys(AUTO.notifyTargets);
+  if (keys.length > 50) delete AUTO.notifyTargets[keys[0]];
+  return id;
+}
 
 function notifySupported() {
   return typeof Notification !== 'undefined';
@@ -84,22 +102,85 @@ function warmNotifySound() {
 }
 
 // kind：done / ask / warn / error / remind —— 决定提示音音高（缺省按完成）
-function showSystemNotify(title, text, kind) {
+// target：点击通知后跳到哪儿，{ sessionId } 开会话、{ taskId } 开任务详情；不传就只把窗口拉前台
+function showSystemNotify(title, text, kind, target) {
+  // Electron 壳：通知交给主进程创建。Windows 上渲染进程的 HTML5 Notification
+  // 点击事件不可靠（点了没反应），主进程的 'click' 稳定，且能先还原最小化窗口。
+  const gw = nativeNotify();
+  if (gw) {
+    playNotifySound(kind);
+    try {
+      gw.notify({
+        id: rememberNotifyTarget(target),
+        target: target || null,
+        title: title || 'Galgame_monster',
+        body: text || '',
+      });
+      return;
+    } catch (e) { /* 主进程通知失败就退回浏览器通知 */ }
+  }
   if (!notifySupported() || Notification.permission !== 'granted') return;
   playNotifySound(kind);
   try {
-    const n = new Notification(title || 'Galgame_monster', { body: text || '' });
-    n.onclick = () => { try { window.focus(); } catch (e) { /* ignore */ } n.close(); };
+    // silent：上面的 playNotifySound 已经出过提示音了，浏览器/系统不要再补一声
+    const n = new Notification(title || 'Galgame_monster', { body: text || '', silent: true });
+    // 持有引用：某些环境下通知对象被 GC 后 onclick 会一起失效（点了没反应）
+    AUTO.liveNotifs.push(n);
+    if (AUTO.liveNotifs.length > 20) AUTO.liveNotifs.shift();
+    n.onclose = () => {
+      const i = AUTO.liveNotifs.indexOf(n);
+      if (i >= 0) AUTO.liveNotifs.splice(i, 1);
+    };
+    n.onclick = () => {
+      try { window.focus(); } catch (e) { /* ignore */ }
+      n.close();
+      notifyJump(target);
+    };
   } catch (e) { /* 通知失败不影响会话消息 */ }
 }
 
+/* 点通知后的落点：任务 → 工作台任务详情；会话 → 切回 Solo 并滚到最新一条。
+   跳转失败只吞掉异常，不能让用户点完通知什么反应都没有。 */
+async function notifyJump(target) {
+  if (!target) return;
+  try {
+    if (target.taskId && typeof workOpenTask === 'function') {
+      if (typeof setUiMode === 'function') await setUiMode('work');
+      await workOpenTask(target.taskId);
+      return;
+    }
+    if (target.sessionId) {
+      if (typeof setUiMode === 'function' && state.uiMode !== 'solo') await setUiMode('solo');
+      if (target.sessionId !== state.sessions.current && typeof selectSession === 'function') {
+        await selectSession(target.sessionId);
+      }
+      if (typeof scrollToBottom === 'function') scrollToBottom(true);
+    }
+  } catch (e) { /* 跳转失败不影响通知本身 */ }
+}
+
+/* Electron 主进程的通知点击回调：主进程已经把窗口还原 / 聚焦，
+   这里只需要按落点切会话或打开任务。target 随 IPC 一起回来，
+   页面刷新过也能跳（不依赖内存里的 id 映射）。 */
+function bindNativeNotifyClicks() {
+  const gw = nativeNotify();
+  if (!gw || typeof gw.onNotifyClick !== 'function') return;
+  gw.onNotifyClick((payload) => {
+    const id = payload && payload.id;
+    const target = (payload && payload.target) || (id ? AUTO.notifyTargets[id] : null);
+    if (id) delete AUTO.notifyTargets[id];
+    notifyJump(target);
+  });
+}
+bindNativeNotifyClicks();
+
 // 同一件事只弹一次：任务确认、任务完成、提问卡等事件会重复推送
-function notifyOnce(key, title, text, kind) {
-  if (!key) { showSystemNotify(title, text, kind); return; }
+function notifyOnce(key, title, text, kind, target) {
+  if (!key) { showSystemNotify(title, text, kind, target); return; }
   if (AUTO.notifiedKeys.has(key)) return;
   if (AUTO.notifiedKeys.size > 200) AUTO.notifiedKeys.clear();
   AUTO.notifiedKeys.add(key);
-  showSystemNotify(title, text, kind);
+  showSystemNotify(title, text, kind, target);
 }
 
 function startEvents() {
@@ -145,6 +226,17 @@ function startEvents() {
 
 function handleAutoEvent(obj) {
   if (!obj || !obj.type) return;
+  // 会话运行态（待审批 / 待回答）：只改侧栏小圆点，不弹通知
+  if (obj.type === 'session_pending') {
+    const sid = String(obj.sid || '');
+    if (sid) {
+      state.pending = state.pending || {};
+      if (obj.kind) state.pending[sid] = String(obj.kind);
+      else delete state.pending[sid];
+      if (typeof renderSessions === 'function') renderSessions();
+    }
+    return;
+  }
   // 自动化看板：回合内的阶段 / 工具 / 输出片段
   if (obj.type === 'autopilot_live') {
     apLiveOnEvent(obj);
@@ -158,23 +250,26 @@ function handleAutoEvent(obj) {
     apLiveFromGoal(g, false);
     if (mine) syncAutopilotPill(st || false);
     if (st === 'done') {
-      notifyOnce('autopilot-done:' + g.id, '自动化完成', g.objective || '', 'done');
+      notifyOnce('autopilot-done:' + g.id, '自动化完成', g.objective || '', 'done',
+                 { sessionId: g.session_id });
       toast('自动化已完成（验收通过）', 'success');
     } else if (st === 'needs_human') {
       notifyOnce('autopilot-human:' + g.id + ':' + (g.turn || 0),
-                 '自动化需要你', g.last_reason || '', 'ask');
+                 '自动化需要你', g.last_reason || '', 'ask',
+                 { sessionId: g.session_id });
       toast('自动化需要你：' + (g.last_reason || '')
             + '。回答 / 处理后点「自动化」恢复', 'error');
     } else if (st === 'paused' || st === 'failed') {
       const label = st === 'failed' ? '自动化失败' : '自动化已暂停';
       notifyOnce('autopilot-paused:' + g.id + ':' + (g.turn || 0),
-                 label, g.last_reason || '', 'error');
+                 label, g.last_reason || '', 'error', { sessionId: g.session_id });
       toast(label + '：' + (g.last_reason || '') + '。点「自动化」恢复', 'error');
     } else if (st === 'retrying') {
       // 只提示第一次重试，避免每次退避都弹通知
       if ((g.retries || 0) <= 1) {
         notifyOnce('autopilot-retry:' + g.id,
-                   '自动化重试中', g.last_reason || '', 'warn');
+                   '自动化重试中', g.last_reason || '', 'warn',
+                   { sessionId: g.session_id });
       }
     }
     // 自动化不走前端请求，没有实时流；回合结束时消息已落库，这里重新拉一次会话
@@ -186,7 +281,8 @@ function handleAutoEvent(obj) {
     return;
   }
   if (obj.type === 'notify') {
-    showSystemNotify(obj.title || '提醒', obj.text || '', 'remind');
+    showSystemNotify(obj.title || '提醒', obj.text || '', 'remind',
+                     { sessionId: obj.session_id });
     if (obj.session_id === state.sessions.current) {
       appendAutoMessage(obj.text || '', obj.title || '提醒');
     } else {
@@ -244,18 +340,18 @@ function handleAutoEvent(obj) {
     const blocked = steps.find((s) => s.status === 'blocked');
     if (blocked && nudge) {
       notifyOnce('task-blocked:' + t.id + ':' + blocked.id, '任务等待确认',
-        (t.title || '任务') + ' · ' + (blocked.title || '下一步'), 'ask');
+        (t.title || '任务') + ' · ' + (blocked.title || '下一步'), 'ask', { taskId: t.id });
     }
     const manual = (t.status === 'paused')
       ? steps.find((s) => s.status === 'pending' && !s.tool) : null;
     if (manual && nudge) {
       notifyOnce('task-manual:' + t.id + ':' + manual.id, '任务等待你完成',
-        (t.title || '任务') + ' · ' + (manual.title || '下一步'), 'ask');
+        (t.title || '任务') + ' · ' + (manual.title || '下一步'), 'ask', { taskId: t.id });
     }
     if (nudge && (t.status === 'done' || t.status === 'failed')) {
       notifyOnce('task-' + t.status + ':' + t.id + ':' + (t.updated_at || t.finished_at || ''),
         t.status === 'done' ? '任务完成' : '任务失败', t.title || '',
-        t.status === 'done' ? 'done' : 'error');
+        t.status === 'done' ? 'done' : 'error', { taskId: t.id });
     }
   }
 }
@@ -374,6 +470,54 @@ async function loadTasks() {
   } catch (e) {
     toastErr('读取提醒任务', e);
   }
+}
+
+/* ---------------- 提醒开关（总开关 + 细分） ----------------
+   总开关关闭时，细分项全部禁用；值写 config，后端会同步注销 / 恢复 Windows 计划任务。 */
+const REMINDER_SWITCHES = [
+  ['reminders-enabled', 'reminders_enabled'],
+  ['reminder-inapp-enabled', 'reminder_inapp_enabled'],
+  ['reminder-system-enabled', 'reminder_system_enabled'],
+  ['reminder-calendar-enabled', 'reminder_calendar_enabled'],
+  ['auto-chat-enabled', 'auto_chat_enabled'],
+];
+const REMINDER_SUB_IDS = ['#reminder-inapp-enabled', '#reminder-system-enabled',
+  '#reminder-calendar-enabled', '#auto-chat-enabled'];
+
+function syncReminderSwitches() {
+  const cfg = state.config || {};
+  REMINDER_SWITCHES.forEach(([id, key]) => {
+    const el = $('#' + id);
+    if (el) el.checked = cfg[key] !== false;
+  });
+  const master = cfg.reminders_enabled !== false;
+  REMINDER_SUB_IDS.forEach((sel) => {
+    const el = $(sel);
+    if (el) el.disabled = !master;
+  });
+}
+
+function bindReminderSwitches() {
+  REMINDER_SWITCHES.forEach(([id, key]) => {
+    const el = $('#' + id);
+    if (!el) return;
+    el.onchange = async () => {
+      const patch = {};
+      patch[key] = !!el.checked;
+      state.config = Object.assign({}, state.config || {}, patch);
+      syncReminderSwitches();
+      try {
+        await api('/api/config', patch);
+        toast(el.checked ? '已开启' : '已关闭', 'ok');
+      } catch (e) {
+        el.checked = !el.checked;
+        state.config[key] = el.checked;
+        syncReminderSwitches();
+        toastErr('保存提醒开关', e);
+      }
+    };
+  });
+  syncReminderSwitches();
 }
 
 async function addReminder() {

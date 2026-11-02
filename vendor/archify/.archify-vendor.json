@@ -1,0 +1,10 @@
+{
+  "name": "archify",
+  "version": "3.2.0",
+  "source": "https://github.com/tt-a1i/archify",
+  "commit": "a4065941f12be7967436261d9934784e381d423c",
+  "license": ["Apache-2.0", "MIT"],
+  "vendored_at": "2026-11-01",
+  "trimmed": ["examples/*.html (generated demos, 12.2 MB)"],
+  "note": "Vendored upstream skill; do not edit. Keep LICENSE / LICENSE-MIT / NOTICE / THIRD_PARTY_NOTICES.md."
+}

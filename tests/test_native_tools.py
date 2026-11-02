@@ -77,12 +77,13 @@ def test_task_state_text_and_plan():
     assert "canvas 黑屏" in text
 
 
-def test_model_context_limit_recognizes_1m():
+def test_model_context_limit_has_no_model_table():
     from app.config import model_context_limit
-    assert model_context_limit("claude-sonnet-4-6-1m", {"chat_context_limit": 0}) == 1000000
-    assert model_context_limit("claude-sonnet-4-6", {"chat_context_limit": 0}) == 200000
-    # 用户显式收紧仍生效
-    assert model_context_limit("claude-sonnet-4-6-1m",
+    # 不看模型名：没填就是 0（不限）
+    assert model_context_limit("claude-sonnet-4-6-1m", {"chat_context_limit": 0}) == 0
+    assert model_context_limit("claude-sonnet-4-6", {"chat_context_limit": 0}) == 0
+    # 显式填写才生效，且原样使用
+    assert model_context_limit("claude-sonnet-4-6",
                                {"chat_context_limit": 500000}) == 500000
 
 

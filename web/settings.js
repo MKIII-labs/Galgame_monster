@@ -42,7 +42,7 @@ const SETTINGS_PAGE_META = {
 /* 静态页的「恢复本页默认」作用范围；动态页由 _collect() 的键推导。
    密钥与自定义预设不在重置范围内。 */
 const STATIC_RESET_KEYS = {
-  profile: { profile: ['manual', 'auto_learn_enabled', 'learning_prompt_custom'] },
+  profile: { profile: ['manual', 'rules', 'auto_learn_enabled', 'learning_prompt_custom'] },
   appearance: { config: ['theme', 'ide_theme', 'ide_whitespace'] },
   gal: { config: [
     'gal_theme', 'gal_dialog_max', 'gal_ui_sfx', 'gal_nudge', 'gal_typewriter', 'gal_cps',
@@ -54,6 +54,17 @@ const STATIC_RESET_KEYS = {
   speech: { config: [
     'speech_polish', 'speech_denoise', 'tts_enabled', 'tts_provider', 'tts_url',
     'tts_model', 'tts_voice',
+  ] },
+  image: { config: ['image_enabled', 'image_comfy_url', 'image_workflow'] },
+  data: { config: ['trajectory_enabled', 'trajectory_max_field',
+                   'codeindex_enabled', 'codeindex_max_files',
+                   'codeindex_max_chunks', 'codeindex_max_file_kb'] },
+  agents: { config: [
+    'agent_auto_route', 'agent_auto_plan', 'agent_auto_review',
+    'agent_plan_review',
+    'agent_script_agents', 'agent_script_agent_calls', 'agent_write_isolation',
+    'agent_worktree_isolation', 'agent_fidelity_gate', 'agent_fidelity_min',
+    'agent_native_vision',
   ] },
 };
 
@@ -365,33 +376,33 @@ function buildContextPane() {
              + '单次回答最多写多长、以及记忆怎么挑。填错不会报错，但压缩时机会不准。',
              '上下文 上限 token 压缩 估算 记忆') +
     setGroupHtml('容量', 'token 上限 预留 容量') +
-    labelHtml('模型上下文窗口（tokens）', '上限 token 上下文 窗口 快捷 1m 128k') +
+    labelHtml('模型上下文窗口（tokens，0 = 不限）', '上限 token 上下文 窗口 快捷 1m 128k') +
     '<input id="context-limit" class="field-input" type="number" min="0" step="1000">' +
-    '<div class="ctx-presets" data-search="快捷 1M 200K 128K 64K 自动">' +
-    '<button type="button" data-tok="0">自动</button>' +
+    '<div class="ctx-presets" data-search="快捷 1M 200K 128K 64K 不限">' +
+    '<button type="button" data-tok="0">不限</button>' +
     '<button type="button" data-tok="64000">64K</button>' +
     '<button type="button" data-tok="128000">128K</button>' +
     '<button type="button" data-tok="200000">200K</button>' +
     '<button type="button" data-tok="1000000">1M</button>' +
     '</div>' +
     hintHtml('模型一次能「看到」的总量（输入 + 输出都算）。点上面的快捷按钮直接填入：' +
-             '64K / 128K / 200K / 1M。<strong>0 = 自动</strong>：按模型名匹配' +
-             '（deepseek-flash / v4 / gemini 等 1M，deepseek-chat 128K，claude 200K）；' +
-             '手填的值以你为准，既能放大也能收紧（上限 1M）。' +
+             '64K / 128K / 200K / 1M。<strong>0 = 不限</strong>：不做模型窗口猜测，' +
+             '也不按窗口触发压缩（只受请求体字符上限约束），进度圆环会隐藏；' +
+             '填了具体值才按它算压缩时机，填多少就是多少。' +
              '手填的话：128K 填 <code>128000</code>，1M 填 <code>1000000</code>（1000 token ≈ 1700 汉字）。',
-             '上限 token 窗口 快捷 自动') +
+             '上限 token 窗口 快捷 自动 不限') +
     labelHtml('其中留给 AI 回答（tokens）', '预留 token 回复 输出') +
     '<input id="context-reserve" class="field-input" type="number" min="0" step="256">' +
     hintHtml('先从窗口里划出这一块，作为「同步压缩」的硬预留；默认 16384，常用 8192–16384。' +
-             '填 0 表示不预留。实际单次输出还会被 max_tokens 和窗口 25% 夹紧，' +
-             '所以这里不需要按回答长度去精确填。调大 → 更早触发同步压缩。',
+             '填 0 表示不预留。实际单次输出还会被 max_tokens 和窗口 25% 夹紧' +
+             '（窗口填 0 时不按窗口夹），所以这里不需要按回答长度去精确填。调大 → 更早触发同步压缩。',
              '预留 token 回复 默认 16384') +
     labelHtml('单次输出上限 max_tokens（0 = 用服务商默认）', '输出 上限 max_tokens 截断 长度') +
     '<input id="chat-max-tokens" class="field-input" type="number" min="0" max="65536" step="1024">' +
     hintHtml('单次模型调用最多生成多少 token，**硬截断**（思考模式的 reasoning 也计入）。' +
              '设得太小，长回复会在写工具块之前被截断，表现为「话说到一半停了、没有执行工具」；' +
              '默认 8192。填 0 表示不传，由服务商决定。实际还会被夹到窗口的 25%，' +
-             '避免「输入 + 输出」越过窗口。',
+             '避免「输入 + 输出」越过窗口（窗口填 0 时不受这条限制）。',
              '输出 上限 截断 长度 max_tokens') +
     '<p class="hint" id="ctx-calc" data-search="上下文 可用 80% 压缩 计算 换算"></p>' +
     '<details class="fold"><summary>填写说明与估算口径</summary><div class="fold-body">' +
@@ -404,6 +415,9 @@ function buildContextPane() {
     '<li>发送前发现<strong>「已用 + 预留」超过窗口</strong>：同步再压一次；若压缩后仍超出，本轮只临时省略较早的消息再发送，' +
     '本地原文不会被删除。</li>' +
     '</ul>' +
+    '<p><strong>窗口填 0（不限）时</strong>：不显示进度圆环、不按窗口做 25% 输出夹紧，' +
+    '也不会触发预压缩；只有请求体字符上限（默认 50 万字符）兜底。' +
+    '想要「快满了自动压缩」就填模型真实窗口。</p>' +
     '<p><strong>估算口径</strong>：中文约 0.6 token/字、英文约 0.3 token/字，再用接口返回的真实 usage 校准，' +
     '所以百分比是近似值。</p>' +
     '<p><strong>填错的后果</strong>：窗口填得比真实值大 → 进度条偏低、压缩太晚，可能真的报超限错误；' +
@@ -467,7 +481,8 @@ function buildContextPane() {
     const limit = parseInt(q('context-limit').value, 10) || 0;
     const reserve = Math.max(0, parseInt(q('context-reserve').value, 10) || 0);
     if (limit <= 0) {
-      calcEl.textContent = '已设为「自动」：按模型名匹配窗口（匹配不到时按 128K 估算）。';
+      calcEl.textContent = '已设为「不限」：不按窗口触发压缩、不显示进度圆环，'
+        + '只受请求体字符上限（默认 50 万字符）约束。';
       return;
     }
     // 与后端 request_budget() 同一个口径：输出先按窗口 25% 夹紧，再留 headroom。
@@ -569,7 +584,7 @@ function buildAgentPane() {
              '中间换过一次别的调用就重新计数；填 0 = 不拦截。', '重复 原地打转 拦截 不限') +
     '<div class="agent-approval-cap" data-search="自动续跑 继续 继续输出">' +
     '自动续跑（任务没做完时自己继续）</div>' +
-    '<div class="agent-approval">' +
+    '<div class="agent-approval" data-cfg="agent_auto_continue">' +
     acBtn(0, 'alert', '关闭', '每轮结束就停，等你说「继续」') +
     acBtn(3, 'refresh', '最多 3 次', '推荐：连续开发') +
     acBtn(5, 'refresh', '最多 5 次', '长任务') +
@@ -578,14 +593,6 @@ function buildAgentPane() {
     hintHtml('模型想收尾、但计划里还有没做完的步骤（或结尾在问「要不要继续」）时，' +
              '由程序自己推它往下做。工具条里的同名选项与这里是同一份配置。',
              '自动续跑 继续 计划') +
-    labelHtml('阶段总结放行阈值（字，0 = 关闭）', '总结 收尾 续跑 阈值 字数') +
-    limitRow('agent-summary-stop', intVal(cfg.agent_summary_stop_chars, 180)) +
-    hintHtml('一段正文达到这个字数、且带「已完成 / 结果 / 目前 / 验证通过」这类总结信号时，' +
-             '允许本轮先收尾（给「继续输出」按钮），不再强制续跑。' +
-             '一句「继续。S1：核对…」不会触发。默认 180。', '总结 收尾 续跑 阈值') +
-    checkRowHtml('agent-meta-turn-stop',
-      '提问轮先回答（为什么 / 进度 / 是否完成），不自动续跑',
-      '提问 元问题 进度 中断 自动续跑') +
     setGroupHtml('自动化（Autopilot）', '自动化 autopilot 提问 策略 重启 恢复 看门狗 验收 评审') +
     labelHtml('遇到提问卡 / 需要拍板时', '提问 策略 自动化 自主 决策 提问卡') +
     '<select id="autonomy-question-policy" class="field-input">' +
@@ -656,7 +663,7 @@ function buildAgentPane() {
              '预取 上限 并发 关闭') +
     setGroupHtml('工具结果预算', '工具结果 裁剪 折叠 上下文 预算') +
     labelHtml('单条结果回灌上限（0 = 不截断）', '工具结果 上限 截断') +
-    limitRow('tool-result-max', intVal(cfg.tool_result_max, 8192)) +
+    limitRow('tool-result-max', intVal(cfg.tool_result_max, 30000)) +
     labelHtml('回灌头部字数', '头部 开头 截断') +
     limitRow('tool-result-head', intVal(cfg.tool_result_head, 4096)) +
     labelHtml('回灌尾部字数', '尾部 结尾 错误 结论') +
@@ -667,8 +674,9 @@ function buildAgentPane() {
     limitRow('tool-result-keep-recent', intVal(cfg.tool_result_keep_recent, 2)) +
     labelHtml('旧结果折叠上限（字）', '旧结果 折叠 摘要 字数') +
     limitRow('tool-result-fold-chars', intVal(cfg.tool_result_fold_chars, 240)) +
-    hintHtml('较早的工具结果会折叠成「工具名 + 目标 + 首尾 + 关键行」，不再只留一句「已清理」。',
-             '旧结果 折叠 摘要 关键行') +
+    hintHtml('清理单位是<b>单个工具结果</b>：超出预算时把较早的结果折成「工具名 + 目标 + 首尾 + 关键行」，'
+             + '最近若干条保留原文；被折叠结果的全文仍可用 read_tool_result 按区间取回。',
+             '旧结果 折叠 摘要 关键行 粒度') +
     setGroupHtml('写入审批 · 自动判定', '自动审批 ai 风险 高 低 放行 审批') +
     hintHtml('按动作风险判定，不按执行次数：新建文件、建目录、普通编辑、只读命令、' +
              '跑测试与脚本都直接放行；删除 / 移动 / 语义重命名、覆盖已有文件、' +
@@ -731,7 +739,7 @@ function buildAgentPane() {
     labelHtml('一批最多写几次', '子代理 写入 次数 上限') +
     limitRow('agent-explore-write-max', intVal(cfg.agent_explore_write_max, 16)) +
     hintHtml('防止审批轰炸；填 0 = 不限。', '子代理 写入 上限 不限') +
-    labelHtml('一次最多几个子代理', '并行 子代理 数量 上限') +
+    labelHtml('一次最多几个子代理（默认 8，硬上限 12）', '并行 子代理 数量 上限') +
     limitRow('agent-explore-max', intVal(cfg.agent_explore_max, 8)) +
     labelHtml('整批 token 预算', '探索 token 预算 上限') +
     limitRow('agent-explore-budget', intVal(cfg.agent_explore_budget, 160000)) +
@@ -749,7 +757,7 @@ function buildAgentPane() {
     hintHtml('根层 depth=0，子代理最多再往下这么多层；嵌套层默认只读。',
              '嵌套 深度 只读') +
     labelHtml('一棵子代理树的总数上限（0 = 不限）', '子代理 总数 上限') +
-    limitRow('agent-explore-max-total', intVal(cfg.agent_explore_max_total, 60)) +
+    limitRow('agent-explore-max-total', intVal(cfg.agent_explore_max_total, 100)) +
     checkRowHtml('agent-explore-nested-write',
       '允许嵌套层写文件（仍走审批）', '嵌套 写入 审批') +
     hintHtml('默认关闭：嵌套层只做检索与阅读，写入留给根子代理，避免审批链随递归变复杂。',
@@ -804,6 +812,11 @@ function buildAgentPane() {
     '<textarea id="computer-sites" class="field-input" rows="4" spellcheck="false"></textarea>' +
     hintHtml('留空表示：每次打开新站点都先问你。把常用站点写进来后不再逐次确认；' +
              '本程序的端口与 web/ 目录永远不允许操作。', '白名单 站点 授权') +
+    checkRowHtml('computer-browser-unrestricted',
+      '无限制：允许访问所有网站（默认关闭）', '无限制 所有网站 浏览器 白名单 站点') +
+    hintHtml('开启后不再要求站点白名单，任何 http(s) 站点都可直接打开。' +
+             '银行 / 支付 / 邮箱 / 密码管理器、设置里的禁止站点与本程序界面<b>仍然拒绝</b>；' +
+             '提交 / 支付 / 删除类按钮仍会先问你。', '无限制 危险 站点 禁区') +
     labelHtml('浏览器后端', '后端 扩展 登录态 独立窗口') +
     '<select id="computer-backend" class="field-input">' +
     '<option value="local">本地受控窗口（独立 profile，看不到登录态）</option>' +
@@ -836,6 +849,22 @@ function buildAgentPane() {
     'placeholder="notepad.exe&#10;Code.exe"></textarea>' +
     hintHtml('不在这个列表里的窗口连「列出」都不会出现 —— 这是桌面的第一道闸门。留空 = 桌面功能不可用。',
              '白名单 程序 闸门') +
+    checkRowHtml('computer-desktop-unrestricted',
+      '无限制：允许操作所有桌面程序（默认关闭）', '无限制 所有程序 桌面 白名单') +
+    hintHtml('开启后不再检查 exe 白名单，任何可见窗口都能被列出和操作。' +
+             '提权（管理员）窗口仍拒绝、密码框仍不读不填，提交 / 删除类高危动作仍会先问你。',
+             '无限制 桌面 提权 密码 高危') +
+    setGroupHtml('编辑器 · AI Tab 补全', 'tab 补全 ai 内联 ghost 建议 代码补全') +
+    checkRowHtml('ide-ai-complete', '启用 AI Tab 补全（灰色建议，按 Tab 接受）',
+      'tab 补全 ai 内联 ghost 建议 代码') +
+    hintHtml('需要先在上方「轻量任务的模型」里配置 <code>light_model</code>；' +
+             '没配时不会触发（避免拿主模型每 350ms 烧一次 token）。' +
+             '光标停顿后自动请求，<kbd>Alt</kbd>+<kbd>\\</kbd> 手动触发，<kbd>Esc</kbd> 关闭。',
+             '补全 模型 light 轻量 成本') +
+    labelHtml('停顿多久后请求（毫秒）', '补全 延迟 停顿 debounce') +
+    limitRow('ide-ai-delay', intVal(cfg.ide_ai_complete_delay_ms, 350)) +
+    labelHtml('最多补几行', '补全 行数 长度 建议') +
+    limitRow('ide-ai-max-lines', intVal(cfg.ide_ai_complete_max_lines, 8)) +
     setGroupHtml('代码工具（pyright / Git）', 'pyright lsp 类型 跳转 定义 引用 重命名 git 提交 仓库') +
     checkRowHtml('lsp-enabled',
       '启用 pyright 语言服务（类型检查 / 跳转定义 / 查找引用 / 重命名）',
@@ -844,7 +873,7 @@ function buildAgentPane() {
              '关掉后模型退回正则版 find_symbol：只能按名字扫文本，拿不到类型检查。',
              'pyright 下载 镜像 缓存') +
     '<div class="agent-approval-cap" data-search="git 提交 commit 权限 自动">AI 提交 Git 的权限</div>' +
-    '<div class="agent-approval">' +
+    '<div class="agent-approval" data-cfg="git_commit_mode">' +
     gitModeBtn('off', 'alert', '不开放', '模型只能看状态和 diff') +
     gitModeBtn('ask', 'check', '每次确认', '推荐：提交前问你一次') +
     gitModeBtn('auto', 'refresh', '完全自动', '改完就提交，不留确认') +
@@ -919,16 +948,22 @@ function buildAgentPane() {
   if (sitesEl) sitesEl.value = (cfg.computer_sites || []).join('\n');
   const compOnEl = qIn(pane, 'computer-enabled');
   if (compOnEl) compOnEl.checked = !!cfg.computer_enabled;
+  const compUnEl = qIn(pane, 'computer-browser-unrestricted');
+  if (compUnEl) compUnEl.checked = !!cfg.computer_browser_unrestricted;
   const appsEl = qIn(pane, 'computer-apps');
   if (appsEl) appsEl.value = (cfg.computer_apps || []).join('\n');
   const deskOnEl = qIn(pane, 'computer-desktop-enabled');
   if (deskOnEl) deskOnEl.checked = !!cfg.computer_desktop_enabled;
+  const deskUnEl = qIn(pane, 'computer-desktop-unrestricted');
+  if (deskUnEl) deskUnEl.checked = !!cfg.computer_desktop_unrestricted;
   const beEl = qIn(pane, 'computer-backend');
   if (beEl) beEl.value = cfg.computer_backend || 'local';
   const autoShotEl = qIn(pane, 'computer-auto-shot');
   if (autoShotEl) autoShotEl.checked = cfg.computer_auto_shot !== false;
   const lspOnEl = qIn(pane, 'lsp-enabled');
   if (lspOnEl) lspOnEl.checked = cfg.lsp_enabled !== false;
+  const aiCompEl = qIn(pane, 'ide-ai-complete');
+  if (aiCompEl) aiCompEl.checked = cfg.ide_ai_complete !== false;
   // 这两项以前漏了回填：界面永远显示未勾选，保存时又按未勾选写回，
   // 表现为「并行探索开了也存不住」，还会把外联审计悄悄关掉。
   const netAuditEl = qIn(pane, 'agent-net-audit');
@@ -937,8 +972,6 @@ function buildAgentPane() {
   if (exploreEl) exploreEl.checked = cfg.agent_explore_enabled !== false;
   const forkEl = qIn(pane, 'agent-explore-fork');
   if (forkEl) forkEl.checked = cfg.agent_explore_fork !== false;
-  const metaStopEl = qIn(pane, 'agent-meta-turn-stop');
-  if (metaStopEl) metaStopEl.checked = cfg.agent_meta_turn_stop !== false;
   const qpEl = qIn(pane, 'autonomy-question-policy');
   if (qpEl) qpEl.value = String(cfg.autonomy_question_policy || 'smart');
   const apVerifyEl = qIn(pane, 'autopilot-verify');
@@ -1069,8 +1102,6 @@ function buildAgentPane() {
   pane._collect = () => ({
     agent_max_rounds: clampLimit('agent-max-rounds', 0),
     agent_auto_continue: acVal,
-    agent_summary_stop_chars: clampLimit('agent-summary-stop', 180),
-    agent_meta_turn_stop: !!(qIn(pane, 'agent-meta-turn-stop') || {}).checked,
     autonomy_question_policy: (qIn(pane, 'autonomy-question-policy') || {}).value || 'smart',
     autopilot_verify: !!(qIn(pane, 'autopilot-verify') || {}).checked,
     autopilot_resume_on_start: !!(qIn(pane, 'autopilot-resume-on-start') || {}).checked,
@@ -1087,7 +1118,7 @@ function buildAgentPane() {
     agent_explore_write: !!(qIn(pane, 'agent-explore-write') || {}).checked,
     agent_explore_write_max: clampLimit('agent-explore-write-max', 16),
     agent_explore_max_depth: clampLimit('agent-explore-max-depth', 5),
-    agent_explore_max_total: clampLimit('agent-explore-max-total', 60),
+    agent_explore_max_total: clampLimit('agent-explore-max-total', 100),
     agent_explore_nested_write: !!(qIn(pane, 'agent-explore-nested-write') || {}).checked,
     agent_explore_background: !!(qIn(pane, 'agent-explore-background') || {}).checked,
     agent_explore_background_max: clampLimit('agent-explore-background-max', 12),
@@ -1109,19 +1140,24 @@ function buildAgentPane() {
     agent_tool_parallel_max: clampLimit('agent-tool-parallel-max', 10),
     agent_require_read: !!(qIn(pane, 'agent-require-read') || {}).checked,
     agent_hall_prompt: !!(qIn(pane, 'agent-hall-prompt') || {}).checked,
-    tool_result_max: clampLimit('tool-result-max', 8192),
+    tool_result_max: clampLimit('tool-result-max', 30000),
     tool_result_head: clampLimit('tool-result-head', 4096),
     tool_result_tail: clampLimit('tool-result-tail', 1024),
     tool_result_keep_recent: clampLimit('tool-result-keep-recent', 2),
     tool_result_fold_chars: clampLimit('tool-result-fold-chars', 240),
     agent_max_undo: clampLimit('agent-max-undo', 60),
     lsp_enabled: !!(qIn(pane, 'lsp-enabled') || {}).checked,
+    ide_ai_complete: !!(qIn(pane, 'ide-ai-complete') || {}).checked,
+    ide_ai_complete_delay_ms: clampLimit('ide-ai-delay', 350),
+    ide_ai_complete_max_lines: clampLimit('ide-ai-max-lines', 8),
     git_commit_mode: gitMode,
     computer_enabled: !!(qIn(pane, 'computer-enabled') || {}).checked,
+    computer_browser_unrestricted: !!(qIn(pane, 'computer-browser-unrestricted') || {}).checked,
     computer_sites: String((qIn(pane, 'computer-sites') || {}).value || '')
       .split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
     computer_snapshot_chars: clamp('computer-snapshot-chars', 4000, 800, 12000),
     computer_desktop_enabled: !!(qIn(pane, 'computer-desktop-enabled') || {}).checked,
+    computer_desktop_unrestricted: !!(qIn(pane, 'computer-desktop-unrestricted') || {}).checked,
     computer_apps: String((qIn(pane, 'computer-apps') || {}).value || '')
       .split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
     computer_backend: (qIn(pane, 'computer-backend') || {}).value || 'local',
@@ -1336,7 +1372,7 @@ function buildSearchPane() {
     '<select id="search-provider" class="field-input">' + opts + '</select>' +
     '<p class="hint" id="search-provider-hint"></p>' +
     checkRowHtml('search-prefer-api', '优先使用独立搜索 API（即使聊天模型自带搜索）', '优先 搜索 api 聊天模型 自带') +
-    hintHtml('默认：聊天模型自带搜索时优先用它（目前是 DeepSeek，复用聊天 API 的密钥）；'
+    hintHtml('默认：聊天模型自带搜索时优先用它；'
       + '勾选上面的选项后，始终使用这里配置的服务商（博查 / 豆包 / Tavily）。',
       '优先 搜索 api 聊天模型') +
     setGroupHtml('接入', '接口 地址 密钥 api') +
@@ -1468,11 +1504,20 @@ function buildBiliPane(host) {
    Token 用量统计
    ============================================================ */
 let usageChart = null;
+let usageBars = null;
 
 const USAGE_RANGES = {
   day7: { mode: 'day', span: 7 },
   day30: { mode: 'day', span: 30 },
   month12: { mode: 'month', span: 12 },
+};
+
+// 接入通道：流水里的 api 字段（chat / light / vision）
+const USAGE_API_LABEL = { chat: '对话主模型', light: '轻量任务', vision: '图像识别' };
+// 用量来源：区分「对话」与剧本生成 / 节点判定等内部轻量调用
+const USAGE_SRC_LABEL = {
+  chat: '对话', vision: '图像识别', char_profile: '角色设定生成',
+  gal_script: '剧本生成', gal_act: '续写下一幕', gal_node: '剧情节点判定',
 };
 
 const fmtNum = (n) => (n || 0).toLocaleString('en-US');
@@ -1497,6 +1542,11 @@ async function openUsage(rangeKey) {
   $$('#usage-modal .tab').forEach((t) => t.classList.toggle('active', t.dataset.usageRange === key));
   $('#usage-cards').innerHTML = '';
   $('#usage-tables').innerHTML = skeletonHtml(5);
+  // 图表要先销毁再清容器：直接 innerHTML='' 会让旧的 ECharts 实例挂在已移除的节点上
+  if (usageChart) { usageChart.dispose(); usageChart = null; }
+  if (usageBars) { usageBars.dispose(); usageBars = null; }
+  $('#usage-chart').innerHTML = '<p class="usage-empty">加载中…</p>';
+  $('#usage-bars').innerHTML = '<p class="usage-empty">加载中…</p>';
   const rb = $('#usage-balance-refresh');
   if (rb) rb.onclick = () => loadUsageBalance();
   loadUsageBalance();                  // 余额单独拉，不阻塞下面的用量主体
@@ -1530,59 +1580,78 @@ async function loadUsageBalance() {
 function closeUsage() {
   hideWithAnim($('#usage-modal'), () => {
     if (usageChart) { usageChart.dispose(); usageChart = null; }
+    if (usageBars) { usageBars.dispose(); usageBars = null; }
   });
 }
 
 function renderUsage(data) {
   const s = data.summary || {};
+  const d = data.derived || {};
+  const peak = d.peak || null;
+  const unit = data.mode === 'month' ? '月' : '日';
+  const pctText = (v) => (v == null ? '—' : v + '%');
+  const pctOf = (a, b) => (Number(b) ? Math.round(Number(a) * 1000 / Number(b)) / 10 : null);
+  const shareOf = (v, total) => {
+    const t = Number(total) || 0;
+    const pct = t > 0 ? Math.min(100, (Number(v) || 0) * 100 / t) : 0;
+    return '<span class="usage-share"><span class="us-track"><i class="us-fill" style="width:' +
+      pct.toFixed(2) + '%"></i></span>' + (t > 0 ? Math.round(pct * 10) / 10 + '%' : '—') + '</span>';
+  };
+
   const cards = [
-    ['总 tokens（账户）', fmtNum(s.total)],
-    ['输入', fmtNum(s.prompt)],
-    ['输出', fmtNum(s.completion)],
-    ['缓存命中', fmtNum(s.cached)],
-    ['调用次数', fmtNum(s.calls)],
+    ['总 tokens', fmtNum(s.total), '日均 ' + fmtNum(d.avg_active) + '（仅计有消耗的' + unit + '）'],
+    ['输入', fmtNum(s.prompt), '占合计 ' + pctText(pctOf(s.prompt, s.total))],
+    ['输出', fmtNum(s.completion), '占合计 ' + pctText(pctOf(s.completion, s.total))],
+    ['缓存命中', fmtNum(s.cached), '命中率 ' + pctText(d.hit_rate) + '（占输入）'],
+    ['调用次数', fmtNum(s.calls), '平均每次 ' + fmtNum(d.avg_call) + ' tokens'],
+    ['峰值' + unit, peak ? fmtNum(peak.total) : '—', peak ? peak.bucket : '该区间无记录'],
+    ['活跃' + unit, fmtNum(d.active), '区间共 ' + fmtNum((data.labels || []).length) + ' ' + unit],
   ];
-  $('#usage-cards').innerHTML = cards.map(([l, v]) =>
+  $('#usage-cards').innerHTML = cards.map(([l, v, sub]) =>
     '<div class="usage-card"><div class="uc-label">' + l + '</div>' +
-    '<div class="uc-value">' + v + '</div></div>').join('');
+    '<div class="uc-value">' + v + '</div>' +
+    (sub ? '<div class="uc-sub">' + sub + '</div>' : '') + '</div>').join('');
 
   const byModel = data.by_model || [];
-  const rows = data.rows || [];
-  const MAX_ROWS = 200;
-  const head = (cols) => '<tr>' + cols.map((c) => '<th>' + c + '</th>').join('') + '</tr>';
-  const modelCols = ['模型', '输入', '输出', '合计', '缓存命中', '次数'];
-  const rowCols = [data.mode === 'month' ? '月份' : '日期'].concat(modelCols);
-  const tr = (cells) => '<tr>' + cells.map((c) => '<td>' + c + '</td>').join('') + '</tr>';
-
-  // 按 API 端点（服务商）：把同一域名下的消耗合并，对应「账户下所有 API」
   const byEndpoint = data.by_endpoint || [];
-  let html = '<h3>按 API 端点（服务商）</h3>';
-  html += byEndpoint.length
-    ? '<table><thead>' + head(['端点', '输入', '输出', '合计', '缓存命中', '次数']) + '</thead><tbody>' +
-      byEndpoint.map((r) => tr([escapeHtml(r.endpoint), fmtNum(r.prompt), fmtNum(r.completion),
-        fmtNum(r.total), fmtNum(r.cached), fmtNum(r.calls)])).join('') + '</tbody></table>'
-    : '<p class="usage-empty">该时间段暂无用量记录</p>';
-
-  html += '<h3>按模型汇总</h3>';
-  html += byModel.length
-    ? '<table><thead>' + head(modelCols) + '</thead><tbody>' +
-      byModel.map((r) => tr([escapeHtml(r.model), fmtNum(r.prompt), fmtNum(r.completion),
-        fmtNum(r.total), fmtNum(r.cached), fmtNum(r.calls)])).join('') + '</tbody></table>'
-    : '<p class="usage-empty">该时间段暂无用量记录</p>';
-
-  // 按来源：区分「对话」与剧本生成 / 节点判定等内部轻量调用
-  const SRC_LABEL = { chat: '对话', vision: '图像识别', char_profile: '角色设定生成',
-                      gal_script: '剧本生成', gal_act: '续写下一幕', gal_node: '剧情节点判定' };
+  const byApi = data.by_api || [];
   const bySource = Object.keys(data.by_source || {})
     .map((k) => Object.assign({ source: k }, data.by_source[k]))
     .sort((a, b) => b.total - a.total);
+  const rows = data.rows || [];
+  const MAX_ROWS = 200;
+
+  const head = (cols) => '<tr>' + cols.map((c) => '<th>' + c + '</th>').join('') + '</tr>';
+  const tr = (cells) => '<tr>' + cells.map((c) => '<td>' + c + '</td>').join('') + '</tr>';
+  const numCols = ['占比', '输入', '输出', '合计', '缓存命中', '次数'];
+  const modelCols = ['模型'].concat(numCols);
+  const rowCols = [data.mode === 'month' ? '月份' : '日期', '模型', '输入', '输出',
+                   '合计', '缓存命中', '次数'];
+  const empty = '<p class="usage-empty">该时间段暂无用量记录</p>';
+  const table = (cols, list, rowFn) => list.length
+    ? '<table><thead>' + head(cols) + '</thead><tbody>' + list.map(rowFn).join('') + '</tbody></table>'
+    : empty;
+
+  let html = '<h3>按 API 端点（服务商）</h3>';
+  html += table(['端点'].concat(numCols), byEndpoint, (r) => tr([
+    escapeHtml(r.endpoint), shareOf(r.total, s.total), fmtNum(r.prompt), fmtNum(r.completion),
+    fmtNum(r.total), fmtNum(r.cached), fmtNum(r.calls)]));
+
+  // 接入通道：区分主对话、轻量任务（标题/摘要等）与图像识别，便于判断 token 花在哪一类请求
+  html += '<h3>按接入通道</h3>';
+  html += table(['通道'].concat(numCols), byApi, (r) => tr([
+    escapeHtml(USAGE_API_LABEL[r.api] || r.api), shareOf(r.total, s.total), fmtNum(r.prompt),
+    fmtNum(r.completion), fmtNum(r.total), fmtNum(r.cached), fmtNum(r.calls)]));
+
+  html += '<h3>按模型汇总</h3>';
+  html += table(modelCols, byModel, (r) => tr([
+    escapeHtml(r.model), shareOf(r.total, s.total), fmtNum(r.prompt), fmtNum(r.completion),
+    fmtNum(r.total), fmtNum(r.cached), fmtNum(r.calls)]));
+
   html += '<h3>按来源</h3>';
-  html += bySource.length
-    ? '<table><thead>' + head(['来源', '输入', '输出', '合计', '缓存命中', '次数']) + '</thead><tbody>' +
-      bySource.map((r) => tr([escapeHtml(SRC_LABEL[r.source] || r.source), fmtNum(r.prompt),
-        fmtNum(r.completion), fmtNum(r.total), fmtNum(r.cached), fmtNum(r.calls)])).join('') +
-      '</tbody></table>'
-    : '<p class="usage-empty">该时间段暂无用量记录</p>';
+  html += table(['来源'].concat(numCols), bySource, (r) => tr([
+    escapeHtml(USAGE_SRC_LABEL[r.source] || r.source), shareOf(r.total, s.total),
+    fmtNum(r.prompt), fmtNum(r.completion), fmtNum(r.total), fmtNum(r.cached), fmtNum(r.calls)]));
 
   html += '<h3>按' + (data.mode === 'month' ? '月份' : '日期') + '明细</h3>';
   html += rows.length
@@ -1592,16 +1661,17 @@ function renderUsage(data) {
       '</tbody></table>' +
       (rows.length > MAX_ROWS
         ? '<p class="usage-empty">仅显示前 ' + MAX_ROWS + ' 行（共 ' + rows.length + ' 行）</p>' : '')
-    : '<p class="usage-empty">该时间段暂无用量记录</p>';
+    : empty;
 
   // 逐次调用明细：用于定位「哪一次、哪个接口」花掉了 token
   const calls = data.calls || [];
-  const callCols = ['时间', 'API', '端点', '模型', '来源', '输入', '输出', '合计', '缓存命中'];
+  const callCols = ['时间', '通道', '端点', '模型', '来源', '输入', '输出', '合计', '缓存命中'];
   html += '<h3>最近调用明细（溯源）</h3>';
   html += calls.length
     ? '<table><thead>' + head(callCols) + '</thead><tbody>' +
-      calls.map((r) => tr([fmtTime(r.ts), escapeHtml(r.api), escapeHtml(r.endpoint),
-        escapeHtml(r.model), escapeHtml(SRC_LABEL[r.source] || r.source), fmtNum(r.prompt),
+      calls.map((r) => tr([fmtTime(r.ts), escapeHtml(USAGE_API_LABEL[r.api] || r.api),
+        escapeHtml(r.endpoint), escapeHtml(r.model),
+        escapeHtml(USAGE_SRC_LABEL[r.source] || r.source), fmtNum(r.prompt),
         fmtNum(r.completion), fmtNum(r.total), fmtNum(r.cached)])).join('') + '</tbody></table>' +
       ((data.calls_total || 0) > calls.length
         ? '<p class="usage-empty">仅显示最近 ' + calls.length + ' 条（共 ' + data.calls_total + ' 条）</p>' : '')
@@ -1609,9 +1679,24 @@ function renderUsage(data) {
 
   $('#usage-tables').innerHTML = html;
 
+  const dayWord = data.mode === 'month' ? '每月' : '每日';
+  const ct = $('#usage-chart-title');
+  if (ct) ct.textContent = '趋势（按模型 · ' + dayWord + ' tokens）';
+  const bt = $('#usage-bars-title');
+  if (bt) bt.textContent = dayWord + '输入 / 输出与调用次数';
+
   // 图表放在最后渲染：表格插入后 .modal-body 才可能出现滚动条，
   // 滚动条会压缩容器宽度；若先画图，canvas 会比可视区宽，右侧标签被裁掉。
   drawUsageChart(data);
+  drawUsageBars(data);
+}
+
+// 横轴标签：日模式只留「月-日」，月模式保留完整「年-月」（跨年时不能省）
+const usageAxisLabel = (mode, k) => (mode === 'month' ? String(k) : String(k).slice(5));
+
+function usageAxisColors() {
+  const dark = isDarkTheme();
+  return { axis: dark ? '#a3a3ad' : '#6b6b76', line: dark ? '#333336' : '#e6e6ea' };
 }
 
 function drawUsageChart(data) {
@@ -1624,13 +1709,11 @@ function drawUsageChart(data) {
   }
   el.innerHTML = '';
   if (usageChart) { usageChart.dispose(); usageChart = null; }
-  const dark = isDarkTheme();
-  const axisColor = dark ? '#a3a3ad' : '#6b6b76';
-  const lineColor = dark ? '#333336' : '#e6e6ea';
+  const c = usageAxisColors();
   usageChart = echarts.init(el);
   usageChart.setOption({
     tooltip: { trigger: 'axis', valueFormatter: (v) => Number(v).toLocaleString('en-US') },
-    legend: models.length ? { data: models, bottom: 0, textStyle: { color: axisColor } } : undefined,
+    legend: models.length ? { data: models, bottom: 0, textStyle: { color: c.axis } } : undefined,
     // containLabel: 让 ECharts 为轴标签预留空间；
     // right 再留出余量，避免最右侧标签（如 2026-10-09）贴边被裁
     grid: {
@@ -1638,11 +1721,12 @@ function drawUsageChart(data) {
       containLabel: true,
     },
     xAxis: {
-      type: 'category', data: labels, boundaryGap: false,
-      axisLabel: { color: axisColor, hideOverlap: true },
-      axisLine: { lineStyle: { color: lineColor } },
+      type: 'category', data: labels.map((k) => usageAxisLabel(data.mode, k)),
+      boundaryGap: false,
+      axisLabel: { color: c.axis, hideOverlap: true },
+      axisLine: { lineStyle: { color: c.line } },
     },
-    yAxis: { type: 'value', axisLabel: { color: axisColor }, splitLine: { lineStyle: { color: lineColor } } },
+    yAxis: { type: 'value', axisLabel: { color: c.axis }, splitLine: { lineStyle: { color: c.line } } },
     series: models.map((m) => ({
       name: m, type: 'line', smooth: true, symbol: 'circle', symbolSize: 5,
       data: labels.map((k) => ((data.series || {})[m] || {})[k] || 0),
@@ -1652,6 +1736,55 @@ function drawUsageChart(data) {
   // 容器尺寸可能在 init 之后才最终确定（弹窗刚显示、出现滚动条等），
   // 再同步一次，避免 canvas 比容器宽导致右侧标签跑出可视区
   requestAnimationFrame(() => { if (usageChart) usageChart.resize(); });
+}
+
+// 柱状图：输入 / 输出堆叠（左轴 tokens）+ 调用次数折线（右轴）。
+// 折线看「哪天贵」，柱子看「贵在输入还是输出」。
+function drawUsageBars(data) {
+  const el = $('#usage-bars');
+  if (!el) return;
+  if (!window.echarts) {
+    el.innerHTML = '<p class="usage-empty">图表库未加载（需联网加载 ECharts）。</p>';
+    return;
+  }
+  const daily = data.daily || [];
+  el.innerHTML = '';
+  if (usageBars) { usageBars.dispose(); usageBars = null; }
+  const c = usageAxisColors();
+  const axisNum = (v) => (v >= 1e8 ? (v / 1e8).toFixed(1) + '亿'
+    : v >= 1e4 ? (v / 1e4).toFixed(v >= 1e5 ? 0 : 1) + '万' : v);
+  usageBars = echarts.init(el);
+  usageBars.setOption({
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      valueFormatter: (v) => Number(v).toLocaleString('en-US'),
+    },
+    legend: { data: ['输入', '输出', '调用次数'], bottom: 0, textStyle: { color: c.axis } },
+    // top 要留出轴名（tokens / 次数）的高度，否则会被画布上沿裁掉
+    grid: { left: 8, right: 40, top: 34, bottom: 46, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: daily.map((r) => usageAxisLabel(data.mode, r.bucket)),
+      axisLabel: { color: c.axis, hideOverlap: true },
+      axisLine: { lineStyle: { color: c.line } },
+    },
+    yAxis: [
+      { type: 'value', name: 'tokens', nameTextStyle: { color: c.axis, fontSize: 11 },
+        axisLabel: { color: c.axis, formatter: axisNum },
+        splitLine: { lineStyle: { color: c.line } } },
+      { type: 'value', name: '次数', nameTextStyle: { color: c.axis, fontSize: 11 },
+        axisLabel: { color: c.axis }, splitLine: { show: false }, minInterval: 1 },
+    ],
+    series: [
+      { name: '输入', type: 'bar', stack: 'tok', barMaxWidth: 28,
+        data: daily.map((r) => r.prompt) },
+      { name: '输出', type: 'bar', stack: 'tok', barMaxWidth: 28,
+        data: daily.map((r) => r.completion) },
+      { name: '调用次数', type: 'line', yAxisIndex: 1, smooth: true,
+        symbol: 'circle', symbolSize: 5, data: daily.map((r) => r.calls) },
+    ],
+  });
+  requestAnimationFrame(() => { if (usageBars) usageBars.resize(); });
 }
 
 function buildLearningPresetSelect(cfg) {
@@ -1807,11 +1940,108 @@ function buildDynamicPanes() {
   return panes;
 }
 
+/* ---- 全局规则：多条规则 + 单条开关 ----
+   存储：user_profile.json 的 rules=[{id,text,enabled}]；旧字段 manual 载入时折算成一条，
+   保存后只写 rules。注入文本由后端 profile.manual_block() 拼接（只取启用的）。 */
+let profileRuleSeq = 0;
+
+function profileRulesFrom(p) {
+  const src = (p && Array.isArray(p.rules)) ? p.rules : [];
+  if (src.length) return src.map(normalizeProfileRule);
+  const legacy = String((p && p.manual) || '').trim();     // 老配置：单条文本
+  return legacy ? [{ id: 'r_legacy', text: legacy, enabled: true }] : [];
+}
+
+function normalizeProfileRule(r) {
+  if (typeof r === 'string') return { id: '', text: r, enabled: true };
+  const o = r || {};
+  return {
+    id: String(o.id || ''),
+    text: String(o.text || ''),
+    enabled: o.enabled !== false && String(o.enabled).toLowerCase() !== 'false',
+  };
+}
+
+function renumberProfileRules() {
+  const box = $('#profile-rules');
+  if (!box) return;
+  const rows = box.querySelectorAll('.rule-item');
+  Array.prototype.forEach.call(rows, (row, i) => {
+    const idx = row.querySelector('.rule-index');
+    if (idx) idx.textContent = '规则 ' + (i + 1);
+  });
+}
+
+function buildProfileRuleRow(rule) {
+  profileRuleSeq += 1;
+  const r = normalizeProfileRule(rule);
+  const row = document.createElement('div');
+  row.className = 'rule-item' + (r.enabled ? '' : ' off');
+  row.dataset.id = r.id || ('r_' + Date.now().toString(36) + profileRuleSeq);
+  row.innerHTML =
+    '<div class="rule-head">' +
+      '<label class="ui-switch" title="启用 / 停用这条规则">' +
+        '<input type="checkbox" data-act="rule-toggle"' + (r.enabled ? ' checked' : '') + '>' +
+        '<span class="ui-switch-track"></span>' +
+      '</label>' +
+      '<span class="rule-index"></span>' +
+      '<button type="button" class="rule-expand" data-act="rule-expand" ' +
+        'aria-expanded="false" title="展开 / 收起这条规则的编辑框">展开</button>' +
+      '<button type="button" class="rule-del" data-act="rule-del">删除</button>' +
+    '</div>' +
+    '<textarea class="ta rule-text" rows="3" ' +
+      'placeholder="例如：每次先指出我最核心的问题，再给证据和下一步。"></textarea>';
+  row.querySelector('.rule-text').value = r.text || '';
+  return row;
+}
+
+function renderProfileRules(rules) {
+  const box = $('#profile-rules');
+  if (!box) return;
+  box.innerHTML = '';
+  const list = Array.isArray(rules) ? rules : [];
+  if (!list.length) {
+    const tip = document.createElement('p');
+    tip.className = 'hint rule-empty';
+    tip.textContent = '还没有规则。点下面「添加一条规则」开始写。';
+    box.appendChild(tip);
+    return;
+  }
+  list.forEach((r) => box.appendChild(buildProfileRuleRow(r)));
+  renumberProfileRules();
+}
+
+function collectProfileRules() {
+  const box = $('#profile-rules');
+  if (!box) return [];
+  const out = [];
+  Array.prototype.forEach.call(box.querySelectorAll('.rule-item'), (row) => {
+    const ta = row.querySelector('.rule-text');
+    const text = ta ? ta.value.trim() : '';
+    if (!text) return;                       // 空规则不写盘
+    const cb = row.querySelector('input[data-act="rule-toggle"]');
+    out.push({ id: row.dataset.id || '', text: text, enabled: !cb || cb.checked });
+  });
+  return out;
+}
+
+function addProfileRule() {
+  const box = $('#profile-rules');
+  if (!box) return;
+  const tip = box.querySelector('.rule-empty');
+  if (tip) tip.remove();
+  const row = buildProfileRuleRow({ text: '', enabled: true });
+  box.appendChild(row);
+  renumberProfileRules();
+  const ta = row.querySelector('.rule-text');
+  if (ta) ta.focus();
+}
+
 /* 静态面板的值回填：打开设置与「恢复默认」共用 */
 function fillStaticSettings(cfg, profile) {
   const p = profile || {};
   const c = cfg || {};
-  $('#profile-manual').value = p.manual || '';
+  $('#profile-rules') && renderProfileRules(profileRulesFrom(p));
   $('#profile-auto-learn').checked = p.auto_learn_enabled !== false;
   $('#learning-prompt').value = p.learning_prompt_custom || '';
   buildLearningPresetSelect(c);
@@ -1871,6 +2101,151 @@ function fillStaticSettings(cfg, profile) {
   const tk = $('#speech-tts-key'); if (tk) tk.value = c.tts_api_key || '';
   const tm = $('#speech-tts-model'); if (tm) tm.value = c.tts_model || '';
   const tv = $('#speech-tts-voice'); if (tv) tv.value = c.tts_voice || '';
+
+  const ie = $('#image-enabled'); if (ie) ie.checked = !!c.image_enabled;
+  const iu = $('#image-comfy-url');
+  if (iu) iu.value = c.image_comfy_url || 'http://127.0.0.1:8188';
+  const iw = $('#image-workflow'); if (iw) iw.value = c.image_workflow || '';
+  const te2 = $('#traj-enabled');
+  if (te2) te2.checked = c.trajectory_enabled !== false;
+  const tm2 = $('#traj-max-field');
+  if (tm2) tm2.value = String(c.trajectory_max_field != null ? c.trajectory_max_field : 200000);
+  const ci = $('#codeindex-enabled');
+  if (ci) ci.checked = c.codeindex_enabled !== false;
+  const cimf = $('#codeindex-max-files');
+  if (cimf) cimf.value = String(c.codeindex_max_files != null ? c.codeindex_max_files : 0);
+  const cimc = $('#codeindex-max-chunks');
+  if (cimc) cimc.value = String(c.codeindex_max_chunks != null ? c.codeindex_max_chunks : 0);
+  const cikb = $('#codeindex-max-file-kb');
+  if (cikb) cikb.value = String(c.codeindex_max_file_kb != null ? c.codeindex_max_file_kb : 512);
+  // 自动派发（子代理页）
+  const ar = $('#agent-auto-route');
+  if (ar) ar.checked = c.agent_auto_route !== false;
+  const ap = $('#agent-auto-plan');
+  if (ap) ap.checked = c.agent_auto_plan !== false;
+  const av = $('#agent-auto-review');
+  if (av) av.checked = !!c.agent_auto_review;
+  const apr = $('#agent-plan-review');
+  if (apr) apr.checked = c.agent_plan_review !== false;
+  const asa = $('#agent-script-agents');
+  if (asa) asa.checked = c.agent_script_agents !== false;
+  const asn = $('#agent-script-agent-calls');
+  if (asn) asn.value = String(c.agent_script_agent_calls != null ? c.agent_script_agent_calls : 8);
+  const awi = $('#agent-write-isolation');
+  if (awi) awi.value = c.agent_write_isolation || 'serial';
+  const awt = $('#agent-worktree-isolation');
+  if (awt) awt.value = c.agent_worktree_isolation || 'auto';
+  const afg = $('#agent-fidelity-gate');
+  if (afg) afg.value = c.agent_fidelity_gate || 'nudge';
+  const afm = $('#agent-fidelity-min');
+  if (afm) afm.value = String(c.agent_fidelity_min != null ? c.agent_fidelity_min : 70);
+  const anv = $('#agent-native-vision');
+  if (anv) anv.checked = c.agent_native_vision !== false;
+  const it = $('#image-test');
+  if (it) {
+    it.onclick = async () => {
+      const out = $('#image-test-result');
+      if (out) out.textContent = '检测中…';
+      try {
+        const r = await api('/api/image/status', {
+          image_comfy_url: (($('#image-comfy-url') || {}).value || '').trim(),
+          image_workflow: (($('#image-workflow') || {}).value || '').trim(),
+        });
+        if (!r.ok) throw new Error(r.error || '检测失败');
+        const bits = [r.reachable ? 'ComfyUI 已连接' : '连不上 ComfyUI',
+          r.workflow_exists ? '工作流已找到' : '工作流文件不存在'];
+        if (out) {
+          out.textContent = bits.join(' · ') + (r.error ? '（' + r.error + '）' : '');
+          out.style.color = (r.reachable && r.workflow_exists) ? '' : 'var(--danger)';
+        }
+      } catch (e) {
+        if (out) { out.textContent = e.message; out.style.color = 'var(--danger)'; }
+      }
+    };
+  }
+}
+
+/* ============================================================
+   设置页卡片：头部（标题 + 本节操作）/ 主体 / 折叠 / 页内锚点
+   ============================================================ */
+
+const SETTINGS_CARD_STATE_KEY = 'settings_card_collapsed_v1';
+/* 专家向分区：第一次打开时默认收起（点锚点或标题即可展开），常用分区保持展开 */
+const SETTINGS_CARD_ADVANCED = {
+  chat: ['思考落库'],
+  search: ['信息量上限', '研究类任务（复刻 / 还原 / 从零实现）'],
+  agent: [
+    '只读并行与预取', '工具结果预算', '并行探索（子代理）', '子代理 · 嵌套与后台',
+    '研究闸门（复刻 / 还原类任务）', '工作流（多阶段编排）', '变更审阅（撤销快照）',
+    '编辑器 · AI Tab 补全', '代码工具（pyright / Git）', '外部工具（MCP）',
+    '生命周期钩子（Hooks）',
+  ],
+};
+
+function readCardCollapsed() {
+  try { return JSON.parse(localStorage.getItem(SETTINGS_CARD_STATE_KEY) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+
+function writeCardCollapsed(map) {
+  try { localStorage.setItem(SETTINGS_CARD_STATE_KEY, JSON.stringify(map)); } catch (e) { /* 忽略 */ }
+}
+
+function cardStateId(card) {
+  const pane = card.closest('.pane');
+  return (pane ? pane.dataset.pane : '') + '|' + (card.dataset.card || '');
+}
+
+function setCardCollapsed(card, on, persist) {
+  if (!card) return;
+  card.classList.toggle('collapsed', !!on);
+  const btn = card.querySelector('[data-act="collapse-card"]');
+  if (btn) {
+    btn.setAttribute('aria-expanded', on ? 'false' : 'true');
+    btn.title = on ? '展开本节' : '收起本节';
+  }
+  if (persist) {
+    const map = readCardCollapsed();
+    map[cardStateId(card)] = on ? 1 : 0;
+    writeCardCollapsed(map);
+  }
+}
+
+function syncCardCollapse(pane) {
+  const saved = readCardCollapsed();
+  const advanced = SETTINGS_CARD_ADVANCED[pane.dataset.pane] || [];
+  pane.querySelectorAll('.set-card').forEach((card) => {
+    const id = cardStateId(card);
+    const on = id in saved ? !!saved[id] : advanced.indexOf(card.dataset.card) >= 0;
+    setCardCollapsed(card, on, false);
+  });
+}
+
+/* 一行设置：标签在左、控件在右；长文本类（url / 密钥 / 多行）保持标签在上 */
+function layoutSettingRows(pane) {
+  pane.querySelectorAll('.set-card-body').forEach((body) => {
+    Array.from(body.children).forEach((el) => {
+      if (!el.matches || !el.matches('label.field-label')) return;
+      const next = el.nextElementSibling;
+      if (!next || el.closest('.set-row')) return;
+      let mode = '';
+      if (next.tagName === 'SELECT') mode = 'short';
+      else if (next.tagName === 'INPUT') {
+        const t = (next.type || 'text').toLowerCase();
+        if (t === 'number') mode = 'short';
+        else if (t !== 'checkbox' && t !== 'radio' && t !== 'hidden') mode = 'wide';
+      } else if (next.matches('.limit-row, .range-row')) mode = 'short';
+      if (!mode) return;
+      const row = document.createElement('div');
+      row.className = 'set-row ' + mode;
+      el.parentNode.insertBefore(row, el);
+      row.appendChild(el);
+      const ctl = document.createElement('div');
+      ctl.className = 'set-row-ctl';
+      row.appendChild(ctl);
+      ctl.appendChild(next);
+    });
+  });
 }
 
 /* 分组卡片：每个 h4.set-group 与其后内容包成一张卡（静态面板只包一次） */
@@ -1878,23 +2253,94 @@ function decorateSettingsPanes() {
   $$('#modal .pane').forEach((pane) => {
     if (pane.dataset.carded === '1') return;
     const nodes = Array.from(pane.children);
-    let card = null;
+    let body = null;
     nodes.forEach((node) => {
       if (node.matches && node.matches('h4.set-group')) {
-        card = document.createElement('section');
+        const card = document.createElement('section');
         card.className = 'set-card';
+        card.dataset.card = node.textContent.trim();
         pane.insertBefore(card, node);
+
         const head = document.createElement('div');
         head.className = 'set-card-head';
         card.appendChild(head);
         head.appendChild(node);
-      } else if (card) {
-        card.appendChild(node);
+
+        const acts = document.createElement('div');
+        acts.className = 'set-card-acts';
+        acts.innerHTML =
+          '<button type="button" class="set-card-act" data-act="reset-card">恢复默认</button>' +
+          '<button type="button" class="set-card-act caret" data-act="collapse-card" ' +
+          'aria-expanded="true" title="收起本节"><svg class="ic"><use href="#i-chevron"/></svg></button>';
+        head.appendChild(acts);
+
+        body = document.createElement('div');
+        body.className = 'set-card-body';
+        card.appendChild(body);
+      } else if (body) {
+        body.appendChild(node);
       }
     });
     pane.dataset.carded = '1';
+    layoutSettingRows(pane);
+    syncCardCollapse(pane);
   });
 }
+
+/* ---- 页内锚点条：卡片多于一屏时给出分区跳转 ---- */
+function settingsAnchorsEl() { return $('#settings-anchors'); }
+
+function renderSettingsAnchors(name) {
+  const bar = settingsAnchorsEl();
+  if (!bar) return;
+  const pane = document.querySelector('#modal .pane[data-pane="' + name + '"]');
+  const cards = pane ? Array.from(pane.querySelectorAll('.set-card')) : [];
+  if (name === 'help' || cards.length < 3) {
+    bar.classList.add('hidden');
+    bar.innerHTML = '';
+    return;
+  }
+  bar.classList.remove('hidden');
+  bar.innerHTML = cards.map((c, i) =>
+    '<button type="button" class="set-anchor" data-i="' + i + '">' +
+    escapeHtml(c.dataset.card || '') + '</button>').join('');
+  bar.querySelectorAll('.set-anchor').forEach((b) => {
+    b.onclick = () => {
+      const card = cards[Number(b.dataset.i)];
+      if (!card) return;
+      setCardCollapsed(card, false, true);
+      card.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    };
+  });
+  updateAnchorsActive();
+}
+
+let _anchorRaf = 0;
+
+function updateAnchorsActive() {
+  const bar = settingsAnchorsEl();
+  const content = $('#modal .settings-content');
+  if (!bar || !content || bar.classList.contains('hidden')) return;
+  const pane = content.querySelector('.pane:not(.hidden)');
+  if (!pane) return;
+  const cards = Array.from(pane.querySelectorAll('.set-card'));
+  if (!cards.length) return;
+  const line = content.getBoundingClientRect().top + 72;
+  let idx = 0;
+  cards.forEach((c, i) => { if (c.getBoundingClientRect().top <= line) idx = i; });
+  bar.querySelectorAll('.set-anchor').forEach((b, i) => b.classList.toggle('active', i === idx));
+}
+
+function bindAnchorsScroll() {
+  const content = $('#modal .settings-content');
+  if (!content || content.dataset.anchorsBound === '1') return;
+  content.dataset.anchorsBound = '1';
+  content.addEventListener('scroll', () => {
+    if (_anchorRaf) return;
+    _anchorRaf = requestAnimationFrame(() => { _anchorRaf = 0; updateAnchorsActive(); });
+  }, { passive: true });
+}
+
 
 /* 长说明默认折叠，首屏只留结论（有 id 的提示会被 JS 动态更新，不折叠） */
 function foldLongHints() {
@@ -1913,6 +2359,274 @@ function foldLongHints() {
     body.appendChild(p);
     p.dataset.folded = '1';
   });
+}
+
+/* ============================================================
+   功能说明页：目录 / 筛选 / 展开收起 / 去设置
+   ============================================================ */
+
+// 条目标题 → [设置分页, 定位关键词]。没有对应设置页的条目不列（不给假的入口）。
+const HELP_SET_TARGET = {
+  '图像识别：独立视觉 API vs 聊天模型': ['chat', 'vision'],
+  '账户余额': ['chat', 'balance'],
+  '深度思考：开关、档位与参数模式': ['chat', 'reasoning'],
+  '上下文上限（回复末尾的圆环）': ['context', '压缩'],
+  '联网搜索（判据 / 抓取 / 来源）': ['search', '搜索'],
+  '用户画像：手动偏好 vs AI 自主记录': ['profile', '画像'],
+  '学习指令（预设与自定义）': ['profile', '学习指令'],
+  '主题与外观（界面主题 / IDE 主题 / GAL 主题）': ['appearance', '主题'],
+  'GAL 演出：主题 / 打字机 / 特效 / 立绘': ['gal', '演出'],
+  'GAL 推进与自动写剧本': ['gal', '剧本'],
+  '语音输入（实时转写 + AI 矫正）': ['speech', '语音'],
+  '台词朗读（TTS）：三种后端与音色克隆': ['speech', '朗读'],
+  'IDE / Solo 模式（VS Code 风格工作区）': ['appearance', 'ide'],
+  'Agent 沙箱（文件读写与命令）与审批': ['agent', 'agent'],
+  '执行计划与分步思考（过程里的「步骤 2/5」）': ['agent', '计划'],
+  '自动化：自主规划到完成、断了自己续、提问按策略处理': ['agent', '自动化'],
+  '自动续跑：什么时候自己继续、什么时候会停': ['agent', '续跑'],
+  '变更审阅：块对 diff、标签页统计与提示栏': ['agent', '审阅'],
+  '快捷键总览': ['keys', '快捷键'],
+};
+
+let helpGroups = [];
+let helpOpenSnap = null;      // 筛选前的展开状态，清空筛选时还原
+let helpSpyBound = false;
+
+function helpPaneEl() {
+  return document.querySelector('#modal .pane[data-pane="help"]');
+}
+
+function initHelpPane() {
+  const pane = helpPaneEl();
+  const head = pane && pane.querySelector('#help-head');
+  if (!pane || !head || pane.dataset.helpReady === '1') return;
+  pane.dataset.helpReady = '1';
+
+  // 按文档顺序切组：h4 开头，后面到下一个 h4 之间的 details 属于该组
+  const nodes = Array.from(pane.querySelectorAll('h4.set-group, details.help-sec'));
+  helpGroups = [];
+  let cur = null;
+  nodes.forEach((el, i) => {
+    if (el.tagName === 'H4') {
+      cur = { h4: el, title: el.textContent.trim(), secs: [] };
+      helpGroups.push(cur);
+    } else if (cur) {
+      cur.secs.push(el);
+      if (!el.id) el.id = 'help-' + (i + 1);    // 稳定锚点，便于深链
+    }
+  });
+
+  head.innerHTML =
+    '<div class="help-toolbar">' +
+    '<input id="help-filter" class="help-filter" type="search" ' +
+    'placeholder="筛选本页说明（如 压缩 / 通知 / 计划）" aria-label="筛选功能说明">' +
+    '<button class="help-act" type="button" data-act="toggle">全部展开</button>' +
+    '</div>' +
+    '<div class="help-toc-row"><div class="help-toc" id="help-toc"></div>' +
+    '<span class="help-count" id="help-count"></span></div>';
+
+  const toc = head.querySelector('#help-toc');
+  toc.innerHTML = helpGroups.map((g, i) =>
+    '<button type="button" data-g="' + i + '">' + escapeHtml(g.title) +
+    '<span class="help-toc-n">' + g.secs.length + '</span></button>').join('');
+  toc.querySelectorAll('button').forEach((b) => {
+    const g = helpGroups[Number(b.dataset.g)];
+    g.chip = b;
+    b.onclick = () => helpJumpGroup(g);
+  });
+
+  helpGroups.forEach((g) => {
+    const note = document.createElement('span');
+    note.className = 'help-group-note';
+    note.textContent = g.secs.length + ' 条';
+    g.h4.appendChild(note);
+
+    g.secs.forEach((sec) => {
+      const sum = sec.querySelector('summary');
+      if (!sum) return;
+      const title = sum.textContent.trim();
+      sum.textContent = '';
+      const span = document.createElement('span');
+      span.className = 'help-sec-title';
+      span.textContent = title;
+      span.dataset.text = title;
+      sum.appendChild(span);
+      const t = HELP_SET_TARGET[title];
+      if (t) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'help-set';
+        btn.textContent = '去设置';
+        btn.title = '跳到「' + settingsPaneName(t[0]) + '」中对应的设置项';
+        btn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();     // 别让 summary 顺手把条目收起
+          helpGoSetting(t[0], t[1]);
+        };
+        sum.appendChild(btn);
+      }
+    });
+  });
+
+  const filter = head.querySelector('#help-filter');
+  filter.oninput = () => helpApplyFilter(filter.value);
+  head.querySelector('[data-act="toggle"]').onclick = () => {
+    const btn = head.querySelector('[data-act="toggle"]');
+    // 还有没展开的（且没被筛掉）就全开，否则全收
+    const anyClosed = helpGroups.some((g) => g.secs.some(
+      (s) => !s.open && !s.classList.contains('help-hidden')));
+    helpGroups.forEach((g) => g.secs.forEach((s) => {
+      s.open = anyClosed && !s.classList.contains('help-hidden');
+    }));
+    btn.textContent = anyClosed ? '全部收起' : '全部展开';
+  };
+
+  helpBindSpy(pane);
+  helpCountUpdate();
+  helpSyncHeadHeight(pane);
+
+  // 深链：#help-12 / openModal({ tab:'help', anchor:'help-12' })
+  const m = /^#(help-\d+)$/.exec(location.hash || '');
+  if (m) openHelpAnchor(m[1]);
+}
+
+function resetHelpFilter() {
+  const f = document.querySelector('#modal #help-filter');
+  if (f) f.value = '';
+  if (helpGroups.length) helpApplyFilter('');
+}
+
+function helpCountUpdate(hit) {
+  const el = document.querySelector('#modal #help-count');
+  if (!el) return;
+  const total = helpGroups.reduce((n, g) => n + g.secs.length, 0);
+  el.textContent = (hit == null || hit === total) ? ('共 ' + total + ' 条') : ('命中 ' + hit + ' / ' + total);
+}
+
+function helpApplyFilter(q) {
+  const pane = helpPaneEl();
+  if (!pane || !helpGroups.length) return;
+  const kws = String(q || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (kws.length && !helpOpenSnap) {
+    helpOpenSnap = helpGroups.map((g) => g.secs.map((s) => s.open));
+  } else if (!kws.length && helpOpenSnap) {
+    // 清空筛选：回到筛选前看到的样子
+    helpGroups.forEach((g, gi) => g.secs.forEach((s, si) => {
+      s.open = !!(helpOpenSnap[gi] && helpOpenSnap[gi][si]);
+    }));
+    helpOpenSnap = null;
+  }
+
+  let shown = 0;
+  helpGroups.forEach((g) => {
+    let visible = 0;
+    g.secs.forEach((sec) => {
+      const title = sec.querySelector('.help-sec-title');
+      const text = (title && title.dataset.text) || (title ? title.textContent : '');
+      // 正文也参与匹配：用户想找「通知」时，正文提到的那条也该命中
+      if (sec.dataset.plain == null) sec.dataset.plain = (sec.textContent || '').toLowerCase();
+      const hay = ((sec.dataset.search || '') + ' ' + text + ' ' + sec.dataset.plain).toLowerCase();
+      const hit = kws.every((k) => hay.includes(k));
+      sec.classList.toggle('help-hidden', !hit);
+      if (hit) {
+        visible += 1;
+        if (kws.length) sec.open = true;      // 筛选时直接展开，省一次点击
+      }
+      if (title) title.innerHTML = kws.length ? markSearchText(text, kws) : escapeHtml(text);
+    });
+    // 整组没命中就一起藏（h4、它所在的 set-card 与目录 chip）
+    const card = g.h4.closest('.set-card');
+    g.h4.classList.toggle('help-hidden', !visible);
+    if (card) card.classList.toggle('help-hidden', !visible);
+    if (g.chip) {
+      g.chip.classList.toggle('help-hidden', !visible);
+      const n = g.chip.querySelector('.help-toc-n');
+      if (n) n.textContent = kws.length ? (visible + '/' + g.secs.length) : String(g.secs.length);
+    }
+    shown += visible;
+  });
+  helpCountUpdate(kws.length ? shown : null);
+  const box = pane.parentElement;
+  if (kws.length && box) box.scrollTop = 0;
+}
+
+function helpJumpGroup(g) {
+  if (!g) return;
+  g.h4.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+
+function helpGoSetting(tab, kw) {
+  const pane = document.querySelector('#modal .pane[data-pane="' + tab + '"]');
+  if (!pane) return;
+  setSettingsTab(tab);
+  let target = null;
+  if (kw) {
+    const k = String(kw).toLowerCase();
+    target = Array.from(pane.querySelectorAll('[data-search]')).find(
+      (el) => (el.dataset.search || '').toLowerCase().includes(k));
+  }
+  requestAnimationFrame(() => {
+    (target || pane).scrollIntoView({ block: 'center', behavior: 'smooth' });
+    if (!target) return;
+    target.classList.add('help-flash');
+    setTimeout(() => target.classList.remove('help-flash'), 1200);
+  });
+}
+
+function helpBindSpy(pane) {
+  if (helpSpyBound) return;
+  const box = pane.parentElement;
+  if (!box) return;
+  helpSpyBound = true;
+  box.addEventListener('scroll', () => {
+    if (!isOpen($('#modal')) || pane.classList.contains('hidden')) return;
+    helpUpdateSpy();
+  }, { passive: true });
+  window.addEventListener('resize', () => helpSyncHeadHeight(pane));
+}
+
+/* 「功能说明」内部的吸附区贴在滚动区顶部。设置页页头现在已经不吸顶，
+   只有页头仍是 sticky 时才需要为它让位（保留兼容，方便以后改回去）。
+   高度同时写进 CSS 变量，供目录高亮与 scroll-margin 使用 */
+function helpSyncHeadHeight(pane) {
+  const head = pane && pane.querySelector('#help-head');
+  if (!head) return;
+  const box = pane.parentElement;
+  const pageHead = box && box.querySelector('.set-page-head');
+  let ph = 0;
+  if (pageHead && getComputedStyle(pageHead).position === 'sticky') {
+    ph = Math.round(pageHead.getBoundingClientRect().height);
+  }
+  head.style.top = ph + 'px';
+  try {
+    pane.style.setProperty('--help-head-h',
+      (ph + Math.round(head.getBoundingClientRect().height) + 28) + 'px');
+  } catch (e) { /* 忽略 */ }
+}
+
+function helpUpdateSpy() {
+  const pane = helpPaneEl();
+  const toc = pane && pane.querySelector('#help-toc');
+  if (!pane || !toc || !helpGroups.length || pane.classList.contains('hidden')) return;
+  const box = pane.parentElement;
+  // 用同步好的「页头 + 吸附区」高度：否则分组标题刚滚到它下方时，高亮还停在上一个组
+  const hh = parseFloat(getComputedStyle(pane).getPropertyValue('--help-head-h')) || 120;
+  const top = box.getBoundingClientRect().top + hh;
+  let idx = 0;
+  helpGroups.forEach((g, i) => {
+    if (g.h4.classList.contains('help-hidden')) return;
+    if (g.h4.getBoundingClientRect().top <= top) idx = i;
+  });
+  toc.querySelectorAll('button').forEach((b) => {
+    b.classList.toggle('active', Number(b.dataset.g) === idx);
+  });
+}
+
+function openHelpAnchor(id) {
+  const sec = document.getElementById(id);
+  if (!sec) return;
+  sec.open = true;
+  requestAnimationFrame(() => sec.scrollIntoView({ block: 'center', behavior: 'smooth' }));
 }
 
 /* 范围型数值：滑块 + 数字输入联动 */
@@ -2006,7 +2720,9 @@ function openModal(opts) {
   refreshBalance('vision', panes[1]);
 
   if (typeof loadSkills === 'function') loadSkills();    // Skill 列表（静态面板，只刷数据）
+  if (typeof loadAgents === 'function') loadAgents();    // 子代理定义（静态面板，只刷数据）
   if (typeof loadTasks === 'function') loadTasks();      // 提醒 / 主动聊天面板
+  if (typeof syncReminderSwitches === 'function') syncReminderSwitches();
 
   setSettingsTab(opts.tab || settingsLastTab());
   showWithAnim(modal);
@@ -2016,9 +2732,16 @@ function openModal(opts) {
     decorateSettingsPanes();
     foldLongHints();
     addRangeCompanions();
+    bindAnchorsScroll();
+    initHelpPane();                    // 依赖 set-card，必须在 decorate 之后
+    helpSyncHeadHeight(helpPaneEl());
+    resetHelpFilter();
+    if (opts.anchor) openHelpAnchor(opts.anchor);
     buildSettingsSearchIndex();        // 动态面板刚重建，索引必须在这之后重建
     resetSettingsSearch();
+    renderSettingsAnchors(settingsCurrentTab);
     restoreSettingsScroll(settingsCurrentTab);
+    updateAnchorsActive();
     settingsSnapshot = JSON.stringify(collectSettings());
     updateSettingsDirty();
   });
@@ -2035,7 +2758,18 @@ function setSettingsTab(name) {
   const content = $('#modal .settings-content');
   if (content) content.scrollTop = 0;
   updateSettingsPageHead(name);
-  if (isOpen($('#modal'))) requestAnimationFrame(() => restoreSettingsScroll(name));
+  renderSettingsAnchors(name);
+  if (name === 'help') {
+    initHelpPane();
+    requestAnimationFrame(() => {
+      helpSyncHeadHeight(helpPaneEl());
+      helpUpdateSpy();
+    });
+  }
+  if (isOpen($('#modal'))) requestAnimationFrame(() => {
+    restoreSettingsScroll(name);
+    updateAnchorsActive();
+  });
 }
 
 /* ---- 设置面板：搜索 + 键盘操作（与「快捷键」面板的说明一一对应）---- */
@@ -2153,8 +2887,11 @@ function settingsJumpTo(pane, el) {
   requestAnimationFrame(() => {
     const det = el && el.closest ? el.closest('details') : null;
     if (det) det.open = true;
+    const card = el && el.closest ? el.closest('.set-card') : null;
+    if (card) setCardCollapsed(card, false, true);      // 命中的分区若被收起，先展开
     if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' });
     flashSettingsTarget(el);
+    updateAnchorsActive();
   });
 }
 
@@ -2169,8 +2906,14 @@ function onSettingsKeydown(e) {
   const inSearch = !!inp && document.activeElement === inp;
   if (e.key === 'Escape') {
     e.preventDefault(); e.stopPropagation();
-    if (inSearch && inp.value) { inp.value = ''; runSettingsSearch(''); }
-    else closeModal();
+    const hf = $('#help-filter');
+    if (hf && document.activeElement === hf && hf.value) {
+      hf.value = ''; helpApplyFilter('');          // 先清筛选，别顺手关掉整个设置
+    } else if (inSearch && inp.value) {
+      inp.value = ''; runSettingsSearch('');
+    } else {
+      closeModal();
+    }
     return;
   }
   const mod = e.ctrlKey || e.metaKey;
@@ -2221,6 +2964,10 @@ function setupSettingsSearch() {
   // 「数据与高级」页
   const openData = $('#app-open-data');
   if (openData) openData.onclick = openDataDir;
+  const ciRefresh = $('#codeindex-refresh');
+  if (ciRefresh) ciRefresh.onclick = codeindexRefresh;
+  const ciRebuild = $('#codeindex-rebuild');
+  if (ciRebuild) ciRebuild.onclick = codeindexRebuild;
   const backup = $('#app-backup');
   if (backup) backup.onclick = () => {
     if (typeof workOpenBackupDialog === 'function') workOpenBackupDialog();
@@ -2239,6 +2986,60 @@ function setupSettingsSearch() {
     const onEdit = (e) => { if (e.target.closest && e.target.closest('.pane')) queueDirtyCheck(); };
     modal.addEventListener('input', onEdit);
     modal.addEventListener('change', onEdit);
+    // 卡片：标题行点击折叠 / 展开；右上角两个按钮分别恢复本节默认、折叠
+    modal.addEventListener('click', (e) => {
+      const card = e.target.closest && e.target.closest('.set-card');
+      if (!card) return;
+      const act = e.target.closest('.set-card-act');
+      if (act) {
+        if (act.dataset.act === 'collapse-card') {
+          setCardCollapsed(card, !card.classList.contains('collapsed'), true);
+        } else if (act.dataset.act === 'reset-card') {
+          resetSettingsCard(card);
+        }
+        return;
+      }
+      if (e.target.closest('.set-card-head')) {
+        setCardCollapsed(card, !card.classList.contains('collapsed'), true);
+      }
+    });
+  }
+
+  // 全局规则：展开 / 删除按钮走事件委托（规则行是动态生成的）
+  const rulesBox = $('#profile-rules');
+  if (rulesBox) {
+    rulesBox.addEventListener('click', (e) => {
+      const expand = e.target.closest && e.target.closest('[data-act="rule-expand"]');
+      if (expand) {
+        const row = expand.closest('.rule-item');
+        if (!row) return;
+        const open = row.classList.toggle('open');
+        expand.textContent = open ? '收起' : '展开';
+        expand.setAttribute('aria-expanded', open ? 'true' : 'false');
+        return;
+      }
+      const del = e.target.closest && e.target.closest('[data-act="rule-del"]');
+      if (!del) return;
+      const row = del.closest('.rule-item');
+      if (!row) return;
+      row.remove();
+      if (!rulesBox.querySelector('.rule-item')) renderProfileRules([]);
+      else renumberProfileRules();
+      updateSettingsDirty();
+    });
+    rulesBox.addEventListener('change', (e) => {
+      const cb = e.target;
+      if (!cb || cb.dataset.act !== 'rule-toggle') return;
+      const row = cb.closest('.rule-item');
+      if (row) row.classList.toggle('off', !cb.checked);
+    });
+  }
+  const addRule = $('#profile-rule-add');
+  if (addRule) {
+    addRule.onclick = () => {
+      addProfileRule();
+      updateSettingsDirty();
+    };
   }
 }
 
@@ -2346,8 +3147,67 @@ function collectSettings() {
   if ($('#speech-tts-model')) cfg.tts_model = $('#speech-tts-model').value.trim();
   if ($('#speech-tts-voice')) cfg.tts_voice = $('#speech-tts-voice').value.trim();
 
+  cfg.image_enabled = !!($('#image-enabled') || {}).checked;
+  if ($('#image-comfy-url')) {
+    cfg.image_comfy_url = $('#image-comfy-url').value.trim() || 'http://127.0.0.1:8188';
+  }
+  if ($('#image-workflow')) cfg.image_workflow = $('#image-workflow').value.trim();
+
+  cfg.trajectory_enabled = !!($('#traj-enabled') || {}).checked;
+  if ($('#traj-max-field')) {
+    const tn = parseInt($('#traj-max-field').value, 10);
+    cfg.trajectory_max_field = Number.isFinite(tn) && tn >= 0 ? tn : 200000;
+  }
+  if ($('#codeindex-enabled')) cfg.codeindex_enabled = !!$('#codeindex-enabled').checked;
+  if ($('#codeindex-max-files')) {
+    const n = parseInt($('#codeindex-max-files').value, 10);
+    cfg.codeindex_max_files = Number.isFinite(n) && n >= 0 ? n : 0;
+  }
+  if ($('#codeindex-max-chunks')) {
+    const n = parseInt($('#codeindex-max-chunks').value, 10);
+    cfg.codeindex_max_chunks = Number.isFinite(n) && n >= 0 ? n : 0;
+  }
+  if ($('#codeindex-max-file-kb')) {
+    const n = parseInt($('#codeindex-max-file-kb').value, 10);
+    cfg.codeindex_max_file_kb = Number.isFinite(n) && n >= 16 ? n : 512;
+  }
+
+  // 自动派发（子代理页）
+  cfg.agent_auto_route = !!($('#agent-auto-route') || {}).checked;
+  cfg.agent_auto_plan = !!($('#agent-auto-plan') || {}).checked;
+  cfg.agent_auto_review = !!($('#agent-auto-review') || {}).checked;
+  if ($('#agent-plan-review')) {
+    cfg.agent_plan_review = !!$('#agent-plan-review').checked;
+  }
+  cfg.agent_script_agents = !!($('#agent-script-agents') || {}).checked;
+  if ($('#agent-script-agent-calls')) {
+    const n = parseInt($('#agent-script-agent-calls').value, 10);
+    cfg.agent_script_agent_calls = Number.isFinite(n) && n >= 0 ? n : 8;
+  }
+  if ($('#agent-write-isolation')) {
+    const v = $('#agent-write-isolation').value;
+    cfg.agent_write_isolation = ['off', 'serial', 'strict'].includes(v) ? v : 'serial';
+  }
+  if ($('#agent-worktree-isolation')) {
+    const v = $('#agent-worktree-isolation').value;
+    cfg.agent_worktree_isolation = ['off', 'auto', 'always'].includes(v) ? v : 'auto';
+  }
+  if ($('#agent-fidelity-gate')) {
+    const v = $('#agent-fidelity-gate').value;
+    cfg.agent_fidelity_gate = ['off', 'nudge', 'strict'].includes(v) ? v : 'nudge';
+  }
+  if ($('#agent-fidelity-min')) {
+    const n = parseInt($('#agent-fidelity-min').value, 10);
+    cfg.agent_fidelity_min = Number.isFinite(n) && n >= 0 && n <= 100 ? n : 70;
+  }
+  if ($('#agent-native-vision')) {
+    cfg.agent_native_vision = !!$('#agent-native-vision').checked;
+  }
+
   const profile = {
-    manual: $('#profile-manual').value,
+    // 旧字段 manual 在载入时已折算进 rules；保存后统一以 rules 为准
+    rules: collectProfileRules(),
+    manual: '',
     auto_learn_enabled: $('#profile-auto-learn').checked,
     learning_prompt_custom: $('#learning-prompt').value,
   };
@@ -2390,6 +3250,8 @@ async function resetCurrentSettingsPage() {
   const name = settingsCurrentTab;
   const spec = pageResetSpec(name);
   if (!spec) { toast('本页没有可恢复的默认项'); return; }
+  if (!window.confirm('把「' + settingsPaneName(name) + '」整页恢复为默认值？\n' +
+      'API 密钥、B 站 SESSDATA 与自定义预设会保留；恢复后仍需点「保存」生效。')) return;
   let defs;
   try { defs = await ensureSettingsDefaults(); }
   catch (e) { toastErr('读取默认值', e); return; }
@@ -2400,6 +3262,155 @@ async function resetCurrentSettingsPage() {
   draftProfile = cur.profile;
   rebuildSettingsFromDraft();
   toast('已恢复本页默认值，点「保存」生效');
+}
+
+/* ---- 按分区恢复默认 ----
+   卡片归属的配置键不靠手写映射表：临时扰动卡片里的每个控件，比较收集结果，找出它真正
+   影响的键；随后把控件恢复原状，并校验整页收集结果与扰动前完全一致——校验不过就认为
+   这次映射不可信，宁可不提供本节重置，也不误改别处的配置。 */
+const CARD_RESET_SKIP = /(^|\.)(rules|manual)$|api_key|sessdata|_presets$/;
+
+function flattenSettingPaths(obj, prefix, out) {
+  out = out || {};
+  Object.keys(obj || {}).forEach((k) => {
+    const v = obj[k];
+    const p = prefix ? prefix + '.' + k : k;
+    if (v && typeof v === 'object' && !Array.isArray(v)) flattenSettingPaths(v, p, out);
+    else out[p] = JSON.stringify(v);
+  });
+  return out;
+}
+
+function settingsOracle(pane) {
+  if (typeof pane._collect === 'function') return () => ({ config: pane._collect() });
+  return () => collectSettings();
+}
+
+function radioGroupOf(el) {
+  if (!el.name) return [el];
+  return Array.from(document.querySelectorAll('#modal input[type="radio"][name="' + el.name + '"]'));
+}
+
+function perturbControl(el) {
+  if (el.tagName === 'SELECT') {
+    if (el.options.length < 2) return false;
+    el.selectedIndex = (el.selectedIndex + 1) % el.options.length;
+    return true;
+  }
+  const t = (el.type || 'text').toLowerCase();
+  if (t === 'checkbox') { el.checked = !el.checked; return true; }
+  if (t === 'radio') {
+    const other = radioGroupOf(el).find((x) => x !== el && !x.checked);
+    if (!other) return false;
+    other.checked = true;
+    return true;
+  }
+  if (t === 'number') {
+    const n = parseFloat(el.value);
+    el.value = String(Number.isFinite(n) ? n + 1 : 1);
+    return true;
+  }
+  if (el.tagName === 'TEXTAREA' || ['text', 'search', 'url', 'password', 'email'].indexOf(t) >= 0) {
+    el.value = 'zz' + el.value;
+    return true;
+  }
+  return false;
+}
+
+function settingsFingerprint(flat) {
+  return Object.keys(flat).sort().map((k) => k + '=' + flat[k]).join('\n');
+}
+
+function cardKeyMap(pane) {
+  if (pane._cardKeyMap) return pane._cardKeyMap;
+  const oracle = settingsOracle(pane);
+  let base;
+  try { base = flattenSettingPaths(oracle()); } catch (e) { return null; }
+  const basePrint = settingsFingerprint(base);
+  const controls = Array.from(pane.querySelectorAll('input, select, textarea'))
+    .filter((el) => el.closest('.set-card') && el.type !== 'range' && !el.disabled);
+  const map = new Map();
+  controls.forEach((el) => {
+    const radios = el.type === 'radio' ? radioGroupOf(el) : null;
+    const saved = radios ? radios.map((x) => x.checked) : { value: el.value, checked: el.checked };
+    let changed = null;
+    try {
+      if (!perturbControl(el)) return;
+      const now = flattenSettingPaths(oracle());
+      changed = Object.keys(now).filter((p) => now[p] !== base[p]);
+    } catch (e) {
+      changed = null;
+    } finally {
+      if (radios) radios.forEach((x, i) => { x.checked = saved[i]; });
+      else { el.value = saved.value; el.checked = saved.checked; }
+    }
+    if (changed && changed.length) map.set(el, changed);
+  });
+  // 校验：全部控件恢复后，收集结果必须与扰动前完全一致，否则这次映射不可信
+  try {
+    if (settingsFingerprint(flattenSettingPaths(oracle())) !== basePrint) return null;
+  } catch (e) { return null; }
+  pane._cardKeyMap = map;
+  return map;
+}
+
+function cardResetPaths(card) {
+  const pane = card.closest('.pane');
+  if (!pane) return [];
+  const out = new Set();
+  card.querySelectorAll('[data-cfg]').forEach((el) => {
+    String(el.dataset.cfg || '').split(',').forEach((k) => {
+      const t = k.trim();
+      if (t) out.add('config.' + t);
+    });
+  });
+  const map = cardKeyMap(pane);
+  if (map) {
+    map.forEach((paths, el) => {
+      if (!card.contains(el)) return;
+      paths.forEach((p) => out.add(p));
+    });
+  }
+  return Array.from(out).filter((p) => !CARD_RESET_SKIP.test(p));
+}
+
+function findCardByTitle(pane, title) {
+  if (!pane) return null;
+  return Array.from(pane.querySelectorAll('.set-card'))
+    .find((c) => (c.dataset.card || '') === title) || null;
+}
+
+async function resetSettingsCard(card) {
+  const title = card.dataset.card || '本节';
+  const paths = cardResetPaths(card);
+  if (!paths.length) { toast('「' + title + '」没有可单独恢复的默认项'); return; }
+  let defs;
+  try { defs = await ensureSettingsDefaults(); }
+  catch (e) { toastErr('读取默认值', e); return; }
+  const cur = collectSettings();
+  let hit = 0;
+  paths.forEach((p) => {
+    const i = p.indexOf('.');
+    const group = p.slice(0, i);
+    const key = p.slice(i + 1);
+    const src = group === 'profile' ? defs.profile : defs.config;
+    const dst = group === 'profile' ? cur.profile : cur.config;
+    if (!src || !dst || !(key in src)) return;
+    dst[key] = deepCopy(src[key]);
+    hit++;
+  });
+  if (!hit) { toast('「' + title + '」没有可单独恢复的默认项'); return; }
+  draftCfg = cur.config;
+  draftProfile = cur.profile;
+  rebuildSettingsFromDraft();
+  requestAnimationFrame(() => {
+    const pane = document.querySelector('#modal .pane[data-pane="' + settingsCurrentTab + '"]');
+    const again = findCardByTitle(pane, title);
+    if (!again) return;
+    setCardCollapsed(again, false, true);
+    updateAnchorsActive();
+  });
+  toast('已恢复「' + title + '」默认值，点「保存」生效');
 }
 
 async function resetAllSettings() {
@@ -2445,6 +3456,53 @@ async function openDataDir() {
     if (!r || !r.ok) throw new Error((r && r.error) || '打开失败');
   } catch (e) {
     toastErr('打开数据目录', e);
+  }
+}
+
+/* 代码库语义索引：状态 / 重建（后台增量，轮询到就绪） */
+function codeindexStateText(r) {
+  r = r || {};
+  const st = r.state || 'idle';
+  if (st === 'running') {
+    return '索引中：' + (r.done || 0) + '/' + (r.total || '?') + ' 文件 · '
+      + (r.chunks || 0) + ' 块';
+  }
+  if (st === 'error') return '索引失败：' + (r.error || '未知错误');
+  if (st === 'ready') {
+    let t = '就绪：' + (r.files || 0) + ' 文件 / ' + (r.chunks || 0) + ' 块';
+    if (r.model_ready === false) t += '（语义模型未下载，当前用关键词兜底）';
+    return t;
+  }
+  return '尚未建立索引';
+}
+
+async function codeindexRefresh() {
+  const box = $('#codeindex-status');
+  if (!box) return;
+  const sid = (state.sessions && state.sessions.current) || '';
+  if (!sid) { box.textContent = '先打开一个会话'; return; }
+  try {
+    const r = await api('/api/codeindex/status', { session_id: sid });
+    box.textContent = codeindexStateText(r);
+    if (r && r.state === 'running') setTimeout(codeindexRefresh, 1200);
+  } catch (e) {
+    box.textContent = '读取索引状态失败：' + e;
+  }
+}
+
+async function codeindexRebuild() {
+  const sid = (state.sessions && state.sessions.current) || '';
+  if (!sid) return toast('先打开一个会话');
+  const btn = $('#codeindex-rebuild');
+  if (btn) btn.disabled = true;
+  try {
+    await api('/api/codeindex/reindex', { session_id: sid });
+    toast('已开始重建索引');
+    codeindexRefresh();
+  } catch (e) {
+    toastErr('重建索引', e);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -3037,13 +4095,21 @@ function syncAgentUI() {
   const more = $('#btn-agent-more');
   if (more) more.classList.toggle('hidden', !on);
   if (!on) closeAgentMenu();
+  const sandboxPath = (s && s.sandbox) || '';
   const sb = $('#btn-sandbox');
   if (sb) {
     sb.classList.toggle('hidden', !on);
-    const p = (s && s.sandbox) || '';
     const nm = $('#sandbox-name');
-    if (nm) nm.textContent = p ? (p.split(/[\\/]/).filter(Boolean).pop() || p) : '目录';
-    sb.title = p ? ('沙箱：' + p + '（点击更换）') : '选择 Agent 沙箱目录';
+    if (nm) nm.textContent = sandboxPath
+      ? (sandboxPath.split(/[\\/]/).filter(Boolean).pop() || sandboxPath) : '目录';
+    sb.title = sandboxPath ? ('沙箱：' + sandboxPath + '（点击更换）') : '选择 Agent 沙箱目录';
+  }
+  // 沙箱目录右侧的「在文件管理器中打开」：没有目录时不显示
+  const sbOpen = $('#btn-sandbox-open');
+  if (sbOpen) {
+    sbOpen.classList.toggle('hidden', !on || !sandboxPath);
+    sbOpen.title = sandboxPath
+      ? ('在文件管理器中打开：' + sandboxPath) : '在文件管理器中打开沙箱目录';
   }
   const or = $('#btn-outside-read');
   if (or) {
@@ -3082,14 +4148,14 @@ async function setAutoContinue(n) {
 }
 
 /* 写入审批档位：ask 手动 / ai 自动 / full 完全访问 / custom 自定义。
-   旧会话里可能存着 auto/once/always。旧「自动」曾是默认值、不代表用户明确选择，
-   一律收紧为「手动审批」，避免升级后仍然不问就写。 */
-const APPROVAL_ALIASES = { auto: 'ask', once: 'ask', always: 'ask' };
+   默认 ai：只读与普通命令放行，安装 / 联网 / 改历史类才问。
+   旧值 auto / always 语义就是自动审批；once 按手动处理。 */
+const APPROVAL_ALIASES = { auto: 'ai', always: 'ai', once: 'ask' };
 const APPROVAL_MODES = ['ask', 'ai', 'full', 'custom'];
 function normApproval(mode) {
   const k = String(mode || '').trim().toLowerCase();
   const v = APPROVAL_ALIASES[k] || k;
-  return APPROVAL_MODES.indexOf(v) >= 0 ? v : 'ask';
+  return APPROVAL_MODES.indexOf(v) >= 0 ? v : 'ai';
 }
 
 async function setApprovalMode(mode) {
@@ -3174,6 +4240,18 @@ async function pickSandbox() {
   finally {
     _pickerBusy = false;
     if (btn) btn.classList.remove('busy');
+  }
+}
+
+/* 在文件管理器里打开当前会话的沙箱目录（与分组头的小按钮共用同一个接口） */
+async function openSandboxFolder() {
+  const s = curSession();
+  const path = (s && s.sandbox) || '';
+  if (!path) { toast('还没有选择沙箱目录', 'error'); return; }
+  try {
+    await api('/api/open/folder', { path: path });
+  } catch (e) {
+    toastErr('打开文件夹', e);
   }
 }
 

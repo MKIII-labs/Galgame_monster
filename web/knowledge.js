@@ -367,6 +367,88 @@ function closeKbModal() {
   hideWithAnim($('#kb-modal'));
 }
 
+/* 「AI 读取这个知识库要花多少 token」的预估。
+   必须把三个口径分开写，否则很容易被读成「每轮都花这么多」：
+   · 整库规模 = 库里有多少（不是单次成本）
+   · 日常每轮 = 检索式注入，有 INJECT_MAX_TOKENS 上限，整库不会全塞进去
+   · GAL 编剧 = world_text 全量一次性（另有字数上限）
+   · 规则类 = GAL 里每轮常驻，不占检索预算 */
+function kbFmtNum(n) {
+  const v = Number(n) || 0;
+  return v >= 10000 ? (v / 10000).toFixed(1) + ' 万' : String(v);
+}
+
+async function renderKbTokenEst(ids) {
+  const box = $('#kb-token-est');
+  if (!box) return;
+  const list = (ids || []).filter(Boolean);
+  if (!list.length) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  let r = null;
+  try { r = await api('/api/kb/stats', { ids: list }); } catch (e) { r = null; }
+  if (!r || !r.ok) { box.classList.add('hidden'); return; }
+  const t = r.total || {};
+  const cap = Number(r.inject_max_tokens) || 1500;
+  const worldChars = Number(r.world_max_chars) || 9000;
+  const density = t.chars ? (t.tokens / t.chars) : 0.5;   // 用这个库自己的字/token 密度折算上限
+  const worldTokens = Math.round(worldChars * density);
+  const lines = [];
+  lines.push('<div><b>整库规模</b>：' + (t.libraries || list.length) + ' 个库 · '
+    + (t.nodes || 0) + ' 条 · ' + kbFmtNum(t.chars) + '字 ≈ ' + kbFmtNum(t.tokens)
+    + ' token <span class="kb-token-hint">（库的总量，不是每次对话的成本）</span></div>');
+  lines.push('<div><b>日常每轮</b>：按检索命中注入，最多 <b>' + cap
+    + '</b> token / 轮 —— 整库不会全塞进提示词</div>');
+  lines.push('<div><b>GAL 编剧一次性</b>：整库上限 ' + kbFmtNum(worldChars) + ' 字 ≈ '
+    + kbFmtNum(worldTokens) + ' token，每次生成只喂一次</div>');
+  if (t.pinned_nodes) {
+    lines.push('<div class="kb-token-warn"><b>规则类</b>：' + t.pinned_nodes + ' 条 ≈ '
+      + kbFmtNum(t.pinned_tokens) + ' token —— GAL 模式每轮常驻注入，不占检索上限</div>');
+  }
+  lines.push('<div class="kb-token-hint">按中英混排折算的估算值，实际计费以接口返回的 usage 为准。</div>');
+  box.innerHTML = lines.join('');
+  box.classList.remove('hidden');
+}
+
+/* 会话记忆 / 用户画像的注入量估算。
+   两个来源规则不同，文案里必须各自写清上限：
+   · 画像：每轮固定注入最多 PROFILE_INJECT_LIMIT 条，其余靠检索
+   · 会话记忆：和知识库共用 INJECT_MAX_TOKENS 的检索预算 */
+async function renderMemTokenEst() {
+  const pbox = $('#mem-est-profile');
+  const sbox = $('#mem-est-session');
+  if (!pbox && !sbox) return;
+  let r = null;
+  try {
+    r = await api('/api/memory/estimate', { session_id: state.sessions.current });
+  } catch (e) { r = null; }
+  if (!r || !r.ok) {
+    if (pbox) pbox.classList.add('hidden');
+    if (sbox) sbox.classList.add('hidden');
+    return;
+  }
+  const p = r.profile || {};
+  const s = r.session || {};
+  const cap = Number(r.profile_inject_limit) || 30;
+  const budget = Number(r.inject_max_tokens) || 1500;
+  if (pbox) {
+    pbox.innerHTML = '<div><b>用户画像</b>：共 ' + (p.items || 0) + ' 条 · '
+      + kbFmtNum(p.chars) + '字 ≈ ' + kbFmtNum(p.tokens) + ' token'
+      + ' <span class="kb-token-hint">（每轮固定注入最多 ' + cap
+      + ' 条，其余靠检索命中）</span></div>';
+    pbox.classList.remove('hidden');
+  }
+  if (sbox) {
+    sbox.innerHTML = '<div><b>会话记忆</b>：本会话共 ' + (s.items || 0) + ' 条 · '
+      + kbFmtNum(s.chars) + '字 ≈ ' + kbFmtNum(s.tokens) + ' token'
+      + ' <span class="kb-token-hint">（每轮按检索注入，与知识库共用 '
+      + budget + ' token/轮 预算）</span></div>';
+    sbox.classList.remove('hidden');
+  }
+}
+
 function renderKbBindList() {
   const box = $('#kb-bind-list');
   const s = curSession();
@@ -392,6 +474,8 @@ function renderKbBindList() {
   });
   renderKbAiTarget();
   renderKbBadge();
+  renderKbTokenEst(bound);        // 「AI 读取预估」跟着绑定变化刷新
+  renderMemTokenEst();            // 会话记忆 / 用户画像的注入量估算
   // 会话级「读取用户画像」：默认开；GAL 剧场有自己的读画像开关，这里隐藏
   const upEl = $('#sess-use-profile');
   if (upEl) upEl.checked = !s || s.use_profile !== false;
@@ -538,9 +622,12 @@ function relationMeta(code) {
   return (state.relations || []).find((r) => r.code === code) || null;
 }
 
+// 已下线的旧关系码：词表里不再提供，但老图上的边要照旧显示中文名
+const LEGACY_REL_LABEL = { sequence: '顺承', turn: '转折' };
+
 function relationLabel(code) {
   const m = relationMeta(code);
-  return m ? m.label : (code || '相关');
+  return m ? m.label : (LEGACY_REL_LABEL[code] || code || '相关');
 }
 
 /* 对称关系（相关 / 同义 / 对立）默认画双向箭头；sym 标记由后端词表下发 */
@@ -564,6 +651,15 @@ function edgeArrows(directed) {
     ? { to: { enabled: true, scaleFactor: s } }
     : { to: { enabled: true, scaleFactor: s },
         from: { enabled: true, scaleFactor: s } };
+}
+
+// 边的悬浮说明：关系名 + 一句话陈述；老数据没有 fact 就直说「未写依据」
+function edgeTooltip(e) {
+  const rel = (e && (e.label || relationLabel(e.relation))) || '相关';
+  const fact = String((e && e.fact) || '').trim();
+  let s = fact ? (rel + '：' + fact) : (rel + '（未写依据）');
+  if (e && e.invalid_at) s = '已失效 · ' + s;
+  return s;
 }
 
 function renderRelationHelp() {
@@ -833,16 +929,20 @@ function drawKbGraph() {
   const edges = visibleEdges.map((e) => {
     const rel = e.relation || 'related';
     const col = relationColor(rel, th);
+    const dead = !!e.invalid_at;             // S2：被新结论替代的旧边，虚线 + 淡化
     // 标签加画布色描边：彩色小字压在边和点阵上时不会糊成一团
     const o = {
       id: e.id, from: e.from, to: e.to,
-      label: e.label || relationLabel(rel),
-      font: { color: col, size: 11, align: 'middle',
+      label: (e.label || relationLabel(rel)) + (dead ? '（已失效）' : ''),
+      title: edgeTooltip(e),
+      font: { color: col, size: dead ? 10 : 11, align: 'middle',
               strokeWidth: 3, strokeColor: th.labelBg },
-      color: { color: col, highlight: col, hover: col },
+      color: { color: col, highlight: col, hover: col,
+               opacity: dead ? 0.4 : 1 },
       arrows: edgeArrows(isEdgeDirected(e)),
-      width: 1.6,
+      width: dead ? 1.1 : 1.6,
     };
+    if (dead) o.dashes = [4, 5];
     if (addEdges.has(e.id)) {            // 本轮 AI 新增的连线：加粗 + 绿色
       o.width = 3;
       o.color = { color: '#22c55e', highlight: '#22c55e', hover: '#22c55e' };
@@ -879,20 +979,12 @@ function drawKbGraph() {
       addNode: (data, cb) => { cb(null); },
       editNode: (data, cb) => { cb(null); },
       addEdge: (data, cb) => {
-        const id = 'e_' + Math.random().toString(36).slice(2, 10);
-        const rel = 'related';
-        const label = relationLabel(rel);
-        const directed = !isSymmetricRel(rel);
-        state.kbData.edges.push({ id, from: data.from, to: data.to,
-                                  label: label, relation: rel, directed: directed,
-                                  type: 'relation' });
-        const col = relationColor(rel, th);
-        cb({ id, from: data.from, to: data.to, label: label,
-             font: { color: col, size: 11, align: 'middle',
-                     strokeWidth: 3, strokeColor: th.labelBg },
-             color: { color: col, highlight: col, hover: col },
-             arrows: edgeArrows(directed), width: 1.6 });
-        scheduleKbSave();
+        // 拖拽连线不直接落库：先打开表单补「为什么」，没有陈述的边等于噪声
+        cb(null);
+        showEdgeForm(data.from);
+        const toSel = $('#ke-to');
+        if (toSel) toSel.value = data.to;
+        toast('请补一句话说明这条关系的依据');
       },
       editEdge: (data, cb) => { cb(data); },
       deleteEdge: (data, cb) => {
@@ -1016,7 +1108,29 @@ function showNodeForm(node) {
   $('#kd-size-val').textContent = sz;
   renderColorSwatches(node.color || '');
   $('#kd-locked').checked = !!node.locked;
+  // 原话锚点：只有「AI 在对话里写下」的条目才有 source + source_msg
+  const originBtn = $('#kd-origin');
+  if (originBtn) {
+    const ok = !!(node.source && typeof node.source_msg === 'number');
+    originBtn.classList.toggle('hidden', !ok);
+    originBtn.title = ok ? '回到写下这条记忆的那条回复' : '';
+  }
   renderKbNotes(node);
+}
+
+// 回到写下这条记忆的那条回复。消息数组不删（压缩只移动 summary_upto），下标稳定。
+async function kbJumpToOrigin() {
+  const nodes = (state.kbData && state.kbData.nodes) || [];
+  const n = nodes.find((x) => x.id === state.kbSelNode);
+  if (!n || !n.source || typeof n.source_msg !== 'number') return;
+  const sid = n.source, idx = n.source_msg;
+  closeKbModal();
+  try {
+    if (typeof selectSession === 'function') await selectSession(sid);
+    if (typeof ssFocusMessage === 'function') await ssFocusMessage(idx, '');
+  } catch (e) {
+    toast('跳转失败：原会话可能已删除');
+  }
 }
 
 // ---------- 关联：入边 + 未链接提及 ----------
@@ -1036,7 +1150,9 @@ function renderKbLinks(node) {
     linked.add(otherId);
     const rel = e.label || relationLabel(e.relation);
     const dir = e.from === node.id ? '→' : (e.directed ? '←' : '⇄');
-    rows.push({ id: otherId, title: other.title || '(无标题)', meta: rel + ' ' + dir });
+    const dead = e.invalid_at ? '已失效 · ' : '';
+    rows.push({ id: otherId, title: other.title || '(无标题)',
+                meta: dead + rel + ' ' + dir, tip: edgeTooltip(e) });
   });
   const title = String(node.title || '').trim();
   if (title) {
@@ -1057,6 +1173,7 @@ function renderKbLinks(node) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'kb-link-row';
+    if (r.tip) b.title = r.tip;
     const t = document.createElement('span');
     t.className = 'kb-link-title';
     t.textContent = r.title;
@@ -1133,6 +1250,8 @@ function showEdgeForm(fromId) {
   fillRelationSelect($('#ke-relation'));
   syncEdgeDir();                                  // 方向随关系类型给个默认值
   $('#ke-relation').onchange = syncEdgeDir;       // 换关系时重新给默认（之后可手动改）
+  const factEl = $('#ke-fact');
+  if (factEl) { factEl.value = ''; }              // 每次开新连线都从空白开始
   $('#kb-node-form').classList.add('hidden');
   $('#kb-node-empty').classList.add('hidden');
   $('#kb-edge-form').classList.remove('hidden');
@@ -1157,36 +1276,53 @@ function addKbEdge() {
   const to = $('#ke-to').value;
   const rel = $('#ke-relation').value || 'related';
   if (!kbEdgeFrom || !to || kbEdgeFrom === to) return;
+  const fact = ($('#ke-fact') ? $('#ke-fact').value : '').trim();
+  // 连线必须写「为什么」：只连一条没有任何陈述的边，等于给图谱添噪声
+  if (!fact) {
+    toast('请写一句话说明这条关系的依据');
+    if ($('#ke-fact')) $('#ke-fact').focus();
+    return;
+  }
   const directed = ($('#ke-dir') ? $('#ke-dir').value : '1') === '1';
   const label = relationLabel(rel);
   state.kbData.edges = state.kbData.edges || [];
-  // 无向边反着连也算重复，避免出现 A⇄B / B⇄A 两条重影
-  const dup = state.kbData.edges.some((e) => (e.relation || 'related') === rel &&
+  // (from,to,relation) 唯一：无向边反着连也算重复，避免出现 A⇄B / B⇄A 两条重影
+  const same = (e) => (e.relation || 'related') === rel &&
     ((e.from === kbEdgeFrom && e.to === to) ||
-     (!directed && e.from === to && e.to === kbEdgeFrom)));
-  if (dup) {
-    toast('这两个节点之间已有相同关系');
-    return;
+     (!directed && e.from === to && e.to === kbEdgeFrom));
+  const dup = state.kbData.edges.filter((e) => same(e) && !e.invalid_at);
+  let replaced = false;
+  if (dup.length) {
+    // 同一对节点同一关系已有有效边：陈述变了就等于「替代」旧结论（S2：标失效，不删除）
+    const old = dup[0];
+    if (String(old.fact || '').trim() === fact) {
+      toast('这两个节点之间已有相同关系与相同陈述');
+      return;
+    }
+    old.invalid_at = Date.now() / 1000;
+    replaced = true;
   }
   const e = { id: 'e_' + Math.random().toString(36).slice(2, 10),
               from: kbEdgeFrom, to: to, label: label, relation: rel,
-              directed: directed, type: 'relation' };
+              directed: directed, type: 'relation', fact: fact,
+              valid_at: Date.now() / 1000 };
   state.kbData.edges.push(e);
-  if (kbNetwork && kbNetwork._ds) {
+  if (replaced || !kbNetwork || !kbNetwork._ds) {
+    drawKbGraph();                     // 有边失效：整图重画一次，虚线与新边一起生效
+  } else {
     const th = graphTheme();
     const col = relationColor(rel, th);
     kbNetwork._ds.edges.add({
-      id: e.id, from: e.from, to: e.to, label: e.label,
+      id: e.id, from: e.from, to: e.to, label: e.label, title: e.fact,
       font: { color: col, size: 11, align: 'middle',
               strokeWidth: 3, strokeColor: th.labelBg },
       color: { color: col, highlight: col, hover: col },
       arrows: edgeArrows(directed), width: 1.6,
     });
-  } else {
-    drawKbGraph();
   }
   scheduleKbSave();
-  toast('已添加连线：' + label + (directed ? '（单向）' : '（双向）'));
+  toast(replaced ? ('已替代旧陈述：' + label) :
+        ('已添加连线：' + label + (directed ? '（单向）' : '（双向）')));
   hideEdgeForm();
 }
 
@@ -1785,6 +1921,7 @@ function bindKbEvents() {
   $('#ke-add').onclick = addKbEdge;
   $('#ke-cancel').onclick = hideEdgeForm;
   $('#kd-save').onclick = applyNodeForm;
+  $('#kd-origin').onclick = kbJumpToOrigin;
   $('#kd-note-add').onclick = addKbNodeNote;
   $('#kd-del').onclick = deleteKbNode;
   $('#kd-size').oninput = () => { $('#kd-size-val').textContent = $('#kd-size').value; };

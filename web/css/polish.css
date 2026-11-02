@@ -15,16 +15,19 @@
 .snav-group { margin-bottom: var(--sp-3); }
 .snav-group:last-child { margin-bottom: 0; }
 .snav-group-title {
-  padding: 6px 10px 4px; font-size: 11px; letter-spacing: .06em;
+  padding: 7px 10px 4px; font-size: 10.5px; letter-spacing: .08em;
   text-transform: uppercase; color: var(--text-dim);
 }
 .snav-btn {
-  display: block; width: 100%; text-align: left;
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
   padding: 7px 10px; margin: 1px 0;
   font-size: 13.5px; color: var(--text); cursor: pointer;
   border-radius: var(--radius-sm);
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
+.snav-btn .ic { width: 15px; height: 15px; margin: 0; color: var(--text-dim); }
+.snav-btn:hover .ic { color: var(--text); }
+.snav-btn.active .ic { color: var(--accent); }
 .snav-btn:hover { background: var(--bg-hover); }
 .snav-btn.active {
   background: var(--accent-soft); color: var(--accent); font-weight: 600;
@@ -76,12 +79,13 @@
   100% { box-shadow: none; }
 }
 
-/* --- 设置页：吸顶页头 / 分组卡片 / 折叠说明 --- */
+/* --- 设置页：页头 / 分组卡片 / 折叠说明 --- */
+/* 页头不吸顶：吸顶时模块标题滚到它下面会被整块挡住（用户反馈「文字被挡住了」）。
+   现在页头随内容一起滚走；需要定位时靠下面的 scroll-margin 留出余量。 */
 .set-page-head {
-  position: sticky; top: 0; z-index: 4;
   display: flex; align-items: flex-end; justify-content: space-between; gap: 12px;
   flex-wrap: wrap;
-  margin: -18px -20px 12px; padding: 12px 20px 10px;
+  margin: 0 -20px 12px; padding: 12px 20px 10px;
   background: var(--bg); border-bottom: 1px solid var(--border);
 }
 .set-page-head-main { min-width: 0; }
@@ -92,21 +96,121 @@
   border: 1px solid var(--border); border-radius: var(--radius-sm);
 }
 
+/* 卡片：头部常驻（标题 + 本节操作），主体可折叠 */
 .set-card {
-  margin: 0 0 14px; padding: 14px 16px;
+  margin: 0 0 12px; padding: 0 16px 14px;
   border: 1px solid var(--border); border-radius: var(--radius-lg);
   background: var(--bg);
+  scroll-margin-top: 54px;              /* 吸顶锚点条的高度 */
 }
-.set-card-head { margin: 0 0 10px; }
-.set-card .set-group { margin: 0; padding: 0; border: 0; background: none; }
-.set-card > *:last-child { margin-bottom: 0; }
+.set-card-head {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 -16px 4px; padding: 10px 12px 9px 16px;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.set-card-head:hover { background: var(--bg-hover); }
+.set-card-head .set-group {
+  flex: 1; min-width: 0; margin: 0;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 650; letter-spacing: .01em; color: var(--text);
+}
+.set-card-head .set-group::before {
+  content: ''; flex: none; width: 3px; height: 13px;
+  border-radius: 2px; background: var(--accent);
+}
+.set-card-acts {
+  flex: none; display: flex; align-items: center; gap: 4px;
+  opacity: .55; transition: opacity var(--t-fast) var(--ease);
+}
+.set-card-head:hover .set-card-acts,
+.set-card-head:focus-within .set-card-acts { opacity: 1; }
+.set-card-act {
+  padding: 3px 9px; font-size: 11.5px; line-height: 1.7;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--text-dim);
+  font-family: var(--font); cursor: pointer;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.set-card-act:hover { color: var(--text); background: var(--bg-active); }
+.set-card-act.caret { padding: 2px 5px; }
+.set-card-act.caret .ic {
+  width: 14px; height: 14px;
+  transition: transform var(--t-fast) var(--ease);
+}
+.set-card.collapsed .set-card-act.caret .ic { transform: rotate(-90deg); }
+.set-card-body { padding-top: 4px; }
+.set-card.collapsed .set-card-body { display: none; }
+.set-card > .set-card-body > *:last-child { margin-bottom: 0; }
 .set-card .hint:last-child { margin-bottom: 0; }
+.set-card .check-row { margin: 8px 0; font-size: 13.5px; line-height: 1.6; align-items: flex-start; }
+.set-card .hint { font-size: 12px; line-height: 1.65; margin: 6px 0 0; }
+.set-card .hint-fold { margin: 6px 0 0; }
 
-/* 跳转定位时给吸顶页头留出空间 */
+/* 一行设置：短控件（数字 / 下拉 / 滑杆）标签在左、控件在右 */
+.set-row {
+  display: grid; grid-template-columns: minmax(140px, 1fr) minmax(0, 300px);
+  align-items: center; gap: 6px 18px; margin: 10px 0;
+}
+.set-row > .field-label { margin: 0; font-size: 13px; font-weight: 600; }
+.set-row-ctl { min-width: 0; }
+.set-row-ctl .field-input { width: 100%; }
+.set-row.wide { grid-template-columns: 1fr; gap: 5px; margin: 12px 0 6px; }
+.set-row.wide > .field-label { font-size: 12.5px; font-weight: 600; color: var(--text-dim); }
+
+/* 复选框统一成开关：开关语义更明确，也不再占满一行的视觉重量 */
+.check-row input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  flex: none; width: 30px; height: 17px; margin: 1px 0 0;
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  background: var(--bg-active); position: relative; cursor: pointer;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.check-row input[type="checkbox"]::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.check-row input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+.check-row input[type="checkbox"]:checked::after { transform: translateX(13px); background: #fff; }
+.check-row input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* 页内锚点条：吸顶，长页（Agent 执行等）靠它跳分区 */
+/* 滚动容器的顶部内边距会变成吸顶条上方的一条缝，滚动的卡片会从缝里透出来，
+   所以设置内容区不再留 padding-top，页头自己补回同样的间距（见上一条规则）。 */
+#modal .settings-content { padding-top: 0; }
+.set-anchors {
+  position: sticky; top: 0; z-index: 6;
+  display: flex; gap: 6px; overflow-x: auto;
+  margin: 0 -20px 12px; padding: 8px 20px;
+  background: var(--bg); border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+.set-anchors::-webkit-scrollbar { display: none; }
+.set-anchors.hidden { display: none; }
+.set-anchor {
+  flex: none; padding: 4px 11px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: transparent; color: var(--text-dim);
+  font-family: var(--font); font-size: 12px; white-space: nowrap; cursor: pointer;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
+              background var(--t-fast) var(--ease);
+}
+.set-anchor:hover { color: var(--text); border-color: var(--border-strong); }
+.set-anchor.active {
+  color: var(--accent); border-color: var(--accent); background: var(--accent-soft);
+}
+
+/* 跳转定位时留出空间：页头已不吸顶，普通页只需一点余量；
+   「功能说明」页内部有自己的吸顶筛选栏，按它同步出的高度留白 */
 #modal .pane [data-search],
 #modal .pane .check-row,
-#modal .pane .field-label,
-#modal .pane .set-card { scroll-margin-top: 76px; }
+#modal .pane .field-label { scroll-margin-top: 16px; }
+#modal .pane .set-card { scroll-margin-top: 54px; }
+#modal .pane[data-pane="help"] [data-search],
+#modal .pane[data-pane="help"] .set-card { scroll-margin-top: var(--help-head-h, 120px); }
 
 .range-row { display: flex; align-items: center; gap: 10px; }
 .range-row input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
@@ -157,6 +261,12 @@
 .preset-row > *, .set-card { min-width: 0; }
 .modal-foot .primary, .modal-foot .ghost { flex: none; white-space: nowrap; }
 .foot-note { min-width: 0; }
+
+@media (max-width: 760px) {
+  .set-row { grid-template-columns: 1fr; gap: 5px; margin: 12px 0 6px; }
+  .set-row > .field-label { font-size: 12.5px; color: var(--text-dim); }
+  .set-card-acts { opacity: 1; }
+}
 
 @media (max-width: 560px) {
   .set-page-head { align-items: flex-start; }
@@ -249,7 +359,92 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
   max-width: 320px; max-height: 240px; display: block;
   border-radius: var(--radius-lg); border: 1px solid var(--border); cursor: zoom-in;
 }
-.msg-image.zoom { justify-content: center; }
-.msg-image.zoom img { max-width: 100%; max-height: none; cursor: zoom-out; }
 .msg-images { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-bottom: 6px; }
 .msg-images .msg-image { margin-bottom: 0; }
+
+/* --- 点击消息图片的全屏查看器：滚轮缩放 / 拖动平移 / 双击切换 --- */
+.img-zoom {
+  position: fixed; inset: 0; z-index: 90;      /* 高过弹窗(50)，低于 toast(100) */
+  display: flex; flex-direction: column;
+  background: rgba(8, 9, 12, .95);
+  animation: overlayIn var(--t) var(--ease);
+}
+.img-zoom-bar {
+  flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 14px; font-size: 12.5px; color: #e7e9ee;
+}
+.img-zoom-pct {
+  min-width: 54px; color: #b9bec9; font-variant-numeric: tabular-nums;
+}
+.img-zoom-bar button {
+  padding: 5px 11px; border: 1px solid rgba(255, 255, 255, .24); border-radius: 8px;
+  background: transparent; color: #e7e9ee; font-size: 12.5px; cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.img-zoom-bar button:hover { background: rgba(255, 255, 255, .16); }
+.img-zoom-spacer { flex: 1; }
+.img-zoom-stage {
+  flex: 1; min-height: 0; position: relative; overflow: hidden;
+  cursor: grab;
+  touch-action: none;                          /* 避免拖动被当页面滚动 / 手势吞掉 */
+}
+.img-zoom-stage.dragging { cursor: grabbing; }
+/* 图片按原始像素渲染、绝对定位到舞台中心：
+   不能用 grid/flex 的 center 居中 —— 图比舞台大时，overflow:hidden 会让居中对齐
+   退化成「贴起始边」，缩放后整张图就被推到可视区之外了 */
+.img-zoom-stage img {
+  position: absolute; left: 50%; top: 50%;
+  max-width: none; max-height: none;
+  transform-origin: center center;
+  user-select: none; -webkit-user-drag: none;
+}
+.img-zoom-hint {
+  flex: none; padding: 8px 14px 12px; text-align: center;
+  font-size: 11.5px; color: #8f949f;
+}
+
+/* 全局规则（设置 → 用户画像与学习）：一条规则一行，可单独启用 / 停用 */
+.rule-list { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; }
+.rule-item {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-side);
+}
+.rule-item.off { opacity: .62; }
+.rule-head { display: flex; align-items: center; gap: 8px; }
+.rule-index { flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-dim); }
+.rule-del,
+.rule-expand {
+  flex: none; padding: 2px 8px; font-size: 11.5px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: transparent; color: var(--text-dim); cursor: pointer;
+}
+.rule-expand:hover { color: var(--text); border-color: var(--border-strong); }
+.rule-del:hover {
+  color: var(--danger);
+  border-color: var(--danger-line);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+.rule-text {
+  width: 100%; box-sizing: border-box;
+  margin-top: 6px; min-height: 62px; resize: vertical;
+}
+/* 展开后给足高度，长规则不用在小框里反复滚动 */
+.rule-item.open .rule-text { min-height: 240px; }
+.rule-item.off .rule-text { color: var(--text-dim); }
+.rule-empty { margin: 2px 0 10px; }
+
+/* 设置 → 子代理：列表行 + 说明 */
+.agent-row { cursor: pointer; }
+.agent-row:hover { border-color: var(--accent); }
+.agent-row.sel { border-color: var(--accent); background: var(--accent-soft); }
+.rule-meta {
+  margin-top: 4px; font-size: 11.5px; color: var(--text-dim);
+  line-height: 1.5; word-break: break-word;
+}
+.agent-tools { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 2px 0 8px; }
+.agent-tools label {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 11.5px; color: var(--text-dim); cursor: pointer;
+}

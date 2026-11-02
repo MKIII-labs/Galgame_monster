@@ -60,6 +60,13 @@ const state = {
   // IDE 运行时字段：首次进入 IDE 前就需有默认值，否则点文件会因 undefined 抛错
   ideSide: 'explorer',
   ideSideHidden: false,      // 文件管理区（活动栏右侧）是否收起
+  // 调试器：断点表 rel -> [line]；debugState 保存后端最近一次 stack/scopes
+  ideBreakpoints: {},
+  debugActive: false,
+  debugPaused: false,
+  debugState: null,
+  debugTimer: null,
+  debugDecorations: [],
   ideTabList: [],            // 已打开的标签（沙箱内相对路径）
   ideCache: {},              // rel -> { text, enc }
   ideDirtyMap: {},           // rel -> 是否有未保存改动

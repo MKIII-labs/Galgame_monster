@@ -168,9 +168,56 @@
 }
 /* 正在读盘的文件：立刻给点击反馈，不用等到内容返回 */
 .ide-row.loading { opacity: .55; cursor: progress; }
+/* 文件树拖拽 / 多选 */
+.ide-row.multi {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: -1px; border-radius: 3px;
+}
+.ide-row.dragging { opacity: .5; }
+.ide-row.drop-target,
+.ide-workspace.drop-target {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  outline: 1px dashed var(--accent); outline-offset: -1px;
+}
 
 /* 编辑区 */
 .ide-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+/* 网页预览：铺满编辑区（和图片预览同一层） */
+.ide-preview {
+  /* 必须高于 Monaco 的小地图（.minimap 自带 z-index:5），否则预览栏右侧按钮被盖住点不到 */
+  position: absolute; inset: 0; z-index: 8;
+  display: flex; flex-direction: column; background: var(--bg);
+}
+.ide-preview.hidden { display: none; }
+.ide-preview-bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-bottom: 1px solid var(--border);
+  background: var(--bg-side);
+}
+.ide-preview-bar .field-input { flex: 1; min-width: 0; }
+.ide-preview-frame { flex: 1; width: 100%; border: 0; background: #fff; }
+/* Markdown 预览：右半边分屏（编辑器让出 50%，Monaco 自己重排） */
+.ide-md {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 50%; z-index: 3;
+  display: flex; flex-direction: column;
+  background: var(--bg); border-left: 1px solid var(--border);
+}
+.ide-md.hidden { display: none; }
+.ide-md-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-bottom: 1px solid var(--border);
+  background: var(--bg-side);
+}
+.ide-md-title { flex: 1; font-size: 12px; color: var(--text-dim); }
+.ide-md-body {
+  flex: 1; min-height: 0; overflow: auto;
+  padding: 14px 18px; font-size: 13px; line-height: 1.7;
+}
+.ide-editor-wrap.md-split .ide-editor-area,
+.ide-editor-wrap.md-split .ide-fallback,
+.ide-editor-wrap.md-split .ide-diff,
+.ide-editor-wrap.md-split .ide-image { right: 50%; }
 .ide-tabsbar {
   display: flex; align-items: center; flex: 0 0 auto;
   height: 36px; padding: 0 8px;
@@ -333,6 +380,33 @@
   color: var(--text-dim) !important; font-style: italic;
 }
 
+/* 逐段审阅：编辑器上方的一行 chip（不做浮层，避免相邻改动段互相遮挡）。
+   每段 = 定位 + 保留 + 撤销；空的就把整行藏起来。 */
+.hunk-bar {
+  flex: 0 0 auto;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-dim);
+}
+.hunk-bar.hidden { display: none; }
+.hunk-bar-label { opacity: .8; }
+.hunk-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 4px 1px 6px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg);
+}
+.hunk-chip button {
+  border: 0; background: transparent; cursor: pointer;
+  font-family: var(--font); font-size: 11.5px; color: var(--text-dim);
+  padding: 1px 5px; border-radius: 999px;
+}
+.hunk-chip .hunk-chip-name { color: var(--text); }
+.hunk-chip button:hover { background: var(--bg-hover); color: var(--text); }
+.hunk-chip .hunk-keep:hover { color: var(--ok); }
+.hunk-chip .hunk-undo:hover { color: var(--danger); }
+
 /* 输入框上方的审阅提示栏（一轮改完、还有文件没处理时出现） */
 .review-tip {
   position: relative;
@@ -433,11 +507,58 @@
   border-top: 1px solid var(--border);
 }
 .ide-status-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ide-status-right { display: flex; gap: 12px; flex: 0 0 auto; }
+.ide-status-right { display: flex; gap: 12px; flex: 0 0 auto; align-items: center; }
 .ide-status-flash { color: var(--ok); }   /* 保存成功的短暂提示（替代底部 toast） */
+/* 状态栏「问题」角标：有错误时变红；点击展开问题面板 */
+.ide-status-chip {
+  border: 0; background: transparent; color: var(--ide-status-fg, var(--text-dim));
+  font-family: var(--font); font-size: 11.5px; cursor: pointer; padding: 0 4px;
+  opacity: .85;
+}
+.ide-status-chip:hover { opacity: 1; }
+.ide-status-chip.has-err { color: var(--danger); opacity: 1; }
+
+/* ---------------- 问题 / 大纲 / 结果面板 ---------------- */
+.ide-intel {
+  flex: 0 0 auto; height: 180px; display: flex; flex-direction: column;
+  min-height: 0; background: var(--bg); border-top: 1px solid var(--border);
+}
+.ide-intel.hidden { display: none; }
+.ide-intel-head {
+  display: flex; align-items: center; gap: 4px; flex: none;
+  padding: 4px 8px; border-bottom: 1px solid var(--border);
+}
+.ide-intel-tab {
+  padding: 2px 8px; border: 0; border-radius: 5px; background: transparent;
+  color: var(--text-dim); font-family: var(--font); font-size: 12px; cursor: pointer;
+}
+.ide-intel-tab:hover { color: var(--text); }
+.ide-intel-tab.active { color: var(--text); background: var(--bg-hover); }
+.ide-intel-count { opacity: .65; }
+.ide-intel-spacer { flex: 1; }
+.ide-intel-body { flex: 1; min-height: 0; overflow: auto; padding: 2px 0; }
+.ide-intel-row {
+  display: flex; align-items: baseline; gap: 8px; padding: 3px 10px;
+  font-size: 12px; color: var(--text); cursor: pointer;
+}
+.ide-intel-row:hover { background: var(--bg-hover); }
+.ide-intel-ico { flex: none; width: 12px; text-align: center; }
+.ide-intel-row.err .ide-intel-ico { color: var(--danger); }
+.ide-intel-row.warn .ide-intel-ico { color: var(--warn, #b7791f); }
+.ide-intel-text {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ide-intel-meta { flex: none; color: var(--text-dim); font-size: 11px; }
 
 /* 搜索面板 */
 .ide-search { display: flex; flex-direction: column; gap: 8px; padding: 0 10px 10px; flex: 1; min-height: 0; }
+/* 替换行：正则开关 + 全部替换按钮 */
+.ide-search-opts {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 11.5px; color: var(--text-dim);
+}
+.ide-search-opt { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.ide-search-opts .ide-btn { margin-left: auto; padding: 3px 10px; font-size: 11.5px; }
 .ide-search-hits { flex: 1; overflow: auto; font-size: 12px; font-family: var(--mono); }
 .ide-hit {
   padding: 3px 4px; color: var(--text-dim); cursor: pointer; border-radius: 2px;
@@ -864,5 +985,58 @@ html[data-ide-theme="trae-blue"] #sidebar {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 #ide-git-diff .review-editor { overflow: hidden; }
+
+/* ---------------- 运行和调试 ---------------- */
+.ide-debug {
+  display: flex; flex-direction: column; gap: 8px;
+  height: calc(100% - 34px); overflow: auto; padding: 8px 10px 20px;
+}
+.ide-debug-start { display: flex; flex-direction: column; gap: 6px; }
+.ide-debug-start .field-input { height: 28px; font-size: 12px; }
+.ide-debug-start .check-row { font-size: 12px; }
+.ide-debug-toolbar {
+  display: flex; gap: 4px; padding: 4px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--bg-input);
+}
+.ide-debug-toolbar button {
+  flex: 1; height: 26px; border: 0; border-radius: 4px; background: transparent;
+  color: var(--text-dim); font-size: 13px; cursor: pointer;
+}
+.ide-debug-toolbar button:hover { background: var(--bg-hover); color: var(--text); }
+.ide-debug-sec { border-top: 1px solid var(--border); padding-top: 6px; }
+.ide-debug-h { color: var(--text-dim); font-size: 11px; letter-spacing: .04em; margin-bottom: 4px; }
+.ide-debug-list { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.ide-debug-frame, .ide-debug-bp {
+  display: flex; gap: 6px; align-items: center; width: 100%;
+  padding: 3px 6px; border: 0; border-radius: 4px; background: transparent;
+  color: var(--text); text-align: left; font: inherit; font-size: 12px; cursor: pointer;
+}
+.ide-debug-frame:hover, .ide-debug-bp:hover { background: var(--bg-hover); }
+.ide-debug-frame.on { background: var(--accent-soft); color: var(--accent); }
+.ide-debug-frame .df-path, .ide-debug-bp .df-path {
+  color: var(--text-dim); font-size: 11px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.ide-debug-scope { margin: 2px 0 6px; }
+.ide-debug-scope b { display: block; color: var(--text-dim); font-size: 11px; font-weight: 500; margin-bottom: 2px; }
+.ide-debug-var {
+  display: grid; grid-template-columns: minmax(60px, 40%) minmax(0, 1fr);
+  gap: 6px; font-size: 11.5px; padding: 1px 4px;
+}
+.ide-debug-var i { font-style: normal; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+.ide-debug-var span { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ide-debug-eval { margin-top: 4px; font-size: 12px; color: var(--accent); word-break: break-word; }
+.ide-debug-out {
+  margin: 0; max-height: 180px; overflow: auto; padding: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg); color: var(--text-dim);
+  font: 11px/1.5 var(--font-mono, monospace); white-space: pre-wrap;
+}
+.ide-bp-glyph::before {
+  content: ""; display: block; width: 10px; height: 10px; margin: 4px 0 0 4px;
+  border-radius: 50%; background: #e51400; box-shadow: 0 0 0 1px rgba(0,0,0,.25);
+}
+.ide-debug-line { background: rgba(255, 200, 0, .16); }
+
 
 

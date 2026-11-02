@@ -68,8 +68,8 @@ def test_ablation_filter():
     assert "visual_check" in bench.ablation_disable_tools(["no_visual"])
     assert "asset_atlas" in bench.ablation_disable_tools(["no_assets"])
     names = {s["function"]["name"] for s in bench._schemas(["no_visual"])}
-    assert "visual_check" not in names
-    assert "write_file" in names
+    assert "visual" not in names
+    assert "edit" in names
 
 
 def test_summarize():
@@ -87,6 +87,25 @@ def test_summarize():
     assert summary["tasks"][1]["failed_checks"] == ["cmd"]
     assert summary["by_ablation"]["baseline"] == {"total": 2, "passed": 1,
                                                   "pass_rate": 0.5}
+    assert summary["by_task"]["a"]["attempts"] == 1
+    assert summary["by_task"]["a"]["passed"] == 1
+    assert summary["by_task"]["b"]["pass_rate"] == 0.0
+
+
+def test_summarize_repeat_counts():
+    results = [
+        {"task": "a", "status": "finished", "ok": True, "checks": [],
+         "usage": {"total_tokens": 10}, "ms": 1},
+        {"task": "a", "status": "finished", "ok": False, "checks": [],
+         "usage": {"total_tokens": 10}, "ms": 1},
+        {"task": "a", "status": "finished", "ok": True, "checks": [],
+         "usage": {"total_tokens": 10}, "ms": 1},
+    ]
+    summary = bench.summarize(results)
+    assert summary["by_task"]["a"] == {
+        "task": "a", "attempts": 3, "passed": 2, "tokens": 30, "ms": 3,
+        "statuses": ["finished", "finished", "finished"], "pass_rate": 0.6667,
+    }
 
 
 def test_render_review(tmp_path):
@@ -122,15 +141,32 @@ def test_save_run_writes_summary(tmp_path):
     assert os.path.isfile(os.path.join(d, "a.json"))
     assert os.path.isfile(os.path.join(d, "summary.json"))
     assert os.path.isfile(os.path.join(d, "summary.md"))
+    assert os.path.isfile(os.path.join(d, "env.json"))
+    env = json.load(open(os.path.join(d, "env.json"), encoding="utf-8"))
+    assert env["temperature"] == 0.0 and env["model"] == "m"
     assert summary["passed"] == 1
     assert "pass_rate" in summary
 
 
+def test_save_run_repeats_do_not_overwrite(tmp_path):
+    results = [{"task": "a", "status": "finished", "ok": i != 1, "checks": [],
+                "usage": {"total_tokens": 1}, "ms": 1} for i in range(3)]
+    d, summary = bench.save_run(results, {"model": "m", "run_id": "r2",
+                                          "repeat": 3}, root=str(tmp_path))
+    for name in ("a.json", "a.2.json", "a.3.json"):
+        assert os.path.isfile(os.path.join(d, name))
+    assert summary["by_task"]["a"]["attempts"] == 3
+    assert summary["by_task"]["a"]["passed"] == 2
+    md = open(os.path.join(d, "summary.md"), encoding="utf-8").read()
+    assert "按任务（含重复）" in md and "温度：0.0" in md
+
+
 def test_run_task_end_to_end_with_fake_model(tmp_path, monkeypatch):
     """不调真实模型：用假 stream_chat 走完「调工具 → 回灌 → 断言」全链路。"""
-    state = {"n": 0}
+    state = {"n": 0, "temp": None}
 
-    def fake_stream(api_key, api_url, model, messages, **_kw):
+    def fake_stream(api_key, api_url, model, messages, **kw):
+        state["temp"] = kw.get("temperature")
         state["n"] += 1
         if state["n"] == 1:
             return {"visible": "", "tool_calls": [
@@ -149,4 +185,5 @@ def test_run_task_end_to_end_with_fake_model(tmp_path, monkeypatch):
     assert r["ok"] is True
     assert r["turns"] == 1
     assert r["tool_calls"] == 1
+    assert state["temp"] == 0.0
     assert (tmp_path / "w" / "out.txt").read_text(encoding="utf-8") == "hello"

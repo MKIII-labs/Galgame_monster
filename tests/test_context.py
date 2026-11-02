@@ -117,19 +117,16 @@ def test_keep_from_respects_token_budget():
     assert context.keep_from_by_tokens(short, 0, 1000) == 0
 
 
-def test_context_limits_uses_chat_model_when_omitted(monkeypatch):
-    """不传模型名时要按「当前聊天模型」算窗口。
-
-    deepseek-flash 是 V4 系列，官方窗口 1M；用户把 chat_context_limit 填成 1 亿时
-    会被钳到防呆上限 1M，但不会被内置表压回 128K。
-    """
+def test_context_limits_only_reads_explicit_setting(monkeypatch):
+    """窗口只认设置里的值：0 = 不限（不做任何模型窗口猜测）。"""
     monkeypatch.setattr(context, "load_config",
-                        lambda: {"chat_context_limit": 100000000, "chat_reserve_output": 4096})
+                        lambda: {"chat_context_limit": 0, "chat_reserve_output": 4096})
     monkeypatch.setattr(context, "get_api_conf", lambda p: ("k", "http://x", "deepseek-flash"))
-    limit, _reserve = context.context_limits()
-    assert limit == 1000000
-    # 显式传模型时行为不变
-    assert context.context_limits("deepseek-flash")[0] == 1000000
+    assert context.context_limits() == (0, 0)
+    assert context.context_limits("deepseek-flash") == (0, 0)
+    monkeypatch.setattr(context, "load_config",
+                        lambda: {"chat_context_limit": 900000, "chat_reserve_output": 4096})
+    assert context.context_limits("deepseek-flash")[0] == 900000
 
 
 def test_context_limits_reserve_default_and_zero(monkeypatch):
@@ -242,6 +239,14 @@ def test_summary_info():
     assert info["remaining"] == 4
     assert info["total"] == 10
     assert info["chars"] == 4
+
+
+def test_real_used_tokens_adds_increment():
+    """事后真实 + 增量估算：基准取 usage，只有新增消息部分是估算。"""
+    msgs = [_msg("user", "中文" * 50)]
+    assert context.real_used_tokens(1000, msgs, 0, 1.0) > 1000
+    assert context.real_used_tokens(1000, msgs, 1) == 1000     # 没有新增 → 只算基准
+    assert context.real_used_tokens(0, msgs, 0) == 0           # 没拿到 usage → 交回调用方
 
 
 def test_trim_tool_results():

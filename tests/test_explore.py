@@ -63,7 +63,7 @@ def test_budget_counts_and_exhausts():
 def test_read_cache_dedupes(monkeypatch, tmp_path):
     calls = []
 
-    def fake_run_tool(sandbox, name, args):
+    def fake_run_tool(sandbox, name, args, **kwargs):
         calls.append((name, args))
         return "内容", None, False
 
@@ -74,7 +74,7 @@ def test_read_cache_dedupes(monkeypatch, tmp_path):
     assert len(calls) == 1                       # 同一调用只执行一次
 
 
-def test_format_results_truncates_and_marks_failures():
+def test_format_results_marks_failures_and_keeps_full_text():
     res = {"goal": "查鉴权", "tokens": 12, "ms": 1500,
            "results": [{"id": "q1", "role": "finder", "ok": True,
                         "text": "结论 app/x.py:10", "error": ""},
@@ -82,12 +82,11 @@ def test_format_results_truncates_and_marks_failures():
                         "text": "", "error": "超时"}]}
     text = explore.format_results(res)
     assert "查鉴权" in text and "app/x.py:10" in text and "超时" in text
-    assert len(text) <= explore.TOTAL_CHARS
 
     long_res = dict(res)
     long_res["results"] = [{"id": "q%d" % i, "role": "reader", "ok": True,
                             "text": "x" * 900, "error": ""} for i in range(3)]
-    assert len(explore.format_results(long_res)) <= explore.TOTAL_CHARS
+    assert explore.format_results(long_res).count("x" * 900) == 3   # 不再截断
 
 
 def test_run_loops_tools_and_returns_summary(monkeypatch, tmp_path):
@@ -122,7 +121,8 @@ def test_run_loops_tools_and_returns_summary(monkeypatch, tmp_path):
 
 
 def test_run_respects_max_agents(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent, "run_tool", lambda s, n, a: ("x", None, False))
+    monkeypatch.setattr(agent, "run_tool",
+                        lambda s, n, a, **k: ("x", None, False))
 
     def fake_chat(ctx, messages, schemas, stop_event):
         return {"visible": "结论 app/a.py:1", "usage": {"total_tokens": 10},
@@ -357,7 +357,7 @@ def test_run_returns_batch_and_can_disable(tmp_path):
 def test_followup_reuses_sub_session(monkeypatch, tmp_path):
     _clear_batches()
     monkeypatch.setattr(agent, "run_tool",
-                        lambda s, n, a: ("第一行内容\n第二行内容", None, False))
+                        lambda s, n, a, **k: ("第一行内容\n第二行内容", None, False))
     seen = []
 
     def fake_chat(ctx, messages, schemas, stop_event):
@@ -501,5 +501,137 @@ def test_background_cancel(tmp_path):
 
 def test_background_status_rejects_bad_id():
     assert explore.status("nope")["ok"] is False
+
+
+def test_explore_api_routes_registered():
+    """前端靠这三个接口轮询后台批次，路由必须真的注册上。"""
+    from app import registry
+    import app.api.explore  # noqa: F401
+    paths = {p for (_m, p), _fn in registry.snapshot().items()
+             if p.startswith("/api/explore/")}
+    assert paths == {"/api/explore/status", "/api/explore/result", "/api/explore/cancel"}
     assert explore.result("nope")["ok"] is False
     assert explore.cancel("nope")["ok"] is False
+
+def test_custom_role_tools_prompt_and_model(tmp_path):
+    seen = {}
+
+    def fake_chat(ctx, messages, schemas, stop_event, model=None):
+        seen["system"] = messages[0]["content"]
+        seen["tools"] = [s["function"]["name"] for s in schemas]
+        seen["schemas"] = schemas
+        seen["model"] = model
+        return {"visible": "结论：未发现问题\n置信度: high；未查清: 无",
+                "tool_calls": [], "usage": {"total_tokens": 3}}
+
+    ctx = {
+        "sandbox": str(tmp_path), "api_key": "k", "api_url": "u", "model": "m",
+        "emit": lambda o: None, "budget": 0, "max_agents": 2,
+        "chat_fn": fake_chat,
+        "roles": {"myrev": {"tools": ["read_file"], "prompt": "自定义提示词",
+                            "model": "small-model", "max_turns": 2}},
+    }
+    res = explore.run({"goal": "审一下", "agents": [{"agent": "myrev", "task": "看 a.py"}]}, ctx)
+    assert seen["system"] == "自定义提示词"
+    assert seen["tools"] == ["read"]
+    read_schema = next(s for s in seen["schemas"]
+                       if s["function"]["name"] == "read")
+    assert read_schema["function"]["parameters"]["properties"]["action"]["enum"] == ["file"]
+    assert seen["model"] == "small-model"
+    assert res["ok"] is True
+    assert res["results"][0]["role"] == "myrev"
+
+
+def test_custom_role_rejects_unknown_tool(tmp_path):
+    def fake_chat(ctx, messages, schemas, stop_event, model=None):
+        return {"visible": "", "tool_calls": [
+            {"tool": "write_file", "args": {"path": "x", "content": "y"}}],
+            "usage": {"total_tokens": 1}}
+
+    ctx = {
+        "sandbox": str(tmp_path), "api_key": "k", "api_url": "u", "model": "m",
+        "emit": lambda o: None, "budget": 0, "max_agents": 1, "chat_fn": fake_chat,
+        "roles": {"ro": {"tools": ["read_file"], "prompt": "只读", "max_turns": 1}},
+    }
+    res = explore.run({"goal": "g", "agents": [{"agent": "ro", "task": "t"}]}, ctx)
+    assert res["ok"] is False
+    assert not (tmp_path / "x").exists()          # 越权工具没有真正执行
+
+
+# ============================================================
+# 并行写隔离（同批不同代理写同一路径）
+# ============================================================
+def _isolation_ctx(tmp_path, writes, mode, fake_chat):
+    def fake_write(name, args):
+        writes.append(args.get("path"))
+        return True, "已写入"
+
+    return {"sandbox": str(tmp_path), "api_key": "k", "api_url": "u", "model": "m",
+            "emit": lambda o: None, "budget": 0, "max_agents": 4,
+            "chat_fn": fake_chat, "write_tool": fake_write,
+            "write_isolation": mode, "verify_evidence": False}
+
+
+def _write_once_chat():
+    seen = set()
+
+    def fake_chat(ctx, messages, schemas, stop_event, model=None):
+        key = id(messages)
+        if key not in seen:
+            seen.add(key)
+            return {"visible": "", "tool_calls": [
+                {"tool": "write_file", "args": {"path": "shared.py", "content": "x"}}],
+                "usage": {"total_tokens": 1}}
+        return {"visible": "完成", "tool_calls": [], "usage": {"total_tokens": 1}}
+    return fake_chat
+
+
+def _two_writers():
+    return {"agents": [{"agent": "implementer", "task": "改 shared.py"},
+                       {"agent": "documenter", "task": "也改 shared.py"}]}
+
+
+def test_write_isolation_serial_warns_but_allows(monkeypatch, tmp_path):
+    from app import agent_defs
+    monkeypatch.setattr(agent_defs, "AGENTS_DIR", str(tmp_path / "agents"))
+    writes = []
+    res = explore.run(_two_writers(),
+                      _isolation_ctx(tmp_path, writes, "serial", _write_once_chat()))
+    assert len(writes) == 2
+    assert res["write_conflicts"] == 1
+
+
+def test_write_isolation_strict_rejects_second(monkeypatch, tmp_path):
+    from app import agent_defs
+    monkeypatch.setattr(agent_defs, "AGENTS_DIR", str(tmp_path / "agents"))
+    writes = []
+    res = explore.run(_two_writers(),
+                      _isolation_ctx(tmp_path, writes, "strict", _write_once_chat()))
+    assert len(writes) == 1                 # 第二个写者在 claim 阶段被拒绝
+    assert res["write_conflicts"] == 0      # 被拒绝的写入不进写者表
+
+
+def test_explore_honors_allow_outside(monkeypatch, tmp_path):
+    """子代理的 ReadCache 也要把 allow_outside 传下去。"""
+    from app import agent_defs
+    monkeypatch.setattr(agent_defs, "AGENTS_DIR", str(tmp_path / "agents"))
+    box = tmp_path / "box"
+    box.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    note = outside / "note.txt"
+    note.write_text("OUTSIDE_OK", encoding="utf-8")
+
+    def fake_chat(ctx, messages, schemas, stop_event, model=None):
+        joined = "\n".join(str(m.get("content") or "") for m in messages)
+        if "OUTSIDE_OK" in joined:
+            return {"visible": "FOUND", "usage": {"total_tokens": 1},
+                    "tool_calls": []}
+        return {"visible": "", "usage": {"total_tokens": 1},
+                "tool_calls": [{"tool": "read_file", "args": {"path": str(note)}}]}
+
+    res = explore.run(
+        {"goal": "g", "agents": [{"agent": "reviewer", "task": "读"}]},
+        {"sandbox": str(box), "api_key": "k", "api_url": "u", "model": "m",
+         "budget": 0, "chat_fn": fake_chat, "allow_outside": True})
+    assert "FOUND" in (res["results"][0]["text"] or "")

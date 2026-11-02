@@ -39,43 +39,44 @@ def test_chain_skips_incomplete_presets():
     assert len(config.provider_chain(cfg)) == 1
 
 
-def test_context_limit_uses_longest_prefix():
-    cfg = _cfg(model_contexts={"claude": 200000, "claude-3": 100000,
-                               "deepseek": 64000})
-    assert config.model_context_limit("claude-3-opus", cfg) == 100000
-    assert config.model_context_limit("claude-sonnet", cfg) == 200000
-    assert config.model_context_limit("deepseek-chat", cfg) == 64000
-    assert config.model_context_limit("unknown-model", cfg) == 128000
+def test_context_limit_ignores_model_tables():
+    """不做前缀匹配：model_contexts 已废弃，填了也不参与计算。"""
+    cfg = _cfg(model_contexts={"claude": 200000, "deepseek": 64000})
+    assert config.model_context_limit("claude-3-opus", cfg) == 0
+    assert config.model_context_limit("deepseek-chat", cfg) == 0
+    assert config.model_context_limit("unknown-model", cfg) == 0
 
 
-def test_context_limit_clamps_absurd_config():
-    # 用户填 1 亿时钳到防呆上限 1M（而不是像以前那样被静默忽略成 128K）
-    cfg = _cfg(chat_context_limit=100000000, model_contexts={})
-    assert config.model_context_limit("deepseek-flash", cfg) == config.MAX_CONTEXT_HARD
-    assert config.model_context_limit("totally-unknown", cfg) == config.MAX_CONTEXT_HARD
+def test_context_limit_zero_means_unlimited():
+    assert config.model_context_limit("whatever", _cfg()) == 0
+    assert config.model_context_limit("", _cfg(chat_context_limit=0)) == 0
 
 
-def test_explicit_context_limit_overrides_builtin_both_ways():
-    """显式填窗口 = 用户说了算：既能放宽到 1M，也能收紧到下层的值。"""
-    assert config.model_context_limit("deepseek-flash", _cfg()) == 1000000
-    assert config.model_context_limit("deepseek-chat", _cfg()) == 128000
-    assert config.model_context_limit(
-        "deepseek-flash", _cfg(chat_context_limit=1000000)) == 1000000
-    assert config.model_context_limit(
-        "deepseek-flash", _cfg(chat_context_limit=64000)) == 64000
-    # 比防呆上限还大 → 钳住，不能出现「进度环 1 亿」这种假窗口
-    assert config.model_context_limit(
-        "deepseek-flash", _cfg(chat_context_limit=100_000_000)) == config.MAX_CONTEXT_HARD
+def test_explicit_context_limit_used_as_is():
+    assert config.model_context_limit("x", _cfg(chat_context_limit=1000000)) == 1000000
+    assert config.model_context_limit("x", _cfg(chat_context_limit=64000)) == 64000
+    # 不再有 1M 防呆上限：用户填多少就是多少
+    assert config.model_context_limit("x", _cfg(chat_context_limit=2000000)) == 2000000
 
 
 def test_context_limits_clamps_reserve(monkeypatch):
     from app import context as ctx_mod
     monkeypatch.setattr(ctx_mod, "load_config", lambda: {
-        "chat_context_limit": 100000000, "chat_reserve_output": 3000320,
-        "model_contexts": {}})
+        "chat_context_limit": 1000000, "chat_reserve_output": 3000320})
     limit, reserve = ctx_mod.context_limits("deepseek-flash")
-    assert limit == config.MAX_CONTEXT_HARD
+    assert limit == 1000000
     assert reserve == config.MAX_RESERVE
+
+
+def test_context_limits_unlimited_has_no_budget(monkeypatch):
+    """没填窗口 = 真无限：不限预算、不触发压缩。"""
+    from app import context as ctx_mod
+    monkeypatch.setattr(ctx_mod, "load_config",
+                        lambda: {"chat_context_limit": 0, "chat_reserve_output": 16384})
+    assert ctx_mod.context_limits("deepseek-flash") == (0, 0)
+    assert ctx_mod.request_budget("deepseek-flash") == 0
+    # 输出上限回落到 chat_max_tokens（默认 8192），不再按窗口比例算
+    assert ctx_mod.effective_output_cap(0, {"chat_max_tokens": 8192}) == 8192
 
 
 def test_today_total_sums_today_only(monkeypatch):

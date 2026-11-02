@@ -75,18 +75,40 @@ def test_record_requires_evidence(tmp_path):
     assert not changed and "evidence" in text
 
 
-def test_acceptance_gate_blocks_multistep_until_defined():
-    state = {"blocked": 0, "granted": False}
-    assert chat._acceptance_gate_action(state, "write_file", [], 3, 0) == "block"
-    assert chat._acceptance_gate_action(state, "write_file", [], 3, 0) == "block"
-    assert chat._acceptance_gate_action(state, "write_file", [], 3, 0) == "allow_after_block"
+def test_revise_requires_reason_and_updates(tmp_path):
+    s = {}
+    chat._acceptance_handle(
+        s, {"action": "set", "criteria": [_criterion()]},
+        str(tmp_path), {"sid": "s1"}, agent_on=True)
+    text, changed = chat._acceptance_handle(
+        s, {"action": "revise", "id": "a1", "reason": ""},
+        str(tmp_path), {"sid": "s1"}, agent_on=True)
+    assert not changed and "reason" in text
 
-    assert chat._acceptance_gate_action(
-        {"blocked": 0, "granted": False}, "write_file", [{"id": "a1"}], 3, 0) == "allow"
-    assert chat._acceptance_gate_action(
-        {"blocked": 0, "granted": False}, "write_file", [], 1, 0) == "allow"
-    assert chat._acceptance_gate_action(
-        {"blocked": 0, "granted": False}, "recover_file", [], 3, 5) == "allow"
+    text, changed = chat._acceptance_handle(
+        s, {"action": "revise", "id": "a1", "text": "a.txt 里有 world",
+            "expect": {"contains": "world"}, "reason": "需求改成 world"},
+        str(tmp_path), {"sid": "s1"}, agent_on=True)
+    assert changed and "已更新" in text
+    c = chat._acceptance_criteria(s)[0]
+    assert c["text"] == "a.txt 里有 world"
+    assert c["status"] == "pending"          # 改过之后必须重新验
+    assert s["acceptance"]["history"][-1]["reason"] == "需求改成 world"
+
+
+def test_revise_drop_removes_stale_item(tmp_path):
+    s = {}
+    chat._acceptance_handle(
+        s, {"action": "set", "criteria": [_criterion(), _criterion("b.txt 有 hi")]},
+        str(tmp_path), {"sid": "s1"}, agent_on=True)
+    text, changed = chat._acceptance_handle(
+        s, {"action": "revise", "id": "a2", "drop": True, "reason": "页面已不需要"},
+        str(tmp_path), {"sid": "s1"}, agent_on=True)
+    assert changed and "已移除" in text
+    assert [c["id"] for c in chat._acceptance_criteria(s)] == ["a1"]
+    assert chat._acceptance_handle(
+        s, {"action": "revise", "id": "nope", "reason": "x"},
+        str(tmp_path), {"sid": "s1"}, agent_on=True)[1] is False
 
 
 def test_acceptance_nudge_lists_pending():
@@ -95,3 +117,15 @@ def test_acceptance_nudge_lists_pending():
         {"id": "a2", "status": "failed"}])
     assert "2 条" in text and "a1" in text and "a2" in text
     assert "acceptance" in text
+
+
+def test_acceptance_reads_mesh_metrics():
+    import json
+
+    text = "__MESH_METRICS__ " + json.dumps(
+        {"triangles": 120, "degenerate": 0, "missing_textures": 0})
+    ok, why = chat._acceptance_expect(
+        {"triangles_min": 100, "degenerate_max": 0}, text)
+    assert ok, why
+    ok2, why2 = chat._acceptance_expect({"triangles_min": 500}, text)
+    assert not ok2 and "triangles" in why2

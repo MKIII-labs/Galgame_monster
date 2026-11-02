@@ -94,7 +94,7 @@ def test_native_web_search_schema_mentions_multi_round():
     """原生通道只看 schema 描述：这里必须写明复刻类任务要分轮补搜。"""
     from app import agent
     schemas = agent.native_tool_schemas(agent_on=True, search_ready=True)
-    ws = next(t for t in schemas if t["function"]["name"] == "web_search")
+    ws = next(t for t in schemas if t["function"]["name"] == "web")
     assert "分轮" in ws["function"]["description"]
 
 

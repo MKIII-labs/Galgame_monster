@@ -204,11 +204,21 @@ def _bucket_keys(mode, span):
     return keys
 
 def aggregate_usage(mode="day", span=30, call_limit=200):
-    """按 天/月 聚合用量，供折线图、按端点/模型/来源汇总与调用明细使用"""
+    """按 天/月 聚合用量。
+
+    返回分三层：
+    - 明细层：rows（按桶 × 模型）、calls（逐次调用，用于溯源）
+    - 汇总层：by_model / by_source / by_endpoint / by_api
+    - 趋势层：series（按模型的折线）、daily（不分模型的堆叠柱）
+    外加 summary 与 derived（命中率、平均单次、活跃桶、峰值等派生指标）。
+    """
     keys = _bucket_keys(mode, span)
     key_set = set(keys)
     models, series = [], {}
-    table, by_model, by_source, by_endpoint, calls = {}, {}, {}, {}, []
+    table, by_model, by_source, by_endpoint, by_api, calls = {}, {}, {}, {}, {}, []
+    # 不分模型的按桶汇总：柱状图用（堆叠输入/输出 + 调用次数）
+    daily = {k: {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "calls": 0}
+             for k in keys}
     summary = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "calls": 0}
 
     for r in load_usage():
@@ -247,6 +257,13 @@ def aggregate_usage(mode="day", span=30, call_limit=200):
         bump(by_model, model)
         bump(by_source, source)
         bump(by_endpoint, endpoint)
+        bump(by_api, api)
+        day = daily[key]
+        day["prompt"] += p
+        day["completion"] += c
+        day["total"] += tot
+        day["cached"] += cached
+        day["calls"] += 1
         calls.append({"ts": ts, "api": api, "endpoint": endpoint, "model": model,
                       "source": source, "prompt": p, "completion": c,
                       "total": tot, "cached": cached})
@@ -262,6 +279,9 @@ def aggregate_usage(mode="day", span=30, call_limit=200):
     model_rows.sort(key=lambda x: x["total"], reverse=True)
     endpoint_rows = [{"endpoint": k, **v} for k, v in by_endpoint.items()]
     endpoint_rows.sort(key=lambda x: x["total"], reverse=True)
+    api_rows = [{"api": k, **v} for k, v in by_api.items()]
+    api_rows.sort(key=lambda x: x["total"], reverse=True)
+    daily_rows = [{"bucket": k, **daily[k]} for k in keys]
     calls.sort(key=lambda x: x["ts"], reverse=True)
 
     return {
@@ -270,11 +290,34 @@ def aggregate_usage(mode="day", span=30, call_limit=200):
         "labels": keys,
         "models": models,
         "series": series,
+        "daily": daily_rows,
         "summary": summary,
+        "derived": _derived(summary, daily_rows),
         "rows": rows,
         "by_model": model_rows,
         "by_source": by_source,
         "by_endpoint": endpoint_rows,
+        "by_api": api_rows,
         "calls": calls[:call_limit],
         "calls_total": len(calls),
+    }
+
+
+def _derived(summary, daily_rows):
+    """概览卡片的派生指标。分母为 0 时给 None，前端显示「—」而不是 NaN。"""
+    prompt = int(summary.get("prompt") or 0)
+    total = int(summary.get("total") or 0)
+    calls = int(summary.get("calls") or 0)
+    active = [d for d in daily_rows if d.get("calls")]
+    peak = max(active, key=lambda d: d.get("total") or 0) if active else None
+    pct = lambda a, b: round(a * 100.0 / b, 1) if b else None
+    return {
+        # 缓存命中率的分母是输入：命中本身就是输入的一部分
+        "hit_rate": pct(int(summary.get("cached") or 0), prompt),
+        "avg_call": int(round(total / calls)) if calls else 0,
+        # 只在有消耗的桶上取平均，否则空白期会把日均拉得很低
+        "avg_active": int(round(total / len(active))) if active else 0,
+        "active": len(active),
+        "peak": ({"bucket": peak["bucket"], "total": int(peak.get("total") or 0)}
+                 if peak else None),
     }

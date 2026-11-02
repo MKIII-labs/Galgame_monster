@@ -31,8 +31,10 @@ PICK_LIMIT = 12         # 本地直接注入（或模型挑选）的上限条数
 CAND_LIMIT = 60         # 交给候选池的上限
 PROFILE_INJECT_LIMIT = 30  # 用户画像固定注入的上限条数
 NEIGHBOR_LIMIT = 4      # 命中节点额外带上的一跳邻居上限
+MATCH_KEEP = PICK_LIMIT - NEIGHBOR_LIMIT   # 直接命中的保底条数，其余名额与邻居同池竞争
 INJECT_NODE_CHARS = 400 # 单条节点注入正文上限
 INJECT_MAX_TOKENS = 1500  # 相关记忆整块注入的 token 预算
+WORLD_MAX_CHARS = 9000    # world_text（整库喂给编剧）的字符上限
 # 记忆挑选结果缓存（进程内）：key -> (时间戳, 下标列表)。
 # 挑选是一次非流式模型往返且位于首字节前，同一问话/同一批候选重复触发时可直接复用。
 _PICK_CACHE = {}
@@ -75,12 +77,14 @@ RELATIONS = [
     ("instance",  "例证",   "B 是 A 的实例 / 例子"),
     ("cause",     "因果",   "A 导致 / 引起 B"),
     ("condition", "条件",   "A 是 B 的前提条件"),
-    ("sequence",  "顺承",   "A 先于 B 发生"),
     ("means",     "手段",   "通过 A 达成 B"),
     ("purpose",   "目的",   "A 是为了 B"),
-    ("turn",      "转折",   "A 与 B 形成转折 / 让步"),
 ]
+# 已下线的旧关系码：新连线不再提供，但老数据里的边要照旧显示出原来的标签，
+# 不能因为词表收缩就把历史图谱里的边全部显示成「相关」。
+LEGACY_RELATION_LABEL = {"sequence": "顺承", "turn": "转折"}
 RELATION_LABEL = {c: lb for c, lb, _ in RELATIONS}
+RELATION_LABEL.update(LEGACY_RELATION_LABEL)
 RELATION_DESC = {c: d for c, _, d in RELATIONS}
 RELATION_CODES = [c for c, _, _ in RELATIONS]
 
@@ -173,10 +177,12 @@ _REL_ALIASES = {
     "例证": "instance", "例子": "instance", "实例": "instance", "例如": "instance", "instance": "instance",
     "因果": "cause", "导致": "cause", "引起": "cause", "因为": "cause", "cause": "cause", "causes": "cause",
     "条件": "condition", "前提": "condition", "condition": "condition",
-    "顺承": "sequence", "先于": "sequence", "然后": "sequence", "接着": "sequence", "sequence": "sequence",
+    # 「顺承 / 转折」已从词表下线：新边退回 related，避免模型继续产出会破坏结构的时间顺序噪声；
+    # 老数据里 relation=sequence/turn 的边不受影响（它们不经过归一化，标签由 LEGACY_RELATION_LABEL 兜底）。
+    "顺承": "related", "先于": "related", "然后": "related", "接着": "related", "sequence": "related",
     "手段": "means", "方法": "means", "方式": "means", "通过": "means", "means": "means",
     "目的": "purpose", "为了": "purpose", "purpose": "purpose",
-    "转折": "turn", "但是": "turn", "让步": "turn", "turn": "turn",
+    "转折": "related", "但是": "related", "让步": "related", "turn": "related",
 }
 
 
@@ -653,7 +659,8 @@ def _collect_items(s, include_kbs=True, exclude_pinned=False, include_session=Tr
         else:
             nodes, edges = obj.get("nodes") or [], obj.get("edges") or []
         nodes_map[key] = {n.get("id"): n for n in nodes if isinstance(n, dict)}
-        edges_map[key] = [e for e in edges if isinstance(e, dict)]
+        # S2：失效边保留在文件里，但不参与检索 / 邻居扩展
+        edges_map[key] = [e for e in edges if isinstance(e, dict) and edge_is_valid(e)]
         for n in nodes:
             if not isinstance(n, dict):
                 continue
@@ -733,10 +740,27 @@ def _expand_neighbors(chosen, edges_map, nodes_map, limit=NEIGHBOR_LIMIT):
                 continue
             seen.add(oid)
             rel = e.get("label") or relation_label(e.get("relation"))
+            fact = normalize_edge_fact(e.get("fact"))[:80]
+            if fact:                      # 连线的「为什么」比关系名更有信息量，优先带给模型
+                rel = rel + "：" + fact
             out.append((score * 0.6,
                         {"node": node, "scope": it["scope"], "scope_key": key},
                         rel))
     return out
+
+
+def _merge_ranked(chosen, neighbors, limit=PICK_LIMIT, match_keep=MATCH_KEEP):
+    """S4a：把直接命中与一跳邻居放进同一个排序池，返回 [(score, item, relation, kind)]。
+
+    规则：先按分数保底保留 `match_keep` 条直接命中，剩余名额由「低分命中 + 邻居」按分数竞争。
+    这样既不会让低分邻居把命中全挤掉，也不再让邻居永远排在所有命中之后（原来的做法
+    是命中占满 PICK_LIMIT 后再硬塞 4 条邻居，等于 16 条都要付费）。
+    """
+    ordered = [(sc, it, "", "match") for sc, it in chosen[:match_keep]]
+    rest = [(sc, it, "", "match") for sc, it in chosen[match_keep:]]
+    rest += [(sc, it, rel, "neighbor") for sc, it, rel in neighbors]
+    rest.sort(key=lambda x: x[0], reverse=True)
+    return (ordered + rest)[:limit]
 
 
 def _inject_line(node, score=None, relation=""):
@@ -794,24 +818,16 @@ def retrieve_memory(s, user_text, exclude_pinned=False, skip_profile=False, incl
         query = (query + "\n" + recent_text).strip()
     chosen, _q, _used_model = _rank_items(items, query, allow_model=_llm_pick_enabled())
     neighbors = _expand_neighbors(chosen, edges_map, nodes_map)
+    ranked = _merge_ranked(chosen, neighbors)
 
-    lines, used = [], 0
-    for score, it in chosen:
-        line = _inject_line(it["node"], score=score)
+    lines, nlines, used = [], [], 0
+    for score, it, rel, kind in ranked:
+        line = (_inject_line(it["node"], relation=rel) if kind == "neighbor"
+                else _inject_line(it["node"], score=score))
         t = estimate_tokens(line)
-        if lines and used + t > budget_tokens:
+        if (lines or nlines) and used + t > budget_tokens:
             break
-        lines.append(line)
-        used += t
-        count += 1
-
-    nlines = []
-    for score, it, rel in neighbors:
-        line = _inject_line(it["node"], relation=rel)
-        t = estimate_tokens(line)
-        if nlines and used + t > budget_tokens:
-            break
-        nlines.append(line)
+        (nlines if kind == "neighbor" else lines).append(line)
         used += t
         count += 1
 
@@ -819,7 +835,7 @@ def retrieve_memory(s, user_text, exclude_pinned=False, skip_profile=False, incl
         parts.append("【相关记忆】（来自知识库/会话记忆，供参考，不必刻意复述）")
         parts.extend(lines)
     if nlines:
-        parts.append("【关联记忆】（与上面条目一跳相连，供补充理解）")
+        parts.append("【关联记忆】（与上面条目一跳相连；「关系：陈述」中的陈述就是两者的具体依据，可直接采用）")
         parts.extend(nlines)
     if not parts:
         return "", 0
@@ -841,18 +857,12 @@ def recall_detail(s, user_text, recent_text="", include_kbs=True, include_sessio
     chosen, q, used_model = _rank_items(items, query)
     neighbors = _expand_neighbors(chosen, edges_map, nodes_map)
     out = []
-    for score, it in chosen:
+    for score, it, rel, kind in _merge_ranked(chosen, neighbors):
         n = it["node"]
         out.append({"node_id": n.get("id"), "title": n.get("title") or "",
                     "category": n.get("category") or "其他", "scope": it["scope"],
                     "scope_key": it["scope_key"], "score": round(score, 2),
-                    "kind": "match", "relation": ""})
-    for score, it, rel in neighbors:
-        n = it["node"]
-        out.append({"node_id": n.get("id"), "title": n.get("title") or "",
-                    "category": n.get("category") or "其他", "scope": it["scope"],
-                    "scope_key": it["scope_key"], "score": round(score, 2),
-                    "kind": "neighbor", "relation": rel})
+                    "kind": kind, "relation": rel})
     return {"query": query, "tokens": sorted(q), "items": out,
             "used_model": used_model, "candidates": len(items),
             "budget": INJECT_MAX_TOKENS}
@@ -935,6 +945,49 @@ def world_text(s, max_chars=9000):
     return "\n".join(parts)
 
 
+def kb_stats(kb_ids):
+    """估算「AI 读取这些知识库」要花多少输入 token（两个口径分开给）。
+
+    - 全量：整库拼进提示词时的量（GAL 编剧走 world_text，另有 WORLD_MAX_CHARS 上限）
+    - 每轮：日常对话是**检索式注入**，受 INJECT_MAX_TOKENS 约束；
+      「规则 / 能力 / 力量」类在 GAL 里走 pinned_block 每轮常驻，不占检索预算。
+
+    口径与 `context.estimate_tokens` 一致（中英分别折算），不是精确 tokenizer。
+    """
+    from app.context import estimate_tokens      # 延迟导入，避免循环依赖
+    items = []
+    for kid in (kb_ids or []):
+        kid = str(kid or "").strip()
+        if not kid:
+            continue
+        kb = load_kb(kid)
+        if not kb:
+            continue
+        chars = tokens = 0
+        pin_n = pin_chars = pin_tokens = 0
+        for n in (kb.get("nodes") or []):
+            text = ("%s\n%s" % (n.get("title") or "", n.get("content") or "")).strip()
+            c = len(text)
+            t = estimate_tokens(text)
+            chars += c
+            tokens += t
+            if str(n.get("category") or "").strip() in PINNED_CATEGORIES:
+                pin_n += 1
+                pin_chars += c
+                pin_tokens += t
+        items.append({"id": kid, "name": kb.get("name") or kid,
+                      "nodes": len(kb.get("nodes") or []),
+                      "chars": chars, "tokens": tokens,
+                      "pinned_nodes": pin_n, "pinned_chars": pin_chars,
+                      "pinned_tokens": pin_tokens})
+    keys = ("nodes", "chars", "tokens", "pinned_nodes", "pinned_chars", "pinned_tokens")
+    total = {k: sum(i[k] for i in items) for k in keys}
+    total["libraries"] = len(items)
+    return {"items": items, "total": total,
+            "inject_max_tokens": INJECT_MAX_TOKENS,
+            "world_max_chars": WORLD_MAX_CHARS}
+
+
 def _norm_text(s):
     """去掉所有空白并转小写，用于宽松匹配"""
     return re.sub(r"\s+", "", (s or "")).lower()
@@ -1008,6 +1061,89 @@ def _same_edge(edge, a_id, b_id, rel, directed):
     if not directed and ef == b_id and et == a_id:
         return True
     return False
+
+
+EDGE_FACT_MAX = 200
+
+
+def normalize_edge_fact(raw):
+    """连线的「为什么」：压成一行；空字符串表示没写。"""
+    s = " ".join(str(raw or "").split())
+    return s[:EDGE_FACT_MAX]
+
+
+def edge_is_valid(edge):
+    """边是否仍然有效：invalid_at 有值 = 已被新结论替代，留作历史，不参与检索与导出。"""
+    return not (isinstance(edge, dict) and edge.get("invalid_at"))
+
+
+def invalidate_edge(edge, at=None):
+    """把边标记为失效（不删除，保留可追溯的历史）。返回是否真的改了。"""
+    if not isinstance(edge, dict) or edge.get("invalid_at"):
+        return False
+    edge["invalid_at"] = float(at or time.time())
+    return True
+
+
+def _find_edge(edges, edge_id=None, a_id=None, b_id=None, rel=None):
+    """按 id 优先、否则按端点 + 关系找一条**有效**的边。"""
+    for e in edges or []:
+        if not isinstance(e, dict) or not edge_is_valid(e):
+            continue
+        if edge_id and e.get("id") == edge_id:
+            return e
+    if not (a_id and b_id):
+        return None
+    directed = not is_symmetric(rel) if rel else None
+    for e in edges or []:
+        if not isinstance(e, dict) or not edge_is_valid(e):
+            continue
+        if rel and (e.get("relation") or "related") != rel:
+            continue
+        ef, et = e.get("from"), e.get("to")
+        if ef == a_id and et == b_id:
+            return e
+        if directed is False and ef == b_id and et == a_id:
+            return e
+    return None
+
+
+def anchor_changed(changed, session, msg_index):
+    """给本轮写入的节点 / 边打上「原话锚点」source_msg（消息下标），供 UI 跳回出处。
+
+    为什么分两步：apply_memory_ops 执行时 assistant 消息还没落库
+    （续写会复用上一条、进度消息会被 pop），最终下标要到落库那一刻才知道。
+    返回被打上锚点的条目数。
+    """
+    if not isinstance(changed, dict) or not isinstance(msg_index, int) or msg_index < 0:
+        return 0
+    kbs, n = {}, 0
+    for scope, part in changed.items():
+        if not isinstance(part, dict):
+            continue
+        ids = set()
+        for kind in ("node_add", "node_update", "edge_add", "edge_update"):
+            ids.update(str(x) for x in (part.get(kind) or []))
+        if not ids:
+            continue
+        if scope == "session":
+            mem = (session or {}).get("memory") or {}
+            targets = list(mem.get("nodes") or []) + list(mem.get("edges") or [])
+        else:
+            kb = kbs.get(scope)
+            if kb is None:
+                kb = load_kb(scope)
+                if not kb:
+                    continue
+                kbs[scope] = kb
+            targets = list(kb.get("nodes") or []) + list(kb.get("edges") or [])
+        for it in targets:
+            if isinstance(it, dict) and str(it.get("id")) in ids:
+                it["source_msg"] = msg_index
+                n += 1
+    for kb in kbs.values():
+        save_kb(kb)
+    return n
 
 
 def apply_memory_ops(session_id, allowed_kb_ids, ops):
@@ -1148,6 +1284,7 @@ def apply_memory_ops(session_id, allowed_kb_ids, ops):
             elif kind == "link":
                 rel = normalize_relation(op.get("relation") or op.get("label"))
                 directed = _edge_directed(op, rel)
+                fact = normalize_edge_fact(op.get("fact") or op.get("why") or op.get("reason"))
                 a_scope, a = locate(op.get("from"))
                 b_scope, b = locate(op.get("to"))
                 if not a or not b:
@@ -1163,18 +1300,65 @@ def apply_memory_ops(session_id, allowed_kb_ids, ops):
                 if tedges is None:
                     problems.append("作用域 %s 不存在" % tkey)
                     continue
-                # 同一对节点允许存在不同的关系，完全重复才跳过（无向边反向也算重复）
-                if any(_same_edge(e, a["id"], b["id"], rel, directed) for e in tedges):
+                # S1：连线必须带一句话陈述（为什么成立 / 依据是什么），否则这条边没有信息量
+                if not fact:
+                    problems.append("连线必须用 fact 写一句话说明依据：%s → %s"
+                                    % (a.get("title") or "", b.get("title") or ""))
                     continue
-                label = (op.get("label") or "").strip() or relation_label(rel)
-                new_edge_id = _edge_id()
-                tedges.append({"id": new_edge_id, "from": a["id"], "to": b["id"],
-                               "label": label, "relation": rel, "directed": directed,
-                               "type": "relation"})
-                counts["link"] = counts.get("link", 0) + 1
-                did = True
-                key = tkey
-                mark(tkey, "edge_add", new_edge_id)
+                # (from,to,relation) 唯一：同一对节点同一关系只保留一条有效边
+                old = next((e for e in tedges
+                            if _same_edge(e, a["id"], b["id"], rel, directed)), None)
+                fact_updated = False
+                if old is not None:
+                    old_fact = normalize_edge_fact(old.get("fact"))
+                    if old_fact == fact:
+                        continue                      # 完全重复：幂等跳过
+                    if old_fact:
+                        invalidate_edge(old)          # S2：旧陈述被新陈述替代，标失效不删除
+                        mark(tkey, "edge_update", old.get("id"))
+                    else:                             # 老数据没写陈述 → 补上，不算替代
+                        old["fact"] = fact
+                        old.setdefault("valid_at", time.time())
+                        fact_updated = True
+                        counts["link"] = counts.get("link", 0) + 1
+                        did = True
+                        key = tkey
+                        mark(tkey, "edge_update", old.get("id"))
+                if not fact_updated:
+                    label = (op.get("label") or "").strip() or relation_label(rel)
+                    new_edge_id = _edge_id()
+                    tedges.append({"id": new_edge_id, "from": a["id"], "to": b["id"],
+                                   "label": label, "relation": rel, "directed": directed,
+                                   "type": "relation", "fact": fact, "valid_at": time.time()})
+                    counts["link"] = counts.get("link", 0) + 1
+                    did = True
+                    key = tkey
+                    mark(tkey, "edge_add", new_edge_id)
+            elif kind == "unlink":
+                # S2：让一条已有关系失效（旧结论被推翻），保留在历史里可追溯
+                raw_rel = op.get("relation") or op.get("label")
+                rel = normalize_relation(raw_rel) if raw_rel else None
+                eid = str(op.get("edge_id") or op.get("id") or "").strip()
+                a_scope, a = locate(op.get("from")) if op.get("from") else (None, None)
+                b_scope, b = locate(op.get("to")) if op.get("to") else (None, None)
+                if not eid and not (a and b):
+                    problems.append("unlink 需要 edge_id，或 from / to 两端")
+                    continue
+                tkey = a_scope or key
+                _tn, tedges = scope_store(tkey)
+                if tedges is None:
+                    problems.append("作用域 %s 不存在" % tkey)
+                    continue
+                e = _find_edge(tedges, eid or None,
+                               a.get("id") if a else None, b.get("id") if b else None, rel)
+                if not e:
+                    problems.append("找不到要失效的关系")
+                    continue
+                if invalidate_edge(e):
+                    counts["unlink"] = counts.get("unlink", 0) + 1
+                    did = True
+                    key = tkey
+                    mark(tkey, "edge_update", e.get("id"))
         except Exception:
             continue
         if not did:

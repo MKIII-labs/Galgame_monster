@@ -16,6 +16,9 @@
 /_probe.pdf
 /scripts/_tmp_*.py
 
+# 评测运行产物（含本机路径 / 时间戳；只保留评测代码与示例）
+/eval/runs/
+
 # Python 缓存
 **/__pycache__/
 *.pyc

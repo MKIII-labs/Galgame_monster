@@ -127,6 +127,8 @@ async function init() {
   state.chatVisionAvailable = !!data.chat_vision_available;
   state.searchEffective = data.search_effective || '';
   state.pendingOpen = data.pending_open || '';
+  // 会话运行态：sid -> 'approval' | 'ask'（侧栏显示「待批准 / 待回答」）
+  state.pending = data.pending && typeof data.pending === 'object' ? data.pending : {};
   state.contextMenu = data.context_menu || {};
   state.relations = data.relations || [];
   renderRelationHelp();
@@ -167,7 +169,7 @@ async function init() {
   $('#btn-close-ctx2').onclick = () => closeCtxDetail();
   $('#ctx-detail-compress').onclick = () => compressContextManually();
   $('#ctx-detail-restore').onclick = () => ctxRestore();
-  // 上下文明细：同一个弹窗里的两个页签（占用明细 / 输入明细）
+  // 上下文明细：同一个弹窗里的两个页签（占用明细 / token 明细）
   document.querySelectorAll('.ctx-tab').forEach((b) => {
     b.onclick = () => {
       document.querySelectorAll('.ctx-tab').forEach((x) => {
@@ -299,33 +301,14 @@ async function init() {
 
   // 用量统计
   $('#btn-usage').onclick = () => openUsage('day7');
-  // 学习观测：observations 表里记录的学习行为
-  $('#btn-observe').onclick = () => {
-    observeSubject = '';
-    observeTopic = '';
-    openObserve(7);
-  };
-  $('#btn-close-observe').onclick = closeObserve;
-  $$('#observe-modal .tab').forEach((t) => {
-    t.onclick = () => openObserve(Number(t.dataset.observeDays));
-  });
-  $('#observe-clear-filter').onclick = () => {
-    observeSubject = '';
-    observeTopic = '';
-    loadObserve();
-  };
-  // Skill：与用量统计并排的快捷入口，直接打开设置里的 Skill 面板
-  const btnSkills = $('#btn-skills');
-  if (btnSkills) {
-    btnSkills.onclick = () => {
-      openModal({ tab: 'skills' });
-    };
-  }
   $('#btn-close-usage').onclick = closeUsage;
   $$('#usage-modal .tab').forEach((t) => {
     t.onclick = () => openUsage(t.dataset.usageRange);
   });
-  window.addEventListener('resize', () => { if (usageChart) usageChart.resize(); });
+  window.addEventListener('resize', () => {
+    if (usageChart) usageChart.resize();
+    if (usageBars) usageBars.resize();
+  });
 
   // 双击会话名可重命名
   $('#session-list').addEventListener('dblclick', (e) => {
@@ -361,6 +344,7 @@ async function init() {
   // Agent：开关 + 沙箱目录
   $('#btn-agent').onclick = toggleAgent;
   $('#btn-sandbox').onclick = pickSandbox;
+  if ($('#btn-sandbox-open')) $('#btn-sandbox-open').onclick = openSandboxFolder;
   $('#btn-sandbox-path').onclick = pickSandboxPath;
   if ($('#btn-outside-read')) $('#btn-outside-read').onclick = toggleOutsideRead;
   // 写入审批档位：手动 / 自动 / 完全访问 / 自定义
@@ -731,6 +715,8 @@ async function init() {
 
   // 会话搜索：居中浮层（匹配标题与对话正文）
   if (typeof bindSessionSearch === 'function') bindSessionSearch();
+  // 会话记录：按目录分组 / 平铺切换
+  if (typeof bindSessionGroupToggle === 'function') bindSessionGroupToggle();
   // 上次关在剧场时，若当前会话不是剧场会话，就落到大厅，避免会话列表空白
   let startMode = (state.config && state.config.ui_mode) || 'solo';
   if (startMode === 'gal') {
@@ -813,6 +799,7 @@ async function init() {
   apLiveBind();           // 自动化看板：展开 / 收起
   if ($('#remind-add')) $('#remind-add').onclick = addReminder;
   if ($('#autochat-on')) $('#autochat-on').onchange = (e) => toggleAutoChat(e.target.checked);
+  if ($('#reminders-enabled') && typeof bindReminderSwitches === 'function') bindReminderSwitches();
   if ($('#autochat-min')) $('#autochat-min').onchange = updateAutoChatGap;
   if ($('#autochat-max')) $('#autochat-max').onchange = updateAutoChatGap;
   if ($('#autochat-test')) $('#autochat-test').onclick = testAutoChat;
@@ -972,6 +959,7 @@ async function init() {
     }
     const ex = $('#sidebar-expand');
     if (ex) ex.setAttribute('aria-expanded', on ? 'false' : 'true');
+    syncModeSwitchHome();
   }
   applyComposerCollapsed(!!(state.config && state.config.composer_collapsed));
   applySidebarCollapsed(!!(state.config && state.config.sidebar_collapsed));
@@ -990,7 +978,6 @@ async function init() {
   }
   if ($('#sidebar-toggle')) $('#sidebar-toggle').onclick = () => toggleSidebar(true);
   if ($('#sidebar-expand')) $('#sidebar-expand').onclick = () => toggleSidebar(false);
-
   bindChips();
 
   if (!String(state.config.chat_api_key || '').trim()) {
@@ -1402,3 +1389,39 @@ function bindNotesEvents() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+/* ============================================================
+   模式切换的「挪家」+ 快捷键
+   ------------------------------------------------------------
+   侧栏收起后 .sidebar-body 整体隐藏，模式按钮也就跟着没了；
+   但 Solo ↔ IDE 是最常来回切的一对，不该逼用户先展开侧栏。
+   做法是移动**同一个** #mode-switch 节点（不复制 DOM，active 状态只有一份）：
+     · 侧栏展开 → 回到 .side-top（原来的位置，文字按钮）
+     · 侧栏收起 → 挂到 #mode-float（图标按钮；所有模式都竖排在左下角）
+   ============================================================ */
+function syncModeSwitchHome() {
+  const ms = document.getElementById('mode-switch');
+  const float = document.getElementById('mode-float');
+  const host = document.querySelector('.side-top');
+  const app = document.getElementById('app');
+  if (!ms || !float || !host || !app) return;
+  if (app.classList.contains('side-collapsed')) {
+    if (ms.parentElement !== float) float.appendChild(ms);
+    float.classList.remove('hidden');
+  } else {
+    if (ms.parentElement !== host) {
+      const anchor = document.getElementById('btn-new');
+      host.insertBefore(ms, anchor && anchor.nextSibling ? anchor.nextSibling : null);
+    }
+    float.classList.add('hidden');
+  }
+}
+
+/* Ctrl+Alt+1..4 直接切模式：不依赖侧栏，也不依赖当前模式 */
+document.addEventListener('keydown', (e) => {
+  if (!e.ctrlKey || !e.altKey || e.shiftKey || e.metaKey) return;
+  const mode = { '1': 'solo', '2': 'ide', '3': 'hall', '4': 'work' }[e.key];
+  if (!mode || typeof setUiMode !== 'function') return;
+  e.preventDefault();
+  setUiMode(mode);
+});
