@@ -128,15 +128,47 @@
 .attach-doc.hidden { display: none; }
 .attach-thumb.hidden { display: none; }
 
-/* 气泡里的文档附件标记 */
+/* 气泡里的文档附件标记：多个时横向换行排列，点标签可预览 */
+.msg-docs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.msg-docs .msg-doc { margin-top: 0; }
 .msg-doc {
-  display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;
+  display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 10px; font-size: 12.5px; color: var(--text-dim);
   background: var(--bg-input); border: 1px dashed var(--border-strong);
   border-radius: var(--radius-sm);
+  cursor: pointer;
 }
+.msg-doc:hover { color: var(--text); border-color: var(--accent); }
 .msg-doc.warn { color: var(--warn); border-color: var(--warn-line); }
 .msg-doc.err { color: var(--danger); border-color: var(--danger-line); }
+/* 解析中：虚线上色 + 呼吸效果，避免看起来像卡死 */
+.msg-doc.parsing {
+  color: var(--accent); border-style: solid; border-color: var(--accent-line, var(--accent));
+  animation: docParsingPulse 1.2s ease-in-out infinite;
+}
+@keyframes docParsingPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
+}
+
+/* 用户消息里的显式上下文引用（# 菜单）：常驻历史，和输入框上的 chip 同形 */
+.msg-refs {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin: 6px 0 4px;
+}
+.msg-ref {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 100%; padding: 3px 9px; font-size: 12px;
+  color: var(--text-dim); background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.msg-ref .ic { flex: none; width: 13px; height: 13px; }
+.msg-ref .msg-ref-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.msg-ref.link { cursor: pointer; }
+.msg-ref.link:hover { color: var(--text); border-color: var(--accent); }
+.msg-ref.virtual { border-style: dashed; }
 
 /* 对话内查找条 */
 .find-bar {

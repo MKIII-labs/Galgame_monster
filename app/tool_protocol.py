@@ -25,9 +25,11 @@ REPEAT = "REPEAT"
 TOOL_ERROR = "TOOL_ERROR"
 
 _TEXT_MAP = (
-    ("沙箱", SANDBOX_DENIED),
-    ("不存在", NOT_FOUND),
+    # 「未找到」必须排在「沙箱」前面：搜索零命中的提示里会带搜索范围，
+    # 顺序反过来会把正常的零命中误判成沙箱拒绝
     ("未找到", NOT_FOUND),
+    ("不存在", NOT_FOUND),
+    ("沙箱", SANDBOX_DENIED),
     ("未知工具", NOT_FOUND),
     ("缺少", INVALID_ARG),
     ("参数", INVALID_ARG),

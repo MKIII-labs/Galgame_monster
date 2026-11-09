@@ -5,7 +5,7 @@ import json
 import mimetypes
 import os
 
-from app import agent, calendar, capabilities, scenes, task_engine
+from app import agent, calendar, capabilities, scenes, task_engine, work_extras
 from app.registry import route
 from app.sessions import find_session, load_sessions, save_sessions
 from app.store import DATA_DIR
@@ -20,6 +20,24 @@ _IMAGE_MAX = 5 * 1024 * 1024
 
 def _bad(h, msg, code=400):
     return h._json({"ok": False, "error": msg}, code)
+
+
+def _blocked_by(tid):
+    """依赖未完成时返回前几个依赖标题，否则返回空列表。"""
+    task = task_engine.get_task(tid)
+    if not task:
+        return []
+    out = []
+    for dep in str(task.get("depends_on") or "").split(","):
+        dep = dep.strip()
+        if not dep:
+            continue
+        other = task_engine.get_task(dep)
+        if other and other.get("status") != "done":
+            out.append(other.get("title") or dep)
+        if len(out) >= 3:
+            break
+    return out
 
 
 @route("/api/scene")
@@ -73,8 +91,12 @@ def _api_work_tasks(h):
     op = str(body.get("op") or "list").strip()
 
     if op == "list":
-        items = task_engine.list_tasks(status=body.get("status") or "",
-                                       limit=body.get("limit") or 50)
+        items = task_engine.list_tasks(
+            status=body.get("status") or "",
+            limit=body.get("limit") or 200,
+            tag=body.get("tag") or "",
+            priority=body.get("priority"),
+            parent_id=body.get("parent_id"))
         return h._json({"ok": True, "tasks": items})
 
     if op == "get":
@@ -83,16 +105,31 @@ def _api_work_tasks(h):
                        {"ok": False, "error": "找不到任务"})
 
     if op == "create":
+        payload = dict(body)
+        tpl_id = str(body.get("template_id") or "").strip()
+        if tpl_id:
+            tpl = work_extras.get_template(tpl_id)
+            if not tpl:
+                return _bad(h, "模板不存在")
+            payload.setdefault("title", tpl["title"])
+            payload.setdefault("steps", tpl["steps"])
+            payload.setdefault("tags", tpl["tags"])
+            payload.setdefault("priority", tpl["priority"])
+            payload.setdefault("estimate_min", tpl["estimate_min"])
         try:
             task = task_engine.create_task(
-                body.get("title"), body.get("steps") or [],
-                session_id=body.get("session_id") or "",
-                scene=body.get("scene") or "general",
-                intent=body.get("intent") or "",
-                due_at=body.get("due_at"),
-                remind_before=body.get("remind_before"),
-                priority=body.get("priority") or 0,
-                tags=body.get("tags") or "")
+                payload.get("title"), payload.get("steps") or [],
+                session_id=payload.get("session_id") or "",
+                scene=payload.get("scene") or "general",
+                intent=payload.get("intent") or "",
+                due_at=payload.get("due_at"),
+                remind_before=payload.get("remind_before"),
+                priority=payload.get("priority") or 0,
+                tags=payload.get("tags") or "",
+                parent_id=payload.get("parent_id") or "",
+                depends_on=payload.get("depends_on") or "",
+                repeat_rule=payload.get("repeat_rule") or "",
+                estimate_min=payload.get("estimate_min") or 0)
         except ValueError as e:
             return _bad(h, str(e))
         if body.get("auto_start"):
@@ -106,10 +143,66 @@ def _api_work_tasks(h):
         try:
             task = task_engine.update_task(
                 tid, title=body.get("title"), priority=body.get("priority"),
-                tags=body.get("tags"))
+                tags=body.get("tags"),
+                due_at=body.get("due_at") if "due_at" in body else None,
+                remind_before=body.get("remind_before"),
+                parent_id=body.get("parent_id"),
+                depends_on=body.get("depends_on"),
+                repeat_rule=body.get("repeat_rule"),
+                estimate_min=body.get("estimate_min"),
+                sort_order=body.get("sort_order"))
         except (TypeError, ValueError) as e:
             return _bad(h, str(e))
         return h._json({"ok": bool(task), "task": task})
+
+    if op == "complete":
+        tid = str(body.get("id") or "").strip()
+        if not tid:
+            return _bad(h, "缺少 id")
+        res = task_engine.complete_task(tid)
+        if not res:
+            return _bad(h, "找不到任务")
+        return h._json({"ok": True, "task": res.get("task"),
+                        "next": res.get("next")})
+
+    if op == "batch":
+        ids = [str(x) for x in (body.get("ids") or []) if str(x).strip()]
+        action = str(body.get("action") or "").strip()
+        if not ids or not action:
+            return _bad(h, "缺少 ids 或 action")
+        done, failed = [], []
+        for tid in ids[:200]:
+            try:
+                if action == "delete":
+                    ok = task_engine.delete_task(tid)
+                elif action == "complete":
+                    ok = bool(task_engine.complete_task(tid))
+                elif action in ("start", "pause", "resume", "cancel"):
+                    if action in ("start", "resume") and _blocked_by(tid):
+                        failed.append(tid)
+                        continue
+                    fn = {"start": task_engine.start_task,
+                          "pause": task_engine.pause_task,
+                          "resume": task_engine.resume_task,
+                          "cancel": task_engine.cancel_task}[action]
+                    ok = bool(fn(tid))
+                elif action in ("priority", "tags"):
+                    val = body.get("value")
+                    ok = bool(task_engine.update_task(tid, **{action: val}))
+                else:
+                    return _bad(h, "未知批量操作：%s" % action)
+                (done if ok else failed).append(tid)
+            except (TypeError, ValueError) as e:
+                failed.append(tid)
+                print("[工作台] 批量操作失败 %s：%s" % (tid, e))
+        return h._json({"ok": True, "done": done, "failed": failed})
+
+    if op == "reorder":
+        ids = [str(x) for x in (body.get("ids") or []) if str(x).strip()]
+        if not ids:
+            return _bad(h, "缺少 ids")
+        task_engine.reorder_tasks(ids)
+        return h._json({"ok": True})
 
     if op == "retry":
         tid = str(body.get("id") or "").strip()
@@ -165,6 +258,10 @@ def _api_work_tasks(h):
             return _bad(h, "缺少 id")
         if op == "delete":
             return h._json({"ok": task_engine.delete_task(tid)})
+        if op in ("start", "resume"):
+            blocked = _blocked_by(tid)
+            if blocked:
+                return _bad(h, "前置任务未完成：%s" % blocked[0])
         fn = {"start": task_engine.start_task,
               "pause": task_engine.pause_task,
               "resume": task_engine.resume_task,
@@ -189,6 +286,54 @@ def _api_work_tasks(h):
         return h._json({"ok": bool(task), "task": task})
 
     return _bad(h, "未知操作：%s" % op)
+
+
+@route("/api/work/templates")
+def _api_work_templates(h):
+    body = h._body()
+    op = str(body.get("op") or "list").strip()
+    if op == "list":
+        return h._json({"ok": True, "templates": work_extras.list_templates()})
+    if op == "save":
+        try:
+            tpl = work_extras.save_template(
+                body.get("name"), body.get("title"), body.get("steps") or [],
+                tags=body.get("tags") or "", priority=body.get("priority") or 0,
+                estimate_min=body.get("estimate_min") or 0,
+                tid=body.get("id") or "")
+        except ValueError as e:
+            return _bad(h, str(e))
+        return h._json({"ok": True, "template": tpl})
+    if op == "delete":
+        return h._json({"ok": work_extras.delete_template(body.get("id"))})
+    return _bad(h, "未知操作：%s" % op)
+
+
+@route("/api/work/focus")
+def _api_work_focus(h):
+    body = h._body()
+    op = str(body.get("op") or "list").strip()
+    if op == "list":
+        return h._json({"ok": True, "sessions": work_extras.list_focus(
+            start_at=body.get("start_at") or 0,
+            end_at=body.get("end_at") or 0,
+            limit=body.get("limit") or 200)})
+    if op == "add":
+        try:
+            item = work_extras.add_focus(
+                task_id=body.get("task_id") or "", title=body.get("title") or "",
+                start_at=body.get("start_at") or 0, end_at=body.get("end_at") or 0,
+                minutes=body.get("minutes") or 0, kind=body.get("kind") or "focus")
+        except ValueError as e:
+            return _bad(h, str(e))
+        return h._json({"ok": True, "session": item})
+    return _bad(h, "未知操作：%s" % op)
+
+
+@route("/api/work/stats")
+def _api_work_stats(h):
+    body = h._body()
+    return h._json({"ok": True, "stats": work_extras.summary(body.get("days") or 7)})
 
 
 @route("/api/work/artifacts")

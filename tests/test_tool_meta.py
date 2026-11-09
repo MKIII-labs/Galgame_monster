@@ -90,3 +90,12 @@ def test_tool_search_reports_meta_actions():
     text = agent._t_tool_search({"query": "图片"}, caps)
     assert "image" in caps.get("tool_unlock", set())
     assert "see" in text and "compare" in text
+
+
+def test_legacy_map_is_reverse_of_meta_actions():
+    """旧工具名 → 元工具反向表：验收代理的旧名白名单靠它。"""
+    m = tool_meta.legacy_map()
+    assert m["read_file"] == ("read", "file")
+    assert m["run_command"] == ("run", "exec")
+    assert m["shell"] == ("run", "terminal")
+    assert len(m) == sum(len(spec["actions"]) for spec in tool_meta.META.values())

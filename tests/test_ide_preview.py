@@ -65,3 +65,37 @@ def test_preview_server_serves_and_blocks(tmp_path):
     finally:
         preview.stop()
     assert _get(base)[0] not in (200, 403)
+
+
+def test_preview_injects_bridge_into_html(tmp_path):
+    (tmp_path / "index.html").write_text(
+        "<html><body><h1>ok</h1></body></html>", encoding="utf-8")
+    (tmp_path / "plain.html").write_text("<h2>plain</h2>", encoding="utf-8")
+    (tmp_path / "a.css").write_text("body{}", encoding="utf-8")
+    base = preview.start(str(tmp_path))
+    try:
+        status, body, cache = _get(base)
+        assert status == 200 and cache == "no-store"
+        assert b"<h1>ok</h1>" in body
+        assert b"/__gm_preview_bridge.js" in body
+        # 没有 </body> 的片段也能注入
+        status, plain, _ = _get(base + "plain.html")
+        assert status == 200 and b"<h2>plain</h2>" in plain
+        assert b"/__gm_preview_bridge.js" in plain
+        # 静态资源不注入
+        status, css, _ = _get(base + "a.css")
+        assert status == 200 and b"__gm_preview_bridge" not in css
+        # 桥脚本本身
+        status, js, _ = _get(base + "__gm_preview_bridge.js")
+        assert status == 200
+        assert b"__gmPreview" in js and b"postMessage" in js
+        assert b"console-batch" in js and b"<script" not in js
+    finally:
+        preview.stop()
+
+
+def test_inject_html_is_idempotent():
+    once = preview._inject_html(b"<html><body>x</body></html>")
+    twice = preview._inject_html(once)
+    assert once == twice
+    assert once.count(b"__gm_preview_bridge.js") == 1

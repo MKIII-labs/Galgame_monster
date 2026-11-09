@@ -259,9 +259,9 @@ function renderColorSwatches(selected) {
   });
 }
 
-function applySessions(r) {
+function applySessions(r, opts) {
   if (!r) return;
-  if (r.sessions) applySessionsPayload(r.sessions);
+  if (r.sessions) applySessionsPayload(r.sessions, opts);
   renderSessions();
   // 当前会话可能被后端切走（存档恢复 / 删除等）：排队栏也要跟着换会话
   if (typeof renderSendQueue === 'function') renderSendQueue();

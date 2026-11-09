@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import base64
 import os
 import time
 from app.uploads import (_MIME_BY_EXT, _upload_path, delete_session_uploads, drop_upload_files)
@@ -7,8 +8,10 @@ from app.export_md import (_md_name, session_markdown)
 from app.config import load_config, save_config
 from app.sessions import (ensure_session_kb_fields, find_session, invalidate_compression,
                           load_sessions, new_id, reorder_sessions, sandbox_group,
-                          save_sessions, set_current, trim_compress_marks)
-from app import (gal, saves)
+                          save_sessions, set_current, trim_compress_marks, trim_qmarks)
+from app.registry import route
+from app import (docparse, gal, saves)
+from app.imaging import recognize_image_auto, vision_available
 
 def _api_session_new(h):
         body = h._body()
@@ -237,8 +240,53 @@ def _api_session_select(h):
         h._ok_sessions(data)
 
 
+@route("/api/session/qmark")
+def _api_session_qmark(h):
+    """提问标记：给某条用户提问起名，Solo 模式下用悬浮按钮快速跳回。
+
+    label 为空表示删除该条标记；同一消息只保留一个标记。
+    """
+    body = h._body()
+    try:
+        idx = int(body.get("idx"))
+    except (TypeError, ValueError):
+        return h._json({"ok": False, "error": "消息下标不合法"}, 400)
+    label = str(body.get("label") or "").strip()[:40]
+    # 读-改-写整段放进锁里：模型流式输出时也会改 sessions.json，
+    # 先 load 再 save 会把刚追加的消息覆盖掉。
+    with _lock:
+        data = load_sessions()
+        s = find_session(data, body.get("id"))
+        if not s:
+            return h._json({"ok": False, "error": "会话不存在"}, 404)
+        msgs = s.get("messages") or []
+        if not (0 <= idx < len(msgs)):
+            return h._json({"ok": False, "error": "这条消息已不存在"}, 400)
+        if (msgs[idx] or {}).get("role") != "user":
+            return h._json({"ok": False, "error": "只能标记用户提问"}, 400)
+        marks = []
+        for m in (s.get("qmarks") or []):
+            if not isinstance(m, dict):
+                continue
+            try:
+                if int(m.get("idx")) == idx:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            marks.append(m)
+        if label:
+            marks.append({"idx": idx, "label": label,
+                          "text": str(body.get("text") or "")[:120],
+                          "at": time.time()})
+            marks.sort(key=lambda m: int(m.get("idx") or 0))
+            marks = marks[-20:]
+        s["qmarks"] = marks
+        save_sessions(data)
+    h._ok_sessions(data)
+
+
 def _api_session_messages(h):
-        """按需拉取更早的消息（切会话只回最近 MSG_WINDOW 条）。"""
+        """按需拉取更早的消息（切会话只回 chat_payload_msg_window 条）。"""
         body = h._body()
         data = load_sessions()
         s = find_session(data, body.get("session_id"))
@@ -271,6 +319,7 @@ def _api_session_clear(h):
             s["summary"] = ""
             s["summary_upto"] = 0
             s["compress_marks"] = []
+            s["qmarks"] = []                                     # 提问标记随消息一起清空
             s["gal_stats"] = []                                  # 舞台状态参数随对话一起清空
             s["gal_bg"] = ""                                     # 手动选定的背景也清掉
             s["gal_bgm"] = ""                                    # BGM 也停掉
@@ -312,8 +361,13 @@ def _api_message_withdraw(h):
                 s["summary_upto"] = min(_upto, idx)
             if body.get("only_this"):
                 trim_compress_marks(s, shift_after=idx)       # 后面的标记整体前移
+                # 被删掉的这条如果是提问标记，先移除；后面的标记整体前移
+                s["qmarks"] = [m for m in (s.get("qmarks") or [])
+                               if not (isinstance(m, dict) and str(m.get("idx")) == str(idx))]
+                trim_qmarks(s, shift_after=idx)
             else:
                 trim_compress_marks(s, drop_after=idx)        # 删除点之后的标记丢弃
+                trim_qmarks(s, drop_after=idx - 1)            # 标记下标 >= idx 的全部丢弃
             s["gal_stats"] = gal.stats_from_messages(s["messages"])   # 状态参数跟着对话一起回滚
             s["updated_at"] = time.time()
             with _lock:
@@ -334,6 +388,106 @@ def _api_attach_get(h):
             return h._json({"ok": False, "error": "read failed"}, 500)
         return h._send(200, data, _MIME_BY_EXT.get(os.path.splitext(p)[1].lower(),
                                                       "application/octet-stream"))
+
+
+def _attach_meta(msgs, index, doc_index):
+    """取出某条消息里的第 doc_index 份附件元信息（兼容旧的单 doc 结构）。"""
+    if not (0 <= index < len(msgs)):
+        return None
+    m = msgs[index]
+    if not isinstance(m, dict) or m.get("role") != "user":
+        return None
+    docs = m.get("docs") if isinstance(m.get("docs"), list) else None
+    if docs:
+        if not (0 <= doc_index < len(docs)):
+            return None
+        meta = docs[doc_index]
+        return meta if isinstance(meta, dict) else None
+    meta = m.get("doc")
+    return meta if isinstance(meta, dict) else None
+
+
+def _parse_stored_doc(sid, meta):
+    """解析一份已落盘的附件。返回 (text, warn)，与 docparse.extract 一致。"""
+    p = _upload_path(sid, meta.get("file") or meta.get("name"))
+    if not p:
+        return None, "附件文件已不存在"
+    try:
+        with open(p, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None, "附件读取失败"
+    if not raw:
+        return None, "附件是空文件"
+
+    def _ocr(jpeg):
+        try:
+            b64 = base64.b64encode(jpeg).decode("ascii")
+            txt = recognize_image_auto("image/jpeg", b64, docparse.PDF_PAGE_OCR_PROMPT)
+        except Exception as e:             # noqa: BLE001  单页失败不影响其它页
+            print("[附件重试] 某一页识别失败：%s" % e)
+            return ""
+        txt = (txt or "").strip()
+        return "" if txt.startswith(("⚠️", "❌")) else txt
+
+    return docparse.extract(str(meta.get("name") or ""), raw,
+                            ocr=(_ocr if vision_available() else None))
+
+
+def _api_attach_reparse(h):
+        """重新解析一条消息里的某份附件（解析失败后手动重试）。"""
+        body = h._body()
+        sid = body.get("session_id")
+        try:
+            index = int(body.get("index"))
+            doc_index = int(body.get("doc_index") or 0)
+        except (TypeError, ValueError):
+            return h._json({"ok": False, "error": "bad index"}, 400)
+        data = load_sessions()
+        s = find_session(data, sid)
+        if not s:
+            return h._json({"ok": False, "error": "会话不存在"}, 404)
+        msgs = s.get("messages") or []
+        meta = _attach_meta(msgs, index, doc_index)
+        if meta is None:
+            return h._json({"ok": False, "error": "找不到附件"}, 404)
+        text, warn = _parse_stored_doc(sid, meta)
+        if text:
+            meta["chars"] = len(text)
+            meta["text"] = text
+            meta.pop("error", None)
+            if warn:
+                meta["warn"] = warn
+            if doc_index == 0:
+                msgs[index]["doc_text"] = text      # 兼容只看 doc_text 的旧逻辑
+            with _lock:
+                save_sessions(data)
+            return h._json({"ok": True, "chars": len(text), "warn": warn})
+        meta["error"] = warn or "未知原因"
+        with _lock:
+            save_sessions(data)
+        return h._json({"ok": False, "error": warn or "未知原因"})
+
+
+def _api_attach_text(h):
+        """提取已落盘附件的纯文本（用于 docx / xlsx / pptx 的应用内预览）。"""
+        body = h._body()
+        sid = body.get("session_id")
+        p = _upload_path(sid, body.get("name"))
+        if not p:
+            return h._json({"ok": False, "error": "not found"}, 404)
+        try:
+            with open(p, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return h._json({"ok": False, "error": "read failed"}, 500)
+        # 不给 OCR 回调：预览要快，扫描件仍走「下载」看原文件
+        text, warn = docparse.extract(os.path.basename(p), raw)
+        if text is None:
+            return h._json({"ok": False, "error": warn or "无法提取文本"})
+        limit = 300000
+        return h._json({"ok": True, "text": text[:limit], "warn": warn,
+                        "truncated": len(text) > limit})
 
 
 def _api_session_export(h):

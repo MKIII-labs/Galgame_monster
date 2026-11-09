@@ -246,9 +246,9 @@
 .stock-chart-sub { color: var(--text-dim); font-size: 11px; }
 .stock-chart-legend { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; }
 .stock-mark-filter {
-  padding: 3px 6px; border: 1px solid var(--border); border-radius: 7px;
+  padding: 5px 8px; min-height: 28px; border: 1px solid var(--border); border-radius: 7px;
   background: var(--bg); color: var(--text-dim);
-  font-family: var(--font); font-size: 11px; cursor: pointer;
+  font-family: var(--font); font-size: 11.5px; cursor: pointer;
 }
 .stock-mark-filter:focus { outline: none; border-color: var(--accent); }
 .stock-chart-head .stock-btn { margin-left: auto; }
@@ -625,3 +625,105 @@
 }
 .stock-cmp-svg { display: block; width: 100%; height: 100%; }
 .stock-cmp-sec { display: flex; flex-direction: column; gap: 5px; }
+
+/* --- 侧栏标签页（持仓成交 / 对手 / 训练） --- */
+.stock-tabs {
+  display: flex; gap: 2px; padding: 3px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 9px; margin-bottom: 8px;
+}
+.stock-tab {
+  flex: 1; padding: 5px 0; border: 0; border-radius: 7px;
+  background: transparent; color: var(--text-dim);
+  font-family: var(--font); font-size: 11.5px; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.stock-tab:hover { color: var(--text); background: var(--bg-hover); }
+.stock-tab.active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  color: var(--text); font-weight: 600;
+}
+.stock-tabpanel { display: none; flex-direction: column; gap: 8px; min-height: 0; }
+.stock-tabpanel.active { display: flex; }
+.stock-tabpanel > .stock-card { border: 0; padding: 0; background: transparent; }
+
+/* --- 下单区：快捷仓位 + 限价开关 --- */
+.stock-quick { display: flex; gap: 4px; margin-top: 5px; }
+.stock-quick button {
+  flex: 1; padding: 4px 0; border: 1px solid var(--border);
+  border-radius: 7px; background: var(--bg); color: var(--text-dim);
+  font-family: var(--font); font-size: 11px; cursor: pointer;
+}
+.stock-quick button:hover {
+  color: var(--text); border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.stock-limit-toggle {
+  display: inline-flex; align-items: center; gap: 5px; margin-top: 6px;
+  font-size: 11.5px; color: var(--text-dim); cursor: pointer; user-select: none;
+}
+.stock-limit-toggle input { cursor: pointer; }
+.stock-limit-toggle + input[type="number"] { margin-top: 5px; width: 100%; }
+.stock-limit-toggle.hidden + input[type="number"] { display: none; }
+
+/* --- 我的持仓 --- */
+.stock-hold {
+  padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px;
+  display: flex; flex-direction: column; gap: 4px; cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.stock-hold + .stock-hold { margin-top: 5px; }
+.stock-hold:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: var(--bg-hover);
+}
+.stock-hold-top { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; }
+.stock-hold-num { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-dim); }
+.stock-hold-num span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.stock-hold-num em { font-style: normal; font-size: 10.5px; opacity: .72; }
+
+/* --- 组合风险 --- */
+.stock-risk-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 4px 0; font-size: 11.5px; border-bottom: 1px dashed color-mix(in srgb, var(--border) 65%, transparent);
+}
+.stock-risk-row:last-of-type { border-bottom: 0; }
+.stock-risk-row span { color: var(--text-dim); }
+.stock-risk-row b { font-variant-numeric: tabular-nums; }
+.stock-risk-note { margin-top: 6px; font-size: 10.5px; color: var(--text-dim); opacity: .8; }
+
+/* --- K 线：十字光标 / 标记 hover --- */
+.stock-mark { cursor: pointer; }
+.stock-mark:hover path { opacity: 1; }
+.stock-cross { pointer-events: none; }
+
+/* --- 工具栏分组 / 下单区限价 / 行情行 / 对比日期 --- */
+.stock-tb-group {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 4px 8px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--bg);
+}
+.stock-tb-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.stock-limit-input {
+  width: 88px; padding: 5px 7px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.stock-limit-input:disabled { opacity: .45; }
+.stock-market-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 3px 2px; font-size: 11.5px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 60%, transparent);
+}
+.stock-market-row:last-child { border-bottom: 0; }
+.stock-market-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stock-cmp-date {
+  padding: 4px 7px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 11.5px;
+}
+.stock-cross.hidden { display: none; }
+.stock-cross line { stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 3 3; opacity: .55; }
+.stock-cross rect { fill: color-mix(in srgb, var(--accent) 85%, #000); rx: 3; }
+.stock-cross text { fill: #fff; font-size: 9px; font-variant-numeric: tabular-nums; }

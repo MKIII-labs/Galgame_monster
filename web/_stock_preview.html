@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>模拟股市 · 渲染自检</title>
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/hall.css">
+<link rel="stylesheet" href="css/hall-stock.css">
+<style>
+  /* 自检页自己的外壳，不影响被测的 .stock-* 样式 */
+  html, body { margin: 0; padding: 0; background: #0d1117; }
+  #hall-body { padding: 0; }
+  #preview-root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="hall-body" class="hall-body"><div id="preview-root"></div></div>
+
+<script>
+/* ---------- 用 fixture 里真实的后端数据替换 api() ---------- */
+window.__FIXTURE__ = null;
+window.__API_LOG__ = [];
+
+function api(path, body) {
+  window.__API_LOG__.push(path);
+  const f = window.__FIXTURE__ || {};
+  const p = String(path);
+  /* 挂起永不 resolve：stockMount 会先请求 /list 渲染设置页，
+     一旦它返回就会把对局页覆盖掉。自检只关心对局页，所以这里挡住。 */
+  if (p.endsWith('/list')) return new Promise(() => {});
+  if (p.endsWith('/state')) return Promise.resolve({ ok: true, game: f.state });
+  if (p.endsWith('/bars')) {
+    const b = (f.bars || {})[body && body.symbol] || {};
+    return Promise.resolve({ ok: true, as_of: b.as_of, bars: b.bars || [], marks: b.marks || [] });
+  }
+  if (p.endsWith('/risk')) return Promise.resolve({ ok: true, risk: f.risk || {} });
+  if (p.endsWith('/report')) return Promise.resolve({ ok: true, report: f.report || {} });
+  if (p.endsWith('/analysis')) return Promise.resolve({ ok: true });
+  return Promise.resolve({ ok: true });
+}
+function toast(msg) { console.log('[toast]', msg); }
+function toastErr(what, e) { console.log('[toastErr]', what, e); }
+function confirm() { return false; }
+function hallRegister() {}
+function hallAiEnabled() { return false; }
+/* 真实实现返回一个开关节点并被 appendChild，桩必须返回 Node，否则 appendChild(undefined) 报错 */
+function hallAiSwitch(label, text, onToggle) {
+  const wrap = document.createElement('label');
+  wrap.className = 'hall-ai-switch';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.onchange = () => onToggle && onToggle(box.checked);
+  wrap.appendChild(box);
+  wrap.appendChild(document.createTextNode(text || label || ''));
+  return wrap;
+}
+function isImeComposing() { return false; }
+function onHoverDate() {}
+</script>
+<script src="_stock_fixture.js"></script>
+<script src="hall-stock.js"></script>
+<script>
+/* ---------- 挂载并灌数据 ---------- */
+window.__RENDER_ERRORS__ = [];
+window.addEventListener('error', (e) => {
+  window.__RENDER_ERRORS__.push(String(e.message || e.error || e));
+});
+window.addEventListener('unhandledrejection', (e) => {
+  window.__RENDER_ERRORS__.push('unhandled: ' + String(e.reason));
+});
+
+function boot(fixture) {
+  window.__FIXTURE__ = fixture;
+  const root = document.getElementById('preview-root');
+  stockMount(root);
+  // stockMount 会先渲染设置页；直接灌 game 走全量渲染
+  setTimeout(() => {
+    stockState.game = fixture.state;
+    stockState.symbol = (fixture.state.symbols[0] || {}).symbol || '';
+    // stockApplyFull 只更新已有区块，骨架必须先由 stockRenderGame 建立
+    stockRenderGame();
+    stockApplyFull(fixture.state);
+    // 手动灌 K 线（等价于 stockLoadBars 拿到数据后的状态）
+    const sym = stockState.symbol;
+    const b = (fixture.bars || {})[sym] || {};
+    stockState.chartBars = b.bars || [];
+    stockState.chartMarks = b.marks || [];
+    stockState.barsCache[sym] = b.bars || [];
+    stockState.marksCache[(fixture.state.cursor_date || '') + '|' + sym] = b.marks || [];
+    stockDrawChart();
+    window.__READY__ = true;
+  }, 60);
+}
+
+/* fixture 由 _stock_fixture.js 内联提供（file:// 读不了本地 JSON） */
+if (window.__FIXTURE__) boot(window.__FIXTURE__);
+else window.__NEED_INLINE__ = true;
+</script>
+</body>
+</html>

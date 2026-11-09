@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.3"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(ROOT, "web")
 DATA_DIR = os.path.join(ROOT, "data")             # 运行时数据（整目录 gitignore）
@@ -25,6 +25,48 @@ NOTIFY_DIR = os.path.join(DATA_DIR, "notify")              # 系统通知的载�
 
 _lock = threading.Lock()
 ACTIVE_STREAMS = {}  # session_id -> threading.Event
+PENDING_STOPS = {}   # session_id -> 请求停止的时间戳（请求还没登记流时先记下）
+_PENDING_LOCK = threading.Lock()
+PENDING_STOP_TTL = 120.0
+
+
+def request_stop(sid):
+    """请求停止：已有流就置事件；还没登记就留下 pending stop，等登记时消费。
+
+    返回 {"found": bool, "pending": bool}。以前找不到流也返回 ok，
+    前端只能干等，长上下文压缩阶段点停止等于没点。
+    """
+    sid = str(sid or "").strip()
+    if not sid:
+        return {"found": False, "pending": False}
+    with _lock:
+        ev = ACTIVE_STREAMS.get(sid)
+    if ev is not None:
+        ev.set()
+        # 已有流接管了这次停止：清掉历史 pending，避免它再停掉下一轮请求
+        with _PENDING_LOCK:
+            PENDING_STOPS.pop(sid, None)
+        return {"found": True, "pending": False}
+    with _PENDING_LOCK:
+        now = time.time()
+        for k in list(PENDING_STOPS):
+            if now - float(PENDING_STOPS.get(k) or 0) > PENDING_STOP_TTL:
+                PENDING_STOPS.pop(k, None)
+        PENDING_STOPS[sid] = now
+    return {"found": False, "pending": True}
+
+
+def consume_stop(sid):
+    """消费一次 pending stop（只生效一次）。"""
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    with _PENDING_LOCK:
+        ts = PENDING_STOPS.pop(sid, None)
+    try:
+        return bool(ts and time.time() - float(ts) <= PENDING_STOP_TTL)
+    except (TypeError, ValueError):
+        return False
 
 _json_cache = {}   # path -> (mtime, data)
 

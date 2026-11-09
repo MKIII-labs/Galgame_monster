@@ -11,7 +11,8 @@ import requests
 import urllib3
 
 from app import agent, mem_tool
-from app.config import (effective_think_mode, load_config, normalize_content, thinking_payload)
+from app.config import (effective_think_mode, hybrid_on, is_local_url, load_config,
+                        normalize_content, resolve_endpoint, thinking_payload)
 from app.knowledge import (get_profile_kb, load_kb)
 from app.profile import load_profile, manual_block
 from app.usage import record_llm_usage
@@ -101,18 +102,68 @@ def _post_retry(url, headers, json_body, timeout, tries=2):
     return r
 
 
+def _pick_light_model(cfg, use_light=True, source=""):
+    """轻量模型选择。
+
+    混合模式关闭时，指向本地服务的 light 不参与（等价于纯 API）；
+    指向云端的小模型仍按原逻辑使用。这样「一键关闭混合」就能完全回到旧行为。
+
+    ide-complete 默认不切本地：补全只有 350ms 防抖 + 3–5s 超时，9B 本地模型
+    容易拖慢输入体验；需要时可以开 hybrid_ide_complete。
+    """
+    lm = (cfg.get("light_model") or "").strip() if use_light else ""
+    if not lm:
+        return ""
+    if not hybrid_on(cfg) and is_local_url(cfg.get("light_url")):
+        return ""
+    if (source == "ide-complete" and is_local_url(cfg.get("light_url"))
+            and not bool(cfg.get("hybrid_ide_complete"))):
+        return ""
+    return lm
+
+
 def _quick_chat(api_key, api_url, api_model, messages, max_tokens=96, source="gal",
-                timeout=(10, 60), tries=2, use_cache=True, temperature=0.2):
+                timeout=(10, 60), tries=2, use_cache=True, temperature=0.2,
+                use_light=True, stop_event=None):
     """一次非流式聊天调用（用于 GAL 剧情节点判定 / 摘要 / 语音矫正等轻量请求）。
     顺带把响应里的 usage 计入用量流水（按 source 标注来源）。
 
     `tries` / `use_cache` / `temperature` 供 IDE 内联补全这类「要快、要不打扰」的
     场景调小：补全不重试、不走缓存、温度 0。默认值与旧行为一致。
+    `use_light=False` 强制走主聊天模型（阅读器翻译这类要质量的场景）。
+    `stop_event`：用户点停止时不再等这个非流式请求返回（用于长上下文压缩）。
     """
+    if stop_event is not None:
+        # requests 的非流式调用无法从外部中断；放到后台线程里，主线程按停止信号
+        # 立即返回，结果丢弃。压缩调用方拿到空串后不会 save_summary。
+        if stop_event.is_set():
+            return ""
+        box = {}
+        done = threading.Event()
+
+        def _run():
+            try:
+                box["v"] = _quick_chat(
+                    api_key, api_url, api_model, messages,
+                    max_tokens=max_tokens, source=source, timeout=timeout,
+                    tries=tries, use_cache=use_cache, temperature=temperature,
+                    use_light=use_light, stop_event=None)
+            except BaseException as e:      # noqa: BLE001  交给调用线程抛出
+                box["e"] = e
+            finally:
+                done.set()
+
+        threading.Thread(target=_run, daemon=True, name="quick-chat-stop").start()
+        while not done.wait(0.2):
+            if stop_event.is_set():
+                return ""
+        if "e" in box:
+            raise box["e"]
+        return box.get("v", "")
     cfg = load_config() or {}
     # 分级模型调度：配置了 light_model 时，这些轻量任务改用它（可另配 light_url / light_api_key）；
     # 三项都留空 = 沿用主 chat 模型，行为与从前完全一致。
-    lm = (cfg.get("light_model") or "").strip()
+    lm = _pick_light_model(cfg, use_light, source)
     api_name = "chat"
     if lm:
         api_model = lm
@@ -134,7 +185,13 @@ def _quick_chat(api_key, api_url, api_model, messages, max_tokens=96, source="ga
             return cached
     from app import providers
     from app.config import get_api_kind
-    kind = get_api_kind("chat")
+    # 选中的是 light 服务商时，协议族要按 light 的地址判断（可能是本地 Ollama）
+    kind = get_api_kind("light" if api_name == "light" else "chat")
+    # light 分支用的是 config 里的原始 light_url（可能是裸地址，如 Ollama 的
+    # http://127.0.0.1:11434），这里补上 /v1/chat/completions；chat 分支的 URL
+    # 在 get_api_conf 里已经补全，不重复处理。
+    if api_name == "light" and kind == "openai":
+        api_url = resolve_endpoint(api_url)
     with _QUICK_SEM:
         if kind == "anthropic":
             resp = _post_retry(
@@ -702,6 +759,10 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
         except (TypeError, ValueError, IndexError):
             pass
     t_req = time.monotonic()       # 请求发出时刻：首包延迟的基准
+    # 请求发出到响应头之间没有任何正文，界面只能看到心跳。先发一条明确的「等待上游」，
+    # 让前端把这段时间显示成「等待响应」而不是「卡住」；attach 重放也会带上它。
+    emit({"type": "model_wait", "timeout": int(idle_timeout or 0),
+          "model": api_model})
     t_data = t_req                 # 最近一次收到 data 行（含空心跳）的时刻
     t_progress = t_req             # 最近一次收到有意义内容的时刻（空转看门狗用）
     t_first = None                 # 第一次收到正文 / 思考内容的时刻
@@ -734,11 +795,20 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
     # kind 由调用方显式传：故障转移时备用服务商的协议可能与主服务商不同
     kind = kind or get_api_kind("chat")
 
+    # Anthropic 提示缓存：默认开，只对「主对话流式请求」生效（轻量任务短、
+    # 写入 1.25x 不划算，不缓存）。
+    try:
+        from app.config import load_config as _load_cfg_cache
+        _cache_on = bool((_load_cfg_cache() or {}).get("anthropic_cache", True))
+    except Exception:                    # noqa: BLE001
+        _cache_on = True
+
     def _post(with_tools):
         if kind == "anthropic":
             body = providers.anthropic_body(
                 api_model, messages, _mt, think, stream=True,
-                tools=(tools if with_tools else None), temperature=temperature)
+                tools=(tools if with_tools else None), temperature=temperature,
+                cache=_cache_on)
             return _http().post(providers.anthropic_url(api_url),
                                 headers=providers.anthropic_headers(api_key),
                                 data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -766,6 +836,7 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
     # 所以让主线程只从队列取行，每 0.2 秒检查一次停止信号 —— 点「停止」最多 0.2 秒返回。
     q = queue.Queue()
     cancelled = threading.Event()
+    _resp_holder = {}
 
     # 诊断：用来区分「没拿到响应头」「拿到头但没有 data」「只发注释保活」。
     # 这些字段随返回值进 token_usage / app.log，下一次断流能直接定性。
@@ -847,6 +918,8 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
             # 走完 tools 降级判断后，这里才是真正要读的响应
             t_headers = time.monotonic()
             status_code = int(getattr(resp, "status_code", 0) or 0)
+            _resp_holder["resp"] = resp      # 停止时尽力关掉，别让上游继续烧 token
+            emit({"type": "model_ready", "status": status_code})
             try:
                 for raw in resp.iter_lines():
                     if cancelled.is_set():
@@ -859,16 +932,37 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
             q.put(("err", e))
 
     threading.Thread(target=_reader, daemon=True, name="llm-sse-reader").start()
+
+    def _abort_stream():
+        """停止 / 看门狗命中：置取消标记，并尽力关掉上游连接。
+
+        Windows 上 close 未必能立刻打断已阻塞的 recv（读线程仍是 daemon），
+        而且 close 本身可能等读锁 —— 实测直接在主线程 close 会把「点停止」
+        拖到上游下一段数据到达（延迟 2~3 秒）。所以只丢给后台线程做资源释放。
+        """
+        cancelled.set()
+        resp = _resp_holder.get("resp")
+        if resp is None:
+            return
+
+        def _close():
+            try:
+                resp.close()
+            except Exception:                # noqa: BLE001  关不掉也不能影响收尾
+                pass
+
+        threading.Thread(target=_close, daemon=True, name="llm-sse-close").start()
+
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
-                cancelled.set()                # 让读线程下次拿到数据时自己退出
+                _abort_stream()                # 让读线程尽快退出，并断开上游
                 stream_end = "stopped"
                 break
             # 看门狗：上游「连接还在、正文永远不来」时，别等 socket 读超时（默认 300s），
             # 到点直接中止并明确告诉用户是谁卡住了。
             if idle_timeout > 0 and time.monotonic() - t_data >= idle_timeout:
-                cancelled.set()
+                _abort_stream()
                 stream_end = "idle"
                 emit({"type": "error", "message":
                       "⏰ 上游 %d 秒没有任何响应数据，已中止本轮"
@@ -888,7 +982,7 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
                     _stall_cap = max(stall_timeout, idle_timeout or stall_timeout)
             if (stall_timeout > 0 and t_first_data is not None
                     and time.monotonic() - t_progress >= _stall_cap):
-                cancelled.set()
+                _abort_stream()
                 stream_end = "idle"
                 if n_reason_chars > 0:
                     _stall_msg = ("⏰ 上游思考结束后 %d 秒仍未开始输出正文，已中止本轮"
@@ -1059,7 +1153,12 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
                               "bytes": _tb, "calls": len(native_calls)})
                         t_tool_emit = _now
                         last_tool_bytes = _tb
-                r_piece = delta.get("reasoning_content") or ""
+                # Ollama 的 OpenAI 兼容端点把思考放在 delta.reasoning，
+                # vLLM / DeepSeek 用 delta.reasoning_content：两种都要认，
+                # 否则本地模型的思考过程会被整段丢掉（前端看不到「深度思考」）。
+                r_piece = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if not isinstance(r_piece, str):
+                    r_piece = ""
                 piece = delta.get("content") or ""
                 if r_piece or piece:
                     _meaningful = True

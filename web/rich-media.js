@@ -235,6 +235,10 @@
         const box = btn.closest('.rich-media');
         if (!box) return;
         const on = box.classList.toggle('show-src');
+        // 源码块初始带 .hidden；全局 .hidden { display:none !important } 会压过
+        // .show-src 的 display:block，所以必须同步摘掉这个类，否则按钮看起来失灵。
+        const src = box.querySelector('.rich-media-src');
+        if (src) src.classList.toggle('hidden', !on);
         btn.textContent = on ? '隐藏源码' : '源码';
       };
     });
@@ -264,6 +268,8 @@
         }
         const srcBtn = box.querySelector('[data-rich-source]');
         if (srcBtn) srcBtn.textContent = '源码';
+        const srcEl = box.querySelector('.rich-media-src');
+        if (srcEl) srcEl.classList.add('hidden');
         box.classList.remove('show-src');
       });
     setTimeout(() => {

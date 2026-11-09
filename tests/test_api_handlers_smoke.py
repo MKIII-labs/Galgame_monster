@@ -71,6 +71,24 @@ def test_misc_usage_runs():
     assert h.last()[0] == 200
 
 
+def test_stop_endpoint_accepts_pending_stop():
+    """请求还没登记流时 /api/stop 也要成功，并把信号留到登记时消费。"""
+    from app import store
+
+    sid = "s_pytest_stop_smoke"
+    store.PENDING_STOPS.pop(sid, None)
+    h = FakeHandler({"session_id": sid})
+    misc._api_stop(h)
+    code, obj = h.last()
+    assert code == 200 and obj["ok"] is True
+    assert obj["pending"] is True
+    assert store.consume_stop(sid) is True
+
+    h2 = FakeHandler({})
+    misc._api_stop(h2)
+    assert h2.last()[0] == 400
+
+
 def test_kb_list_and_missing_get():
     h = FakeHandler()
     kb._api_kb_list(h)

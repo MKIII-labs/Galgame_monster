@@ -61,6 +61,7 @@ desktop.ini
 
 # IDE / Agent 过程文件（方案稿等，不随项目发布）
 .trae/
+/.trae-html-share-packages/
 
 # 本地备份归档（旧版本文件与脚本临时产物）
 /_backup/

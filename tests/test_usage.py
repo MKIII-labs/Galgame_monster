@@ -151,3 +151,39 @@ def test_aggregate_by_api(usage_file):
     rows = usage.aggregate_usage("day", 7)["by_api"]
     assert [r["api"] for r in rows] == ["chat", "light"]     # 按 total 倒序
     assert rows[0]["total"] == 11 and rows[1]["calls"] == 1
+
+def test_aggregate_call_stats_and_obs(usage_file):
+    """批 1 观测：单次调用分布 + 前缀/折叠事件必须能从流水里还原"""
+    now = time.time()
+    usage.record_usage({
+        "ts": now, "source": "chat", "prompt": 100, "completion": 10,
+        "total": 110, "cached": 80, "session_id": "s_a",
+        "timing": {
+            "rounds_detail": [{"prompt": 10}, {"prompt": 20}, {"prompt": 30}],
+            "obs": {
+                "fold": 2, "fold_removed": 5, "compress": 1, "overflow": 0,
+                "prefix": {"cold": False, "prefix_ratio": 0.8, "reuse_ratio": 0.7,
+                           "sys_changed": True},
+                "budget": {"level": 2},
+            },
+        },
+    })
+    data = usage.aggregate_usage("day", 30)
+    cs = data["call_stats"]
+    assert cs["count"] == 3
+    assert cs["p50"] == 20
+    assert cs["max"] == 30
+    obs = data["obs_stats"]
+    assert obs["turns"] == 1
+    assert obs["warm"] == 1
+    assert obs["sys_changed"] == 1
+    assert obs["fold"] == 2
+    assert obs["compress"] == 1
+    assert obs["levels"] == {"2": 1}
+
+
+def test_aggregate_call_stats_empty(usage_file):
+    data = usage.aggregate_usage("day", 30)
+    assert data["call_stats"]["count"] == 0
+    assert data["obs_stats"]["turns"] == 0
+    assert data["obs_stats"]["avg_prefix_ratio"] is None

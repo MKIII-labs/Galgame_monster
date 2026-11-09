@@ -74,6 +74,22 @@ def drop(sid):
     _publish(s, "", 0)
 
 
+def refresh(sid, kind=None):
+    """给等待中的交互续期（不改变计数）。
+
+    提问卡可以配置到最长 1 小时；如果只靠 TTL，侧栏的「待回答」会在 15 分钟时
+    被当成陈旧记录清掉。wait_answers 每 30 秒调一次这里，进程崩溃后仍按 TTL 过期。
+    """
+    s = str(sid or "").strip()
+    if not s:
+        return
+    with _lock:
+        cur = _pending.get(s)
+        if not cur or (kind and cur.get("kind") != kind):
+            return
+        cur["at"] = time.time()
+
+
 def snapshot():
     """当前所有待处理会话：{sid: "approval"|"ask"}（顺便淘汰陈旧记录）。"""
     now = time.time()

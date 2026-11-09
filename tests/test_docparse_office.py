@@ -59,3 +59,12 @@ def test_tsv_uses_tab_delimiter():
     text, warn = docparse.extract("score.tsv", raw)
     assert warn == ""
     assert "| 科目 | 分数 |" in text
+
+
+def test_tex_is_treated_as_text():
+    """LaTeX 源文件按纯文本读，不能因为扩展名陌生被当成二进制。"""
+    raw = (b"\\documentclass{article}\n\\begin{document}\n"
+           b"\\section{Intro}\nHello \\LaTeX\n\\end{document}\n")
+    text, warn = docparse.extract("main.tex", raw)
+    assert warn == ""
+    assert "\\documentclass" in text and "\\section{Intro}" in text

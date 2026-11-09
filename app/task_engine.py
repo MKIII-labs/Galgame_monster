@@ -279,7 +279,8 @@ def _spawn(tid):
 # 公开接口
 # ------------------------------------------------------------
 def create_task(title, steps, session_id="", scene="general", intent="",
-                due_at=None, remind_before=None, priority=0, tags=""):
+                due_at=None, remind_before=None, priority=0, tags="",
+                parent_id="", depends_on="", repeat_rule="", estimate_min=0):
     title = str(title or "").strip()
     if not title:
         raise ValueError("任务标题不能为空")
@@ -316,10 +317,13 @@ def create_task(title, steps, session_id="", scene="general", intent="",
     conn = get_db()
     conn.execute(
         "INSERT INTO tasks (id,session_id,scene,title,intent,status,priority,tags,"
+        "due_at,parent_id,depends_on,repeat_rule,estimate_min,sort_order,"
         "created_at,updated_at,started_at,finished_at,error,meta) "
-        "VALUES (?,?,?,?,?, 'pending', ?,?, ?,?,0,0,'',?)",
+        "VALUES (?,?,?,?,?, 'pending', ?,?, ?,?,?,?,?, ?, ?,?,0,0,'',?)",
         (tid, str(session_id or ""), str(scene or "general"), title,
-         str(intent or ""), priority, tags, now, now,
+         str(intent or ""), priority, tags, float(due_ts or 0),
+         str(parent_id or ""), str(depends_on or ""), str(repeat_rule or ""),
+         max(0, int(estimate_min or 0)), now, now, now,
          json.dumps(meta, ensure_ascii=False)))
     for i, st in enumerate(raw_steps):
         if isinstance(st, str):
@@ -370,13 +374,27 @@ def get_task(tid):
     return task
 
 
-def list_tasks(status="", limit=50):
+def list_tasks(status="", limit=50, tag="", priority=None, parent_id=None):
     sql = "SELECT id FROM tasks"
-    args = []
+    where, args = [], []
     if status:
-        sql += " WHERE status=?"
+        where.append("status=?")
         args.append(str(status))
-    sql += " ORDER BY updated_at DESC LIMIT ?"
+    if tag:
+        where.append("tags LIKE ?")
+        args.append("%" + str(tag) + "%")
+    if priority is not None and str(priority) != "":
+        try:
+            where.append("priority=?")
+            args.append(int(priority))
+        except (TypeError, ValueError):
+            pass
+    if parent_id is not None and str(parent_id) != "":
+        where.append("parent_id=?")
+        args.append(str(parent_id))
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY sort_order DESC, updated_at DESC LIMIT ?"
     args.append(int(limit))
     ids = [r["id"] for r in get_db().execute(sql, tuple(args)).fetchall()]
     return [t for t in (get_task(i) for i in ids) if t]
@@ -519,8 +537,57 @@ def delete_task(tid):
     return True
 
 
-def update_task(tid, title=None, priority=None, tags=None):
-    """改任务标题 / 优先级 / 标签（运行中也可改，不影响执行）。"""
+def _coerce_due(value):
+    """截止时间既接受时间戳，也接受「2026-11-03 10:00」这类文本；空 = 0。"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        num = float(raw)
+        if num > 1e9:
+            return num
+    except ValueError:
+        pass
+    from app import calendar
+    ts = calendar.parse_time(raw)
+    if ts is None:
+        raise ValueError("截止时间无法识别")
+    return float(ts)
+
+
+def _next_due(ts, rule):
+    """重复任务的下一截止时间：daily / weekly / monthly；无法计算时返回 0。"""
+    rule = str(rule or "").strip().lower()
+    if not ts:
+        return 0.0
+    if rule == "daily":
+        return float(ts) + 86400
+    if rule == "weekly":
+        return float(ts) + 7 * 86400
+    if rule == "monthly":
+        import datetime
+        d = datetime.datetime.fromtimestamp(float(ts))
+        month = d.month + 1
+        year = d.year + (1 if month > 12 else 0)
+        month = 1 if month > 12 else month
+        import calendar as _cal
+        day = min(d.day, _cal.monthrange(year, month)[1])
+        return datetime.datetime(year, month, day, d.hour, d.minute,
+                                 d.second).timestamp()
+    return 0.0
+
+
+def update_task(tid, title=None, priority=None, tags=None, due_at=None,
+                remind_before=None, parent_id=None, depends_on=None,
+                repeat_rule=None, estimate_min=None, sort_order=None):
+    """改任务字段（运行中也可改，不影响执行）。
+
+    due_at / remind_before 变化时会同步重建「任务截止」日程。
+    """
     task = get_task(tid)
     if task is None:
         return None
@@ -539,6 +606,43 @@ def update_task(tid, title=None, priority=None, tags=None):
             tags = ",".join(str(x).strip() for x in tags if str(x).strip())
         sets.append("tags=?")
         vals.append(str(tags or ""))
+    if parent_id is not None:
+        sets.append("parent_id=?")
+        vals.append(str(parent_id or ""))
+    if depends_on is not None:
+        if isinstance(depends_on, (list, tuple)):
+            depends_on = ",".join(str(x).strip() for x in depends_on if str(x).strip())
+        sets.append("depends_on=?")
+        vals.append(str(depends_on or ""))
+    if repeat_rule is not None:
+        rule = str(repeat_rule or "").strip().lower()
+        if rule not in ("", "daily", "weekly", "monthly"):
+            raise ValueError("重复规则只支持 daily / weekly / monthly")
+        sets.append("repeat_rule=?")
+        vals.append(rule)
+    if estimate_min is not None:
+        sets.append("estimate_min=?")
+        vals.append(max(0, int(estimate_min or 0)))
+    if sort_order is not None:
+        sets.append("sort_order=?")
+        vals.append(float(sort_order))
+
+    meta = dict(task.get("meta") or {})
+    due_changed = due_at is not None
+    new_due = _coerce_due(due_at) if due_changed else float(task.get("due_at") or 0)
+    if due_changed:
+        sets.append("due_at=?")
+        vals.append(float(new_due or 0))
+        remind = meta.get("remind_before", 600) if remind_before is None else remind_before
+        try:
+            remind = max(0, int(remind))
+        except (TypeError, ValueError):
+            remind = 600
+        meta["due_at"] = float(new_due or 0)
+        meta["remind_before"] = remind
+        sets.append("meta=?")
+        vals.append(json.dumps(meta, ensure_ascii=False))
+
     if not sets:
         return task
     sets.append("updated_at=?")
@@ -547,8 +651,80 @@ def update_task(tid, title=None, priority=None, tags=None):
     conn = get_db()
     conn.execute("UPDATE tasks SET %s WHERE id=?" % ", ".join(sets), tuple(vals))
     conn.commit()
+
+    if due_changed:
+        try:
+            from app import calendar
+            calendar.delete_task_event(tid)
+            if new_due:
+                ev = calendar.bind_task_event(
+                    tid, str(title if title is not None else task.get("title") or ""),
+                    float(new_due), remind_before=int(meta.get("remind_before") or 600),
+                    session_id=str(task.get("session_id") or ""))
+                if ev:
+                    meta["event_id"] = ev["id"]
+                    conn.execute("UPDATE tasks SET meta=? WHERE id=?",
+                                 (json.dumps(meta, ensure_ascii=False), str(tid)))
+                    conn.commit()
+                else:
+                    meta.pop("event_id", None)
+        except Exception as e:                       # noqa: BLE001
+            print("[任务] 同步截止日程失败：%s" % e)
     _publish(tid)
     return get_task(tid)
+
+
+def complete_task(tid):
+    """手动标记完成；带 repeat_rule 的任务会顺手生成下一次。"""
+    task = get_task(tid)
+    if task is None:
+        return None
+    if task["status"] == "running":
+        _control(tid)["cancel"].set()
+    _set_status(tid, "done")
+    _publish(tid)
+    nxt = None
+    try:
+        nxt = _spawn_repeat(task)
+    except Exception as e:                           # noqa: BLE001
+        print("[任务] 生成重复任务失败：%s" % e)
+    out = get_task(tid)
+    return {"task": out, "next": nxt}
+
+
+def _spawn_repeat(task):
+    rule = str(task.get("repeat_rule") or "").strip().lower()
+    if not rule:
+        return None
+    due = _next_due(float(task.get("due_at") or 0), rule)
+    meta = task.get("meta") or {}
+    steps = [{"title": s.get("title") or "步骤", "tool": s.get("tool") or "",
+              "args": s.get("args") or {}} for s in (task.get("steps") or [])]
+    return create_task(
+        task.get("title"), steps,
+        session_id=task.get("session_id") or "",
+        scene=task.get("scene") or "general",
+        intent=task.get("intent") or "",
+        due_at=(time.strftime("%Y-%m-%d %H:%M", time.localtime(due)) if due else ""),
+        remind_before=meta.get("remind_before", 600),
+        priority=task.get("priority") or 0,
+        tags=task.get("tags") or "",
+        parent_id=task.get("parent_id") or "",
+        depends_on="",                     # 下一轮不再依赖上一轮的前置
+        repeat_rule=rule,
+        estimate_min=task.get("estimate_min") or 0)
+
+
+def reorder_tasks(ids):
+    """按给定顺序重排任务（看板拖拽用）；只更新 sort_order。"""
+    conn = get_db()
+    now = _now()
+    total = len(ids)
+    for i, tid in enumerate(ids):
+        conn.execute("UPDATE tasks SET sort_order=?, updated_at=? WHERE id=?",
+                     (float(total - i), now, str(tid)))
+    conn.commit()
+    return True
 
 
 _EDITABLE_TASK = ("pending", "paused", "failed")

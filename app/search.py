@@ -15,6 +15,11 @@ from app.config import load_config
 
 # 联网搜索服务商（可在「设置 → 联网搜索」里改地址/密钥）
 SEARCH_PROVIDERS = {
+    "auto": {"name": "自动（免注册引擎链）",
+             "url": "",
+             "hint": "Firecrawl → Keenable → You.com 依次尝试，都不需要注册或密钥，"
+                     "失败自动换下一个；额度耗尽的引擎会冷却一段时间。"
+                     "可在下方填各自的 Key 换用个人额度，或取消勾选把某个引擎移出链。"},
     "deepseek": {"name": "DeepSeek 搜索（复用聊天密钥）",
                  "url": "https://api.deepseek.com/v1/tools/search",
                  "hint": "与聊天 API 同一个 Key，按次计费（5 元 / 1000 次成功请求）；"
@@ -31,6 +36,7 @@ SEARCH_PROVIDERS = {
 MAX_QUERIES = 3        # 单次最多改写几个检索式
 MAX_MERGED = 12        # 合并去重后的结果上限
 FETCH_CHARS = 2500     # 每条正文最多截取多少字
+SCRAPE_TIMEOUT = 30    # 云端抓页（Firecrawl）比本地抓取慢，单独给更长预算
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
@@ -68,9 +74,15 @@ def _deepseek_search_url(chat_url):
 def effective_search_provider(cfg=None):
     """本轮实际使用的服务商（供设置页 / 诊断显示）。"""
     cfg = cfg or load_config()
+    provider = (cfg.get("search_provider") or "auto").strip() or "auto"
+    if provider == "auto":
+        # 总开关关掉后，旧配置里的 auto 按原来的默认服务商处理
+        if bool(cfg.get("search_modsearch_enabled", True)):
+            return "auto"
+        provider = "bocha"
     if not bool(cfg.get("search_prefer_api")) and chat_search_available(cfg):
         return "deepseek"
-    return (cfg.get("search_provider") or "bocha").strip() or "bocha"
+    return provider
 
 
 def get_search_conf():
@@ -81,6 +93,8 @@ def get_search_conf():
     except (TypeError, ValueError):
         count = 5
     count = max(1, min(count, 20))
+    if provider == "auto":               # 引擎链：Key 由 search_engines 按引擎分别读
+        return provider, "", "", count
     if provider == "deepseek":
         # 复用聊天 API 的密钥；用户把 search_url 指到 DeepSeek 代理时尊重它
         from app.config import get_api_conf
@@ -96,6 +110,9 @@ def get_search_conf():
 
 def search_web(query, provider, url, key, count):
     """调用搜索服务，返回 [{title, url, site, snippet}]；失败时抛出异常"""
+    if provider == "auto":               # 免注册引擎链：逐个尝试，全失败才抛
+        from app import search_engines
+        return search_engines.auto_search(query, count)
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     if provider == "deepseek":
         # DeepSeek Search API：正文由下面的抓取链路单独取（need_content=false）
@@ -178,9 +195,10 @@ def search_multi(queries, provider, url, key, count, should_stop=None, merged_ma
     if not queries or (should_stop and should_stop()):
         return []
     per = max(3, count)
-    results, seen = [], set()
+    results, seen, errors = [], set(), []
     ex = ThreadPoolExecutor(max_workers=min(4, len(queries)))
     stopped = False
+    futs = []
     try:
         futs = [(ex.submit(search_web, q, provider, url, key, per), q) for q in queries]
         for fut, q in futs:                 # 按检索式顺序收集，保证结果稳定
@@ -196,6 +214,7 @@ def search_multi(queries, provider, url, key, count, should_stop=None, merged_ma
                     continue
                 except Exception as e:
                     print(f"[搜索] 检索式「{q}」失败：{e}")
+                    errors.append(str(e))
                     break
             if stopped:
                 break
@@ -209,6 +228,10 @@ def search_multi(queries, provider, url, key, count, should_stop=None, merged_ma
                 results.append(it)
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
+    # 一条都没搜到、并且每个检索式都报错：把真实原因抛给上层，
+    # 否则界面会显示成「没有搜到相关结果」，看不出是引擎/密钥的问题。
+    if not results and errors and futs and len(errors) >= len(futs):
+        raise RuntimeError("；".join(dict.fromkeys(errors))[:400])
     try:
         cap = int(merged_max or 0) or MAX_MERGED
     except (TypeError, ValueError):
@@ -217,7 +240,7 @@ def search_multi(queries, provider, url, key, count, should_stop=None, merged_ma
 
 
 # ============================================================
-# 正文抓取（Jina Reader 优先，失败回落直连 + 去标签）
+# 正文抓取（云端浏览器优先，失败回落 Jina Reader / 直连去标签）
 # ============================================================
 
 class _TextExtractor(HTMLParser):
@@ -362,11 +385,22 @@ def _public_get(url, timeout=20, headers=None, max_redirects=3):
     return None
 
 
-def _fetch_one(url, reader="jina", timeout=20, query="", chars=FETCH_CHARS):
-    """抓单个网页正文；失败返回空串。给了 query 就按相关段落截取。"""
+def _fetch_one(url, reader="jina", timeout=20, query="", chars=FETCH_CHARS, cloud=None):
+    """抓单个网页正文；失败返回空串。给了 query 就按相关段落截取。
+
+    顺序：云端浏览器（Firecrawl，能渲染 JS 页面）→ r.jina.ai → 直连去标签。
+    云端那步会把 URL 发给 Firecrawl，所以私网目标直接跳过，只走本地。
+    """
     url = (url or "").strip()
     if not url.lower().startswith("http"):
         return ""
+    if cloud is None:
+        cloud = bool(load_config().get("search_fetch_cloud", True))
+    if cloud and reader != "direct" and not public_url_error(url):
+        from app import search_engines
+        md = search_engines.cloud_fetch(url, timeout=max(SCRAPE_TIMEOUT, timeout))
+        if md:
+            return _excerpt(_tidy(md), query, chars)
     if reader != "direct":
         r = _public_get("https://r.jina.ai/" + url, timeout=timeout,
                         headers={"Accept": "text/plain", "User-Agent": UA})

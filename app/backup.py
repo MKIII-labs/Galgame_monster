@@ -13,9 +13,11 @@ import hashlib
 import io
 import json
 import os
+import secrets
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 import zipfile
 
@@ -127,13 +129,40 @@ def _zip_add(zf, path, data, files):
     files.append({"path": path, "size": len(data), "sha256": _sha256(data)})
 
 
-def export_backup(data_dir=None, db_file=None):
-    """返回 (zip bytes, 文件名)。"""
+class _SinkWriter:
+    """给 zipfile 用的流式写入器：每次 write 立刻交给 sink，同时提供 tell。
+
+    zipfile 写模式只依赖 write / tell，不 seek，所以可以边压缩边发。
+    """
+
+    def __init__(self, sink):
+        self._sink = sink
+        self.pos = 0
+
+    def write(self, data):
+        if data:
+            self._sink(bytes(data))
+            self.pos += len(data)
+        return len(data)
+
+    def tell(self):
+        return self.pos
+
+    def flush(self):
+        pass
+
+
+def backup_name():
+    return "galgame-backup-%s.zip" % time.strftime("%Y%m%d-%H%M%S")
+
+
+def _write_zip(sink, data_dir=None, db_file=None):
+    """把备份内容写进 sink 驱动的 zip；返回 manifest 里的文件清单。"""
     root = _root(data_dir)
     dbf = _db_path(root, db_file)
-    out = io.BytesIO()
     files = []
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+    writer = _SinkWriter(sink)
+    with zipfile.ZipFile(writer, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in _FILE_NAMES:
             data = _read_bytes(os.path.join(root, name))
             if data is not None:
@@ -165,14 +194,37 @@ def export_backup(data_dir=None, db_file=None):
             "files": files,
         }
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-    name = "galgame-backup-%s.zip" % time.strftime("%Y%m%d-%H%M%S")
-    return out.getvalue(), name
+    return files
 
 
-def inspect_backup(data):
-    """只读预检；返回 manifest 与统计。校验失败抛 ValueError。"""
+def export_backup_to(sink, data_dir=None, db_file=None):
+    """边打包边把字节交给 sink，不把整包攒在内存里；返回文件名。"""
+    _write_zip(sink, data_dir, db_file)
+    return backup_name()
+
+
+def export_backup(data_dir=None, db_file=None):
+    """返回 (zip bytes, 文件名)。仍保留给测试 / 同步调用。"""
+    chunks = []
+    name = export_backup_to(chunks.append, data_dir, db_file)
+    return b"".join(chunks), name
+
+
+def _open_zip(src):
+    if isinstance(src, (bytes, bytearray)):
+        return zipfile.ZipFile(io.BytesIO(src))
+    return zipfile.ZipFile(src)
+
+
+def inspect_backup(src, progress=None):
+    """只读预检；返回 manifest 与统计。校验失败抛 ValueError。
+
+    src 可以是 bytes，也可以是磁盘路径（大备份用路径，避免整包进内存）。
+    progress(done, total) 在校验哈希时按约 0.2s 的间隔回调。
+    """
     try:
-        zf = zipfile.ZipFile(io.BytesIO(data))
+        zf = _open_zip(src)
+        size_in = len(src) if isinstance(src, (bytes, bytearray)) else os.path.getsize(src)
     except Exception as e:
         raise ValueError("不是有效的 ZIP 备份：%s" % e)
     with zf:
@@ -192,13 +244,19 @@ def inspect_backup(data):
         if total > MAX_BACKUP_BYTES:
             raise ValueError("备份解压后 %d MB，超过上限 %d MB，已拒绝"
                              % (total // 1024 // 1024, MAX_BACKUP_BYTES // 1024 // 1024))
-        if total > MAX_BACKUP_RATIO_MIN and total > max(1, len(data)) * MAX_BACKUP_RATIO:
+        if total > MAX_BACKUP_RATIO_MIN and total > max(1, size_in) * MAX_BACKUP_RATIO:
             raise ValueError("备份压缩比异常（解压后 %d MB / 压缩后 %d MB），已拒绝"
-                             % (total // 1024 // 1024, len(data) // 1024 // 1024))
+                             % (total // 1024 // 1024, size_in // 1024 // 1024))
         files = manifest.get("files") or []
         if not isinstance(files, list):
             raise ValueError("manifest.files 格式错误")
+        if progress:
+            try:
+                progress(0, total)
+            except Exception:
+                pass
         seen = 0
+        last_tick = 0.0
         for item in files:
             if not isinstance(item, dict):
                 raise ValueError("manifest.files 条目格式错误")
@@ -222,8 +280,21 @@ def inspect_backup(data):
                         raise ValueError("备份解压后超过 %d MB，已拒绝"
                                          % (MAX_BACKUP_BYTES // 1024 // 1024))
                     digest.update(chunk)
+                    if progress:
+                        now = time.time()
+                        if now - last_tick >= 0.2:
+                            last_tick = now
+                            try:
+                                progress(seen, total)
+                            except Exception:
+                                pass
             if size != int(item.get("size") or 0) or digest.hexdigest() != item.get("sha256"):
                 raise ValueError("文件校验失败：%s" % path)
+        if progress:
+            try:
+                progress(max(seen, total), total)
+            except Exception:
+                pass
         return {
             "manifest": manifest,
             "summary": manifest.get("counts") or {},
@@ -231,10 +302,98 @@ def inspect_backup(data):
         }
 
 
-def _safe_extract(data, root):
-    """把 payload/ 解到临时目录；返回临时目录路径。"""
+# ---------------------------------------------------------------- 预检任务（带进度）
+
+_PREFLIGHT_JOBS = {}
+_PREFLIGHT_LOCK = threading.Lock()
+_PREFLIGHT_TTL = 600          # 10 分钟没取走的任务连同临时文件一起清掉
+
+
+def _remove_quiet(path):
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _gc_preflight(now=None):
+    now = now or time.time()
+    with _PREFLIGHT_LOCK:
+        stale = [k for k, v in _PREFLIGHT_JOBS.items()
+                 if now - float(v.get("created") or 0) > _PREFLIGHT_TTL]
+        for jid in stale:
+            job = _PREFLIGHT_JOBS.pop(jid, None)
+            if job:
+                _remove_quiet(job.get("path"))
+
+
+def start_preflight_job(path):
+    """对已落盘的备份文件启动后台预检；返回任务 id。"""
+    _gc_preflight()
+    jid = secrets.token_urlsafe(12)
+    with _PREFLIGHT_LOCK:
+        _PREFLIGHT_JOBS[jid] = {
+            "state": "running", "done": 0, "total": 0, "created": time.time(),
+            "path": path, "result": None, "error": "",
+        }
+    threading.Thread(target=_run_preflight, args=(jid, path), daemon=True).start()
+    return jid
+
+
+def _run_preflight(jid, path):
+    def progress(done, total):
+        with _PREFLIGHT_LOCK:
+            job = _PREFLIGHT_JOBS.get(jid)
+            if job:
+                job["done"] = int(done)
+                job["total"] = int(total)
+
+    try:
+        info = inspect_backup(path, progress=progress)
+        with _PREFLIGHT_LOCK:
+            job = _PREFLIGHT_JOBS.get(jid)
+            if job:
+                job["state"] = "done"
+                job["result"] = info
+                job["done"] = job.get("total") or job.get("done") or 0
+    except Exception as e:                       # noqa: BLE001  预检失败要原样告诉前端
+        with _PREFLIGHT_LOCK:
+            job = _PREFLIGHT_JOBS.get(jid)
+            if job:
+                job["state"] = "error"
+                job["error"] = str(e)
+    finally:
+        _remove_quiet(path)
+
+
+def preflight_job_status(jid):
+    """返回任务进度；done / error 状态取一次后就从表里删掉。"""
+    with _PREFLIGHT_LOCK:
+        job = _PREFLIGHT_JOBS.get(jid)
+        if not job:
+            return None
+        total = int(job.get("total") or 0)
+        done = int(job.get("done") or 0)
+        out = {
+            "state": job["state"],
+            "done": done,
+            "total": total,
+            "pct": int(min(100, done * 100 / total)) if total else 0,
+        }
+        if job["state"] == "done":
+            out["result"] = job["result"]
+            _PREFLIGHT_JOBS.pop(jid, None)
+        elif job["state"] == "error":
+            out["error"] = job["error"]
+            _PREFLIGHT_JOBS.pop(jid, None)
+        return out
+
+
+def _safe_extract(src, root):
+    """把 payload/ 解到临时目录；返回临时目录路径。src 可以是 bytes 或文件路径。"""
     tmp = tempfile.mkdtemp(prefix=".restore-", dir=root)
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+    with _open_zip(src) as zf:
         for info in zf.infolist():
             name = info.filename
             if not name.startswith("payload/"):

@@ -29,11 +29,16 @@ PDF_TEXT_MIN_PER_PAGE = 5    # 每页平均正常字符少于这个数 → 认�
 PDF_SANE_MIN = 0.60          # 抽取结果的「正常字符」占比低于此 → 认定乱码，转视觉
 PDF_MAX_OCR_PAGES = 60       # 走视觉识别时最多处理多少页（控制耗时与 token 花费）
 PDF_RENDER_SCALE = 2.0       # 渲染倍率（2.0 ≈ 144dpi，够 OCR 用且体积可控）
+# 扫描件逐页识图时的提示词：逐字、保顺序、表格/公式可读，禁止总结
+PDF_PAGE_OCR_PROMPT = (
+    "这是 PDF 的一页。请把这一页的全部文字**逐字**识别出来，"
+    "保持原有顺序与分段；表格用 Markdown 表格、公式用 LaTeX。"
+    "不要总结、不要补充、不要遗漏。")
 PDF_JPEG_QUALITY = 80
 
 # 明确按纯文本处理的扩展名
 TEXT_EXT = {
-    ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml",
+    ".txt", ".md", ".markdown", ".tex", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml",
     ".log", ".ini", ".conf", ".env", ".html", ".htm", ".xml", ".css", ".js", ".mjs",
     ".ts", ".tsx", ".jsx", ".py", ".java", ".c", ".h", ".cpp", ".hpp", ".cs", ".go",
     ".rs", ".rb", ".php", ".sh", ".bat", ".ps1", ".sql", ".lua", ".kt", ".swift",
@@ -199,7 +204,7 @@ def _csv_table(raw, ext):
     return "\n".join(lines), warn
 
 
-def _pdfium_text_pages(raw):
+def _pdfium_text_pages(raw, progress=None):
     """pypdfium2 兜底抽文本（pypdf 抽不到时用）。返回每页文本列表。"""
     try:
         import pypdfium2 as pdfium
@@ -207,8 +212,14 @@ def _pdfium_text_pages(raw):
         return []
     try:
         doc = pdfium.PdfDocument(raw)
+        total = len(doc)
         out = []
-        for i in range(len(doc)):
+        for i in range(total):
+            if progress:
+                try:
+                    progress(i + 1, total, "text")
+                except Exception:            # noqa: BLE001  进度回调不该影响解析
+                    pass
             try:
                 out.append(doc[i].get_textpage().get_text_range() or "")
             except Exception:
@@ -218,10 +229,11 @@ def _pdfium_text_pages(raw):
         return []
 
 
-def _pdf_text(raw):
+def _pdf_text(raw, progress=None):
     """抽取 PDF 文本。返回 (text, warn, needs_ocr)。
 
     needs_ocr=True 表示「没有文本层」或「抽出来是乱码」—— 调用方应改走视觉识别。
+    progress(done, total, stage)：逐页读取 / 识别进度，供前端显示（可选）。
     """
     pages, warn = [], ""
     try:
@@ -231,7 +243,13 @@ def _pdf_text(raw):
     else:
         try:
             reader = PdfReader(io.BytesIO(raw))
-            for pg in reader.pages:
+            total = len(reader.pages)
+            for i, pg in enumerate(reader.pages):
+                if progress:
+                    try:
+                        progress(i + 1, total, "text")
+                    except Exception:        # noqa: BLE001
+                        pass
                 try:
                     pages.append(pg.extract_text() or "")
                 except Exception:
@@ -241,7 +259,7 @@ def _pdf_text(raw):
             pages = []
 
     if not any(p.strip() for p in pages):      # 一个字都没抽到 → 换 pypdfium2 再试
-        alt = _pdfium_text_pages(raw)
+        alt = _pdfium_text_pages(raw, progress=progress)
         if any(p.strip() for p in alt):
             pages = alt
             warn = ""
@@ -258,7 +276,7 @@ def _pdf_text(raw):
     return joined, warn, False
 
 
-def _pdf_render_pages(raw, max_pages=PDF_MAX_OCR_PAGES):
+def _pdf_render_pages(raw, max_pages=PDF_MAX_OCR_PAGES, progress=None):
     """把 PDF 逐页渲染成 JPEG 字节，供视觉模型识别。返回 ([(页码, jpeg), …], 总页数)。"""
     try:
         import pypdfium2 as pdfium
@@ -270,7 +288,13 @@ def _pdf_render_pages(raw, max_pages=PDF_MAX_OCR_PAGES):
     except Exception:
         return [], 0
     out = []
-    for i in range(min(total, max_pages)):
+    limit = min(total, max_pages)
+    for i in range(limit):
+        if progress:
+            try:
+                progress(i + 1, limit, "render")
+            except Exception:            # noqa: BLE001  进度回调不该影响解析
+                pass
         try:
             pil = doc[i].render(scale=PDF_RENDER_SCALE).to_pil().convert("RGB")
             buf = io.BytesIO()
@@ -281,16 +305,22 @@ def _pdf_render_pages(raw, max_pages=PDF_MAX_OCR_PAGES):
     return out, total
 
 
-def _pdf_ocr(raw, ocr, max_pages=PDF_MAX_OCR_PAGES):
+def _pdf_ocr(raw, ocr, max_pages=PDF_MAX_OCR_PAGES, progress=None):
     """扫描件 / 乱码 PDF：逐页交给视觉模型。ocr(jpeg_bytes) -> 文本。
 
+    progress(done, total, "ocr")：每页识别前回调一次，用于前端显示进度。
     返回 (text, warn, 成功页数)。
     """
-    shots, total = _pdf_render_pages(raw, max_pages)
+    shots, total = _pdf_render_pages(raw, max_pages, progress=progress)
     if not shots:
         return "", "PDF 逐页渲染失败（缺少 pypdfium2，或文件已损坏）。", 0
     parts, ok, fail = [], 0, 0
     for pno, jpg in shots:
+        if progress:
+            try:
+                progress(pno, total or len(shots), "ocr")
+            except Exception:            # noqa: BLE001  进度回调不该影响解析
+                pass
         try:
             t = (ocr(jpg) or "").strip()
         except Exception as e:
@@ -312,11 +342,12 @@ def _pdf_ocr(raw, ocr, max_pages=PDF_MAX_OCR_PAGES):
     return "\n\n".join(parts), warn, ok
 
 
-def extract(name, raw, ocr=None):
+def extract(name, raw, ocr=None, progress=None):
     """返回 (text, warn)。text 为 None 表示不支持或失败，warn 是给用户看的说明。
 
     ocr：可选回调，`ocr(jpeg_bytes) -> str`。传入后，PDF 若是扫描件或乱码，
     会自动逐页渲染并调用它做视觉识别（不传则只返回提示）。
+    progress：可选回调，`progress(done, total, stage)`，stage 为 "text" / "ocr"。
     """
     if not raw:
         return None, "文件是空的"
@@ -345,10 +376,10 @@ def extract(name, raw, ocr=None):
             return None, cwarn
         warn = cwarn
     elif ext == ".pdf":
-        text, warn, needs_ocr = _pdf_text(raw)
+        text, warn, needs_ocr = _pdf_text(raw, progress=progress)
         if needs_ocr:
             if ocr is not None:
-                otext, owarn, okn = _pdf_ocr(raw, ocr)
+                otext, owarn, okn = _pdf_ocr(raw, ocr, progress=progress)
                 if okn:
                     return otext, owarn
                 warn = owarn or warn

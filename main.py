@@ -245,95 +245,6 @@ def _kill_stale_tree(pid):
         time.sleep(0.1)
 
 
-def _window_reconnected(seconds):
-    """最多等 seconds 秒；期间出现 SSE 客户端就认为窗口重新打开了。"""
-    from app import httpd as _httpd
-    end = time.monotonic() + max(0.0, float(seconds or 0))
-    while True:
-        if _httpd.active_clients() > 0:
-            return True
-        if time.monotonic() >= end:
-            return False
-        time.sleep(0.2)
-
-
-def _wait_clients_gone():
-    """等到所有界面都断开（连续 1.5 秒没有 SSE 客户端）。"""
-    from app import httpd as _httpd
-    idle = 0
-    while True:
-        if _httpd.active_clients() <= 0:
-            idle += 1
-            if idle >= 3:
-                return
-        else:
-            idle = 0
-        time.sleep(0.5)
-
-
-def _active_stream_count():
-    """当前还有几个会话在生成（app.store.ACTIVE_STREAMS）。"""
-    try:
-        from app.store import ACTIVE_STREAMS
-        return len(ACTIVE_STREAMS)
-    except Exception:
-        return 0
-
-
-def _background_job_count():
-    """还有几个后台长任务在跑：子代理批次 + 自动化目标。
-
-    它们不在 ACTIVE_STREAMS 里（不是对话回合），但同样是用户交给程序的任务；
-    关窗后如果只等对话流，回合一结束进程就退出，后台线程会被一起杀掉。
-    任何一个模块读失败都按 0 计——保活逻辑不能反过来把进程卡死。
-    """
-    n = 0
-    try:
-        from app import explore
-        n += int(explore.running_count() or 0)
-    except Exception:
-        pass
-    try:
-        from app import autopilot
-        n += int(autopilot.running_count() or 0)
-    except Exception:
-        pass
-    return n
-
-
-def _pending_job_count():
-    """对话回合 + 后台长任务的合计，退出判断统一用它。"""
-    return _active_stream_count() + _background_job_count()
-
-
-def _wait_streams_grace(minutes, keep_alive=False):
-    """窗口退出后给正在生成的任务留一段保活时间。
-
-    浏览器窗口没了不等于任务结束：断线期间任务仍在跑，跑完会正常落库。
-    以前窗口一关就 shutdown，正在生成的回合被杀掉，下次启动只能从旧快照
-    「继续任务」，表现为同一段内容反复重来（NOTE 43.168）。
-
-    keep_alive=True（默认，对齐 dsh 的「任务与 UI 解耦」）时一直等到
-    最后一个任务结束，不再用分钟数硬砍；False 时退回旧行为。
-    """
-    try:
-        minutes = float(minutes or 0)
-    except (TypeError, ValueError):
-        minutes = 0
-    if not keep_alive and minutes <= 0:
-        return
-    deadline = None if keep_alive else time.monotonic() + minutes * 60
-    while True:
-        n = _pending_job_count()
-        if n <= 0:
-            _log("grace: streams/background jobs finished")
-            return
-        if deadline is not None and time.monotonic() >= deadline:
-            _log("grace: timeout with %d pending job(s)" % n)
-            return
-        time.sleep(2)
-
-
 def _message_box(text):
     try:
         import ctypes
@@ -548,7 +459,6 @@ def main():
     print("=" * 56)
 
     proc, used_shell = open_app_window(url)
-    _window_closed = False        # 只有「窗口自己退出了」才走保活宽限（Ctrl+C 立即退出）
     _log("app window pid=%s shell=%s" % (getattr(proc, "pid", None), used_shell))
 
     # Electron 壳的顶栏是网页自绘的，不需要 DWM 上色；
@@ -584,35 +494,13 @@ def main():
         else:
             try:
                 proc.wait()
-                _window_closed = True
             except KeyboardInterrupt:
                 pass
 
-    if _window_closed:
-        try:
-            from app.config import load_config
-            _cfg = load_config()
-            _grace = _cfg.get("chat_window_grace_min", 10)
-            _keep = bool(_cfg.get("chat_window_keep_alive", True))
-        except Exception:
-            _grace, _keep = 10, True
-        while True:
-            _n = _pending_job_count()
-            if _n > 0:
-                _log("window closed with %d pending job(s) (streams+background); "
-                     "keep_alive=%s grace=%s min" % (_n, _keep, _grace))
-                _wait_streams_grace(_grace, keep_alive=_keep)
-                continue          # 任务结束后再看一眼：这段时间可能已经重开了窗口
-            # 没有任务：给 5 秒重连窗口（关窗后立刻重开 / 刷新都算）。
-            # 以前这里直接 shutdown，于是「重开的新窗口指向一个刚停掉的服务」——
-            # 界面停在「后台运行中」，看不到输出、也终止不了。
-            if _window_reconnected(5.0):
-                _log("client reconnected; keep serving")
-                _wait_clients_gone()
-                continue
-            break
-
-    _log("browser window exited (code=%s); shutting down"
+    # 窗口关闭 = 立即停止：不再等生成中的任务，也不再留 5 秒重连窗口。
+    # 后台保活曾在关窗后继续跑最多 10 分钟（或无限等），带来一堆「关不掉 /
+    # 后台运行中 / 重开连不上」的问题；现在窗口一关就退出进程。
+    _log("browser window exited (code=%s); shutting down now"
          % (getattr(proc, "returncode", None) if proc is not None else "n/a"))
     try:
         httpd.shutdown()

@@ -6,8 +6,9 @@ import os
 import queue
 import secrets
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 
 from app.store import APP_VERSION, WEB_DIR
@@ -19,6 +20,7 @@ from app import speech
 from app import agent
 from app import events
 from app import scheduler
+from app import share
 
 
 # ---- 以下模块由 P1 重构从本文件抽出（原为同文件的模块级函数） ----
@@ -32,6 +34,7 @@ from app.api import sessions
 from app.api import savepoints
 from app.api import kb
 from app.api import notes
+from app.api import anno as anno_api          # noqa: F401  统一批注 / 文献条目 / 导出
 from app.api import gal_character
 from app.api import gal_script
 from app.api import gal_media
@@ -70,6 +73,9 @@ from app.api import plugins as plugins_api  # noqa: F401  插件：工具插件 
 from app.api import explore as explore_api  # noqa: F401  后台探索批次：前端轮询进度
 from app.api import image as image_api  # noqa: F401  自注册 /api/image/* 路由（本地 ComfyUI 出图）
 from app.api import agents as agents_api  # noqa: F401  自注册 /api/agents 路由（子代理定义）
+from app.api import aside as aside_api  # noqa: F401  自注册 /api/aside/stream 路由（Solo 旁注提问）
+from app.api import share as share_api  # noqa: F401  自注册 /api/share/save 路由（分享页落盘）
+from app.api import reader as reader_api  # noqa: F401  自注册 /api/reader/* 路由（PDF 沉浸式阅读）
 from app.api import computer_bridge
 
 TOKEN = secrets.token_urlsafe(24)
@@ -223,6 +229,54 @@ class Handler(BaseHTTPRequestHandler):
         self._body_read = True
         return raw
 
+    def _body_to_file(self, path):
+        """把请求体按 1MB 分块写进文件（大备份不占内存）。返回写入字节数。"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        remaining = max(0, length)
+        with open(path, "wb") as f:
+            while remaining > 0:
+                chunk = self.rfile.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                f.write(chunk)
+                remaining -= len(chunk)
+        self._body_read = True
+        return max(0, length - remaining)
+
+    # ---------- 流式响应（chunked） ----------
+    def chunked_start(self, ctype, filename=None):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header("Content-Disposition",
+                             'attachment; filename="%s"' % filename)
+        for k, v in SECURITY_HEADERS:
+            self.send_header(k, v)
+        self.end_headers()
+
+    def chunk(self, data):
+        if not data:
+            return
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        self.wfile.write(("%x\r\n" % len(data)).encode("ascii") + data + b"\r\n")
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+
+    def chunked_end(self):
+        try:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except Exception:
+            pass
+
     def _authed(self):
         return self.headers.get("X-Auth-Token") == TOKEN
 
@@ -251,6 +305,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path.startswith("/static/"):
             return self._static(path[len("/static/"):])
+        if path.startswith("/share/"):
+            # 分享页：链接本身就是凭证（随机 id，不列目录），因此不校验 X-Auth-Token
+            if not self._host_ok():
+                return self._send(403, "forbidden", "text/plain; charset=utf-8")
+            data = share.read(path[len("/share/"):])
+            if data is None:
+                return self._send(404, "not found", "text/plain; charset=utf-8")
+            return self._send(200, data, "text/html; charset=utf-8")
+        if path.startswith("/archify/"):
+            # 对话内嵌图卡：iframe 带不了 X-Auth-Token，和 /share/ 一样把 URL 当凭证。
+            # 只读 data/archify/<会话 id>/ 内的产物，并注入高度上报脚本。
+            if not self._host_ok():
+                return self._send(403, "forbidden", "text/plain; charset=utf-8")
+            from app import archify as archify_lib
+            rest = unquote(path[len("/archify/"):])
+            sid, _, rel = rest.partition("/")
+            data = archify_lib.read_for_view(sid, rel)
+            if data is None:
+                return self._send(404, "not found", "text/plain; charset=utf-8")
+            return self._send(200, data, "text/html; charset=utf-8", cache="no-store")
         if path.startswith("/api/"):
             # 扩展桥用自己的 X-Bridge-Key 鉴权（扩展拿不到每进程随机的 X-Auth-Token）
             if path == "/api/computer/bridge/poll":
@@ -325,6 +399,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
 
     def _do_post(self):
+        # keep-alive 下 Handler 实例会复用：清掉上一次 /api/chat 留下的流上下文，
+        # 否则后续请求抛异常时会把上一轮（甚至新一轮）的流租约误当成本次的清理目标。
+        self._chat_sid = ""
+        self._chat_ev = None
+        self._chat_sse = False
         path = urlparse(self.path).path
         if not path.startswith("/api/"):
             return self._send(404, "not found", "text/plain; charset=utf-8")
@@ -372,7 +451,10 @@ class Handler(BaseHTTPRequestHandler):
             "/api/profile": misc._api_save_profile,
             "/api/message/withdraw": sessions._api_message_withdraw,
             "/api/attach/get": sessions._api_attach_get,
+            "/api/attach/reparse": sessions._api_attach_reparse,
+            "/api/attach/text": sessions._api_attach_text,
             "/api/kb/list": kb._api_kb_list,
+            "/api/kb/nodes": kb._api_kb_nodes,
             "/api/kb/get": kb._api_kb_get,
             "/api/kb/create": kb._api_kb_create,
             "/api/kb/delete": kb._api_kb_delete,
@@ -408,6 +490,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/sandbox/new": sandbox._api_sandbox_new,
             "/api/sandbox/rename": sandbox._api_sandbox_rename,
             "/api/sandbox/delete": sandbox._api_sandbox_delete,
+            "/api/sandbox/copy": sandbox._api_sandbox_copy,
+            "/api/sandbox/reveal": sandbox._api_sandbox_reveal,
             "/api/sandbox/search": sandbox._api_sandbox_search,
             "/api/sandbox/open_vscode": sandbox._api_sandbox_open_vscode,
             "/api/gal/characters": gal_character._api_gal_characters,
@@ -457,6 +541,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/notes/graph": notes._api_notes_graph,
             "/api/notes/backlinks": notes._api_notes_backlinks,
             "/api/notes/search": notes._api_notes_search,
+            "/api/notes/anno/list": notes._api_notes_anno_list,
+            "/api/notes/anno/save": notes._api_notes_anno_save,
+            "/api/notes/anno/delete": notes._api_notes_anno_delete,
             # 功能大厅（新玩法按 /api/hall/<功能id>/… 分组挂在这里）
             "/api/hall/geo/new": hall._api_hall_geo_new,
             "/api/hall/geo/guess": hall._api_hall_geo_guess,
@@ -522,7 +609,35 @@ class Handler(BaseHTTPRequestHandler):
             fn(self)
         except Exception as e:
             print(f"[服务] {path} 出错：{e}")
-            self._json({"error": str(e)}, 500)
+            # 只打一行 message 定位不到代码（历史上 43 次
+            # "dictionary update sequence element #0 has length 1" 都只能靠猜）。
+            # 完整堆栈走 sys.stderr → data/app.log（main.py 的 _pipe_output 接管）。
+            traceback.print_exc()
+            # 聊天流已经切到 SSE：不能再写 HTTP 状态行 / JSON（会污染流，前端解析失败后
+            # 一直停在「模型输出中」）。补一条 done 收尾，并释放流租约。
+            sid = str(getattr(self, "_chat_sid", "") or "")
+            if sid:
+                try:
+                    from app.api.chat import abort_chat_stream
+                    abort_chat_stream(sid, getattr(self, "_chat_ev", None), str(e))
+                except Exception:            # noqa: BLE001
+                    pass
+            if getattr(self, "_chat_sse", False):
+                try:
+                    msg = json.dumps({"type": "done", "stopped": True,
+                                      "error": "服务端异常，本轮已中断：%s" % e,
+                                      "blocks": [], "tools": []},
+                                     ensure_ascii=False)
+                    self.wfile.write(("data: " + msg + "\n\n").encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:            # noqa: BLE001  连不上就算了，attach 会补
+                    pass
+                self.close_connection = True
+                return
+            try:
+                self._json({"error": str(e)}, 500)
+            except Exception:                # noqa: BLE001
+                self.close_connection = True
 
     # ---------- 静态资源 ----------
     def _static(self, rel):

@@ -67,3 +67,39 @@ def test_save_progress_does_not_mark_interrupted(monkeypatch):
     assert sessions._mark_resume_pending(data) is True
     assert m["interrupted"] is True
     assert m["end_reason"]["kind"] == "resume"
+
+
+def test_save_progress_inplace_for_continue(monkeypatch):
+    """续写（继续输出 / 断点续跑）：原地更新目标消息，不再新增第二条输出块。
+
+    现场：续跑后进度快照被写成一条新消息，下次请求开始时又把它降级成普通消息，
+    结果同一轮输出被拆成「旧回答 + 只含新段落的块」，计划卡也停在旧块。
+    """
+    from app.api import chat
+
+    data = {"sessions": [{"id": "s1", "messages": [
+        {"role": "user", "content": "做任务"},
+        {"role": "assistant", "content": "原来写好的内容"},
+    ]}]}
+    monkeypatch.setattr(chat, "load_sessions", lambda: data)
+    monkeypatch.setattr(chat, "find_session",
+                        lambda d, sid: d["sessions"][0] if sid == "s1" else None)
+    monkeypatch.setattr(chat, "_persist_session", lambda s: None)
+
+    chat._save_progress("s1", "新的续写内容", [{"tool": "read_file"}],
+                        {"steps": [{"text": "收尾", "status": "doing"}]},
+                        inplace_base="原来写好的内容")
+    msgs = data["sessions"][0]["messages"]
+    assert len(msgs) == 2                          # 没有多出一条输出块
+    last = msgs[-1]
+    assert last["content"] == "原来写好的内容新的续写内容"
+    assert last["_cont_base"] == "原来写好的内容"
+    assert last["_progress"] is True
+    assert last["plan"]["steps"][0]["status"] == "doing"
+
+    # 下一次快照仍以原文为基：内容替换而不是叠加，避免重复拼接
+    chat._save_progress("s1", "又写了一点", None, None,
+                        inplace_base="原来写好的内容")
+    assert msgs[-1]["content"] == "原来写好的内容又写了一点"
+    assert msgs[-1]["_cont_base"] == "原来写好的内容"
+    assert len(msgs) == 2

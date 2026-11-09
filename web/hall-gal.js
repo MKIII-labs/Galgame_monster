@@ -92,7 +92,7 @@ async function galHallEnter(newOne) {
       gal_use_kb: GAL_HALL.flags.kb,
       gal_use_rules: GAL_HALL.flags.rules,
     }));
-    applySessionsPayload(r.sessions);
+    applySessionsPayload(r.sessions, { keepCurrent: false });
     sid = r.sessions.current;
   }
   await api('/api/gal/session', Object.assign({

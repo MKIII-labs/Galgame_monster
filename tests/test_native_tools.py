@@ -97,7 +97,8 @@ def test_compress_pins_task_ledger(tmp_path, monkeypatch):
     task_state.note_write(s, "main.js")
     captured = {}
 
-    def fake_quick(api_key, api_url, api_model, req, max_tokens=0, source=""):
+    def fake_quick(api_key, api_url, api_model, req, max_tokens=0, source="",
+                   stop_event=None, **kwargs):
         captured["req"] = req
         return "【摘要】测试\n【要点】\n- 继续"
 

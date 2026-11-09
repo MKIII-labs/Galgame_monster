@@ -132,14 +132,6 @@ def test_sse_client_counter():
     assert httpd.active_clients() == base
 
 
-def test_window_reconnected_checks_sse_clients(monkeypatch):
-    import main
-    monkeypatch.setattr(httpd, "active_clients", lambda: 1)
-    assert main._window_reconnected(0.3) is True
-    monkeypatch.setattr(httpd, "active_clients", lambda: 0)
-    assert main._window_reconnected(0.2) is False
-
-
 def test_kill_stale_tree_never_kills_self(monkeypatch):
     import os
 

@@ -17,6 +17,29 @@ def _api_kb_list(h):
         h._json({"ok": True, "kbs": load_kb_index()["kbs"]})
 
 
+def _api_kb_nodes(h):
+        """扁平列出所有知识库条目（输入框 #doc 菜单用），只回定位信息。"""
+        body = h._body()
+        q = str(body.get("q") or "").strip().lower()
+        out = []
+        for item in load_kb_index().get("kbs") or []:
+            kb = load_kb(item.get("id"))
+            if not kb:
+                continue
+            for n in kb.get("nodes") or []:
+                title = str(n.get("title") or "").strip()
+                if not title:
+                    continue
+                cat = str(n.get("category") or "")
+                if q and q not in title.lower() and q not in cat.lower():
+                    continue
+                out.append({"kb": item.get("id"), "node": n.get("id"),
+                            "title": title, "category": cat})
+                if len(out) >= 200:
+                    return h._json({"ok": True, "items": out})
+        return h._json({"ok": True, "items": out})
+
+
 def _api_kb_get(h):
         kb = load_kb(h._body().get("id"))
         if not kb:
@@ -244,6 +267,16 @@ def _api_context_compress(h):
         def reply(ok, message):
             h._json({"ok": ok, "message": message,
                         "sessions": slim_sessions(data), "context": current_context(data)})
+
+        # 生成中的会话不压缩：压缩用开始时的快照，生成结束落库会把它覆盖掉。
+        # 用 stream_alive（看最近一次 SSE 事件）而不是只看 ACTIVE_STREAMS，
+        # 否则崩溃 / 断线留下的残条目会让按钮永远停在「正在生成」。
+        try:
+            from app.api.chat import stream_alive
+            if stream_alive(s["id"]):
+                return reply(False, "该会话正在生成回复，请等这一轮结束后再压缩")
+        except Exception:                    # noqa: BLE001  状态探测失败不阻断压缩
+            pass
 
         msgs = s.get("messages") or []
         cut = int(s.get("summary_upto") or 0)

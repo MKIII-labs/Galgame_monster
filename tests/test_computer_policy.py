@@ -78,7 +78,9 @@ def test_session_grant(monkeypatch):
 
 
 # ---------------------------------------------------------------- file://
-def test_file_requires_sandbox_and_html(tmp_path):
+def test_file_requires_sandbox_and_html(tmp_path, monkeypatch):
+    # 用例不依赖本机真实配置：锁定为 ask 档位
+    monkeypatch.setattr(policy, "_cfg", lambda: {})
     page = tmp_path / "a.html"
     page.write_text("<html></html>", encoding="utf-8")
     txt = tmp_path / "a.txt"
@@ -112,3 +114,56 @@ def test_unsupported_scheme():
 def test_host_of():
     assert policy.host_of("https://a.example.com:8080/x") == "a.example.com"
     assert policy.host_of("file:///D:/a.html") == ""
+
+
+# ---------------------------------------------------------------- 站点授权档位
+def test_site_mode_legacy_mapping():
+    assert policy.site_mode({}) == "ask"
+    assert policy.site_mode({"computer_browser_unrestricted": True}) == "allow"
+    assert policy.site_mode({"computer_site_mode": "auto"}) == "auto"
+    assert policy.site_mode({"computer_site_mode": "bogus",
+                             "computer_browser_unrestricted": True}) == "allow"
+    # 升级期间可能被默认值写成 ask、旧键仍为 true：按旧键放行，避免突然收紧
+    assert policy.site_mode({"computer_site_mode": "ask",
+                             "computer_browser_unrestricted": True}) == "allow"
+
+
+def test_site_mode_auto_allows_safe_and_asks_suspicious(monkeypatch):
+    monkeypatch.setattr(policy, "_cfg", lambda: {"computer_site_mode": "auto"})
+    assert policy.check("https://example.com/x")[0] == "allow"
+    assert policy.check("http://example.com/x")[0] == "ask"        # 明文 http
+    assert policy.check("https://10.0.0.5/x")[0] == "ask"          # 裸 IP
+    assert policy.check("https://example.com:8443/x")[0] == "ask"  # 非常规端口
+    assert policy.check("https://xn--fiqs8s.com/")[0] == "ask"     # punycode
+    assert policy.check("https://intranet/")[0] == "ask"           # 无点主机名
+    assert policy.check("http://127.0.0.1:3000/")[0] == "allow"    # 本机开发服务
+
+
+def test_site_mode_allow_and_ask(monkeypatch):
+    monkeypatch.setattr(policy, "_cfg", lambda: {"computer_site_mode": "allow"})
+    assert policy.check("http://example.com/")[0] == "allow"
+    monkeypatch.setattr(policy, "_cfg", lambda: {"computer_site_mode": "ask"})
+    assert policy.check("https://example.com/")[0] == "ask"
+
+
+def test_site_list_accepts_legacy_string(monkeypatch):
+    monkeypatch.setattr(policy, "_cfg",
+                        lambda: {"computer_sites": "example.com\n*.foo.com"})
+    assert policy.check("https://example.com/")[0] == "allow"
+    assert policy.check("https://a.foo.com/")[0] == "allow"
+    assert policy.check("https://bar.com/")[0] == "ask"
+
+
+def test_save_config_normalizes_site_lists(monkeypatch):
+    """旧客户端把列表存成字符串；保存时统一成数组，策略层和设置页都按数组处理。"""
+    from app import config
+    seen = {}
+    monkeypatch.setattr(config, "write_json", lambda path, data: seen.update(data))
+    config.save_config({
+        "computer_sites": "example.com\n*.foo.com",
+        "computer_apps": "notepad.exe, calc.exe",
+        "computer_extra_block": ["a.com", "b.com"],
+    })
+    assert seen["computer_sites"] == ["example.com", "*.foo.com"]
+    assert seen["computer_apps"] == ["notepad.exe", "calc.exe"]
+    assert seen["computer_extra_block"] == ["a.com", "b.com"]

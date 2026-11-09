@@ -10,6 +10,8 @@ from app.store import SESSION_FILE, LEGACY_HISTORY, DATA_DIR, read_json, write_j
 CURRENT_FILE = os.path.join(DATA_DIR, "current_session.json")
 # 切会话/首屏只回最近这么多条消息；更早的用 /api/session/messages 按需拉。
 MSG_WINDOW = 80
+# 每个会话最多保存多少个「提问标记」：悬浮按钮太多会挡住聊天区
+MAX_QMARKS = 20
 
 
 def ensure_session_kb_fields(s):
@@ -154,6 +156,39 @@ def trim_compress_marks(s, *, drop_after=None, shift_after=None):
     s["compress_marks"] = _dedupe_compress_marks(out)[-MAX_COMPRESS_MARKS:]
 
 
+def trim_qmarks(s, *, drop_after=None, shift_after=None):
+    """撤回 / 删除消息后同步「提问标记」的下标，避免悬浮按钮跳到错的提问。
+
+    drop_after=X：删除下标 > X 的标记；shift_after=X：删除下标 X 本身后，
+    比它大的标记整体前移一位（调用方先自行删掉 X 这一条）。
+    """
+    marks = s.get("qmarks")
+    if not isinstance(marks, list):
+        return
+    out = []
+    for m in marks:
+        if not isinstance(m, dict):
+            continue
+        try:
+            idx = int(m.get("idx"))
+        except (TypeError, ValueError):
+            continue
+        if drop_after is not None and idx > drop_after:
+            continue
+        if shift_after is not None and idx > shift_after:
+            idx -= 1
+        if idx < 0:
+            continue
+        out.append({"idx": idx, "label": str(m.get("label") or "")[:40],
+                    "text": str(m.get("text") or "")[:120],
+                    "at": float(m.get("at") or 0)})
+    by_idx = {}
+    for m in out:
+        by_idx[m["idx"]] = m          # 同一下标只留最后一条（新的覆盖旧的）
+    dedup = [by_idx[k] for k in sorted(by_idx)]
+    s["qmarks"] = dedup[-MAX_QMARKS:]
+
+
 def parse_legacy_history(text):
     msgs = []
     for line in text.splitlines():
@@ -240,6 +275,37 @@ def _mark_resume_pending(data):
             }
             s["resume_pending"] = True
             dirty = True
+    return dirty
+
+
+def reap_orphan_progress(data, live_ids):
+    """把「没有活跃流、但最后一条还是 _progress 快照」的会话转成可继续状态。
+
+    以前只在进程启动时做；如果流线程异常退出而进程还活着，刷新页面会把
+    半截快照显示成正常历史，看起来像「这一轮已经输出完成」。
+    """
+    live = {str(x) for x in (live_ids or ())}
+    dirty = False
+    for s in (data or {}).get("sessions") or []:
+        sid = str(s.get("id") or "")
+        if sid and sid in live:
+            continue
+        msgs = s.get("messages") or []
+        if not msgs:
+            continue
+        last = msgs[-1]
+        if not (isinstance(last, dict) and last.get("role") == "assistant"
+                and last.get("_progress")):
+            continue
+        last.pop("_progress", None)
+        last["interrupted"] = True
+        last["end_reason"] = {
+            "kind": "resume",
+            "text": "后台输出已中断（连接或任务异常结束）。可以点「继续任务」接着做。",
+            "action": "resume",
+        }
+        s["resume_pending"] = True
+        dirty = True
     return dirty
 
 
@@ -366,16 +432,35 @@ def reorder_sessions(data, ids):
     return ""
 
 
-def slim_sessions(data, msg_limit=MSG_WINDOW):
+def _payload_msg_window(default=MSG_WINDOW):
+    """发给前端的「当前会话消息窗口」条数；0 = 全部。
+
+    为什么可以调小：前端已支持分页 —— 服务端带 msg_total / msg_start，
+    前端用 /api/session/messages 按需补更早的消息（core.js / chat.js）。
+    默认 80 时，一个 80 条消息的会话会让 done 事件涨到约 780 KB，
+    连接慢时最容易丢的就是这个包。
+    """
+    try:
+        from app.config import load_config
+        v = (load_config() or {}).get("chat_payload_msg_window")
+        if v is None:
+            return default
+        return max(0, int(v))
+    except Exception:                    # noqa: BLE001  读配置失败按默认
+        return default
+
+
+def slim_sessions(data, msg_limit=None):
     """只保留当前会话的消息，其余会话 messages 置为 None（前端切换时再按需拉取），
     避免每次进页面都把全部历史塞进 payload。
 
-    当前会话也只回最近 `msg_limit` 条，并带 `msg_total / msg_start`：
-    14MB 的响应里 10MB 是历史工具结果，切一次会话要序列化+传输一遍（实测 450ms）。
-    更早的消息由 `/api/session/messages` 按需补。
+    当前会话也只回最近 `msg_limit` 条（默认取 chat_payload_msg_window），
+    并带 `msg_total / msg_start`：更早的消息由 `/api/session/messages` 按需补。
     """
     if not data:
         return data
+    if msg_limit is None:
+        msg_limit = _payload_msg_window()
     cur = data.get("current")
     out = {"current": cur, "sessions": []}
     # 置顶会话排在前面；同组内保持原数组顺序（新会话仍在最前，更新会话不会乱跳）
@@ -402,6 +487,20 @@ def slim_sessions(data, msg_limit=MSG_WINDOW):
         item["use_profile"] = s.get("use_profile", True)
         item["use_memory"] = s.get("use_memory", True)
         item["compress_marks"] = compress_marks_for(s)
+        # 提问标记：只回传仍然指向有效消息的条目（撤回后可能失效）
+        qmarks = []
+        for m in (s.get("qmarks") or []):
+            if not isinstance(m, dict):
+                continue
+            try:
+                qi = int(m.get("idx"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= qi < len(msgs):
+                qmarks.append({"idx": qi,
+                               "label": str(m.get("label") or "")[:40],
+                               "text": str(m.get("text") or "")[:120]})
+        item["qmarks"] = qmarks
         item["agent_enabled"] = s.get("agent_enabled", False)
         item["sandbox"] = s.get("sandbox", "")
         item["sandbox_key"], item["sandbox_name"] = sandbox_group(s.get("sandbox"))

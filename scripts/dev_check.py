@@ -20,6 +20,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 # 自检会调用 create_server；不关掉自动恢复的话，会把真实未完成目标拉起来跑。
 os.environ.setdefault("GALGAME_NO_AUTORESUME", "1")
+# 自检不是真实启动：不要碰真实 data/uploads 的清理（live 用例曾因临时 SESSION_FILE 误删附件）
+os.environ.setdefault("GM_NO_SWEEP", "1")
 
 FAIL = []
 
@@ -178,7 +180,7 @@ def check_frontend():
 
 def check_startup():
     """启动耗时：create_server 要播种素材 / 建路由表，变慢通常意味着启动期做了重活。"""
-    step("8. 启动耗时")
+    step("9. 启动耗时")
     try:
         from app.httpd import create_server
     except Exception as e:
@@ -238,6 +240,27 @@ def check_markdown_test():
         bad("Markdown 渲染回归未通过")
 
 
+def check_transpage_test():
+    """译页版式单元测试：译文清洗、折行、字号/行距自适应、遮盖差集。"""
+    step("8. 译页版式单元测试（node scripts/transpage_test.js）")
+    node = shutil.which("node")
+    if not node:
+        print("  [跳过] 未找到 node（可选依赖）")
+        return
+    script = os.path.join(ROOT, "scripts", "transpage_test.js")
+    if not os.path.isfile(script):
+        bad("找不到 scripts/transpage_test.js")
+        return
+    r = subprocess.run([node, script], capture_output=True, text=True, cwd=ROOT)
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    for line in out.splitlines():
+        print("  " + line)
+    if r.returncode == 0:
+        ok("译页版式单元测试通过")
+    else:
+        bad("译页版式单元测试未通过")
+
+
 def main():
     print("=" * 56)
     print("  项目自检（dev_check）")
@@ -249,6 +272,7 @@ def main():
     check_frontend()
     check_hotkeys_test()
     check_markdown_test()
+    check_transpage_test()
     check_startup()
     print("\n" + "=" * 56)
     if FAIL:

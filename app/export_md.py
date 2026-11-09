@@ -43,10 +43,13 @@ def session_markdown(s):
         if body:
             out.append(body)
             out.append("")
-        doc = m.get("doc")
-        if isinstance(doc, dict) and doc.get("name"):
-            out.append("> 附件：" + str(doc["name"]))
-            out.append("")
+        _docs = m.get("docs") if isinstance(m.get("docs"), list) else None
+        if not _docs:
+            _docs = [m.get("doc")] if isinstance(m.get("doc"), dict) else []
+        for doc in _docs:
+            if isinstance(doc, dict) and doc.get("name"):
+                out.append("> 附件：" + str(doc["name"]))
+                out.append("")
         vs = m.get("vision")
         if vs:
             out.append("> 图片识别：" + str(vs).replace("\n", " ").strip())

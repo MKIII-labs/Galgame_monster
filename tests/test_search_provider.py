@@ -40,6 +40,27 @@ def test_chat_search_requires_deepseek_host(monkeypatch):
     assert search.effective_search_provider() == "volc"
 
 
+def test_modsearch_on_returns_auto(monkeypatch):
+    monkeypatch.setattr(search, "load_config",
+                        lambda: _cfg(search_provider="auto"))
+    assert search.effective_search_provider() == "auto"
+
+
+def test_modsearch_off_falls_back_to_single_provider(monkeypatch):
+    monkeypatch.setattr(search, "load_config", lambda: _cfg(
+        search_provider="auto", search_modsearch_enabled=False,
+        chat_api_key="", chat_url="", chat_model=""))
+    assert search.effective_search_provider() == "bocha"
+    provider, url, key, _count = search.get_search_conf()
+    assert provider == "bocha" and "bocha" in url and key == "sk"
+
+
+def test_modsearch_off_still_prefers_chat_search(monkeypatch):
+    monkeypatch.setattr(search, "load_config", lambda: _cfg(
+        search_provider="auto", search_modsearch_enabled=False))
+    assert search.effective_search_provider() == "deepseek"
+
+
 def test_search_web_deepseek_prefers_summary(monkeypatch):
     class _Resp:
         def raise_for_status(self):

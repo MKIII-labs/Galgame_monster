@@ -93,6 +93,33 @@ def test_plan_patch_requires_existing_plan():
     assert newp is None and "还没有计划" in err and summary == ""
 
 
+def test_plan_log_accepts_dict_of_strings():
+    """log 用字典形式（键=kind、值=文本）时不能崩。
+
+    历史崩溃点：dict(v, kind=k) 把字符串按字符拆键值对，
+    抛 "dictionary update sequence element #0 has length 1"。
+    """
+    plan, err = agent.normalize_plan({
+        "steps": [{"text": "收尾复盘", "status": "doing"}],
+        "log": {"decisions": "先写复盘再收尾",
+                "discoveries": "股票子系统 5 个测试文件全绿"},
+    })
+    assert err == ""
+    assert [x["text"] for x in plan["log"]["decisions"]] == ["先写复盘再收尾"]
+    assert [x["text"] for x in plan["log"]["discoveries"]] == ["股票子系统 5 个测试文件全绿"]
+
+
+def test_plan_log_ignores_non_string_values():
+    """字典里非字符串的值保持忽略，而不是让整轮崩掉。"""
+    plan, err = agent.normalize_plan({
+        "steps": [{"text": "x"}],
+        "log": {"decisions": ["不是字符串"],
+                "discoveries": {"text": "对象形式不在这里支持"}},
+    })
+    assert err == ""
+    assert plan["log"] == {"decisions": [], "discoveries": []}
+
+
 def test_plan_schema_exposed():
     names = [t["function"]["name"]
              for t in agent.native_tool_schemas(agent_on=True, search_ready=True)]

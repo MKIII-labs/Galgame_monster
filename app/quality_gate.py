@@ -28,11 +28,14 @@ _TEXT_NOISE = re.compile(r"[\s，。；：、,.;:!?！？（）()\[\]【】\"'�
 
 # 验收代理不拿这些工具：它们要么会改写任务状态，要么会把主对话挂起，
 # 要么会再派生一层子代理（判定的成本会失控）。
+# 元工具重构后 schema 下发的是 plan / agent / workflow 这类分组名，旧名保留兼容。
 DENY_TOOLS = frozenset((
     "finish", "ask_user", "update_plan", "plan_patch", "acceptance",
     "explore", "explore_followup", "explore_status", "explore_result",
     "explore_cancel", "delegate", "shell", "sleep", "set_reminder",
     "todo_write", "read_tool_result",
+    # 元工具名：status 由子命令决定，整组不给验收代理
+    "plan", "agent", "workflow", "utility",
 ))
 
 REVIEW_SYSTEM = "\n".join([
@@ -54,6 +57,8 @@ REVIEW_SYSTEM = "\n".join([
     "",
     "如果任务书给出了「计划里写明的验收条件」，必须为每一条单独列一个 criterion，"
     "文本逐字照抄，并独立核对；漏掉任何一条都会按未通过计。",
+    "工具名必须和任务书【可用工具】完全一致；不要凭记忆写旧名，"
+    "不确定就先看列表再调用。",
     "禁止：不要说「看起来 / 应该 / 大概」；没查就写「未核实」。"
     "gaps 最多 5 条，按影响从大到小排。",
 ])
@@ -288,8 +293,42 @@ def _log_brief(tool_log):
     return "\n".join(lines) or "（本轮没有工具调用）"
 
 
+def tool_lines(schemas):
+    """schema → 「名字 + action」清单，写进任务书让验收代理照着调用。"""
+    rows = []
+    for sc in schemas or []:
+        fn = sc.get("function") if isinstance(sc, dict) else None
+        name = str((fn or {}).get("name") or "").strip()
+        if not name:
+            continue
+        props = ((fn.get("parameters") or {}).get("properties") or {})
+        acts = (props.get("action") or {}).get("enum") or []
+        suffix = ("（action: " + " / ".join(str(a) for a in acts) + "）") if acts else ""
+        rows.append("- " + name + suffix)
+    return rows
+
+
+def allowed_names(schemas):
+    """可用工具名 + 能映射到它们的旧名。
+
+    元工具重构后 schema 是 read / edit / run…，模型常沿用 read_file / run_command。
+    执行端 `_wf_exec_node` 两种名字都能跑；这里只把白名单放宽，避免把能执行的旧名
+    误判成「不在可用范围内」（现场：验收代理连续 5 次工具调用全被拒）。
+    """
+    names = {str((s.get("function") or {}).get("name") or "") for s in schemas or []}
+    names.discard("")
+    try:
+        from app import tool_meta
+        for legacy, (meta, _action) in tool_meta.legacy_map().items():
+            if meta in names:
+                names.add(legacy)
+    except Exception:                     # noqa: BLE001  元层不可用时只认原名
+        pass
+    return names
+
+
 def build_brief(task, plan_text="", tool_log=None, facts=None, summary="",
-                answer="", sandbox="", has_tools=True):
+                answer="", sandbox="", has_tools=True, tools=None):
     """给验收代理的任务书。**不传主模型的分数**，只传事实与待核对的声明。"""
     facts = facts or {}
     parts = [
@@ -298,6 +337,9 @@ def build_brief(task, plan_text="", tool_log=None, facts=None, summary="",
         "【主代理的计划】\n" + (_clip(plan_text, 2000) or "（本轮没有计划）"),
         "【本轮工具流水（按时间顺序，FAIL = 调用失败）】\n" + _log_brief(tool_log),
     ]
+    _rows = tool_lines(tools)
+    if _rows:
+        parts.append("【可用工具（只能调用这些名字）】\n" + "\n".join(_rows))
     if facts.get("plan_checks"):
         parts.append("【计划里写明的验收条件（必须逐条照抄成 criterion 并核对）】\n"
                      + "\n".join("- " + x for x in facts["plan_checks"]))
@@ -342,7 +384,7 @@ def run(brief, ctx):
     chat_fn = ctx.get("chat_fn") or _default_chat
     schemas = list(ctx.get("schemas") or [])
     tool_fn = ctx.get("tool_fn")
-    names = {(s.get("function") or {}).get("name") for s in schemas}
+    names = allowed_names(schemas)
     messages = [{"role": "system", "content": REVIEW_SYSTEM},
                 {"role": "user", "content": brief}]
     try:

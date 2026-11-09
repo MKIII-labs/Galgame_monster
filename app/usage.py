@@ -220,6 +220,10 @@ def aggregate_usage(mode="day", span=30, call_limit=200):
     daily = {k: {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "calls": 0}
              for k in keys}
     summary = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "calls": 0}
+    # 观测（批 1）：按「单次模型调用」统计，比按回合累计更贴近成本；
+    # 这些值来自 timing.rounds_detail / timing.obs，旧记录没有就自动跳过。
+    round_prompts = []
+    obs_rows = []
 
     for r in load_usage():
         try:
@@ -273,6 +277,19 @@ def aggregate_usage(mode="day", span=30, call_limit=200):
         summary["cached"] += cached
         summary["calls"] += 1
 
+        # 观测（批 1）：把「单次调用」和「前缀/折叠事件」从 timing 里摘出来
+        timing = r.get("timing") or {}
+        for d in (timing.get("rounds_detail") or []):
+            try:
+                rp = int(d.get("prompt") or 0)
+            except (TypeError, ValueError, AttributeError):
+                rp = 0
+            if rp > 0:
+                round_prompts.append(rp)
+        obs = timing.get("obs")
+        if isinstance(obs, dict):
+            obs_rows.append(obs)
+
     rows = [{"bucket": k, "model": m, **v} for (k, m), v in table.items()]
     rows.sort(key=lambda x: (x["bucket"], x["model"]), reverse=True)
     model_rows = [{"model": m, **v} for m, v in by_model.items()]
@@ -300,6 +317,70 @@ def aggregate_usage(mode="day", span=30, call_limit=200):
         "by_api": api_rows,
         "calls": calls[:call_limit],
         "calls_total": len(calls),
+        # 观测（批 1）：单次调用的输入分布 + 前缀/折叠/压缩统计
+        "call_stats": _percentiles(round_prompts),
+        "obs_stats": _obs_stats(obs_rows),
+    }
+
+
+def _percentiles(values):
+    """单次调用的输入 token 分布。空样本返回全 0，前端显示「—」。"""
+    vals = sorted(int(v) for v in values if v)
+    if not vals:
+        return {"count": 0, "p50": 0, "p90": 0, "p95": 0, "mean": 0, "max": 0}
+
+    def at(q):
+        return vals[min(len(vals) - 1, int(len(vals) * q))]
+
+    return {"count": len(vals), "p50": at(0.5), "p90": at(0.9), "p95": at(0.95),
+            "mean": int(sum(vals) / len(vals)), "max": vals[-1]}
+
+
+def _obs_stats(rows):
+    """前缀复用与折叠/压缩事件汇总。
+
+    `cold` = 该会话的第一次请求（没有可比对象），不参与复用率平均。
+    """
+    turns = [r for r in rows if isinstance(r, dict)]
+    if not turns:
+        return {"turns": 0, "cold": 0, "warm": 0, "sys_changed": 0,
+                "avg_prefix_ratio": None, "avg_reuse": None,
+                "fold": 0, "fold_removed": 0, "compress": 0, "overflow": 0,
+                "levels": {}}
+    prefix = [r.get("prefix") if isinstance(r.get("prefix"), dict) else {}
+              for r in turns]
+    warm = [p for p in prefix if p and not p.get("cold")]
+
+    def avg(vals):
+        return round(sum(vals) * 1.0 / len(vals), 3) if vals else None
+
+    levels = {}
+    for r in turns:
+        b = r.get("budget") if isinstance(r.get("budget"), dict) else {}
+        lv = str(b.get("level") if b.get("level") is not None else 0)
+        levels[lv] = levels.get(lv, 0) + 1
+
+    def total(key):
+        out = 0
+        for r in turns:
+            try:
+                out += int(r.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    return {
+        "turns": len(turns),
+        "cold": len(turns) - len(warm),
+        "warm": len(warm),
+        "sys_changed": sum(1 for p in warm if p.get("sys_changed")),
+        "avg_prefix_ratio": avg([float(p.get("prefix_ratio") or 0) for p in warm]),
+        "avg_reuse": avg([float(p.get("reuse_ratio") or 0) for p in warm]),
+        "fold": total("fold"),
+        "fold_removed": total("fold_removed"),
+        "compress": total("compress"),
+        "overflow": total("overflow"),
+        "levels": levels,
     }
 
 

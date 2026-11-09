@@ -5,10 +5,16 @@
  * 两套状态混在一起会互相覆盖。
  */
 let gitState = { files: [], repo: false, branch: '', reason: '',
-                 history: [], ops: [], tab: 'changes' };
+                 history: [], ops: [], tab: 'changes',
+                 remotes: [], upstream: '', graph: false };
 let gitDiffEditor = null;
 let gitDiffModel = null;
 let gitDiffDecos = [];
+const GIT_GRAPH_KEY = 'ide_git_graph_v1';
+
+function gitGraphPref() {
+  try { return localStorage.getItem(GIT_GRAPH_KEY) === '1'; } catch (e) { return false; }
+}
 
 function gitEl(id) { return document.getElementById(id); }
 
@@ -156,6 +162,7 @@ async function gitRefresh() {
   } catch (e) {
     gitState = { files: [], repo: false, branch: '', reason: '读取 Git 状态失败：' + e.message };
     gitRender();
+    gitRenderSyncState();
     return;
   }
   gitState = {
@@ -165,24 +172,73 @@ async function gitRefresh() {
     ahead: (r && r.ahead) || 0,
     behind: (r && r.behind) || 0,
     reason: (r && r.reason) || '',
+    remotes: (r && r.remotes) || [],
+    upstream: (r && r.upstream) || '',
     history: gitState.history || [],
     ops: gitState.ops || [],
     tab: gitState.tab || 'changes',
+    graph: gitGraphPref(),
   };
   gitRender();
+  gitRenderSyncState();
   await gitLoadHistory();
   await gitLoadOps();
 }
 
+/* 远端同步按钮：没有远程时置灰并给出原因（点一下也能看到提示） */
+function gitRenderSyncState() {
+  const has = !!(gitState.repo && (gitState.remotes || []).length);
+  [['ide-git-fetch', '获取远端更新（fetch）'], ['ide-git-pull', '拉取并合并（pull）'],
+    ['ide-git-push', '推送（push）']].forEach(([id, title]) => {
+    const b = gitEl(id);
+    if (!b) return;
+    b.disabled = !has;
+    b.title = has ? title : '当前仓库没有配置远程（bash: git remote add origin …）';
+  });
+}
+
+async function gitSync(action) {
+  if (!gitState.repo) return toast('当前沙箱不是 Git 仓库');
+  if (!(gitState.remotes || []).length) {
+    return toast('仓库还没有配置远程：git remote add origin <url>');
+  }
+  if (action === 'pull'
+      && !window.confirm('拉取并合并远端改动？有冲突时需要手动解决。')) return;
+  const ids = { fetch: 'ide-git-fetch', pull: 'ide-git-pull', push: 'ide-git-push' };
+  const btn = gitEl(ids[action]);
+  if (btn) btn.disabled = true;
+  const body = { session_id: state.sessions.current, action: action };
+  if (action === 'pull') body.confirm = 'pull';
+  try {
+    const r = await api('/api/git/sync', body);
+    const out = String((r && r.output) || '').split('\n').filter(Boolean).pop() || '';
+    toast((action === 'fetch' ? '已获取远端信息' : action === 'pull' ? '已拉取' : '已推送')
+      + (out ? '：' + out.slice(0, 80) : ''), 'success');
+  } catch (e) {
+    toast((action === 'fetch' ? 'fetch 失败：' : action === 'pull' ? 'pull 失败：'
+      : 'push 失败：') + e.message);
+  } finally {
+    await gitRefresh();
+  }
+}
+
 /* ---------- 历史 / AI 操作 ---------- */
 async function gitLoadHistory() {
+  const graph = gitGraphPref();
   try {
-    const r = await api('/api/git/log', {
-      session_id: state.sessions.current, limit: 30,
+    const r = await api(graph ? '/api/git/graph' : '/api/git/log', {
+      session_id: state.sessions.current, limit: graph ? 60 : 30,
     });
     gitState.history = (r && r.items) || [];
+    gitState.historyError = (r && !r.ok && r.error) || '';
   } catch (e) {
     gitState.history = [];
+    gitState.historyError = e.message || '';
+  }
+  const hint = gitEl('ide-git-histhint');
+  if (hint) {
+    hint.textContent = graph ? '全部分支 · 最近 60 条'
+      : (gitState.historyError ? '读取失败' : '当前分支 · 最近 30 条');
   }
   gitRenderHistory();
 }
@@ -200,31 +256,43 @@ async function gitLoadOps() {
 function gitRenderHistory() {
   const box = gitEl('ide-git-history');
   if (!box) return;
+  box.classList.toggle('graph', gitGraphPref());
   const list = gitState.history || [];
   if (!list.length) {
     box.innerHTML = '<div class="ide-git-empty">没有提交历史（沙箱不在 Git 仓库里时会为空）。</div>';
     return;
   }
-  box.innerHTML = list.map((c) =>
-    '<div class="ide-git-commit-row" data-hash="' + escapeHtml(c.hash) + '">' +
+  box.innerHTML = list.map((c) => {
+    const graph = (c.graph != null)
+      ? '<span class="ide-git-graph">' + escapeHtml(c.graph || '') + '</span>' : '';
+    const refs = c.refs
+      ? '<span class="ide-git-refs" title="' + escapeHtml(c.refs) + '">' +
+        escapeHtml(c.refs) + '</span>' : '';
+    return '<div class="ide-git-commit-row" data-hash="' + escapeHtml(c.hash) + '">' +
+      graph +
       '<span class="h">' + escapeHtml(c.hash) + '</span>' +
-      '<span class="s" title="' + escapeHtml(c.subject || '') + '">' +
-        escapeHtml(c.subject || '') + '</span>' +
+      '<span class="s" title="' + escapeHtml((c.subject || '') + ' · ' + (c.author || '')) + '">' +
+        refs + escapeHtml(c.subject || '') + '</span>' +
       '<span class="d">' + escapeHtml(c.date || '') + '</span>' +
       '<span class="acts">' +
+        '<button class="ide-git-hact" data-hact="review" data-hash="' +
+          escapeHtml(c.hash) + '" title="AI 审查这个提交">审查</button>' +
         '<button class="ide-git-hact" data-hact="revert" data-hash="' +
           escapeHtml(c.hash) + '" title="撤回此提交（生成反向提交，不改写历史）">撤回</button>' +
         '<button class="ide-git-hact" data-hact="reset" data-hash="' +
           escapeHtml(c.hash) + '" title="回退到此提交（之后的改动保留在工作区）">回退</button>' +
       '</span>' +
-    '</div>').join('');
+    '</div>';
+  }).join('');
   box.querySelectorAll('.ide-git-commit-row').forEach((row) => {
     row.addEventListener('click', () => gitOpenCommit(row.dataset.hash));
   });
   box.querySelectorAll('.ide-git-hact').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (btn.dataset.hact === 'revert') gitRevert(btn.dataset.hash);
+      if (btn.dataset.hact === 'review') {
+        gitReview({ mode: 'commit', rev: btn.dataset.hash }, '提交 ' + btn.dataset.hash);
+      } else if (btn.dataset.hact === 'revert') gitRevert(btn.dataset.hash);
       else if (btn.dataset.hact === 'reset') gitResetTo(btn.dataset.hash);
     });
   });
@@ -504,6 +572,59 @@ async function gitCommit() {
   }
 }
 
+/* ---------- AI 生成提交信息 ----------
+   和 Trae 一致：读暂存区（没有就工作区）的 diff + 最近提交风格，
+   只填进输入框，提交与否仍然由用户决定。 */
+async function gitGenMessage() {
+  const btn = gitEl('ide-git-ai-msg');
+  const box = gitEl('ide-git-msg');
+  if (!btn || btn.disabled) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '生成中…';
+  try {
+    const r = await api('/api/git/message', { session_id: state.sessions.current });
+    if (!r || !r.ok) throw new Error((r && r.error) || '生成失败');
+    if (box) {
+      box.value = r.message || '';
+      box.focus();
+    }
+    toast(r.staged ? '已根据暂存区生成提交信息' : '已根据工作区生成提交信息', 'success');
+  } catch (e) {
+    toast('生成提交信息失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+/* ---------- AI 审查（Git 范围） ----------
+   未提交改动 / 单个提交 / 当前分支与某分支的差异；结果复用 AI 摘要的渲染。 */
+let gitReviewLast = null;
+
+async function gitReview(extra, title) {
+  const box = gitEl('ide-git-review-body');
+  if (!box) return;
+  gitReviewLast = { extra: extra || {}, title: title || '' };
+  const scopeEl = gitEl('ide-git-review-scope');
+  if (scopeEl) scopeEl.textContent = title || '';
+  ideShowView('gitreview');
+  box.innerHTML = '<div class="ide-review-ai-load">正在生成 AI 审查…</div>';
+  const body = Object.assign({ session_id: state.sessions.current, scope: 'git' },
+    extra || {});
+  try {
+    const r = await api('/api/ide/review', body);
+    if (!r || !r.ok) throw new Error((r && r.error) || '生成失败');
+    const m = (typeof ideReviewAiMarkdown === 'function')
+      ? ideReviewAiMarkdown(r) : { html: escapeHtml(r.summary || ''), meta: '' };
+    if (scopeEl) scopeEl.textContent = title ? title + (m.meta ? ' · ' + m.meta : '') : m.meta;
+    box.innerHTML = '<div class="work-preview-md">' + m.html + '</div>';
+    if (window.enhanceRichMedia) window.enhanceRichMedia(box);
+  } catch (e) {
+    box.innerHTML = '<div class="ide-review-ai-err">' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+
 /* 只读 diff：复用 ideDiffDoc 的「合成文档 + 整行装饰」方案，
    和 AI 变更审阅长得一样，但不动 undo / 保留逻辑。 */
 async function gitOpenDiff(rel, staged) {
@@ -564,6 +685,11 @@ async function gitToggleBranchMenu() {
     return toast('读取分支失败：' + e.message);
   }
   if (!r || !r.ok) return toast((r && r.error) || '读取分支失败');
+  let tr = null;
+  try {
+    tr = await api('/api/git/tag', { session_id: state.sessions.current, action: 'list' });
+  } catch (e) { tr = null; }
+  const tags = (tr && tr.items) || [];
   const items = r.items || [];
   menu.innerHTML = items.map((b) =>
     '<div class="ide-git-branch-row' + (b.current ? ' cur' : '') + '" data-name="' +
@@ -571,11 +697,20 @@ async function gitToggleBranchMenu() {
       '<span class="n">' + (b.current ? '✓ ' : '') + escapeHtml(b.name) + '</span>' +
       '<span class="acts">' +
         (!b.current ? '<button data-bact="switch" title="切换到此分支">切换</button>' : '') +
+        (!b.current ? '<button data-bact="review" title="AI 审查当前分支与此分支的差异">审查</button>' : '') +
         (!b.current ? '<button data-bact="delete" title="删除此分支">删除</button>' : '') +
         '<button data-bact="rename" title="重命名此分支">改名</button>' +
       '</span></div>').join('');
   menu.innerHTML += '<div class="ide-git-branch-row new">' +
     '<button data-bact="create">＋ 新建分支</button></div>';
+  menu.innerHTML += '<div class="ide-git-branch-head">标签</div>' +
+    tags.map((t) => '<div class="ide-git-branch-row tag" data-tag="' +
+      escapeHtml(t.name) + '">' +
+      '<span class="n">' + escapeHtml(t.name) + '</span>' +
+      '<span class="acts"><button data-bact="tag-delete" title="删除标签">删除</button></span>' +
+      '</div>').join('') +
+    '<div class="ide-git-branch-row new">' +
+    '<button data-bact="tag-create">＋ 新建标签（当前 HEAD）</button></div>';
   menu.classList.remove('hidden');
   menu.querySelectorAll('[data-bact]').forEach((btn) => {
     btn.onclick = async (e) => {
@@ -589,6 +724,10 @@ async function gitToggleBranchMenu() {
         await gitBranchAction('create', { name: n });
       } else if (act === 'switch') {
         await gitCheckout(name);
+      } else if (act === 'review') {
+        menu.classList.add('hidden');
+        await gitReview({ mode: 'branch', base: name, head: 'HEAD' },
+                        '当前分支 vs ' + name);
       } else if (act === 'delete') {
         if (!window.confirm('删除分支 ' + name + '？')) return;
         await gitBranchAction('delete', { name: name });
@@ -596,9 +735,31 @@ async function gitToggleBranchMenu() {
         const n = await appPrompt('新的分支名', name);
         if (!n || n === name) return;
         await gitBranchAction('rename', { old: name, new: n });
+      } else if (act === 'tag-create') {
+        const n = await appPrompt('新标签名（指向当前 HEAD）');
+        if (!n) return;
+        await gitTagAction('create', { name: n });
+      } else if (act === 'tag-delete') {
+        const t = row && row.dataset.tag;
+        if (!t || !window.confirm('删除标签 ' + t + '？')) return;
+        await gitTagAction('delete', { name: t });
       }
     };
   });
+}
+
+async function gitTagAction(action, extra) {
+  const body = Object.assign({ session_id: state.sessions.current, action: action }, extra);
+  try {
+    await api('/api/git/tag', body);
+  } catch (e) {
+    return toast('标签操作失败：' + e.message);
+  }
+  toast(action === 'create' ? '已创建标签' : '已删除标签', 'success');
+  const menu = gitEl('ide-git-branch-menu');
+  if (menu) menu.classList.add('hidden');
+  await gitToggleBranchMenu();      // 重新打开，刷新标签列表
+  await gitLoadHistory();
 }
 
 async function gitBranchAction(action, extra) {
@@ -648,6 +809,21 @@ async function gitCheckout(name) {
   gitSetTab('changes');
   const refresh = gitEl('ide-git-refresh');
   if (refresh) refresh.onclick = () => gitRefresh();
+  [['ide-git-fetch', 'fetch'], ['ide-git-pull', 'pull'],
+    ['ide-git-push', 'push']].forEach(([id, act]) => {
+    const b = gitEl(id);
+    if (b) b.onclick = () => gitSync(act);
+  });
+  const graphToggle = gitEl('ide-git-graph-toggle');
+  if (graphToggle) {
+    graphToggle.checked = gitGraphPref();
+    graphToggle.onchange = () => {
+      try {
+        localStorage.setItem(GIT_GRAPH_KEY, graphToggle.checked ? '1' : '0');
+      } catch (e) { /* 忽略：存不了就只影响下次默认值 */ }
+      gitLoadHistory();
+    };
+  }
   const branch = gitEl('ide-git-branch');
   if (branch) branch.onclick = () => gitToggleBranchMenu();
   document.addEventListener('click', (e) => {
@@ -660,6 +836,18 @@ async function gitCheckout(name) {
   if (stageAll) stageAll.onclick = () => gitStageAll();
   const commitBtn = gitEl('ide-git-commit-btn');
   if (commitBtn) commitBtn.onclick = () => gitCommit();
+  const aiMsg = gitEl('ide-git-ai-msg');
+  if (aiMsg) aiMsg.onclick = () => gitGenMessage();
+  const reviewBtn = gitEl('ide-git-review-btn');
+  if (reviewBtn) reviewBtn.onclick = () => gitReview({ mode: 'work' }, '未提交的改动');
+  const reviewClose = gitEl('ide-git-review-close');
+  if (reviewClose) reviewClose.onclick = () => ideShowView('editor');
+  const reviewRefresh = gitEl('ide-git-review-refresh');
+  if (reviewRefresh) {
+    reviewRefresh.onclick = () => {
+      if (gitReviewLast) gitReview(gitReviewLast.extra, gitReviewLast.title);
+    };
+  }
   const close = gitEl('ide-git-diff-close');
   if (close) close.onclick = () => ideShowView('editor');
   const msg = gitEl('ide-git-msg');

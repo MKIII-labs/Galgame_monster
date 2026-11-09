@@ -45,6 +45,23 @@ def test_weekly_recurrence_expands():
     assert len(items) == 3          # 周一 / 周三 / 周五
 
 
+def test_daily_recurrence_expands_after_range_start():
+    """回归：range_start 是 float，DAILY 分支曾把它和 datetime 直接比较。"""
+    calendar.create_event("每日提醒", "2026-10-05 09:00", "2026-10-05 09:15",
+                          rrule="FREQ=DAILY")
+    items = calendar.list_events(ts("2026-10-20 00:00"), ts("2026-10-23 00:00"))
+    assert len(items) == 3
+    assert items[0]["occurrence_at"] == ts("2026-10-20 09:00")
+
+
+def test_daily_interval_skips_days():
+    calendar.create_event("隔天提醒", "2026-10-05 09:00", "2026-10-05 09:15",
+                          rrule="FREQ=DAILY;INTERVAL=2")
+    items = calendar.list_events(ts("2026-10-05 00:00"), ts("2026-10-10 00:00"))
+    assert [calendar.fmt_time(i["occurrence_at"]) for i in items] == [
+        "2026-10-05 09:00", "2026-10-07 09:00", "2026-10-09 09:00"]
+
+
 def test_update_and_delete():
     ev = calendar.create_event("临时", "2026-10-21 14:00", "2026-10-21 15:00")
     up = calendar.update_event(ev["id"], title="改期", start_at="2026-10-21 16:00",

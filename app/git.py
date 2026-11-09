@@ -149,7 +149,20 @@ def status(root):
             break
     return {"ok": True, "repo": True, "reason": "", "files": files,
             "branch": branch or "(detached)", "ahead": ahead, "behind": behind,
+            "remotes": _remotes(root), "upstream": _upstream(root),
             "capped": len(files) >= MAX_FILES}
+
+
+def _remotes(root):
+    code, out, _err = _run(root, ["remote"])
+    if code != 0:
+        return []
+    return [x.strip() for x in out.decode("utf-8", "replace").splitlines() if x.strip()]
+
+
+def _upstream(root):
+    code, out, _err = _run(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    return out.decode("utf-8", "replace").strip() if code == 0 else ""
 
 
 def _entry(path, xy):
@@ -266,6 +279,109 @@ def commit(root, message, rels=None, add_all=False):
     return {"ok": True,
             "hash": hout.decode("utf-8", "replace").strip() if hcode == 0 else "",
             "summary": summary[-800:]}
+
+
+def _ref(name, default="HEAD"):
+    """分支名 / HEAD 系列 / 十六进制提交号：只接受这三种形态。"""
+    name = str(name or default).strip() or default
+    if re.match(r"^(HEAD([~^]\d*)*|[0-9a-fA-F]{4,40})$", name):
+        return name
+    return _clean_branch(name)
+
+
+def _cap(text, max_chars):
+    try:
+        cap = max(1000, min(int(max_chars or 0), 400000))
+    except (TypeError, ValueError):
+        cap = 60000
+    text = str(text or "")
+    if len(text) <= cap:
+        return text, False
+    return text[:cap] + "\n…（diff 已截断）", True
+
+
+def _untracked_patches(root):
+    """未跟踪文件 git diff 不输出，逐个手工生成「新文件」补丁。"""
+    out = []
+    try:
+        st = status(root)
+    except GitError:
+        return out
+    for f in st.get("files") or []:
+        if not f.get("untracked"):
+            continue
+        try:
+            p = patch(root, f["path"])
+        except GitError:
+            continue
+        if p.get("patch"):
+            out.append(p["patch"])
+    return out
+
+
+def diff_text(root, scope="work", rev="", base="", head="HEAD", max_chars=60000):
+    """给 AI 审阅用的 diff 文本。
+
+    scope = work   未提交的改动（含未跟踪文件）
+    scope = commit 单个提交的 patch
+    scope = branch base...head 的分支差异（三点 = 以 merge-base 为基准）
+    """
+    scope = str(scope or "work").lower()
+    if scope == "commit":
+        rev = str(rev or "").strip()
+        if not re.match(r"^[0-9a-fA-F]{4,40}$", rev):
+            raise GitError("提交号不合法：%r" % rev)
+        code, out, err = _run(root, ["show", "--no-color", "--relative",
+                                     "--unified=3", "--format=", rev, "--", "."])
+        label = "提交 " + rev[:12]
+        if code != 0:
+            raise GitError(err or "读取提交失败")
+        text = out.decode("utf-8", "replace")
+    elif scope == "branch":
+        b = _ref(base, "")
+        h = _ref(head, "HEAD")
+        code, out, err = _run(root, ["diff", "--no-color", "--relative",
+                                     "--unified=3", "%s...%s" % (b, h), "--", "."])
+        label = "%s...%s" % (b, h)
+        if code != 0:
+            raise GitError(err or "读取分支差异失败")
+        text = out.decode("utf-8", "replace")
+    else:
+        scope = "work"
+        code, out, err = _run(root, ["diff", "--no-color", "--relative",
+                                     "--unified=3", "HEAD", "--", "."])
+        if code != 0:
+            raise GitError(err or "读取未提交改动失败")
+        text = out.decode("utf-8", "replace")
+        extra = _untracked_patches(root)
+        if extra:
+            text = (text.rstrip() + "\n" + "\n".join(extra)).strip()
+        label = "未提交的改动"
+    files = sorted(set(re.findall(r"^diff --git a/(\S+)", text, re.M)))
+    text, truncated = _cap(text, max_chars)
+    return {"ok": True, "scope": scope, "label": label, "text": text,
+            "files": files, "truncated": truncated}
+
+
+def commit_patch(root, max_chars=40000):
+    """生成提交信息用的 diff：优先暂存区，没有暂存改动就用工作区。"""
+    code, out, err = _run(root, ["diff", "--cached", "--no-color", "--relative",
+                                 "--unified=3", "--", "."])
+    if code != 0:
+        raise GitError(err or "读取暂存改动失败")
+    text = out.decode("utf-8", "replace")
+    staged = bool(text.strip())
+    if not staged:
+        code, out, err = _run(root, ["diff", "--no-color", "--relative",
+                                     "--unified=3", "HEAD", "--", "."])
+        if code != 0:
+            raise GitError(err or "读取工作区改动失败")
+        text = out.decode("utf-8", "replace")
+        extra = _untracked_patches(root)
+        if extra:
+            text = (text.rstrip() + "\n" + "\n".join(extra)).strip()
+    text, truncated = _cap(text, max_chars)
+    return {"ok": True, "text": text, "staged": staged, "truncated": truncated}
 
 
 def log(root, limit=20):
@@ -550,3 +666,116 @@ def stash(root, action="push", message=""):
         raise GitError(err or "stash 失败")
     return {"ok": True, "action": action,
             "output": out.decode("utf-8", "replace")[-2000:]}
+
+
+# ============================================================
+# 远端同步 / 标签 / 分支图
+# ============================================================
+
+def sync(root, action="fetch", branch="", force=False, timeout=180):
+    """fetch / pull / push。
+
+    `GIT_TERMINAL_PROMPT=0` 保证缺凭据时立刻失败并返回 stderr，
+    而不是把进程挂在交互提示上。
+    """
+    action = str(action or "fetch").lower()
+    if action not in ("fetch", "pull", "push"):
+        raise GitError("同步动作只能是 fetch / pull / push")
+    if action == "fetch":
+        code, out, err = _run(root, ["fetch", "--all", "--prune"], timeout=timeout)
+        label = "拉取远端信息"
+    elif action == "pull":
+        code, out, err = _run(root, ["pull", "--no-edit"], timeout=timeout)
+        label = "拉取并合并"
+    else:
+        b = str(branch or "").strip()
+        if not b:
+            c, o, _e = _run(root, ["symbolic-ref", "--short", "HEAD"])
+            b = o.decode("utf-8", "replace").strip() if c == 0 else ""
+        if b:
+            b = _clean_branch(b)
+        # 没有上游时直接 -u：`git push origin <b>` 不会自动建立跟踪关系
+        has_upstream = bool(_upstream(root))
+        args = ["push"]
+        if force:
+            args.append("--force-with-lease")
+        if b:
+            args += ([] if has_upstream else ["-u"]) + ["origin", b]
+        code, out, err = _run(root, args, timeout=timeout)
+        label = "推送到远端"
+    if code != 0:
+        raise GitError(err or (label + "失败"))
+    text = (out.decode("utf-8", "replace") + "\n" + err).strip()
+    return {"ok": True, "action": action, "output": text[-4000:]}
+
+
+def tags(root):
+    """本地标签列表（按创建时间倒序）。"""
+    code, out, err = _run(root, [
+        "for-each-ref", "--sort=-creatordate",
+        "--format=%(refname:short)%09%(objectname:short)%09%(creatordate:short)",
+        "refs/tags"])
+    if code != 0:
+        raise GitError(err or "读取标签失败")
+    items = []
+    for line in out.decode("utf-8", "replace").splitlines():
+        seg = line.split("\t")
+        if seg and seg[0]:
+            items.append({"name": seg[0],
+                          "hash": seg[1] if len(seg) > 1 else "",
+                          "date": seg[2] if len(seg) > 2 else ""})
+    return {"ok": True, "items": items}
+
+
+def tag_create(root, name, rev="", message=""):
+    name = _clean_branch(name)
+    rev = _clean_rev(rev) if str(rev or "").strip() else ""
+    msg = str(message or "").strip()
+    if msg:
+        args = ["tag", "-a", name, "-m", msg[:500]] + ([rev] if rev else [])
+    else:
+        args = ["tag", name] + ([rev] if rev else [])
+    code, _out, err = _run(root, args)
+    if code != 0:
+        raise GitError(err or "创建标签失败")
+    return {"ok": True, "name": name}
+
+
+def tag_delete(root, name):
+    name = _clean_branch(name)
+    code, _out, err = _run(root, ["tag", "-d", name])
+    if code != 0:
+        raise GitError(err or "删除标签失败")
+    return {"ok": True, "name": name}
+
+
+def graph_log(root, limit=60):
+    """带分支图的提交历史（ASCII 图由 git 生成，前端只按列展示）。"""
+    try:
+        limit = max(1, min(int(limit or 60), 200))
+    except (TypeError, ValueError):
+        limit = 60
+    code, out, err = _run(root, [
+        "log", "--graph", "--all", "--no-color", "--date=short",
+        "-n", str(limit),
+        # \x1f 作为分隔符：--graph 会把 "* " 前缀拼在第一个字段前面，
+        # 不能按第一个 tab 切（否则提交号会被并进图里）。
+        # 不用 \x1e：Python 的 splitlines() 会把它当换行，行会被切碎。
+        "--pretty=format:%x1f%h%x09%ad%x09%an%x09%s%x09%d"])
+    if code != 0:
+        return {"ok": False, "error": err or "读取提交历史失败", "items": []}
+    items = []
+    for line in out.decode("utf-8", "replace").split("\n"):
+        if "\x1f" not in line:
+            continue
+        graph, rest = line.split("\x1f", 1)
+        seg = rest.split("\t")
+        if len(seg) < 4:
+            continue
+        items.append({
+            "graph": graph.rstrip(),
+            "hash": seg[0], "date": seg[1], "author": seg[2],
+            "subject": seg[3],
+            "refs": seg[4].strip() if len(seg) > 4 else "",
+        })
+    return {"ok": True, "error": "", "items": items}

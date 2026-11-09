@@ -101,3 +101,34 @@ def test_broken_pdf_does_not_raise():
                                   ocr=lambda jpg: "x")
     assert text is None
     assert warn
+
+
+def test_progress_reports_text_pages():
+    seen = []
+    text, _ = docparse.extract("a.pdf", _make_text_pdf(),
+                               progress=lambda done, total, stage: seen.append((done, total, stage)))
+    assert text
+    assert seen == [(1, 1, "text")]
+
+
+def test_progress_reports_render_and_ocr_pages():
+    seen = []
+
+    def on_prog(done, total, stage):
+        seen.append((done, total, stage))
+
+    text, _ = docparse.extract("scan.pdf", _make_scanned_pdf(pages=2),
+                               ocr=lambda jpg: "正文", progress=on_prog)
+    assert text
+    stages = [s for _, _, s in seen]
+    assert stages.count("render") == 2
+    assert stages.count("ocr") == 2
+    assert all(total == 2 for _, total, _ in seen)
+
+
+def test_progress_callback_error_does_not_break_parsing():
+    def boom(done, total, stage):
+        raise RuntimeError("进度回调炸了")
+
+    text, _ = docparse.extract("a.pdf", _make_text_pdf(), progress=boom)
+    assert text and "Hello PDF 12345" in text

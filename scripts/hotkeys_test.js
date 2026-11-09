@@ -19,8 +19,10 @@ const path = require('path');
 const fs = require('fs');
 const core = require(path.join(__dirname, '..', 'web', 'hk-core.js'));
 const reg = require(path.join(__dirname, '..', 'web', 'hotkeys.js'));
+const doc = require(path.join(__dirname, '..', 'web', 'hk-doc.js'));
 
 const { HK_DEFS, HK_SCOPES } = reg;
+const { HK_DOC_GROUPS } = doc;
 const {
   hkKeyOf, hkLabel, hkSpecProblem, hkKeysOfDef,
   hkHitIn, hkFindDup, hkFindCross, hkMonacoParts,
@@ -79,6 +81,8 @@ const defs = [
 ];
 eq('hkKeysOfDef: 有覆盖只保留新键', hkKeysOfDef(defs[1], ov), ['Ctrl+KeyJ']);
 eq('hkKeysOfDef: 无覆盖用默认列表', hkKeysOfDef(defs[0], ov), ['Ctrl+KeyJ']);
+eq('hkKeysOfDef: 空串覆盖 = 解除绑定', hkKeysOfDef(defs[1], { 'b.rule': '' }), []);
+eq('hkHitIn: 解除绑定后不再命中', hkHitIn(defs, 'Ctrl+KeyK', ['y'], { 'b.rule': '' }), null);
 eq('hkHitIn: 自定义优先 —— 原作用域 x 让路（返回 null，不吞键）',
   hkHitIn(defs, 'Ctrl+KeyJ', ['x'], ov), null);
 eq('hkHitIn: 自定义优先 —— 改键者 y 胜出',
@@ -202,6 +206,39 @@ eq('注册表: 各作用域内部默认键不冲突',
 eq('hkKeysOf: 无覆盖时返回默认键', reg.hkKeysOf('ed.undo'), ['Ctrl+KeyZ', 'Meta+KeyZ']);
 eq('hkHit: 在 editor 作用域命中 Ctrl+Shift+Z',
   (reg.hkHit(ev('KeyZ', { ctrl: true, shift: true }), ['editor']) || {}).id, 'ed.redo');
+
+/* ---------- 8.5 「完整说明」与注册表同源 ----------
+   说明页的键位由 HK_DEFS 现取，但**条目**仍需人工维护。这里挡住两类回归：
+   新增了可改键规则却忘了写进说明；说明里引用了不存在的规则 id。 */
+const DOC_ROWS = [];
+HK_DOC_GROUPS.forEach((g) => (g.rows || []).forEach((r) => DOC_ROWS.push({ g, r })));
+const docIds = HK_DOC_GROUPS.map((g) => g.id);
+
+eq('说明: 分组 id 唯一', new Set(docIds).size, docIds.length);
+eq('说明: 分组标题不重复',
+  new Set(HK_DOC_GROUPS.map((g) => g.title)).size, HK_DOC_GROUPS.length);
+eq('说明: 每个分组都有标题与条目',
+  HK_DOC_GROUPS.filter((g) => !g.title || !(g.rows || []).length).map((g) => g.id), []);
+eq('说明: 没有引用不存在的规则 id',
+  DOC_ROWS.filter((x) => x.r.def && !reg.hkDef(x.r.def)).map((x) => x.r.def), []);
+eq('说明: 每条可改键规则都写进了说明',
+  HK_DEFS.filter((d) => !DOC_ROWS.some((x) => x.r.def === d.id)).map((d) => d.id), []);
+eq('说明: 同一条规则不重复文档化',
+  (() => {
+    const seen = {};
+    const bad = [];
+    DOC_ROWS.forEach((x) => {
+      if (!x.r.def) return;
+      if (seen[x.r.def]) bad.push(x.r.def);
+      else seen[x.r.def] = true;
+    });
+    return bad;
+  })(), []);
+eq('说明: 自写条目都有 keys / name / cond',
+  DOC_ROWS.filter((x) => !x.r.def &&
+    (!(x.r.keys || []).length || !x.r.name || !x.r.cond)).map((x) => x.r.name || '(无名)'), []);
+eq('说明: def 条目都写了生效条件',
+  DOC_ROWS.filter((x) => x.r.def && !x.r.cond).map((x) => x.r.def), []);
 
 /* ---------- 9. 单一来源校验 ----------
    纯逻辑只允许声明在 hk-core.js。hotkeys.js 若再声明一份同名函数/常量，浏览器里

@@ -69,3 +69,23 @@ def _api_notes_backlinks(h):
 
 def _api_notes_search(h):
         h._json({"ok": True, "hits": noteslib.search(h._body().get("q"))})
+
+
+def _api_notes_anno_list(h):
+        path = h._body().get("path")
+        h._json({"ok": True, "items": noteslib.list_annotations(path)})
+
+
+def _api_notes_anno_save(h):
+        body = h._body()
+        aid = noteslib.save_annotation(body.get("path"), body)
+        if not aid:
+            return h._json({"ok": False, "error": "批注内容不能为空"}, 400)
+        h._json({"ok": True, "id": aid,
+                 "items": noteslib.list_annotations(body.get("path"))})
+
+
+def _api_notes_anno_delete(h):
+        body = h._body()
+        noteslib.delete_annotation(body.get("path"), str(body.get("id") or ""))
+        h._json({"ok": True, "items": noteslib.list_annotations(body.get("path"))})

@@ -12,7 +12,9 @@ import re
 import threading
 import time
 
-from app.config import (MAX_RESERVE, get_api_conf, load_config,
+from app import attachments
+from app.config import (MAX_RESERVE, get_api_conf, hybrid_on, is_local_url,
+                        light_chat_is_local, light_chat_mode, load_config,
                         model_context_limit)
 from app.profile import load_profile, manual_block
 from app.sessions import (MAX_COMPRESS_MARKS, compress_marks_for, find_session,
@@ -53,6 +55,7 @@ COMPRESS_PROMPT = (
 )
 
 _COMPRESSING = set()        # 正在压缩的会话 id（后台预压缩与手动压缩共用）
+_COMPRESS_CANCEL = {}       # sid -> Event：/api/stop 可以取消后台压缩
 _COMPRESS_LOCK = threading.Lock()
 
 
@@ -76,10 +79,25 @@ def context_limits(model=""):
         limit = int(model_context_limit(model, cfg))
     except (TypeError, ValueError):
         limit = 0
+    # 仅轻量模型 + 本地服务：窗口按本地模型的实际上下文配置（默认 12k）；
+    # 混合模式：用 hybrid_context_limit；关闭 / 云端轻量模型：沿用用户填的窗口。
+    if light_chat_is_local(cfg):
+        try:
+            limit = int(cfg.get("local_context_limit") or 12000)
+        except (TypeError, ValueError):
+            limit = 12000
+    elif hybrid_on(cfg) and not light_chat_mode(cfg):
+        try:
+            _hl = int(cfg.get("hybrid_context_limit") or 0)
+        except (TypeError, ValueError):
+            _hl = 0
+        if _hl > 0:
+            limit = _hl
     if limit <= 0:
         # 不限窗口（设置里没填）：不按比例算预算，压缩逻辑全部不触发
         return 0, 0
-    _res_raw = cfg.get("chat_reserve_output")
+    _res_raw = (cfg.get("local_reserve_output") if light_chat_is_local(cfg)
+                else cfg.get("chat_reserve_output"))
     try:
         # 0 是合法值（不预留），不能用 `or 默认值` 把它吃掉
         reserve = 16384 if _res_raw is None or _res_raw == "" else int(_res_raw)
@@ -184,9 +202,12 @@ def summary_block(summary):
     return "以下是本次对话较早内容的摘要（原始消息已压缩）：\n" + (summary or "")
 
 
-def _msg_text(m):
+def _msg_text(m, refs_handle=False):
     """一条消息真正发给模型的文本：正文 + 图片描述 + 附件正文。
-    估算与拼装必须共用这一个函数，否则进度条会低估附件体积。"""
+    估算与拼装必须共用这一个函数，否则进度条会低估附件体积。
+
+    refs_handle=True 时，`@文件` 引用的正文不再内联，只留一行定位信息
+    （省费模式：历史里的引用正文由 read_file 按需取回）。"""
     text = m.get("content") or ""
     if isinstance(text, list):
         # 多模态 content（图片 + 文字）：只取文字部分，图片按张数单独估算，
@@ -204,15 +225,55 @@ def _msg_text(m):
     if m.get("vision"):
         text = (text + "\n\n【图片内容】\n" + m["vision"]) if text \
                else ("【用户上传了一张图片】\n" + m["vision"])
-    if m.get("doc_text"):
+    # 文档附件：新消息把每份附件的正文存在 docs[].text；旧消息只有 doc_text（第一份）
+    _docs = m.get("docs") if isinstance(m.get("docs"), list) else None
+    if _docs:
+        for _d in _docs:
+            if not isinstance(_d, dict):
+                continue
+            fn = str(_d.get("name") or "附件")
+            body = str(_d.get("text") or "")
+            if body:
+                text = (text + "\n\n【附件：" + fn + "】\n" + body) if text \
+                       else ("【用户上传了附件 " + fn + "】\n" + body)
+            elif _d.get("error"):
+                note = "（未能读取：%s）" % _d.get("error")
+                text = (text + "\n\n【附件：" + fn + "】" + note) if text \
+                       else ("【用户上传了附件 " + fn + "】" + note)
+    elif m.get("doc_text"):
         fn = (m.get("doc") or {}).get("name") or "附件"
         text = (text + "\n\n【附件：" + str(fn) + "】\n" + m["doc_text"]) if text \
                else ("【用户上传了附件 " + str(fn) + "】\n" + m["doc_text"])
+    # `@文件` 引用：正文在发送时由 app/fileref.py 抽好挂在消息上。
+    # 估算与拼装共用本函数，所以引用体积也会被算进上下文占用。
+    for r in (m.get("refs") or []):
+        if not isinstance(r, dict):
+            continue
+        page = (" 第 %d 页" % r["page"]) if r.get("page") else ""
+        if r.get("start"):
+            sym = (" · " + str(r.get("symbol"))) if r.get("symbol") else ""
+            head = "【引用代码：%s:%s-%s%s】" % (
+                r.get("path") or "", r.get("start"), r.get("end") or "", sym)
+        else:
+            head = "【引用文件：%s%s】" % (r.get("path") or "", page)
+        if refs_handle:
+            # 省费模式：正文不内联，只给「在哪、怎么取回」。信息没有丢，
+            # 只是从「每轮重发」改成「按需读取」。
+            line = head + "（正文未内联；需要时用 read_file 按上面的路径与行号取回）"
+            text = (text + "\n\n" + line) if text else line
+            continue
+        body = r.get("text") or ("（未能读取：%s）" % (r.get("warn") or "未知原因"))
+        text = (text + "\n\n" + head + "\n" + body) if text else (head + "\n" + body)
+    # 图片 / 文档附件：给模型一行可回看的 id（正文由 attachment_read 按需取，
+    # 不常驻上下文；vision 模式下识别结果已在上面注入过）
+    refs = attachments.ref_line(m)
+    if refs:
+        text = (text + "\n" + refs) if text else refs
     return text
 
 
-def _msg_tokens(m):
-    n = MSG_OVERHEAD + estimate_tokens(_msg_text(m))
+def _msg_tokens(m, refs_handle=False):
+    n = MSG_OVERHEAD + estimate_tokens(_msg_text(m, refs_handle))
     content = m.get("content") if isinstance(m, dict) else None
     if isinstance(content, list):
         n += IMAGE_TOKENS * sum(1 for p in content
@@ -220,37 +281,105 @@ def _msg_tokens(m):
     return n
 
 
-def _context_text_tokens(system_prompt, summary, msgs):
-    """估算一次请求上下文的 token 数（system + 摘要 + 消息）"""
+def _context_text_tokens(system_prompt, summary, msgs, refs_handle_from=None):
+    """估算一次请求上下文的 token 数（system + 摘要 + 消息）
+
+    refs_handle_from：从这个下标起，引用正文才内联；更早的只算句柄。
+    None = 全部内联（旧行为）。"""
     n = 0
     if system_prompt:
         n += MSG_OVERHEAD + estimate_tokens(system_prompt)
     if summary:
         n += MSG_OVERHEAD + estimate_tokens(summary_block(summary))
-    for m in msgs:
-        n += _msg_tokens(m)
+    for i, m in enumerate(msgs):
+        n += _msg_tokens(m, refs_handle_from is not None and i < refs_handle_from)
     return n
 
 
-def _context_parts(system_prompt, summary, msgs):
+def _context_parts(system_prompt, summary, msgs, refs_handle_from=None):
     """分项统计：系统提示 / 摘要 / 对话正文 / 附件与图片描述"""
     parts = {"system": 0, "summary": 0, "dialog": 0, "attachment": 0, "image": 0}
     if system_prompt:
         parts["system"] = MSG_OVERHEAD + estimate_tokens(system_prompt)
     if summary:
         parts["summary"] = MSG_OVERHEAD + estimate_tokens(summary_block(summary))
-    for m in msgs:
+    for i, m in enumerate(msgs):
+        handle = refs_handle_from is not None and i < refs_handle_from
         raw = m.get("content") or ""
         if isinstance(raw, list):
-            base = estimate_tokens(_msg_text(m))
+            base = estimate_tokens(_msg_text(m, handle))
             extra = 0
         else:
             base = estimate_tokens(raw)
-            extra = estimate_tokens(_msg_text(m)) - base
+            extra = estimate_tokens(_msg_text(m, handle)) - base
         parts["dialog"] += MSG_OVERHEAD + base
         if extra > 0:
             parts["attachment"] += extra
     return parts
+
+
+def _refs_handle_on():
+    """省费模式下，历史里的引用正文只留句柄。默认开启（与 DEFAULT_CONFIG 一致）。"""
+    try:
+        cfg = load_config() or {}
+        return str(cfg.get("token_profile") or "balanced").lower() != "quality"
+    except Exception:                    # noqa: BLE001  配置读不到就按旧行为
+        return False
+
+
+def _refs_inline_from(msgs):
+    """最后一条「真正的用户消息」的下标：它保留引用正文，更早的用句柄。"""
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        if str(m.get("content") or "").startswith(TOOL_MSG_PREFIX):
+            continue
+        return i
+    return None
+
+
+def working_set_tokens():
+    """省费模式下的「跨回合历史原文」预算；0 = 关闭（按窗口压缩的旧行为）。
+
+    注意这不是上下文窗口：模型的窗口与 read_file 能力都不变，
+    只是不再每轮把整段历史原文全部重发。
+    """
+    try:
+        cfg = load_config() or {}
+        if str(cfg.get("token_profile") or "balanced").lower() == "quality":
+            return 0
+        # 本地小模型窗口只有 8–12k，工作集对它没有意义，继续走原来的窗口比例逻辑
+        if light_chat_is_local(cfg):
+            return 0
+        return max(0, int(cfg.get("history_working_set_tokens") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _clamp_keep_from(msgs, cut, keep_from):
+    """压缩切点不能越过「当前回合」：最后一条真正的用户消息及其之后永远保留原文。"""
+    _cur = _refs_inline_from(msgs)
+    if _cur is not None and _cur > cut:
+        return min(keep_from, _cur)
+    return keep_from
+
+
+def history_tokens(s):
+    """当前会话「会被重发的历史原文」估算（压缩点之后的消息）。"""
+    cut = int((s or {}).get("summary_upto") or 0)
+    msgs = ((s or {}).get("messages") or [])[cut:]
+    _rf = _refs_inline_from(msgs) if _refs_handle_on() else None
+    n = _context_text_tokens("", "", msgs, _rf)
+    # 历史附图是真实发给模型的，也要算进「要重发多少」
+    try:
+        from app import imaging
+        keep = int((load_config() or {}).get("image_history_keep") or 0)
+        if keep > 0 and imaging.vision_mode() == "chat":
+            n += IMAGE_TOKENS * history_image_count(s, keep)
+    except Exception:                    # noqa: BLE001  估算失败不影响主流程
+        pass
+    return n
 
 
 def estimate_messages_tokens(messages):
@@ -278,6 +407,17 @@ IN_PARTS = ("rules", "tools_doc", "memory", "other_sys",
             "summary", "user", "reply", "tool_result", "schema")
 
 
+def message_chars(m):
+    """一条消息的「正文字符数」：多模态数组只算 text 片段，绝不把 base64 算进去。"""
+    if not isinstance(m, dict):
+        return 0
+    raw = m.get("content")
+    if isinstance(raw, list):
+        return len("\n".join(str(p.get("text") or "") for p in raw
+                             if isinstance(p, dict) and p.get("type") == "text"))
+    return len(str(raw or ""))
+
+
 def input_breakdown(messages, sys_parts=None, summary_chars=0, schema_chars=0):
     """按类型统计一次请求的输入体量（字符），用于「token 明细」看钱花在哪。
 
@@ -295,7 +435,12 @@ def input_breakdown(messages, sys_parts=None, summary_chars=0, schema_chars=0):
     for m in messages or []:
         if not isinstance(m, dict):
             continue
-        text = str(m.get("content") or "")
+        raw = m.get("content")
+        if isinstance(raw, list):
+            text = "\n".join(str(p.get("text") or "") for p in raw
+                             if isinstance(p, dict) and p.get("type") == "text")
+        else:
+            text = str(raw or "")
         n = len(text)
         role = m.get("role")
         if role == "system":
@@ -356,6 +501,7 @@ def calibrate_ratio(s, system_prompt=""):
     """
     msgs = s.get("messages", [])
     cut = int(s.get("summary_upto") or 0)
+    _refs_handle = _refs_handle_on()      # 与真正发请求时的口径保持一致
     try:
         _window = context_limits()[0]
     except Exception:
@@ -378,7 +524,9 @@ def calibrate_ratio(s, system_prompt=""):
         # 否则（例如压缩前产生的旧锚点）其 prompt 对应的是全量历史，估算无法对上
         if not prompt_tokens or cut >= i or int(m.get("ctx_cut", 0)) != cut:
             continue
-        est = _context_text_tokens(system_prompt, s.get("summary") or "", msgs[cut:i])
+        _slice = msgs[cut:i]
+        _rf = _refs_inline_from(_slice) if _refs_handle else None
+        est = _context_text_tokens(system_prompt, s.get("summary") or "", _slice, _rf)
         if est > 0:
             ratio = int(prompt_tokens) / est
             if 0.2 <= ratio <= 5:         # 明显离群则丢弃，避免估算被带偏
@@ -394,12 +542,13 @@ def session_context(s, system_prompt="", extra_tokens=0, tools_extra=0):
     cut = int(s.get("summary_upto") or 0)
     summary = s.get("summary") or ""
     msgs = s.get("messages", [])[cut:]
-    est = _context_text_tokens(system_prompt, summary, msgs)
+    _rf = _refs_inline_from(msgs) if _refs_handle_on() else None
+    est = _context_text_tokens(system_prompt, summary, msgs, _rf)
     ratio = calibrate_ratio(s, system_prompt)
     used = int(est * ratio) + int(extra_tokens or 0) + int(tools_extra or 0)
     remain = max(0, limit - used) if limit else 0
     pct = round(used * 100.0 / limit, 1) if limit else 0.0
-    parts = _context_parts(system_prompt, summary, msgs)
+    parts = _context_parts(system_prompt, summary, msgs, _rf)
     for k in parts:
         parts[k] = int(parts[k] * ratio)
     parts["image"] = int(extra_tokens or 0)
@@ -454,8 +603,50 @@ def _history_compact_cfg():
     return max(0, keep), max(0, digest)
 
 
-def build_context_messages(s, system_prompt):
-    """按「系统提示 + 摘要 + 压缩点之后的原文」拼出真正发给模型的消息列表"""
+def _history_image_msgs(msgs, keep):
+    """最近 keep 条「带图片的用户消息」（排除当前回合）。
+
+    当前回合的图片由调用方单独附图，这里排除以免重复。
+    """
+    if keep <= 0:
+        return []
+    last_user = _refs_inline_from(msgs)
+    cand = []
+    for i, m in enumerate(msgs):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        if last_user is not None and i >= last_user:
+            continue
+        if m.get("images") or m.get("image"):
+            cand.append(m)
+    return cand[-int(keep):]
+
+
+def _msg_image_count(m, per_msg=2):
+    imgs = m.get("images")
+    if not isinstance(imgs, list) or not imgs:
+        imgs = [m.get("image")] if isinstance(m.get("image"), dict) else []
+    return min(max(1, int(per_msg or 1)), len(imgs))
+
+
+def history_image_count(s, keep, per_msg=2):
+    """历史里会被重新附图的图片数量（供上下文估算补 IMAGE_TOKENS）。"""
+    params = _session_cut(s)
+    return sum(_msg_image_count(m, per_msg) for m in _history_image_msgs(params, keep))
+
+
+def _session_cut(s):
+    cut = int((s or {}).get("summary_upto") or 0)
+    return ((s or {}).get("messages") or [])[cut:]
+
+
+def build_context_messages(s, system_prompt, image_loader=None, image_keep=0):
+    """按「系统提示 + 摘要 + 压缩点之后的原文」拼出真正发给模型的消息列表。
+
+    image_loader(m, text) -> content parts：省费/多模态模式下，把最近几条带图
+    消息的图片重新作为多模态内容附上。否则历史里只剩一行「可回看附件」，
+    模型看不到图就只能要求用户重新发送。
+    """
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -467,18 +658,32 @@ def build_context_messages(s, system_prompt):
             messages.insert(0, {"role": "system", "content": block})
     cut = int(s.get("summary_upto") or 0)
     msgs = s.get("messages", [])[cut:]
+    _rf = _refs_inline_from(msgs) if _refs_handle_on() else None
     keep_turns, digest = _history_compact_cfg()
     compact_on = keep_turns > 0 and digest > 0      # 任一项为 0 = 关闭
     keep = set()
     if compact_on:
         asst = [i for i, m in enumerate(msgs) if m.get("role") == "assistant"]
         keep = set(asst[-keep_turns:])
+    # 最近几条带图消息：把图片重新附上（当前回合由调用方单独附图）
+    _img_set = set()
+    if image_loader and image_keep > 0:
+        _by_msg = _history_image_msgs(msgs, image_keep)
+        _img_set = {id(m) for m in _by_msg}
     for i, m in enumerate(msgs):
-        text = _msg_text(m)
+        text = _msg_text(m, _rf is not None and i < _rf)
         if compact_on and m.get("role") == "assistant" and i not in keep:
             compact = _compact_history_assistant(m, digest)
             if compact:
                 text = compact
+        if id(m) in _img_set:
+            try:
+                parts = image_loader(m, text)
+            except Exception:            # noqa: BLE001  附图失败退回纯文本
+                parts = None
+            if parts:
+                messages.append({"role": m["role"], "content": parts})
+                continue
         messages.append({"role": m["role"], "content": text})
     return messages
 
@@ -551,38 +756,304 @@ def manual_keep_budget(msgs, cut=0, system_prompt=""):
 
     有窗口时按「窗口 − 输出上限」算；不限窗口时按当前历史本身的估算量算，
     不再引入 128k 这类假想窗口。
+    窗口远大于当前历史时（默认窗口是 1 亿），按窗口算会让「保留 16%」变成
+    “全部保留”，手动压缩永远提示可压缩内容不足；这里再以实际历史为上限。
     """
+    try:
+        _ws = working_set_tokens()
+    except Exception:                       # noqa: BLE001
+        _ws = 0
+    _msgs = (msgs or [])[int(cut or 0):]
+    est = _context_text_tokens(system_prompt, "", _msgs)
+    if _ws > 0:
+        # 省费模式：保留预算直接取工作集（历史原文上限），与窗口大小解耦。
+        return max(1, min(_ws, est))
     try:
         limit = context_limits()[0]
     except Exception:                       # noqa: BLE001  读配置失败按不限处理
         limit = 0
     if limit > 0:
-        return max(1, limit - effective_output_cap(limit))
-    est = _context_text_tokens(system_prompt, "", (msgs or [])[int(cut or 0):])
+        budget = max(1, limit - effective_output_cap(limit))
+        return max(1, min(budget, est))
     return max(1, est)
 
 
-def compress_history(s, system_prompt=""):
+# 本地小模型的压缩系统提示：只要求结构化要点，避免它把 8k 窗口写满。
+COMPRESS_SYSTEM_SMALL = (
+    "你是上下文压缩器。只输出中文结构化要点，不要寒暄、不要解释过程。"
+    "必须保留：文件路径、函数/命令名、错误原文、未完成事项、已做决定。"
+    "信息不足时写「(none)」，不要编造。")
+
+_ANCHOR_PATH_RE = re.compile(
+    r"[A-Za-z0-9_./\\-]+\.(?:py|js|mjs|cjs|ts|tsx|jsx|json|md|html|css|scss|"
+    r"yaml|yml|toml|ini|cfg|sh|ps1|bat|rs|go|java|kt|c|h|cpp|hpp|cs|rb|php|"
+    r"lua|sql|txt)\b")
+_ANCHOR_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_.]{3,})\s*\(")
+# 正文里出现的 snake_case / camelCase 标识符（函数名、字段名）也算事实锚点
+_ANCHOR_IDENT_RE = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*)\b")
+_ANCHOR_ERR_RE = re.compile(
+    r"(?:Error|Exception|Traceback|HTTP\s*\d{3}|退出码\s*\d+|exit code\s*\d+)[^\n]{0,100}")
+_ANCHOR_STOP = {
+    "if", "for", "while", "print", "len", "str", "int", "list", "dict", "set",
+    "open", "range", "return", "def", "function", "async", "await", "catch",
+    "then", "map", "filter", "foreach", "push", "split", "join", "replace",
+    "json", "string", "number", "object", "array", "console", "window",
+}
+
+
+def _extract_anchors(text):
+    """提取「压缩后必须还能看到」的事实锚点：路径 / 调用名 / 错误串。"""
+    text = str(text or "")
+    out = []
+    seen = set()
+    for rx in (_ANCHOR_PATH_RE, _ANCHOR_IDENT_RE, _ANCHOR_CALL_RE, _ANCHOR_ERR_RE):
+        for m in rx.finditer(text):
+            v = (m.group(1) if rx in (_ANCHOR_CALL_RE, _ANCHOR_IDENT_RE)
+                 else m.group(0)).strip()
+            if not v or v.lower() in _ANCHOR_STOP or len(v) < 4:
+                continue
+            if v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+            if len(out) >= 200:
+                return out
+    return out
+
+
+def _anchor_weight(anchor):
+    """事实锚点权重：文件路径 / 错误串最贵，普通标识符只作参考。"""
+    try:
+        if _ANCHOR_PATH_RE.fullmatch(anchor):
+            return 3
+        if _ANCHOR_ERR_RE.match(anchor):
+            return 3
+    except Exception:                     # noqa: BLE001
+        pass
+    return 1
+
+
+def _summary_quality_ok(replay_text, summary, pins, cfg):
+    """本地摘要的事实保留闸门：加权召回不足就回退主模型。"""
+    anchors = _extract_anchors(replay_text)
+    if len(anchors) < 8:                   # 锚点太少，无从判断，放行
+        return True
+    text = str(summary or "") + "\n" + str(pins or "")
+    total = sum(_anchor_weight(a) for a in anchors)
+    hit = sum(_anchor_weight(a) for a in anchors if a in text)
+    ratio = hit / float(total or 1)
+    _need = cfg.get("hybrid_quality_gate")
+    try:
+        need = float(0.55 if _need is None else _need)
+    except (TypeError, ValueError):
+        need = 0.55
+    if need <= 0:                          # 0 = 关闭闸门（只用于诊断）
+        return True
+    if ratio < need:
+        print("[压缩] 本地摘要事实召回 %.0f%% < %.0f%%，回退主模型"
+              % (ratio * 100, need * 100))
+        return False
+    return True
+
+
+def _critical_facts(text):
+    """从原文里抽「必须原样保留」的文件路径与错误串。"""
+    text = str(text or "")
+    paths, errs = [], []
+    for m in _ANCHOR_PATH_RE.finditer(text):
+        v = m.group(0).strip()
+        if v and v not in paths:
+            paths.append(v)
+    for m in _ANCHOR_ERR_RE.finditer(text):
+        v = m.group(0).strip()
+        if v and v not in errs:
+            errs.append(v)
+    return paths[:40], errs[:10]
+
+
+def _augment_summary(summary, replay_text):
+    """本地摘要自动补一份「原文事实清单」：路径 / 错误串不依赖模型转述。"""
+    paths, errs = _critical_facts(replay_text)
+    miss_p = [p for p in paths if p not in summary]
+    # 错误串后面常跟上下文（「退出码 1」等），命中前 16 字就算已保留
+    miss_e = [e for e in errs
+              if not (e in summary or (len(e) >= 16 and e[:16] in summary))]
+    if not miss_p and not miss_e:
+        return summary
+    out = [str(summary or "").rstrip(), "", "## 关键文件与错误（自动提取）"]
+    for p in miss_p[:30]:
+        out.append("- `%s`" % p)
+    for e in miss_e[:8]:
+        out.append("- `%s`" % e.replace("`", ""))
+    return "\n".join(out)
+
+
+def _split_replay_chunks(replay, limit_tokens):
+    """按 token 预算把回放消息切成若干块（本地 8k 上下文的安全线）。"""
+    chunks, cur, cur_tokens = [], [], 0
+    for m in replay or []:
+        text = str((m or {}).get("content") or "")
+        if not text:
+            continue
+        piece = ("【assistant】" if (m or {}).get("role") == "assistant" else "【user】") + text
+        n = estimate_tokens(piece)
+        if cur and cur_tokens + n > limit_tokens:
+            chunks.append("\n\n".join(cur))
+            cur, cur_tokens = [], 0
+        if n > limit_tokens:
+            # 单条就超预算：按字符硬切，保证本地不会 400
+            step = max(1000, limit_tokens * 3)
+            for i in range(0, len(piece), step):
+                chunks.append(piece[i:i + step])
+            continue
+        cur.append(piece)
+        cur_tokens += n
+    if cur:
+        chunks.append("\n\n".join(cur))
+    return chunks
+
+
+def _api_compress(api_key, api_url, api_model, system_prompt, lines, replay,
+                  sum_tokens, stop_event, use_light=True):
+    """原有一次性摘要：主模型（或云端轻量模型）。"""
+    req = []
+    if system_prompt:
+        req.append({"role": "system", "content": system_prompt})
+    if lines:
+        req.append({"role": "user", "content": "\n".join(lines)})
+    req.extend(replay)
+    req.append({"role": "user", "content": COMPRESS_PROMPT})
+    try:
+        from app import llm               # 延迟导入：llm 依赖 agent，避免模块级循环
+        kw = {} if use_light else {"use_light": False}
+        return llm._quick_chat(api_key, api_url, api_model, req,
+                               max_tokens=max(256, sum_tokens), source="summary",
+                               stop_event=stop_event, **kw)
+    except Exception as e:                # noqa: BLE001
+        print(f"[压缩] 失败：{e}")
+        return ""
+
+
+def _local_compress(api_key, api_url, api_model, lines, replay, cfg, stop_event):
+    """本地小模型分块摘要；返回 None 表示需要回退主模型。"""
+    from app import llm
+    try:
+        chunk_tokens = int(cfg.get("hybrid_light_chunk_tokens") or 3500)
+    except (TypeError, ValueError):
+        chunk_tokens = 3500
+    chunk_tokens = max(800, min(6000, chunk_tokens))
+    pins = "\n".join(lines)[:4000]
+    chunks = _split_replay_chunks(replay, chunk_tokens)
+    if not chunks:
+        return None
+    try:
+        sum_tokens = int(cfg.get("hybrid_summary_tokens") or 800)
+    except (TypeError, ValueError):
+        sum_tokens = 800
+    parts = []
+    for ch in chunks:
+        if stop_event is not None and stop_event.is_set():
+            return None
+        req = [
+            {"role": "system", "content": COMPRESS_SYSTEM_SMALL},
+            {"role": "user", "content": (pins + "\n\n【待压缩的较早对话】\n" + ch
+                                         + "\n\n" + COMPRESS_PROMPT)},
+        ]
+        try:
+            txt = llm._quick_chat(api_key, api_url, api_model, req,
+                                  max_tokens=min(700, sum_tokens), source="summary",
+                                  timeout=(10, 120), tries=1, use_light=True,
+                                  stop_event=stop_event)
+        except Exception as e:            # noqa: BLE001
+            print(f"[压缩] 本地分块失败：{e}")
+            return None
+        txt = str(txt or "").strip()
+        if not txt:
+            return None
+        parts.append(txt)
+    raw = parts[0] if len(parts) == 1 else _merge_local_summaries(
+        api_key, api_url, api_model, parts, sum_tokens, stop_event)
+    if not raw:
+        return None
+    replay_text = "\n".join(str(m.get("content") or "") for m in replay)
+    # 路径 / 错误串由代码补齐，避免小模型把 `app/x.py` 转述成 `x.py`
+    raw = _augment_summary(raw, replay_text)
+    if not _summary_quality_ok(replay_text, raw, pins, cfg):
+        return None
+    return raw
+
+
+def _merge_local_summaries(api_key, api_url, api_model, parts, sum_tokens, stop_event):
+    """多块摘要合并成一份；失败时退化为直接拼接（仍会过质量闸门）。"""
+    from app import llm
+    body = "\n\n".join(parts)
+    req = [
+        {"role": "system", "content": COMPRESS_SYSTEM_SMALL},
+        {"role": "user", "content": ("【分块摘要】\n" + body
+                                     + "\n\n请合并成一份同样结构的检查点，"
+                                       "保留仍然有效的路径 / 错误 / 待办，去掉重复。\n\n"
+                                     + COMPRESS_PROMPT)},
+    ]
+    try:
+        txt = llm._quick_chat(api_key, api_url, api_model, req,
+                              max_tokens=min(800, sum_tokens), source="summary",
+                              timeout=(10, 120), tries=1, use_light=True,
+                              stop_event=stop_event)
+        txt = str(txt or "").strip()
+        return txt or body
+    except Exception:                     # noqa: BLE001
+        return body
+
+
+def compress_history(s, system_prompt="", stop_event=None, prefer_local=True):
     """把较早的对话总结成摘要，写入 s['summary'] / s['summary_upto']。
     成功返回 True；可压缩消息不足或调用失败返回 False。
-    摘要用「轻量模型」生成（未配置 light_model 时自动沿用主模型）。
+    摘要默认用「轻量模型」生成；混合模式下的小区间可由本地模型分块完成。
 
+    prefer_local=False：同步路径（发送前兜底压缩）强制用主模型，避免本地
+    8k 分块串行导致的几十秒停顿；后台预压缩仍可用本地。
+
+    stop_event：用户在压缩期间点停止时立即放弃，不再等模型返回。
     system_prompt 会原样放在请求最前面，被压缩区间按原 role 回放：
     这样摘要请求的前缀与主请求的早期部分一致，能命中提供方的热前缀缓存
     （dsh 的 compaction-basic 也是同样做法）。"""
+    if stop_event is not None and stop_event.is_set():
+        return False
     msgs = s.get("messages", [])
     cut = int(s.get("summary_upto") or 0)
     # 保留预算按 dsh 口径：(窗口 - 输出上限) * keep_ratio，并保底 8k token。
     # 不限窗口时按当前历史量算（不引入假想窗口）。
     _input_window = manual_keep_budget(msgs, cut, system_prompt)
+    _cfg = load_config() or {}
     try:
-        _cfg = load_config() or {}
         _keep_ratio = float(_cfg.get("compress_keep_ratio") or COMPRESS_KEEP_RATIO)
         _sum_tokens = int(_cfg.get("compress_summary_tokens") or SUMMARY_MAX_TOKENS)
     except (TypeError, ValueError):
         _keep_ratio, _sum_tokens = COMPRESS_KEEP_RATIO, SUMMARY_MAX_TOKENS
+    if light_chat_is_local(_cfg):
+        # 本地轻量模型：窗口只有 12k 左右，摘要必须更短、保留更少
+        try:
+            _keep_ratio = float(_cfg.get("local_keep_ratio") or 0.35)
+            _sum_tokens = int(_cfg.get("local_summary_tokens") or 2048)
+        except (TypeError, ValueError):
+            pass
+    elif hybrid_on(_cfg):
+        # 混合模式的压缩更积极：保留比例与摘要上限单独配置，便于一键回退
+        try:
+            _keep_ratio = float(_cfg.get("hybrid_keep_ratio") or _keep_ratio)
+            _sum_tokens = int(_cfg.get("hybrid_summary_tokens") or _sum_tokens)
+        except (TypeError, ValueError):
+            pass
+    # 工作集模式：保留预算就是工作集本身，不再按窗口比例打折
+    # （否则 40k 工作集会被 25% 的 keep_ratio 再砍成 10k）。
+    if working_set_tokens() > 0 and not light_chat_is_local(_cfg):
+        _keep_ratio = 1.0
     keep_from = keep_from_by_tokens(msgs, cut, _input_window, _keep_ratio,
                                     calibrate_ratio(s, system_prompt))
+    # 当前回合（最后一条真正的用户消息及其之后）永远保留原文：
+    # 回合内膨胀由工具结果折叠治理，不能用「摘要」把正在做的事压掉。
+    keep_from = _clamp_keep_from(msgs, cut, keep_from)
     if keep_from <= cut:
         return False                      # 可压缩的旧消息不足
     api_key, api_url, api_model = get_api_conf("chat")
@@ -653,19 +1124,40 @@ def compress_history(s, system_prompt=""):
                        "content": text})
     if not replay and not lines:
         return False
-    req = []
-    if system_prompt:
-        req.append({"role": "system", "content": system_prompt})
-    if lines:
-        req.append({"role": "user", "content": "\n".join(lines)})
-    req.extend(replay)
-    req.append({"role": "user", "content": COMPRESS_PROMPT})
+    # 本地混合模式：先用本地小模型分块摘要（省 API token），
+    # 未配置 / 失败 / 事实锚点保留不足时回退主模型，保证输出质量不降级。
+    _local_light = (hybrid_on(_cfg) and is_local_url(_cfg.get("light_url"))
+                    and (_cfg.get("light_model") or "").strip())
+    _range_tokens = sum(estimate_tokens(str(m.get("content") or "")) for m in replay)
     try:
-        from app import llm               # 延迟导入：llm 依赖 agent，避免模块级循环
-        raw = llm._quick_chat(api_key, api_url, api_model, req,
-                              max_tokens=max(256, _sum_tokens), source="summary")
-    except Exception as e:
-        print(f"[压缩] 失败：{e}")
+        _local_max = int(_cfg.get(
+            "local_max_range_tokens" if light_chat_is_local(_cfg)
+            else "hybrid_local_max_range_tokens") or 12000)
+    except (TypeError, ValueError):
+        _local_max = 12000
+    raw = None
+    # 仅轻量模型时没有别的模型可退：区间再大也必须本地压完，否则下一轮必超窗
+    # （代价是分块串行、耗时随区间线性增长）。
+    _allow_local = (_range_tokens <= max(2000, _local_max)
+                    or light_chat_mode(_cfg))
+    if _local_light and prefer_local and _allow_local:
+        raw = _local_compress(api_key, api_url, api_model, lines, replay, _cfg, stop_event)
+        if raw is None and (light_chat_mode(_cfg)
+                            or not bool(_cfg.get("hybrid_fallback_api", True))):
+            return False
+    elif _local_light:
+        # 区间太大时本地要串行跑很多块，延迟不可控：改用主模型一次压完（成本仍远小于省下的 prompt）
+        print("[压缩] 待压缩区间约 %d tokens，超过本地摘要上限 %d，改用主模型"
+              % (_range_tokens, _local_max))
+        if light_chat_mode(_cfg):
+            # 主对话就是 light，没有别的模型可回退：宁可这一轮不压，也不发必超上下文的请求
+            return False
+    if raw is None:
+        raw = _api_compress(api_key, api_url, api_model, system_prompt, lines, replay,
+                            _sum_tokens, stop_event, use_light=not _local_light)
+    if not raw:
+        return False
+    if stop_event is not None and stop_event.is_set():
         return False
     summary, points = _split_summary(raw)
     if not summary:
@@ -793,13 +1285,31 @@ def begin_compress(sid):
         if sid in _COMPRESSING:
             return False
         _COMPRESSING.add(sid)
+        _COMPRESS_CANCEL[sid] = threading.Event()
     return True
 
 
 def end_compress(sid):
     """释放压缩登记（必须放在 finally 里）。"""
+    sid = str(sid or "")
     with _COMPRESS_LOCK:
-        _COMPRESSING.discard(str(sid or ""))
+        _COMPRESSING.discard(sid)
+        _COMPRESS_CANCEL.pop(sid, None)
+
+
+def cancel_compress(sid):
+    """停止后台/同步压缩：只置事件，HTTP 请求会由 _quick_chat 丢弃。"""
+    with _COMPRESS_LOCK:
+        ev = _COMPRESS_CANCEL.get(str(sid or ""))
+    if ev is not None:
+        ev.set()
+        return True
+    return False
+
+
+def compress_stop_event(sid):
+    with _COMPRESS_LOCK:
+        return _COMPRESS_CANCEL.get(str(sid or ""))
 
 
 def _range_fp(msgs, upto):
@@ -829,6 +1339,8 @@ def maybe_precompress(sid, system_tokens, extra_tokens=0, system_prompt=""):
     if not begin_compress(sid):
         return False
 
+    stop_event = compress_stop_event(sid)
+
     def work():
         try:
             data = load_sessions()
@@ -842,7 +1354,7 @@ def maybe_precompress(sid, system_tokens, extra_tokens=0, system_prompt=""):
                     + int(system_tokens or 0) + int(extra_tokens or 0))
             if used < budget:
                 return
-            if not compress_history(s, system_prompt):
+            if not compress_history(s, system_prompt, stop_event=stop_event):
                 return
             cur = save_summary(sid, s)
             if not cur:
@@ -871,6 +1383,53 @@ def maybe_precompress(sid, system_tokens, extra_tokens=0, system_prompt=""):
         events_bus.publish({"type": "context_compressing", "session_id": sid})
     except Exception as e:
         print(f"[压缩] 推送开始事件失败：{e}")
+    return True
+
+
+def maybe_compact_working_set(sid, system_prompt="", stop_event=None):
+    """省费模式：历史原文超过「工作集」时，在后台压到工作集以内。
+
+    与 `maybe_precompress` 的区别：
+    - 那个看的是**窗口预算**（1M 窗口要 80 万才触发）——只在快要爆窗时救火；
+    - 这个看的是**每轮都要重发多少历史**——日常成本的主开关。
+
+    后台执行、不阻塞本轮；当前回合的消息不会被压进摘要（见 compress_history）。
+    返回是否真的起了后台任务。
+    """
+    ws = working_set_tokens()
+    if ws <= 0 or not sid:
+        return False
+    if not begin_compress(sid):
+        return False
+    stop_event = stop_event or compress_stop_event(sid)
+
+    def work():
+        try:
+            data = load_sessions()
+            s = find_session(data, sid)
+            if not s:
+                return
+            if history_tokens(s) <= ws:
+                return
+            if not compress_history(s, system_prompt, stop_event=stop_event):
+                return
+            cur = save_summary(sid, s)
+            if not cur:
+                return
+            flush_summary_memory(sid)
+            ctx = session_context(cur, "")
+            try:
+                from app import events as events_bus
+                events_bus.publish({"type": "context_update",
+                                    "session_id": sid, "context": ctx})
+            except Exception as e:            # noqa: BLE001
+                print(f"[压缩] 推送进度失败：{e}")
+        except Exception as e:                # noqa: BLE001
+            print(f"[压缩] 工作集压缩失败：{e}")
+        finally:
+            end_compress(sid)
+
+    threading.Thread(target=work, daemon=True).start()
     return True
 
 

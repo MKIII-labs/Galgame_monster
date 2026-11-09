@@ -113,6 +113,7 @@ def _api_stock_order(h):
             side=b.get("side") or "buy",
             qty=b.get("qty") or 0,
             reason=b.get("reason") or "",
+            limit_price=b.get("limit_price") or 0,
         )
         ret = {"ok": True, "order": order}
         if _want_delta(b):
@@ -304,5 +305,51 @@ def _api_stock_delete(h):
     try:
         stock.delete_game(game_id)
         return h._json({"ok": True})
+    except stock.StockError as e:
+        return _fail(h, e)
+
+
+# ------------------------------------------------------------
+# 绩效指标 / 报告导出 / 公司行为
+# ------------------------------------------------------------
+
+@route("/api/hall/stock/risk")
+def _api_stock_risk(h):
+    """单个参与者的绩效指标（回撤 / 波动 / 夏普 / 胜率 / 超额收益）。"""
+    b = _body(h)
+    try:
+        return h._json({"ok": True,
+                        "risk": stock.risk_metrics(b.get("game_id"),
+                                                   player_id=str(b.get("player_id") or "you"))})
+    except stock.StockError as e:
+        return _fail(h, e)
+
+
+@route("/api/hall/stock/report")
+def _api_stock_report(h):
+    """导出对局报告文本；`fmt` 取 markdown / csv，返回 text + 建议文件名。"""
+    b = _body(h)
+    try:
+        out = stock.export_report(b.get("game_id"), fmt=b.get("fmt") or "markdown",
+                                  player_id=str(b.get("player_id") or "you"))
+        return h._json({"ok": True, **out})
+    except stock.StockError as e:
+        return _fail(h, e)
+    except ValueError as e:                  # 不支持的格式
+        return _fail(h, e)
+
+
+@route("/api/hall/stock/corporate")
+def _api_stock_corporate(h):
+    """手动登记一条公司行为（分红 / 送转 / 停复牌），立刻调整持仓与现金。"""
+    b = _body(h)
+    try:
+        action = b.get("action")
+        if not isinstance(action, dict):
+            action = {"kind": b.get("kind") or "", "per_10": b.get("per_10") or 0,
+                      "ratio": b.get("ratio") or 0, "per_share": b.get("per_share") or 0}
+        return h._json({"ok": True,
+                        "result": stock.apply_corporate_action(
+                            b.get("game_id"), b.get("symbol"), action)})
     except stock.StockError as e:
         return _fail(h, e)

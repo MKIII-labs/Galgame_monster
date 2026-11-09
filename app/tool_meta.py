@@ -356,6 +356,20 @@ def normalize(name, args):
     return legacy, out
 
 
+def legacy_map():
+    """旧工具名 → (meta 名, action)。
+
+    只给「名字白名单」这类兼容判断用：元工具重构后 schema 下发的是
+    read / edit / run…，但模型（尤其是文本协议）常沿用 read_file / run_command。
+    执行端 `normalize()` 只会把 meta 转旧名，反方向就靠这张表。
+    """
+    out = {}
+    for meta, spec in META.items():
+        for action, item in (spec.get("actions") or {}).items():
+            out[str(item[0])] = (meta, action)
+    return out
+
+
 def required_for(name, action):
     meta = META.get(str(name or "").strip().lower())
     if not meta:

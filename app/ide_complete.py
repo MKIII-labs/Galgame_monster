@@ -15,6 +15,11 @@ PREFIX_MAX = 6000          # 光标前最多带给模型多少字符
 SUFFIX_MAX = 2000          # 光标后最多带给模型多少字符
 MAX_LINES = 8
 MAX_CHARS = 600
+MAX_CANDIDATES = 2         # 一次请求最多要几个候选（前端 Alt+] 切换）
+# 模型输出多个候选时的分隔行。用一整行「---CANDIDATE---」而不是 JSON，
+# 小模型即使不听话也能靠 clean_completion 兜住。
+CANDIDATE_SEP = "---CANDIDATE---"
+_CAND_RE = re.compile(r"^[ \t]*" + re.escape(CANDIDATE_SEP) + r"[ \t]*$", re.M)
 MIN_INTERVAL = 0.8         # 同一会话两次请求的最小间隔（秒）
 FAIL_LIMIT = 5             # 连续失败几次进入冷却
 COOLDOWN = 60.0
@@ -36,7 +41,8 @@ def _trim_suffix(text, limit=SUFFIX_MAX):
     return s[:limit] if limit and len(s) > limit else s
 
 
-def build_messages(path, language, prefix, suffix, max_lines=MAX_LINES):
+def build_messages(path, language, prefix, suffix, max_lines=MAX_LINES,
+                   max_candidates=MAX_CANDIDATES):
     """构造 FIM 提示：光标前文 + 后文，让模型只补中间那段。"""
     pre = _trim_prefix(prefix)
     post = _trim_suffix(suffix)
@@ -46,6 +52,12 @@ def build_messages(path, language, prefix, suffix, max_lines=MAX_LINES):
         "与后文自然衔接；最多 %d 行。没有把握或不需要补全时输出空字符串。"
         % int(max_lines or MAX_LINES)
     )
+    if int(max_candidates or 1) > 1:
+        sys += (
+            "\n如果同一位置有多个同样合理的补全，用单独一行 %s 分隔，最多 %d 个，"
+            "第一个放最推荐的；除补全文本和分隔行外不要输出任何其它内容。"
+            % (CANDIDATE_SEP, int(max_candidates))
+        )
     user = (
         "文件：%s（%s）\n\n--- 光标前 ---\n%s\n--- 光标后 ---\n%s"
         % (str(path or ""), str(language or "plaintext"), pre, post)
@@ -77,10 +89,14 @@ def clean_completion(text, suffix="", max_lines=MAX_LINES, max_chars=MAX_CHARS):
     post = str(suffix or "")
     if post:
         k = min(len(t), len(post), 200)
-        while k > 8 and t[-k:] != post[:k]:
+        hit = 0
+        while k >= 8:
+            if t[-k:] == post[:k]:
+                hit = k
+                break
             k -= 1
-        if k >= 8:
-            t = t[:-k].rstrip()
+        if hit:
+            t = t[:-hit].rstrip()
     if not t:
         return ""
     lines = t.split("\n")
@@ -131,6 +147,20 @@ def note_result(sid, ok, now=None):
             _FAILS[key] = n
 
 
+def parse_candidates(raw, suffix="", max_lines=MAX_LINES, max_chars=MAX_CHARS,
+                     limit=MAX_CANDIDATES):
+    """把模型输出拆成候选列表（去空、去重、保持顺序）。"""
+    parts = _CAND_RE.split(str(raw or ""))
+    out = []
+    for part in parts:
+        text = clean_completion(part, suffix, max_lines, max_chars)
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= max(1, int(limit or 1)):
+            break
+    return out
+
+
 def reset_throttle():
     """清空限流状态（测试用）。"""
     with _LOCK:
@@ -139,25 +169,34 @@ def reset_throttle():
         _COOLDOWN_UNTIL.clear()
 
 
-def complete(path, language, prefix, suffix, max_lines=None):
-    """请求一次补全，返回 (text, error)。text 为空表示「没有建议」。"""
+def complete_candidates(path, language, prefix, suffix, max_lines=None,
+                        max_candidates=MAX_CANDIDATES):
+    """请求一次补全，返回 (texts, error)。texts 为空表示「没有建议」。
+
+    多个候选用于前端 Alt+] 切换；第一个就是最推荐的补全。
+    """
     cfg = load_config() or {}
     if cfg.get("ide_ai_complete") is False:
-        return "", "已关闭 AI 补全"
+        return [], "已关闭 AI 补全"
     if not (cfg.get("light_model") or "").strip():
-        return "", "未配置轻量模型"
+        return [], "未配置轻量模型"
     if max_lines is None:
         try:
             max_lines = int(cfg.get("ide_ai_complete_max_lines") or MAX_LINES)
         except (TypeError, ValueError):
             max_lines = MAX_LINES
     max_lines = max(1, min(40, int(max_lines or MAX_LINES)))
+    try:
+        want = int(max_candidates or 1)
+    except (TypeError, ValueError):
+        want = 1
+    want = max(1, min(MAX_CANDIDATES, want))
     api_key, api_url, api_model = get_api_conf("chat")
     if not api_key:
-        return "", "未配置接口密钥"
-    msgs = build_messages(path, language, prefix, suffix, max_lines)
+        return [], "未配置接口密钥"
+    msgs = build_messages(path, language, prefix, suffix, max_lines, want)
     try:
-        tok = max(32, min(256, max_lines * 24))
+        tok = max(32, min(512, max_lines * 24 * want))
     except (TypeError, ValueError):
         tok = 96
     try:
@@ -165,5 +204,11 @@ def complete(path, language, prefix, suffix, max_lines=None):
                           source="ide-complete", timeout=(3, 5), tries=1,
                           use_cache=False, temperature=0.0)
     except Exception as e:
-        return "", str(e)[:160]
-    return clean_completion(raw, suffix, max_lines), ""
+        return [], str(e)[:160]
+    return parse_candidates(raw, suffix, max_lines, MAX_CHARS, want), ""
+
+
+def complete(path, language, prefix, suffix, max_lines=None):
+    """兼容入口：只返回最推荐的那一个候选 (text, error)。"""
+    texts, why = complete_candidates(path, language, prefix, suffix, max_lines)
+    return (texts[0] if texts else ""), why

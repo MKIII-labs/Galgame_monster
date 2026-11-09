@@ -181,6 +181,26 @@
   outline: 1px dashed var(--accent); outline-offset: -1px;
 }
 
+/* 文件树右键菜单（VS Code 风格）：固定在视口坐标，按边缘自动翻转 */
+.ide-ctxmenu {
+  position: fixed; z-index: 9999; min-width: 200px; padding: 4px;
+  background: var(--bg-side); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 6px;
+  box-shadow: var(--shadow-lg); font-size: 12.5px; outline: none;
+  user-select: none;
+}
+.ide-ctxmenu.hidden { display: none; }
+.ide-ctx-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  width: 100%; padding: 5px 10px; border: 0; border-radius: 4px;
+  background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.ide-ctx-item:hover:not(.disabled) { background: var(--bg-hover); }
+.ide-ctx-item.disabled { opacity: .45; cursor: default; }
+.ide-ctx-item.danger { color: var(--danger); }
+.ide-ctx-key { flex: none; color: var(--text-dim); font-size: 11px; font-family: var(--mono); }
+.ide-ctx-sep { height: 1px; margin: 4px 6px; background: var(--border); }
+
 /* 编辑区 */
 .ide-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 /* 网页预览：铺满编辑区（和图片预览同一层） */
@@ -196,7 +216,49 @@
   background: var(--bg-side);
 }
 .ide-preview-bar .field-input { flex: 1; min-width: 0; }
+.ide-preview-bar .ico-btn { position: relative; }
+.ide-preview-bar .ico-btn.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.ide-preview-bar .ico-btn:disabled { opacity: .38; cursor: default; }
 .ide-preview-frame { flex: 1; width: 100%; border: 0; background: #fff; }
+/* 控制台：预览页底部抽屉，错误可单条 / 批量发送到对话 */
+.ide-preview-console {
+  flex: 0 0 180px; display: flex; flex-direction: column; min-height: 0;
+  border-top: 1px solid var(--border); background: var(--bg-side);
+}
+.ide-preview-console.hidden { display: none; }
+.ide-preview-console-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px; border-bottom: 1px solid var(--border);
+}
+.ide-preview-console-title { font-size: 12px; font-weight: 600; }
+.ide-preview-console-count { margin-right: auto; color: var(--text-dim); font-size: 11px; }
+.ide-preview-console-list {
+  flex: 1; min-height: 0; overflow: auto;
+  font-family: var(--mono); font-size: 11.5px;
+}
+.ide-preview-log {
+  display: flex; align-items: flex-start; gap: 8px; padding: 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.ide-preview-log:hover { background: var(--bg-hover); }
+.ide-preview-log-kind { flex: none; width: 38px; color: var(--text-dim); font-size: 10px; }
+.ide-preview-log.error .ide-preview-log-kind { color: var(--danger); }
+.ide-preview-log.warn .ide-preview-log-kind { color: #c98a00; }
+.ide-preview-log-text {
+  flex: 1; min-width: 0; max-height: 66px; overflow: hidden;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ide-preview-log-send { flex: none; }
+.ide-preview-empty { padding: 14px 8px; text-align: center; color: var(--text-dim); font-size: 11.5px; }
+.ide-preview-badge {
+  position: absolute; top: 1px; right: 1px; min-width: 13px; height: 13px; padding: 0 3px;
+  border-radius: 7px; background: var(--danger); color: #fff;
+  font-size: 9px; line-height: 13px; text-align: center;
+}
+.ide-preview-badge.hidden { display: none; }
 /* Markdown 预览：右半边分屏（编辑器让出 50%，Monaco 自己重排） */
 .ide-md {
   position: absolute; top: 0; right: 0; bottom: 0; width: 50%; z-index: 3;
@@ -380,6 +442,33 @@
   color: var(--text-dim) !important; font-style: italic;
 }
 
+/* AI 摘要（AI 变更审阅 / Git 审查共用）：标题行 + 可滚动的 Markdown 区。
+   不占满整个面板，最多一半高度，下面的 diff 仍然可见。 */
+.ide-review-ai {
+  flex: 0 0 auto; max-height: 46%; overflow: auto;
+  border-bottom: 1px solid var(--border); background: var(--bg-side);
+}
+.ide-review-ai.hidden { display: none; }
+.ide-review-ai-head {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; background: var(--bg-side);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  font-size: 12px; color: var(--text-dim);
+}
+.ide-review-ai-title { color: var(--text); font-weight: 600; }
+.ide-review-ai-meta {
+  margin-left: auto; opacity: .75; font-size: 11.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ide-review-ai-body { padding: 8px 12px; font-size: 12.5px; }
+.ide-review-ai-load { padding: 10px 12px; color: var(--text-dim); font-size: 12.5px; }
+.ide-review-ai-err { padding: 10px 12px; color: var(--danger); font-size: 12.5px; }
+
+/* Git AI 审查：整块独立滚动，不挤占编辑器 */
+.ide-git-review-body { flex: 1; min-height: 0; overflow: auto; padding: 10px 14px; }
+.ide-git-review-body .work-preview-md { font-size: 13px; }
+
 /* 逐段审阅：编辑器上方的一行 chip（不做浮层，避免相邻改动段互相遮挡）。
    每段 = 定位 + 保留 + 撤销；空的就把整行藏起来。 */
 .hunk-bar {
@@ -497,7 +586,8 @@
 .review-modal-card { width: min(1100px, 94vw); height: min(820px, 90vh); }
 .review-head { cursor: default; }
 .review-head .review-actions { margin-left: auto; }
-.review-body { flex: 1; min-height: 0; display: flex; padding: 0; }
+/* 弹窗里的审阅区和 IDE 面板一致：hunk 条 / AI 摘要在上，diff 在下 */
+.review-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }
 
 /* 状态栏（VS Code 是 22px / 12px；底色在 Dark Modern 与侧栏同色，靠 1px 上边框分隔） */
 .ide-status {
@@ -898,6 +988,14 @@ html[data-ide-theme="trae-blue"] #sidebar {
 }
 .ide-git-msg:focus { outline: none; border-color: var(--accent); }
 .ide-git-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+/* 「AI 审查 / AI 生成」这类次级动作：不抢「提交」主按钮的视觉权重 */
+.ide-git-link {
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px;
+  background: transparent; color: var(--text-dim);
+  font-size: 11.5px; cursor: pointer;
+}
+.ide-git-link:hover { background: var(--bg-hover); color: var(--text); }
+.ide-git-link:disabled { opacity: .5; cursor: default; }
 
 /* Git 批量操作 / 多选 / 历史撤回 / 分支菜单 */
 .ide-git-bulk {
@@ -970,6 +1068,30 @@ html[data-ide-theme="trae-blue"] #sidebar {
   text-overflow: ellipsis; white-space: nowrap;
 }
 .ide-git-commit-row .d { flex: none; color: var(--text-dim); font-size: 11px; }
+
+/* 历史面板工具条 + 分支图列。
+   图是 git 自己输出的 ASCII，等宽 + pre 才能对齐。 */
+.ide-git-histbar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 4px 10px 6px; font-size: 11.5px; color: var(--text-dim);
+}
+.ide-git-histbar label { display: inline-flex; align-items: center; gap: 4px; }
+.ide-git-histhint { margin-left: auto; opacity: .8; }
+.ide-git-graph {
+  flex: none; font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre; color: var(--text-dim); opacity: .85; font-size: 11.5px;
+}
+.ide-git-files.graph .ide-git-commit-row .d { display: none; }
+.ide-git-refs {
+  display: inline-block; max-width: 45%; overflow: hidden; text-overflow: ellipsis;
+  vertical-align: bottom; margin-right: 6px; padding: 0 5px;
+  border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text-dim); font-size: 10.5px;
+}
+.ide-git-branch-head {
+  padding: 6px 10px 2px; font-size: 11px; color: var(--text-dim); letter-spacing: .3px;
+}
+.ide-git-branch-row.tag .n { max-width: 62%; overflow: hidden; text-overflow: ellipsis; }
 .ide-git-op {
   display: flex; align-items: center; gap: 6px; padding: 4px 10px;
   font-size: 12px; color: var(--text);
@@ -1040,3 +1162,46 @@ html[data-ide-theme="trae-blue"] #sidebar {
 
 
 
+
+/* ---------- 文件批注（IDE 侧栏） ---------- */
+.ide-anno-line {
+  background: rgba(255, 214, 0, .12);
+  border-left: 2px solid rgba(214, 168, 0, .85);
+}
+.ide-anno-file {
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  border-bottom: 1px dashed var(--border);
+  word-break: break-all;
+}
+.ide-anno-list { flex: 1 1 auto; overflow: auto; padding: 4px 8px 12px; }
+.ide-anno-item {
+  padding: 8px;
+  border-bottom: 1px dashed var(--border);
+  cursor: pointer;
+}
+.ide-anno-item:hover { background: var(--bg-hover); }
+.ide-anno-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px; color: var(--text-dim);
+}
+.ide-anno-head button {
+  border: 0; background: transparent; color: var(--text-dim);
+  cursor: pointer; font-size: 11px; padding: 0 2px;
+}
+.ide-anno-body { font-size: 12.5px; line-height: 1.6; margin-top: 3px; }
+.ide-anno-quote { margin-top: 4px; font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
+
+/* ---------- 文献库（IDE 侧栏） ---------- */
+.ide-doc-search { padding: 6px 8px; border-bottom: 1px dashed var(--border); }
+.ide-doc-list { flex: 1 1 auto; overflow: auto; padding: 4px 8px 12px; }
+.ide-doc-item {
+  padding: 8px;
+  border-bottom: 1px dashed var(--border);
+  cursor: pointer;
+}
+.ide-doc-item:hover { background: var(--bg-hover); }
+.ide-doc-title { font-size: 12.5px; line-height: 1.5; }
+.ide-doc-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.ide-doc-tags { font-size: 11px; color: var(--accent); margin-top: 2px; }

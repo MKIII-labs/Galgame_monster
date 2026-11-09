@@ -5,7 +5,7 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 from app.registry import route
-from app.store import (ACTIVE_STREAMS, APP_VERSION, DATA_DIR, ROOT, _lock)
+from app.store import (ACTIVE_STREAMS, APP_VERSION, DATA_DIR, ROOT, _lock, request_stop)
 from app import open_request, open_session, session_status, win_context_menu
 from app.learning import (BUILTIN_PRESET_LABEL, load_builtin_learning_presets)
 from app.search import (SEARCH_PROVIDERS, chat_search_available,
@@ -16,7 +16,7 @@ from app.context import current_context
 from app.config import (default_config, get_api_conf, load_config, save_config)
 from app.knowledge import (load_kb_index, relations_payload)
 from app.profile import (DEFAULT_PROFILE, clean_rules, load_profile, save_profile)
-from app.sessions import (load_sessions, slim_sessions)
+from app.sessions import (load_sessions, save_sessions, slim_sessions)
 from app.balance import query_balance
 from app import llm, mem_tool, observe as observe_store, winframe
 from app import expression
@@ -28,8 +28,39 @@ REMINDER_SWITCH_KEYS = {
 }
 
 
+def _live_streams():
+    """只列出真正还在产流的会话；僵尸租约就地清掉。
+
+    清理本身是必要的（线程异常退出后条目会永远留着，前端一直「生成中」、新消息被
+    409 卡死）。但判定窗口要足够宽：心跳每 5s 刷新一次 job.ts，只有心跳也停了才会
+    被判死；而「收尾已跑完、租约还没释放」的窗口已由 chat._api_chat 把 release
+    移到落库之后消除了，所以这里不会再误伤正在写消息的回合。
+    """
+    try:
+        from app.api.chat import stream_alive
+    except Exception:                    # noqa: BLE001
+        stream_alive = None
+    live = []
+    with _lock:
+        for sid in list(ACTIVE_STREAMS.keys()):
+            try:
+                ok = stream_alive(sid, idle=300.0) if stream_alive else True
+            except Exception:            # noqa: BLE001
+                ok = True
+            if ok:
+                live.append(sid)
+            else:
+                ACTIVE_STREAMS.pop(sid, None)
+    return sorted(live)
+
+
 def _api_state(h):
         data = load_sessions()
+        live = _live_streams()
+        # 不再在这里跑 reap_orphan_progress：那是每次轮询都把「最后一条 _progress」
+        # 改成「可继续」，会在收尾窗口把正在写的任务误标成中断，
+        # 也是「出现两条 assistant / 旧中断提示永不消失」的源头。
+        # 真正的孤儿只在进程启动时由 sessions._mark_resume_pending 处理一次。
         h._json({
             "config": load_config(),
             "profile": load_profile(),
@@ -46,7 +77,7 @@ def _api_state(h):
             "relations": relations_payload(),
             # 哪些会话正在生成：断线重连时前端据此判断「任务真的结束了没」，
             # 避免 attach 一失败就提前收尾（表现成回答说到一半没了）。
-            "streaming": sorted(ACTIVE_STREAMS.keys()),
+            "streaming": live,
             # 会话运行态：sid -> approval / ask；侧栏据此显示「待批准 / 待回答」
             "pending": session_status.snapshot(),
             # 右键菜单冷启动时的待打开目录（SSE 还没连上，走这里兜底）
@@ -236,10 +267,21 @@ def _api_observe(h):
 
 def _api_stop(h):
         body = h._body()
-        ev = ACTIVE_STREAMS.get(body.get("session_id"))
-        if ev:
-            ev.set()
-        h._json({"ok": True})
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            return h._json({"ok": False, "error": "缺少 session_id"}, 400)
+        info = request_stop(sid)
+        # 埋点：pending=流还没登记（压缩 / 装配阶段），found=已有流直接置位。
+        # 排查「点了停止没反应」时先看这行。
+        print("[停止] sid=%s found=%s pending=%s"
+              % (sid, info.get("found"), info.get("pending")))
+        # 还在压缩 / 装配阶段：连压缩一起取消，别等它自己跑完
+        try:
+            from app import context as _ctx
+            _ctx.cancel_compress(sid)
+        except Exception:                   # noqa: BLE001
+            pass
+        h._json({"ok": True, **info, "session_id": sid})
 
 
 # 输入优化动作 → 指令措辞（见 web/composer.js 的 improveInput / precheckInput）

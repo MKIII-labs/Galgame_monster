@@ -11,6 +11,7 @@
 """
 import fnmatch
 import os
+import re
 
 from app.store import DATA_DIR, ROOT
 
@@ -64,6 +65,65 @@ def _host_match(host, pattern):
 
 def _is_loopback(host):
     return host in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _patterns(value):
+    """站点列表兼容三种历史格式：数组、换行分隔、逗号分隔。"""
+    if isinstance(value, str):
+        parts = re.split(r"[\s,;，；]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        parts = []
+        for item in value:
+            if isinstance(item, str):
+                parts.extend(re.split(r"[\s,;，；]+", item))
+            elif item:
+                parts.append(str(item))
+    else:
+        return []
+    return [p.strip().lower() for p in parts if p and p.strip()]
+
+
+def site_mode(cfg=None):
+    """站点授权档位：ask（每次询问）/ auto（自动批准，只拦可疑）/ allow（始终允许）。
+
+    新配置读 computer_site_mode；旧配置没有这个键时按 computer_browser_unrestricted 推导，
+    保证升级后行为不变。
+    """
+    cfg = cfg if isinstance(cfg, dict) else _cfg()
+    mode = str(cfg.get("computer_site_mode") or "").strip().lower()
+    if mode in ("ask", "auto", "allow"):
+        # 旧配置残留：unrestricted=true 但 mode 被默认值写成了 ask。
+        # 保存设置时两者会同步（ask → unrestricted=false），所以这个冲突只可能来自升级过程。
+        if mode == "ask" and cfg.get("computer_browser_unrestricted"):
+            return "allow"
+        return mode
+    return "allow" if cfg.get("computer_browser_unrestricted") else "ask"
+
+
+def _suspicious(info):
+    """auto 档位下需要额外确认的地址：http、IP、非常规端口、punycode、无点主机名。"""
+    if not info:
+        return True
+    host = info.get("host") or ""
+    scheme = info.get("scheme") or ""
+    port = int(info.get("port") or 0)
+    if _is_loopback(host):
+        return False
+    if scheme == "http":
+        return True
+    if not host:
+        return True
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
+        return True
+    if host.startswith("[") or ":" in host:
+        return True
+    if "xn--" in host:
+        return True
+    if "." not in host:
+        return True
+    if port and port not in (80, 443):
+        return True
+    return False
 
 
 def _split(url):
@@ -124,15 +184,19 @@ def check(url, sandbox=None, skip_allowlist=False):
     """判断一个地址能不能去。返回 (decision, reason)。
 
     decision: allow | ask | deny
+    站点档位见 `site_mode()`：ask 每个新站点都问；auto 自动放行安全地址、
+    只对 http / IP / 非常规端口 / punycode 等可疑地址询问；allow 始终允许。
     sandbox：Agent 的沙箱根；file:// 只允许沙箱内的 HTML（避免读本机任意文件）。
-    skip_allowlist：完全放权档位下不再要求站点白名单，但内置禁区（银行 / 支付 /
-    邮箱 / 密码管理器）、设置里的禁止站点、本项目自身界面照旧拒绝。
+    skip_allowlist：完全放权档位（审批层已放行）下不再要求站点白名单，但内置禁区
+    （银行 / 支付 / 邮箱 / 密码管理器）、设置里的禁止站点、本项目自身界面照旧拒绝。
     """
     info = _split(url)
     if info is None:
         return "deny", "地址格式不支持：%s" % (url or "(空)")
     sch, host = info["scheme"], info["host"]
     cfg = _cfg()
+    mode = site_mode(cfg)
+    skip = bool(skip_allowlist) or mode == "allow"
 
     if sch == "file":
         path = info["path"]
@@ -147,8 +211,8 @@ def check(url, sandbox=None, skip_allowlist=False):
             return "deny", "file:// 只允许 Agent 沙箱内的 .html（当前没有可用沙箱）"
         if not abs_p.lower().endswith((".html", ".htm")):
             return "deny", "file:// 只允许 .html / .htm"
-        return "allow" if skip_allowlist else "ask", \
-            "打开沙箱内本地页面 %s" % os.path.basename(abs_p)
+        why = "打开沙箱内本地页面 %s" % os.path.basename(abs_p)
+        return ("allow" if (skip or mode == "auto") else "ask"), why
 
     if sch not in ("http", "https"):
         return "deny", "只支持 http / https：%s" % sch
@@ -161,16 +225,20 @@ def check(url, sandbox=None, skip_allowlist=False):
     if _is_loopback(host) and own_port() and info["port"] == own_port():
         return "deny", "拒绝操作本项目界面（端口 %d 是本程序）" % own_port()
 
-    for pat in (cfg.get("computer_extra_block") or []):
+    for pat in _patterns(cfg.get("computer_extra_block")):
         if _host_match(host, pat):
             return "deny", "设置里的禁止站点：%s" % pat
 
-    if skip_allowlist:
-        return "allow", ""
-    for pat in (cfg.get("computer_sites") or []):
+    # 白名单与本次进程内授权，在任何档位下都直接放行
+    for pat in _patterns(cfg.get("computer_sites")):
         if _host_match(host, pat):
             return "allow", ""
     if host in _session_granted:
+        return "allow", ""
+
+    if skip:
+        return "allow", ""
+    if mode == "auto" and not _suspicious(info):
         return "allow", ""
     return "ask", "站点 %s 尚未授权（设置 → Computer Use 可加入白名单）" % host
 

@@ -11,6 +11,7 @@ import re
 from app.store import DATA_DIR, _lock
 
 NOTES_DIR = os.path.join(DATA_DIR, "notes")
+ANNO_DIR = os.path.join(NOTES_DIR, ".annotations")
 
 WIKILINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
 _INVALID = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -355,3 +356,76 @@ def search(q, limit=60):
         if len(hits) >= limit:
             break
     return hits[:limit]
+
+
+# ============================================================
+# 批注：与 Markdown 正文分开存放，不改动笔记文件本身
+# ============================================================
+
+def _anno_key(rel):
+    return "notes:" + str(rel or "").replace("\\", "/")
+
+
+def list_annotations(rel):
+    """笔记批注：统一存在 annotations 表（doc_key = notes:<相对路径>）。"""
+    if not _safe(rel):
+        return []
+    from app import anno
+    out = []
+    for it in anno.list_annotations(_anno_key(rel)):
+        out.append({
+            "id": it.get("id"),
+            "kind": it.get("kind") or "note",
+            "quote": it.get("quote") or "",
+            "prefix": it.get("prefix") or "",
+            "suffix": it.get("suffix") or "",
+            "nth": max(0, int((it.get("anchor") or {}).get("nth") or 0)),
+            "comment": it.get("comment") or "",
+            "question": it.get("question") or "",
+            "answer": it.get("answer") or "",
+            "created": it.get("created_at"),
+            "updated": it.get("updated_at"),
+        })
+    return out
+
+
+def save_annotation(rel, info):
+    """新建或更新一条批注，返回 id；参数不合法返回 None。"""
+    if not _safe(rel):
+        return None
+    info = info or {}
+    quote = str(info.get("quote") or "").strip()[:500]
+    comment = str(info.get("comment") or "").strip()[:2000]
+    question = str(info.get("question") or "").strip()[:1000]
+    answer = str(info.get("answer") or "").strip()[:12000]
+    # 划词问答也走同一张 annotations 表：kind=qa + question/answer；
+    # comment 仍然写一份（笔记抽屉按 comment 渲染，不用改前端）。
+    if answer and not comment:
+        comment = "问：%s\n\n答：%s" % (question or "（未填写问题）", answer)
+    if not quote or not (comment or answer):
+        return None
+    from app import anno
+    try:
+        nth = max(0, int(info.get("nth") or 0))
+    except (TypeError, ValueError):
+        nth = 0
+    prefix = str(info.get("prefix") or "")[:40]
+    suffix = str(info.get("suffix") or "")[:40]
+    kind = "qa" if (answer or info.get("kind") == "qa") else "note"
+    return anno.save_annotation({
+        "id": info.get("id"),
+        "doc_key": _anno_key(rel),
+        "kind": kind,
+        "quote": quote, "prefix": prefix, "suffix": suffix,
+        "comment": comment,
+        "question": question, "answer": answer,
+        "anchor": {"quote": quote, "nth": nth, "prefix": prefix, "suffix": suffix},
+    })
+
+
+def delete_annotation(rel, aid):
+    if not _safe(rel):
+        return False
+    from app import anno
+    anno.delete_annotation(str(aid or ""))
+    return True

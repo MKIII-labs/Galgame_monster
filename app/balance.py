@@ -18,7 +18,7 @@ SEARCH_BALANCE = {
 def _search_conf():
     """搜索服务商的 (provider, key, 余额地址)；volc 没有可用接口，地址为空。"""
     cfg = load_config()
-    provider = (cfg.get("search_provider") or "bocha").strip() or "bocha"
+    provider = (cfg.get("search_provider") or "auto").strip() or "auto"
     key = (cfg.get("search_api_key") or "").strip()
     url = (cfg.get("search_balance_url") or "").strip() or SEARCH_BALANCE.get(provider, "")
     return provider, key, url
@@ -82,6 +82,10 @@ def query_balance(provider):
     if not url:
         if provider == "search":
             sp, _k, _u = _search_conf()
+            if sp == "auto":
+                return {"ok": False, "supported": False,
+                        "error": "自动模式走各引擎的免注册额度，没有统一余额；"
+                                 "填了 Key 的引擎请到各自控制台查看用量"}
             if sp == "volc":
                 return {"ok": False, "supported": False,
                         "error": "豆包搜索没有搜索 Key 级别的余额接口；"

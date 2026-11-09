@@ -4,7 +4,7 @@
 与 `/api/sandbox/*` 一样以「会话沙箱」为根；所有路径都是沙箱内相对路径。
 读接口不产生副作用；写接口（stage / unstage / commit）只在用户点击时触发。
 """
-from app import git
+from app import git, ide_review
 from app.registry import route
 import os
 
@@ -85,6 +85,24 @@ def _api_git_commit(h):
                                   add_all=bool(body.get("all"))))
     except git.GitError as e:
         return _fail(h, e)
+
+
+@route("/api/git/message")
+def _api_git_message(h):
+    """根据暂存区（没有就工作区）的改动生成一条提交信息（只读）。"""
+    _body, sb, err = _guard(h)
+    if err:
+        return err
+    try:
+        d = git.commit_patch(sb)
+    except git.GitError as e:
+        return _fail(h, e)
+    if not str(d.get("text") or "").strip():
+        return h._json({"ok": False, "error": "没有可提交的改动"}, 400)
+    msg, why = ide_review.commit_message(d["text"], git.last_commit_message(sb))
+    if why:
+        return h._json({"ok": False, "error": why}, 400)
+    return h._json({"ok": True, "message": msg, "staged": bool(d.get("staged"))})
 
 
 @route("/api/git/log")
@@ -299,6 +317,57 @@ def _api_git_stash(h):
     try:
         return h._json(git.stash(sb, body.get("action") or "push",
                                  body.get("message") or ""))
+    except git.GitError as e:
+        return _fail(h, e)
+
+
+@route("/api/git/sync")
+def _api_git_sync(h):
+    """fetch / pull / push。远端凭据缺失时 git 会立即失败并回传 stderr。"""
+    body, sb, err = _guard(h)
+    if err:
+        return err
+    action = str(body.get("action") or "fetch").lower()
+    # 拉取会改动工作区、强制推送会改写远端：这两个必须二次确认
+    if action == "pull" and body.get("confirm") not in (True, "pull"):
+        return h._json({"ok": False,
+                        "error": "拉取会合并远端改动，需要二次确认"}, 400)
+    if action == "push" and body.get("force") and body.get("confirm") not in (True, "force"):
+        return h._json({"ok": False,
+                        "error": "强制推送会改写远端历史，需要二次确认"}, 400)
+    try:
+        return h._json(git.sync(sb, action, body.get("branch") or "",
+                                bool(body.get("force"))))
+    except git.GitError as e:
+        return _fail(h, e)
+
+
+@route("/api/git/tag")
+def _api_git_tag(h):
+    """action = list / create / delete。"""
+    body, sb, err = _guard(h)
+    if err:
+        return err
+    action = str(body.get("action") or "list").lower()
+    try:
+        if action == "create":
+            return h._json(git.tag_create(sb, body.get("name"),
+                                          body.get("rev") or "",
+                                          body.get("message") or ""))
+        if action == "delete":
+            return h._json(git.tag_delete(sb, body.get("name")))
+        return h._json(git.tags(sb))
+    except git.GitError as e:
+        return _fail(h, e)
+
+
+@route("/api/git/graph")
+def _api_git_graph(h):
+    body, sb, err = _guard(h)
+    if err:
+        return err
+    try:
+        return h._json(git.graph_log(sb, body.get("limit") or 60))
     except git.GitError as e:
         return _fail(h, e)
 

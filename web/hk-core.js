@@ -68,10 +68,14 @@ function hkSpecProblem(scope, spec) {
 }
 
 // 某条规则当前生效的按键：有覆盖只保留新键，否则用默认列表
+// 覆盖为空串 = 用户主动「解除绑定」，返回空数组（不再参与命中）
 function hkKeysOfDef(def, overrides) {
   if (!def) return [];
-  const ov = (overrides || {})[def.id];
-  return ov ? [ov] : (def.keys || []).slice();
+  const ov = overrides || {};
+  if (Object.prototype.hasOwnProperty.call(ov, def.id)) {
+    return ov[def.id] ? [ov[def.id]] : [];
+  }
+  return (def.keys || []).slice();
 }
 
 /* 找出本次按键命中的规则（scopes 为空 = 不限作用域）。

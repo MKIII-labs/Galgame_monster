@@ -154,7 +154,8 @@ def test_compress_history_uses_light_model(monkeypatch):
     monkeypatch.setattr(context, "context_limits", lambda model="": (4000, 500))
     calls = {}
 
-    def fake(api_key, api_url, api_model, messages, max_tokens=96, source="gal"):
+    def fake(api_key, api_url, api_model, messages, max_tokens=96, source="gal",
+             stop_event=None):
         calls.update({"model": api_model, "source": source, "max_tokens": max_tokens})
         return "【摘要】\n早先聊了 A\n【记忆要点】\n- 要点一"
 
@@ -181,7 +182,8 @@ def test_compress_history_keeps_old_summary(monkeypatch):
     monkeypatch.setattr(context, "context_limits", lambda model="": (4000, 500))
     seen = {}
 
-    def fake(api_key, api_url, api_model, messages, max_tokens=96, source="gal"):
+    def fake(api_key, api_url, api_model, messages, max_tokens=96, source="gal",
+             stop_event=None):
         seen["prompt"] = messages[0]["content"]
         return "【摘要】\n合并后的摘要"
 
@@ -202,7 +204,8 @@ def test_compress_history_pins_task_goal_and_acceptance(monkeypatch):
     monkeypatch.setattr(context, "context_limits", lambda model="": (4000, 500))
     seen = {}
 
-    def fake(api_key, api_url, api_model, messages, max_tokens=96, source="gal"):
+    def fake(api_key, api_url, api_model, messages, max_tokens=96, source="gal",
+             stop_event=None):
         seen["prompt"] = messages[0]["content"]
         return "【摘要】\n合并后的摘要"
 

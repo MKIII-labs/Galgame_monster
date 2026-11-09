@@ -66,10 +66,29 @@ const NOTIFY_TONES = {
 };
 let _notifyCtx = null;
 
+/* 通知配置（设置 → Agent → 通知）：横幅 / 声音 / 按事件开关 / 音量 */
+function notifyCfg() {
+  const c = (typeof state !== 'undefined' && state && state.config) || {};
+  const vol = Number(c.notify_volume == null ? 60 : c.notify_volume);
+  return {
+    banner: c.notify_banner !== false,
+    sound: c.notify_sound !== false,
+    volume: Math.max(0, Math.min(100, Number.isFinite(vol) ? vol : 60)) / 100,
+    done: c.notify_done !== false,
+    ask: c.notify_ask !== false,
+    error: c.notify_error !== false,
+  };
+}
+
 /* 提示音：单音短提示（WebAudio 现场合成，不需要音频文件）。
    浏览器要求先有用户手势才让出声，所以发送 / 点按时先 warmNotifySound() 预热。 */
 function playNotifySound(kind) {
   try {
+    const cfg = notifyCfg();
+    if (!cfg.sound || cfg.volume <= 0) return;
+    if (kind === 'done' && !cfg.done) return;
+    if (kind === 'ask' && !cfg.ask) return;
+    if (kind === 'error' && !cfg.error) return;
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     if (!_notifyCtx) _notifyCtx = new AC();
@@ -82,7 +101,7 @@ function playNotifySound(kind) {
     osc.type = 'sine';
     osc.frequency.setValueAtTime(freq, t);
     gain.gain.setValueAtTime(0.0001, t);
-    gain.gain.linearRampToValueAtTime(0.16, t + 0.015);
+    gain.gain.linearRampToValueAtTime(0.16 * cfg.volume, t + 0.015);
     gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
     osc.connect(gain);
     gain.connect(ctx.destination);
@@ -104,11 +123,14 @@ function warmNotifySound() {
 // kind：done / ask / warn / error / remind —— 决定提示音音高（缺省按完成）
 // target：点击通知后跳到哪儿，{ sessionId } 开会话、{ taskId } 开任务详情；不传就只把窗口拉前台
 function showSystemNotify(title, text, kind, target) {
+  const cfg = notifyCfg();
+  // 声音与横幅分开控制：横幅关掉时仍按事件播提示音；声音开关在 playNotifySound 里判断
+  playNotifySound(kind);
+  if (!cfg.banner) return;
   // Electron 壳：通知交给主进程创建。Windows 上渲染进程的 HTML5 Notification
   // 点击事件不可靠（点了没反应），主进程的 'click' 稳定，且能先还原最小化窗口。
   const gw = nativeNotify();
   if (gw) {
-    playNotifySound(kind);
     try {
       gw.notify({
         id: rememberNotifyTarget(target),
@@ -120,7 +142,6 @@ function showSystemNotify(title, text, kind, target) {
     } catch (e) { /* 主进程通知失败就退回浏览器通知 */ }
   }
   if (!notifySupported() || Notification.permission !== 'granted') return;
-  playNotifySound(kind);
   try {
     // silent：上面的 playNotifySound 已经出过提示音了，浏览器/系统不要再补一声
     const n = new Notification(title || 'Galgame_monster', { body: text || '', silent: true });
@@ -132,6 +153,8 @@ function showSystemNotify(title, text, kind, target) {
       if (i >= 0) AUTO.liveNotifs.splice(i, 1);
     };
     n.onclick = () => {
+      if (n._jumped) return;
+      n._jumped = true;
       try { window.focus(); } catch (e) { /* ignore */ }
       n.close();
       notifyJump(target);
@@ -139,10 +162,12 @@ function showSystemNotify(title, text, kind, target) {
   } catch (e) { /* 通知失败不影响会话消息 */ }
 }
 
-/* 点通知后的落点：任务 → 工作台任务详情；会话 → 切回 Solo 并滚到最新一条。
+/* 点通知后的落点：任务 → 工作台任务详情；会话 → 切回 Solo 并定位到对应消息。
    跳转失败只吞掉异常，不能让用户点完通知什么反应都没有。 */
 async function notifyJump(target) {
   if (!target) return;
+  if (AUTO.jumping) return;              // 重复 IPC / 多监听时只跳一次
+  AUTO.jumping = true;
   try {
     if (target.taskId && typeof workOpenTask === 'function') {
       if (typeof setUiMode === 'function') await setUiMode('work');
@@ -154,9 +179,14 @@ async function notifyJump(target) {
       if (target.sessionId !== state.sessions.current && typeof selectSession === 'function') {
         await selectSession(target.sessionId);
       }
+      const idx = Number(target.messageIndex);
+      if (Number.isFinite(idx) && typeof ssFocusMessage === 'function') {
+        try { await ssFocusMessage(idx); return; } catch (e) { /* 定位失败回退到底部 */ }
+      }
       if (typeof scrollToBottom === 'function') scrollToBottom(true);
     }
   } catch (e) { /* 跳转失败不影响通知本身 */ }
+  finally { setTimeout(() => { AUTO.jumping = false; }, 300); }
 }
 
 /* Electron 主进程的通知点击回调：主进程已经把窗口还原 / 聚焦，
@@ -165,8 +195,16 @@ async function notifyJump(target) {
 function bindNativeNotifyClicks() {
   const gw = nativeNotify();
   if (!gw || typeof gw.onNotifyClick !== 'function') return;
+  if (AUTO.nativeNotifyBound) return;    // 脚本重复加载时只绑一次，避免一次点击跳多次
+  AUTO.nativeNotifyBound = true;
   gw.onNotifyClick((payload) => {
     const id = payload && payload.id;
+    if (id) {
+      AUTO.handledNotifies = AUTO.handledNotifies || new Set();
+      if (AUTO.handledNotifies.has(id)) return;
+      AUTO.handledNotifies.add(id);
+      if (AUTO.handledNotifies.size > 100) AUTO.handledNotifies.clear();
+    }
     const target = (payload && payload.target) || (id ? AUTO.notifyTargets[id] : null);
     if (id) delete AUTO.notifyTargets[id];
     notifyJump(target);
@@ -224,6 +262,20 @@ function startEvents() {
   })();
 }
 
+/* 原地刷新当前会话：补最新消息但不切会话、不滚到底。
+   自动化事件（autopilot / task_update）会高频推送，直接用 selectSession 会把
+   用户正在看的位置拽走，所以这里保持 scrollTop 与「是否跟随底部」不变。 */
+async function refreshSessionQuiet(sid) {
+  if (!sid || sid !== state.sessions.current) return;
+  try {
+    const r = await api('/api/session/select', { id: sid });
+    if (!r || !r.sessions) return;
+    applySessionsPayload(r.sessions);
+    if (typeof renderSessions === 'function') renderSessions();
+    if (typeof renderMessages === 'function') renderMessages(undefined, undefined, { keepScroll: true });
+  } catch (e) { /* 静默失败：事件刷新不是关键路径 */ }
+}
+
 function handleAutoEvent(obj) {
   if (!obj || !obj.type) return;
   // 会话运行态（待审批 / 待回答）：只改侧栏小圆点，不弹通知
@@ -272,11 +324,10 @@ function handleAutoEvent(obj) {
                    { sessionId: g.session_id });
       }
     }
-    // 自动化不走前端请求，没有实时流；回合结束时消息已落库，这里重新拉一次会话
-    // 重试中没有新消息，跳过，避免反复整页重载。
-    if (mine && st !== 'retrying' && !state.streaming
-        && typeof selectSession === 'function') {
-      selectSession(state.sessions.current);
+    // 自动化不走前端请求，没有实时流；回合结束时消息已落库，这里原地刷新一次。
+    // 不能走 selectSession：那会重渲染并滚到最底，表现为「一弹通知就跳走」。
+    if (mine && st !== 'retrying' && !state.streaming) {
+      refreshSessionQuiet(state.sessions.current);
     }
     return;
   }
@@ -362,7 +413,7 @@ async function openPathInApp(path) {
   try {
     const r = await api('/api/open/path', { path });
     if (!r || !r.ok) throw new Error((r && (r.error || r.message)) || '打开失败');
-    if (typeof applySessions === 'function') applySessions(r);
+    if (typeof applySessions === 'function') applySessions(r, { keepCurrent: false });
     if (typeof renderMessages === 'function') renderMessages();
     if (typeof resetIdeForSession === 'function') resetIdeForSession();
     if (typeof setUiMode === 'function') await setUiMode('ide');

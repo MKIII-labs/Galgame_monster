@@ -20,6 +20,14 @@ let settingsDefaults = null;
 let settingsCurrentTab = '';
 let _dirtyTimer = null;
 
+/* 列表型配置兼容：旧版本可能把数组存成了换行 / 逗号分隔的字符串 */
+function settingsList(value) {
+  if (Array.isArray(value)) {
+    return value.map((x) => String(x).trim()).filter(Boolean);
+  }
+  return String(value || '').split(/[\s,;，；]+/).map((x) => x.trim()).filter(Boolean);
+}
+
 const SETTINGS_LAST_TAB_KEY = 'settings_last_tab';
 const SETTINGS_SCROLL_KEY = 'settings_scroll_v1';
 
@@ -162,6 +170,30 @@ function buildApiPane(provider, host) {
     html += labelHtml('轻量 API 密钥（可选）', '轻量 小模型 密钥 key') +
       '<input id="light-key" class="field-input" type="password" placeholder="留空则沿用上面的密钥">';
 
+    html += setGroupHtml('本地混合模式', '本地 混合 hybrid 压缩 token 省钱');
+    html += hintHtml('开启：轻量任务走上面的轻量模型，并按「压缩触发上下文」提前压缩历史；'
+                     + '仅轻量模型：主对话也只走轻量模型（本地 / 云端都行）；'
+                     + '关闭：完全回到纯 API（忽略本地轻量模型，也不启用混合压缩）。');
+    html += labelHtml('混合模式', '混合 hybrid 本地') +
+      '<select id="hybrid-mode" class="field-input">' +
+      '<option value="off">关闭（纯 API）</option>' +
+      '<option value="on">开启（本地摘要 + 轻量任务）</option>' +
+      '<option value="light">仅轻量模型（主对话也走轻量模型）</option>' +
+      '</select>';
+    html += hintHtml('「仅轻量模型」不限定本地还是云端：主对话只使用上面的轻量模型，'
+                     + '不产生主 API 费用。轻量模型在本地（如 Ollama）时会自动停用'
+                     + '文件 / 命令工具与联网搜索（本地上下文只有 8–12k），只保留普通问答；'
+                     + '云端轻量模型按正常工具运行。');
+    html += labelHtml('压缩触发上下文（tokens）', '压缩 hybrid 上下文') +
+      '<input id="hybrid-ctx" class="field-input" type="number" min="8000" step="1000" placeholder="64000">';
+    html += labelHtml('压缩保留比例（%）', '压缩 保留 hybrid') +
+      '<input id="hybrid-keep" class="field-input" type="number" min="10" max="90" step="5" placeholder="45">';
+    html += labelHtml('本地窗口（tokens）', '本地 ollama 上下文 window num_ctx') +
+      '<input id="local-ctx" class="field-input" type="number" min="4000" step="1000" placeholder="12000">';
+    html += hintHtml('必须与 Ollama 模型实际分配的 num_ctx 一致（默认模型是 8192，'
+                     + '派生 32k 版本后填 32000）。填大了请求会超窗报错，填小了浪费可用上下文。',
+                     '本地 窗口 ollama num_ctx');
+
     html += setGroupHtml('推理参数', '深度思考 思考 cot 思维链 档位 reasoning');
     html += hintHtml('控制输入框左下「深度思考」开关与档位如何传给接口，避免不支持的接口报错。',
                      '深度思考 开关 档位 reasoning');
@@ -243,6 +275,15 @@ function buildApiPane(provider, host) {
     if (lm) lm.value = cfg.light_model || '';
     if (lu) lu.value = cfg.light_url || '';
     if (lk) lk.value = cfg.light_api_key || '';
+    const hm = pane.querySelector('#hybrid-mode');
+    if (hm) hm.value = cfg.hybrid_mode === 'light' ? 'light'
+      : (cfg.hybrid_mode === 'on' ? 'on' : 'off');
+    const hc = pane.querySelector('#hybrid-ctx');
+    if (hc) hc.value = cfg.hybrid_context_limit || 64000;
+    const hk = pane.querySelector('#hybrid-keep');
+    if (hk) hk.value = Math.round((Number(cfg.hybrid_keep_ratio) || 0.45) * 100);
+    const lc = pane.querySelector('#local-ctx');
+    if (lc) lc.value = cfg.local_context_limit || 12000;
     const tm = pane.querySelector('#think-mode');
     if (tm) tm.value = cfg.chat_think_mode || '';
     const rr = pane.querySelector('#chat-round-retries');
@@ -343,6 +384,17 @@ function buildApiPane(provider, host) {
       out.light_model = lm ? lm.value.trim() : '';
       out.light_url = lu ? lu.value.trim() : '';
       out.light_api_key = lk ? lk.value.trim() : '';
+      const hm = pane.querySelector('#hybrid-mode');
+      out.hybrid_mode = hm && hm.value === 'light' ? 'light'
+        : (hm && hm.value === 'on' ? 'on' : 'off');
+      const hc = pane.querySelector('#hybrid-ctx');
+      out.hybrid_context_limit = hc ? Math.max(8000, parseInt(hc.value, 10) || 64000) : 64000;
+      const hk = pane.querySelector('#hybrid-keep');
+      out.hybrid_keep_ratio = hk
+        ? Math.min(0.9, Math.max(0.1, (parseInt(hk.value, 10) || 45) / 100)) : 0.45;
+      const lc = pane.querySelector('#local-ctx');
+      out.local_context_limit = lc
+        ? Math.max(4000, parseInt(lc.value, 10) || 12000) : 12000;
       const tm = pane.querySelector('#think-mode');
       out.chat_think_mode = tm ? tm.value : '';
       const kd = pane.querySelector('#chat-kind');
@@ -391,6 +443,13 @@ function buildContextPane() {
              '填了具体值才按它算压缩时机，填多少就是多少。' +
              '手填的话：128K 填 <code>128000</code>，1M 填 <code>1000000</code>（1000 token ≈ 1700 汉字）。',
              '上限 token 窗口 快捷 自动 不限') +
+    checkRowHtml('chat-auto-context',
+      '提问时自动检索沙箱代码库（对齐 Trae 的 #Workspace）',
+      '自动 上下文 代码库 检索 workspace 引用') +
+    hintHtml('打开（默认）：每次提问按问题从本地代码索引召回最多 5 段相关代码，'
+             + '回答底部给出「文件:行号」引用。索引没建好时会先在后台建一次，本轮不等待。'
+             + '关闭后只使用你手动 @ 的文件。',
+             '自动 上下文 代码库 检索 workspace 引用') +
     labelHtml('其中留给 AI 回答（tokens）', '预留 token 回复 输出') +
     '<input id="context-reserve" class="field-input" type="number" min="0" step="256">' +
     hintHtml('先从窗口里划出这一块，作为「同步压缩」的硬预留；默认 16384，常用 8192–16384。' +
@@ -423,6 +482,34 @@ function buildContextPane() {
     '<p><strong>填错的后果</strong>：窗口填得比真实值大 → 进度条偏低、压缩太晚，可能真的报超限错误；' +
     '填得比真实值小 → 压缩过早，浪费窗口。</p>' +
     '</div></details>' +
+    setGroupHtml('省费模式', '省费 token 引用 句柄 前缀 缓存') +
+    checkRowHtml('token-profile-balanced',
+      '省费模式：历史引用只留句柄、动态块贴到请求末尾',
+      '省费 token 引用 句柄 前缀 缓存') +
+    hintHtml('关闭（quality）时装配结果与旧版逐字节一致。打开后：@文件 / @目录 的正文只在当轮内联，'
+             + '更早轮次只留「路径:行号」由模型按需读取；界面 / 意图 / 自动化目标贴到请求末尾，'
+             + '避免每轮让整段历史失去前缀缓存。默认开启。',
+             '省费 token 引用 句柄 前缀 缓存') +
+    labelHtml('历史原文预算（tokens，0 = 关闭）', '省费 工作集 历史 原文 预算 token') +
+    '<input id="history-working-set" class="field-input" type="number" min="0" step="1000">' +
+    hintHtml('每轮最多重发多少历史原文；超出部分压进结构化摘要（当前回合始终保留原文）。'
+             + '默认 40000。调大更保守也更费钱；调小更省，但更依赖模型按需重读文件。',
+             '省费 工作集 历史 原文 预算 token') +
+    labelHtml('单回合输入预算（tokens，0 = 不限）', '省费 单回合 预算 护栏 token') +
+    '<input id="agent-turn-token-budget" class="field-input" type="number" min="0" step="1000000">' +
+    hintHtml('一个回合累计输入超过它就先收尾并保留「继续任务」。默认 3000 万，只拦病态长跑。',
+             '省费 单回合 预算 护栏 token') +
+    labelHtml('历史附图保留条数（0 = 不重发）', '历史 图片 附图 多模态 回看 附件') +
+    '<input id="image-history-keep" class="field-input" type="number" min="0" max="6" step="1">' +
+    hintHtml('把最近几条带图消息重新作为图片附上（每条最多 2 张）。默认 2。'
+             + '设为 0 时历史里只留「可回看附件」一行，模型可能要求你重新发图。',
+             '历史 图片 附图 多模态 回看 附件') +
+    checkRowHtml('anthropic-cache',
+      'Anthropic 通道启用提示缓存（cache_control）',
+      'anthropic cache_control 缓存 省费') +
+    hintHtml('只对主对话生效：稳定段与历史前缀各打一个缓存断点。'
+             + '命中约按 0.1 倍计费、写入约 1.25 倍；OpenAI 兼容通道不受影响。默认开启。',
+             'anthropic cache_control 缓存 省费') +
     setGroupHtml('压缩', '上下文 压缩 摘要 阈值 保留') +
     labelHtml('预压缩阈值（%，30–95）', '上下文 压缩 阈值') +
     '<input id="compress-ratio-pct" class="field-input" type="number" min="30" max="95" step="1">' +
@@ -467,6 +554,15 @@ function buildContextPane() {
   q('compress-summary-tokens').value = cfg.compress_summary_tokens != null
     ? cfg.compress_summary_tokens : 8192;
   q('memory-llm-pick').checked = !!cfg.memory_llm_pick;
+  q('token-profile-balanced').checked = (cfg.token_profile || 'balanced') !== 'quality';
+  q('history-working-set').value = cfg.history_working_set_tokens != null
+    ? cfg.history_working_set_tokens : 40000;
+  q('agent-turn-token-budget').value = cfg.agent_turn_token_budget != null
+    ? cfg.agent_turn_token_budget : 30000000;
+  q('image-history-keep').value = cfg.image_history_keep != null
+    ? cfg.image_history_keep : 2;
+  q('anthropic-cache').checked = cfg.anthropic_cache !== false;
+  q('chat-auto-context').checked = cfg.chat_auto_context !== false;
   q('memory-soft-limit').value = cfg.memory_soft_limit != null ? cfg.memory_soft_limit : 60;
   q('memory-organize-every').value = cfg.memory_organize_every != null
     ? cfg.memory_organize_every : 20;
@@ -521,11 +617,18 @@ function buildContextPane() {
     // 0 是合法值（不传 max_tokens），不能兜底成默认值
     chat_max_tokens: Math.max(0, Math.min(65536, intOr(q('chat-max-tokens').value, 0))),
     memory_llm_pick: !!q('memory-llm-pick').checked,
+    chat_auto_context: !!q('chat-auto-context').checked,
     // 0 是合法值（= 不限 / 关闭），不能兜底成默认值
     memory_soft_limit: Math.max(0, intOr(q('memory-soft-limit').value, 60)),
     memory_organize_every: Math.max(0, intOr(q('memory-organize-every').value, 20)),
     memory_list_recent: Math.max(12, Math.min(80, intOr(q('memory-list-recent').value, 40))),
     compress_ratio: Math.max(0.3, Math.min(0.95, intOr(q('compress-ratio-pct').value, 80) / 100)),
+    token_profile: q('token-profile-balanced').checked ? 'balanced' : 'quality',
+    history_working_set_tokens: Math.max(0, intOr(q('history-working-set').value, 40000)),
+    agent_turn_token_budget: Math.max(0,
+      intOr(q('agent-turn-token-budget').value, 30000000)),
+    image_history_keep: Math.max(0, Math.min(6, intOr(q('image-history-keep').value, 2))),
+    anthropic_cache: q('anthropic-cache').checked,
     compress_keep_ratio: Math.max(0.05, Math.min(0.6,
       intOr(q('compress-keep-pct').value, 25) / 100)),
     compress_summary_tokens: Math.max(0, intOr(q('compress-summary-tokens').value, 8192)),
@@ -593,16 +696,33 @@ function buildAgentPane() {
     hintHtml('模型想收尾、但计划里还有没做完的步骤（或结尾在问「要不要继续」）时，' +
              '由程序自己推它往下做。工具条里的同名选项与这里是同一份配置。',
              '自动续跑 继续 计划') +
-    setGroupHtml('自动化（Autopilot）', '自动化 autopilot 提问 策略 重启 恢复 看门狗 验收 评审') +
+    setGroupHtml('提问卡', '提问 策略 自动化 自主 决策 提问卡 主动提问 范围') +
+    labelHtml('作用范围', '提问 策略 范围 普通聊天 自动化') +
+    '<select id="question-policy-scope" class="field-input">' +
+    '<option value="autopilot">仅自动化（默认）</option>' +
+    '<option value="all">所有对话（含普通聊天）</option>' +
+    '</select>' +
     labelHtml('遇到提问卡 / 需要拍板时', '提问 策略 自动化 自主 决策 提问卡') +
     '<select id="autonomy-question-policy" class="field-input">' +
     '<option value="smart">smart（可逆自决，不可逆 / 缺外部信息问我）</option>' +
     '<option value="auto">auto（一律自决，不阻塞）</option>' +
     '<option value="ask">ask（一律问我）</option>' +
     '</select>' +
-    hintHtml('只对自动化目标生效；普通聊天仍是「一律问」。auto 也不会执行删除 / 覆盖 / '
-             + '发布 / 付款 / 改凭据这类不可逆操作，而是选可回滚的最小方案。',
-             '提问 策略 自动化 自主 决策 不可逆') +
+    hintHtml('选「所有对话」后，这档策略也作用于普通聊天：smart 只把不可逆 / 缺信息的决定摆给你，'
+             + 'auto 能自决就自决。auto 也不会执行删除 / 覆盖 / 发布 / 付款 / 改凭据这类不可逆操作，'
+             + '而是选可回滚的最小方案。',
+             '提问 策略 自动化 自主 决策 不可逆 普通聊天') +
+    setGroupHtml('通知', '通知 提示音 音量 横幅 完成 等待回答 出错') +
+    checkRowHtml('notify-banner', '显示系统通知横幅', '通知 横幅 系统 弹窗') +
+    checkRowHtml('notify-sound', '播放提示音', '通知 提示音 声音') +
+    checkRowHtml('notify-done', '任务完成时提醒', '通知 完成 任务') +
+    checkRowHtml('notify-ask', 'AI 等你回答时提醒', '通知 等待回答 提问 待回答') +
+    checkRowHtml('notify-error', '任务失败 / 出错时提醒', '通知 失败 出错 异常 中断') +
+    labelHtml('提示音音量', '通知 音量 提示音') +
+    '<input id="notify-volume" class="field-input" type="range" min="0" max="100" step="5" value="60">' +
+    hintHtml('横幅与声音分开控制：关掉横幅仍可只留提示音。提示音由本机合成，不需要音频文件。',
+             '通知 横幅 声音 音量') +
+    setGroupHtml('自动化（Autopilot）', '自动化 autopilot 重启 恢复 看门狗 验收 评审') +
     checkRowHtml('autopilot-verify',
       '没有机检命令时用独立评审员判定完成', '自动化 验收 评审 完成 判定') +
     hintHtml('评审员用新的上下文，只看目标、完成定义和原始证据（文件 / 命令输出 / '
@@ -808,15 +928,19 @@ function buildAgentPane() {
              '这是**独立窗口**，看不到你主浏览器里已登录的站点；需要登录态时在这个窗口里登录一次，' +
              'cookie 会留在它自己的配置目录里。银行 / 支付 / 邮箱 / 密码管理器内置禁止，无法解除。',
              '浏览器 独立窗口 登录 禁止') +
-    labelHtml('允许操作的站点（每行一个，支持 *.example.com）', '白名单 站点 域名') +
+    labelHtml('新站点授权方式', '授权 默认 询问 自动 批准 始终允许 站点') +
+    '<select id="computer-site-mode" class="field-input">' +
+    '<option value="ask">每次询问（默认）</option>' +
+    '<option value="auto">自动批准，只拦可疑地址</option>' +
+    '<option value="allow">始终允许（不建议）</option>' +
+    '</select>' +
+    hintHtml('自动批准只放行 https 公网域名；http、IP 地址、非常规端口、punycode 域名仍会先问你。' +
+             '银行 / 支付 / 邮箱 / 密码管理器、设置里的禁止站点与本程序界面<b>永远拒绝</b>；' +
+             '提交 / 支付 / 删除类按钮仍会先问你。', '授权 自动 可疑 危险 站点 禁区') +
+    labelHtml('始终允许的站点（每行一个，支持 *.example.com）', '白名单 站点 域名') +
     '<textarea id="computer-sites" class="field-input" rows="4" spellcheck="false"></textarea>' +
-    hintHtml('留空表示：每次打开新站点都先问你。把常用站点写进来后不再逐次确认；' +
+    hintHtml('写进来的站点在任何档位下都直接放行；留空则按上面的授权方式处理。' +
              '本程序的端口与 web/ 目录永远不允许操作。', '白名单 站点 授权') +
-    checkRowHtml('computer-browser-unrestricted',
-      '无限制：允许访问所有网站（默认关闭）', '无限制 所有网站 浏览器 白名单 站点') +
-    hintHtml('开启后不再要求站点白名单，任何 http(s) 站点都可直接打开。' +
-             '银行 / 支付 / 邮箱 / 密码管理器、设置里的禁止站点与本程序界面<b>仍然拒绝</b>；' +
-             '提交 / 支付 / 删除类按钮仍会先问你。', '无限制 危险 站点 禁区') +
     labelHtml('浏览器后端', '后端 扩展 登录态 独立窗口') +
     '<select id="computer-backend" class="field-input">' +
     '<option value="local">本地受控窗口（独立 profile，看不到登录态）</option>' +
@@ -945,13 +1069,19 @@ function buildAgentPane() {
   if (hooksOn) hooksOn.checked = !!cfg.hooks_enabled;
 
   const sitesEl = qIn(pane, 'computer-sites');
-  if (sitesEl) sitesEl.value = (cfg.computer_sites || []).join('\n');
+  if (sitesEl) sitesEl.value = settingsList(cfg.computer_sites).join('\n');
   const compOnEl = qIn(pane, 'computer-enabled');
   if (compOnEl) compOnEl.checked = !!cfg.computer_enabled;
-  const compUnEl = qIn(pane, 'computer-browser-unrestricted');
-  if (compUnEl) compUnEl.checked = !!cfg.computer_browser_unrestricted;
+  const modeEl = qIn(pane, 'computer-site-mode');
+  if (modeEl) {
+    let m = String(cfg.computer_site_mode || '').toLowerCase();
+    // 与后端 policy.site_mode 保持一致：旧键仍为 true 时按 allow 显示
+    if (m === 'ask' && cfg.computer_browser_unrestricted) m = 'allow';
+    modeEl.value = (m === 'ask' || m === 'auto' || m === 'allow')
+      ? m : (cfg.computer_browser_unrestricted ? 'allow' : 'ask');
+  }
   const appsEl = qIn(pane, 'computer-apps');
-  if (appsEl) appsEl.value = (cfg.computer_apps || []).join('\n');
+  if (appsEl) appsEl.value = settingsList(cfg.computer_apps).join('\n');
   const deskOnEl = qIn(pane, 'computer-desktop-enabled');
   if (deskOnEl) deskOnEl.checked = !!cfg.computer_desktop_enabled;
   const deskUnEl = qIn(pane, 'computer-desktop-unrestricted');
@@ -974,6 +1104,14 @@ function buildAgentPane() {
   if (forkEl) forkEl.checked = cfg.agent_explore_fork !== false;
   const qpEl = qIn(pane, 'autonomy-question-policy');
   if (qpEl) qpEl.value = String(cfg.autonomy_question_policy || 'smart');
+  const qscEl = qIn(pane, 'question-policy-scope');
+  if (qscEl) qscEl.value = String(cfg.question_policy_scope || 'autopilot');
+  ['notify-banner', 'notify-sound', 'notify-done', 'notify-ask', 'notify-error'].forEach((id) => {
+    const el = qIn(pane, id);
+    if (el) el.checked = cfg[id.replace(/-/g, '_')] !== false;
+  });
+  const nvEl = qIn(pane, 'notify-volume');
+  if (nvEl) nvEl.value = String(cfg.notify_volume == null ? 60 : cfg.notify_volume);
   const apVerifyEl = qIn(pane, 'autopilot-verify');
   if (apVerifyEl) apVerifyEl.checked = cfg.autopilot_verify !== false;
   const apResumeEl = qIn(pane, 'autopilot-resume-on-start');
@@ -1103,6 +1241,14 @@ function buildAgentPane() {
     agent_max_rounds: clampLimit('agent-max-rounds', 0),
     agent_auto_continue: acVal,
     autonomy_question_policy: (qIn(pane, 'autonomy-question-policy') || {}).value || 'smart',
+    question_policy_scope: (qIn(pane, 'question-policy-scope') || {}).value || 'autopilot',
+    notify_banner: !!(qIn(pane, 'notify-banner') || {}).checked,
+    notify_sound: !!(qIn(pane, 'notify-sound') || {}).checked,
+    notify_done: !!(qIn(pane, 'notify-done') || {}).checked,
+    notify_ask: !!(qIn(pane, 'notify-ask') || {}).checked,
+    notify_error: !!(qIn(pane, 'notify-error') || {}).checked,
+    notify_volume: Math.max(0, Math.min(100,
+      parseInt((qIn(pane, 'notify-volume') || {}).value, 10) || 0)),
     autopilot_verify: !!(qIn(pane, 'autopilot-verify') || {}).checked,
     autopilot_resume_on_start: !!(qIn(pane, 'autopilot-resume-on-start') || {}).checked,
     autopilot_use_budget: !!(qIn(pane, 'autopilot-use-budget') || {}).checked,
@@ -1152,14 +1298,15 @@ function buildAgentPane() {
     ide_ai_complete_max_lines: clampLimit('ide-ai-max-lines', 8),
     git_commit_mode: gitMode,
     computer_enabled: !!(qIn(pane, 'computer-enabled') || {}).checked,
-    computer_browser_unrestricted: !!(qIn(pane, 'computer-browser-unrestricted') || {}).checked,
-    computer_sites: String((qIn(pane, 'computer-sites') || {}).value || '')
-      .split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
+    computer_site_mode: (qIn(pane, 'computer-site-mode') || {}).value || 'ask',
+    // 旧键继续写一份，保证旧客户端 / 旧代码路径行为一致
+    computer_browser_unrestricted:
+      ((qIn(pane, 'computer-site-mode') || {}).value || '') === 'allow',
+    computer_sites: settingsList((qIn(pane, 'computer-sites') || {}).value || ''),
     computer_snapshot_chars: clamp('computer-snapshot-chars', 4000, 800, 12000),
     computer_desktop_enabled: !!(qIn(pane, 'computer-desktop-enabled') || {}).checked,
     computer_desktop_unrestricted: !!(qIn(pane, 'computer-desktop-unrestricted') || {}).checked,
-    computer_apps: String((qIn(pane, 'computer-apps') || {}).value || '')
-      .split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
+    computer_apps: settingsList((qIn(pane, 'computer-apps') || {}).value || ''),
     computer_backend: (qIn(pane, 'computer-backend') || {}).value || 'local',
     computer_auto_shot: !!(qIn(pane, 'computer-auto-shot') || {}).checked,
     mcp_enabled: !!(qIn(pane, 'mcp-enabled') || {}).checked,
@@ -1368,9 +1515,28 @@ function buildSearchPane() {
   pane.innerHTML =
     setGroupHtml('联网搜索', '联网 搜索 检索 provider 密钥') +
     hintHtml('开启输入框里的「联网搜索」后，会先把问题改写成多个检索式并行搜索，必要时抓取网页正文，再把结果作为参考资料交给模型，并展示引用来源。完整说明见「功能说明 → 联网搜索」。', '联网 搜索 检索 引用 来源') +
+    checkRowHtml('search-modsearch', '启用 modsearch（免注册引擎链 + 云端抓页）', 'modsearch 开关 启用 免注册') +
+    hintHtml('关闭后不调用任何免注册引擎，也不会把网页发给 Firecrawl 云端抓取；'
+      + '已保存的「自动」会回落到聊天自带搜索 / 博查。', 'modsearch 关闭 开关') +
     setGroupHtml('服务商', '服务商 搜索 provider') +
     '<select id="search-provider" class="field-input">' + opts + '</select>' +
     '<p class="hint" id="search-provider-hint"></p>' +
+    '<div id="search-auto-box">' +
+      setGroupHtml('免注册引擎', '免注册 keyless firecrawl keenable youcom 引擎链') +
+      hintHtml('三个引擎都不填 Key 也能用：Firecrawl 每月 1000 credits（搜索 + 云端抓页）、'
+        + 'Keenable 每小时 1000 次 / IP、You.com 每天 100 次 / IP，都是共享额度。'
+        + '填 Key 换自己的额度；取消勾选可把该引擎移出链。', '免注册 额度 keyless 引擎链') +
+      labelHtml('Firecrawl Key（可空）', 'firecrawl key 密钥') +
+      '<input id="search-ek-firecrawl" class="field-input" type="password" autocomplete="off">' +
+      checkRowHtml('search-eon-firecrawl', '参与自动链：Firecrawl（搜索 + 云端抓页）', 'firecrawl 引擎') +
+      labelHtml('Keenable Key（可空）', 'keenable key 密钥') +
+      '<input id="search-ek-keenable" class="field-input" type="password" autocomplete="off">' +
+      checkRowHtml('search-eon-keenable', '参与自动链：Keenable（仅搜索）', 'keenable 引擎') +
+      labelHtml('You.com Key（可空，目前只有免注册端点）', 'youcom key 密钥') +
+      '<input id="search-ek-youcom" class="field-input" type="password" autocomplete="off">' +
+      checkRowHtml('search-eon-youcom', '参与自动链：You.com（仅搜索）', 'youcom 引擎') +
+    '</div>' +
+    '<div id="search-manual-box">' +
     checkRowHtml('search-prefer-api', '优先使用独立搜索 API（即使聊天模型自带搜索）', '优先 搜索 api 聊天模型 自带') +
     hintHtml('默认：聊天模型自带搜索时优先用它；'
       + '勾选上面的选项后，始终使用这里配置的服务商（博查 / 豆包 / Tavily）。',
@@ -1381,10 +1547,12 @@ function buildSearchPane() {
     labelHtml('API 密钥', '密钥 key api token 认证') +
     '<input id="search-key" class="field-input" type="password">' +
     '<label class="check-row"><input type="checkbox" id="search-show-key"> 显示密钥</label>' +
+    '</div>' +
     setGroupHtml('检索行为', '检索 条数 抓取') +
     labelHtml('结果条数（1–20，每个检索式）', '条数 结果 数量 count') +
     '<input id="search-count" class="field-input" type="number" min="1" max="20">' +
     checkRowHtml('search-fetch', '抓取正文（对命中网页取正文，而不是只有摘要）', '抓取 正文 网页') +
+    checkRowHtml('search-fetch-cloud', '抓正文优先用云端浏览器（Firecrawl，可读 JS 渲染页面；URL 会发给 Firecrawl）', '抓取 云端 firecrawl js') +
     labelHtml('抓取正文条数（1–10）', '抓取 条数 count') +
     '<input id="search-fetch-count" class="field-input" type="number" min="1" max="10">' +
     setGroupHtml('信息量上限', '合并 条数 字数 上限') +
@@ -1405,12 +1573,20 @@ function buildSearchPane() {
     'placeholder="https://api.bochaai.com/v1/fund/remaining">';
 
   const q = (s) => qIn(pane, 'search-' + s);
-  q('provider').value = cfg.search_provider || 'bocha';
+  q('modsearch').checked = cfg.search_modsearch_enabled !== false;
+  q('provider').value = cfg.search_provider || 'auto';
   q('prefer-api').checked = !!cfg.search_prefer_api;
   q('url').value = cfg.search_url || '';
   q('key').value = cfg.search_api_key || '';
+  const ek = cfg.search_engine_keys || {};
+  const ee = cfg.search_engine_enabled || {};
+  ['firecrawl', 'keenable', 'youcom'].forEach((n) => {
+    q('ek-' + n).value = ek[n] || '';
+    q('eon-' + n).checked = ee[n] !== false;
+  });
   q('count').value = cfg.search_count || 8;
   q('fetch').checked = cfg.search_fetch !== false;
+  q('fetch-cloud').checked = cfg.search_fetch_cloud !== false;
   q('fetch-count').value = cfg.search_fetch_count || 4;
   q('merged-max').value = cfg.search_merged_max || 12;
   q('fetch-chars').value = cfg.search_fetch_chars || 2500;
@@ -1424,9 +1600,23 @@ function buildSearchPane() {
     const p = providers[q('provider').value];
     q('provider-hint').textContent = p ? p.hint : '';
     q('url').placeholder = p ? ('留空则使用 ' + p.url) : '留空则使用默认地址';
+    // 自动模式用自己的每引擎 Key，单服务商模式才需要地址 / 密钥
+    const auto = q('provider').value === 'auto';
+    q('auto-box').classList.toggle('hidden', !auto);
+    q('manual-box').classList.toggle('hidden', auto);
   };
-  syncHint();
+  // modsearch 总开关：关掉后「自动」不可选，正选着就回落到博查；云端抓页也一起停
+  const syncModsearch = () => {
+    const on = q('modsearch').checked;
+    const opt = q('provider').querySelector('option[value="auto"]');
+    if (opt) opt.disabled = !on;
+    if (!on && q('provider').value === 'auto') q('provider').value = 'bocha';
+    q('fetch-cloud').disabled = !on;
+    syncHint();
+  };
+  syncModsearch();
   q('provider').onchange = syncHint;
+  q('modsearch').onchange = syncModsearch;
   q('show-key').onchange = (e) => { q('key').type = e.target.checked ? 'text' : 'password'; };
 
   const syncFetch = () => { q('fetch-count').disabled = !q('fetch').checked; };
@@ -1438,12 +1628,24 @@ function buildSearchPane() {
     return Number.isNaN(n) ? d : n;
   };
   pane._collect = () => ({
+    search_modsearch_enabled: q('modsearch').checked,
     search_provider: q('provider').value,
     search_prefer_api: q('prefer-api').checked,
     search_url: q('url').value.trim(),
     search_api_key: q('key').value.trim(),
+    search_engine_keys: {
+      firecrawl: q('ek-firecrawl').value.trim(),
+      keenable: q('ek-keenable').value.trim(),
+      youcom: q('ek-youcom').value.trim(),
+    },
+    search_engine_enabled: {
+      firecrawl: q('eon-firecrawl').checked,
+      keenable: q('eon-keenable').checked,
+      youcom: q('eon-youcom').checked,
+    },
     search_count: num(q('count').value, 8),
     search_fetch: q('fetch').checked,
+    search_fetch_cloud: q('fetch-cloud').checked,
     search_fetch_count: num(q('fetch-count').value, 4),
     search_merged_max: Math.max(1, num(q('merged-max').value, 12)),
     search_fetch_chars: Math.max(500, num(q('fetch-chars').value, 2500)),
@@ -1587,6 +1789,11 @@ function closeUsage() {
 function renderUsage(data) {
   const s = data.summary || {};
   const d = data.derived || {};
+  // 批 1 观测：单次调用分布 + 前缀复用（旧后端没有这两块时优雅降级）
+  const cs = data.call_stats || {};
+  const os = data.obs_stats || {};
+  const hasCall = Number(cs.count) > 0;
+  const pct1 = (v) => (v == null ? '—' : Math.round(Number(v) * 1000) / 10 + '%');
   const peak = d.peak || null;
   const unit = data.mode === 'month' ? '月' : '日';
   const pctText = (v) => (v == null ? '—' : v + '%');
@@ -1604,6 +1811,16 @@ function renderUsage(data) {
     ['输出', fmtNum(s.completion), '占合计 ' + pctText(pctOf(s.completion, s.total))],
     ['缓存命中', fmtNum(s.cached), '命中率 ' + pctText(d.hit_rate) + '（占输入）'],
     ['调用次数', fmtNum(s.calls), '平均每次 ' + fmtNum(d.avg_call) + ' tokens'],
+    // 单次调用看的是「每次模型请求的输入」，比回合累计更贴近真实成本
+    ['单次调用 P50', hasCall ? fmtNum(cs.p50) : '—',
+      hasCall ? ('P90 ' + fmtNum(cs.p90) + ' · P95 ' + fmtNum(cs.p95) +
+                 ' · 样本 ' + fmtNum(cs.count) + ' 次')
+              : '旧记录没有逐轮明细'],
+    // 前缀复用：越低说明 system/历史越不稳定，缓存越容易失效
+    ['前缀复用', os.avg_prefix_ratio == null ? '—' : pct1(os.avg_prefix_ratio),
+      os.warm ? ('system 变更 ' + fmtNum(os.sys_changed) + '/' + fmtNum(os.warm) +
+                 ' 轮 · 折叠 ' + fmtNum(os.fold) + ' 次')
+              : '旧记录没有前缀采样'],
     ['峰值' + unit, peak ? fmtNum(peak.total) : '—', peak ? peak.bucket : '该区间无记录'],
     ['活跃' + unit, fmtNum(d.active), '区间共 ' + fmtNum((data.labels || []).length) + ' ' + unit],
   ];
@@ -1856,6 +2073,72 @@ function buildLearningPresetSelect(cfg) {
   };
 }
 
+/* 弹窗焦点约束：挂在 document 上而不是逐个弹窗上。
+   原因：焦点可能已经落到背景（浏览器自动化 / 鼠标点击某些元素不会转移焦点），
+   只有监听 document 的捕获阶段才能把 Tab 与 focus 拉回弹窗内。
+   多个弹窗可能叠加，用栈记录「当前最上层」的那个。 */
+const FOCUSABLE_SEL = 'a[href],button:not([disabled]),input:not([disabled]),'
+  + 'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+const _modalStack = [];
+/* 焦点约束的豁免名单：划词问答 / 划词工具条 / 笔记批注这些浮层 append 在 body 上、
+   DOM 位置在弹窗（#notes-modal 等）之外，但它们是从弹窗内容里「长出来」的子界面。
+   不豁免的话：弹窗开着时点浮层里的输入框，focusin 会立刻把焦点拉回弹窗，
+   表现为「看得见、点不出光标、打不了字」（与 selkit.js insideOwn 同一份名单）。 */
+const MODAL_FOCUS_EXEMPT = '.askkit, .selbar, .selbar-more-menu, .nt-anno-pop';
+function _inExemptLayer(node) {
+  return !!(node && node.closest && node.closest(MODAL_FOCUS_EXEMPT));
+}
+function _topModal() { return _modalStack[_modalStack.length - 1] || null; }
+function _focusablesIn(box) {
+  return Array.from(box.querySelectorAll(FOCUSABLE_SEL))
+    .filter((n) => n.getClientRects().length && n.getAttribute('aria-hidden') !== 'true');
+}
+function _pushModal(el) {
+  if (!el || _modalStack.indexOf(el) >= 0) return;
+  _modalStack.push(el);
+}
+function _popModal(el) {
+  const i = _modalStack.indexOf(el);
+  if (i >= 0) _modalStack.splice(i, 1);
+}
+document.addEventListener('keydown', (e) => {
+  const box = _topModal();
+  if (!box || e.key !== 'Tab') return;
+  if (_inExemptLayer(document.activeElement)) return;   // 浮层内 Tab 走自然顺序
+  const list = _focusablesIn(box);
+  if (!list.length) { e.preventDefault(); return; }
+  const first = list[0];
+  const last = list[list.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey && (active === first || !box.contains(active))) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (active === last || !box.contains(active))) {
+    e.preventDefault(); first.focus();
+  }
+}, true);
+document.addEventListener('focusin', (e) => {
+  const box = _topModal();
+  if (!box || box.contains(e.target)) return;
+  if (_inExemptLayer(e.target)) return;
+  const list = _focusablesIn(box);
+  if (list.length) list[0].focus({ preventScroll: true });
+}, true);
+// 记录最后一次按下的可点元素：有些触发方式不会让按钮拿到焦点，
+// 关闭弹窗时用它兜底，焦点才回得到「设置」这类按钮上。
+let _lastDownTarget = null;
+let _lastDownAt = 0;
+document.addEventListener('pointerdown', (e) => {
+  const t = e.target && e.target.closest
+    ? e.target.closest('button, a, [role="button"], .mode-card, .snav-btn') : null;
+  if (t) { _lastDownTarget = t; _lastDownAt = Date.now(); }
+}, true);
+// 程序化 click（自动化 / el.click()）不产生 pointerdown，这里再兜一层
+document.addEventListener('click', (e) => {
+  const t = e.target && e.target.closest
+    ? e.target.closest('button, a, [role="button"], .mode-card, .snav-btn') : null;
+  if (t) { _lastDownTarget = t; _lastDownAt = Date.now(); }
+}, true);
+
 /* 浮层显隐：退场先播动画，animationend（或兜底超时）后再真正 display:none，
    避免关闭时「啪」地消失 */
 function hideWithAnim(el, done) {
@@ -1865,6 +2148,7 @@ function hideWithAnim(el, done) {
     if (fired) return;
     fired = true;
     el.removeEventListener('animationend', finish);
+    _popModal(el);
     el.classList.remove('closing');
     el.classList.add('hidden');
     restoreFocusAfterModal();
@@ -1882,7 +2166,14 @@ function showWithAnim(el) {
   if (card) { card.style.transform = ''; card.style.animation = ''; }
   el.classList.remove('closing', 'hidden');
   if (!wasHidden) return;
-  if (document.activeElement && document.activeElement !== document.body) _modalOpener = document.activeElement;
+  _pushModal(el);
+  // 触发元素优先取「刚刚按下的那个按钮」：部分点击（自动化 / 某些控件）不会转移焦点，
+  // 只看 activeElement 会把焦点还给更早之前的按钮。
+  const act = document.activeElement;
+  const recentClick = _lastDownTarget && (Date.now() - _lastDownAt < 1500)
+    && document.contains(_lastDownTarget);
+  _modalOpener = recentClick ? _lastDownTarget
+    : ((act && act !== document.body) ? act : _lastDownTarget);
   // 把焦点交给弹窗容器（而不是输入框）：Tab 就会走进弹窗内部而不是背景页面，
   // 同时不会在移动端一打开就弹出软键盘。卡片补个 tabindex="-1" 才能接收焦点。
   if (card) {
@@ -2367,10 +2658,11 @@ function foldLongHints() {
 
 // 条目标题 → [设置分页, 定位关键词]。没有对应设置页的条目不列（不给假的入口）。
 const HELP_SET_TARGET = {
-  '图像识别：独立视觉 API vs 聊天模型': ['chat', 'vision'],
+  '图像识别：聊天模型直发 vs 独立视觉 API': ['chat', 'vision'],
   '账户余额': ['chat', 'balance'],
   '深度思考：开关、档位与参数模式': ['chat', 'reasoning'],
   '上下文上限（回复末尾的圆环）': ['context', '压缩'],
+  '省费模式：历史预算 / 引用句柄 / 提示缓存': ['context', '省费'],
   '联网搜索（判据 / 抓取 / 来源）': ['search', '搜索'],
   '用户画像：手动偏好 vs AI 自主记录': ['profile', '画像'],
   '学习指令（预设与自定义）': ['profile', '学习指令'],

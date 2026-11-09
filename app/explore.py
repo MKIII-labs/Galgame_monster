@@ -1707,12 +1707,6 @@ def list_jobs():
                 for b, j in _JOBS.items()]
 
 
-def running_count():
-    """还有几个后台批次在跑（关窗保活用，见 main._background_job_count）。"""
-    with _JOB_LOCK:
-        return sum(1 for j in _JOBS.values() if j.get("status") == "running")
-
-
 def format_jobs():
     """给主模型的一行后台批次摘要（不注入结果，只提示去取）。"""
     jobs = list_jobs()

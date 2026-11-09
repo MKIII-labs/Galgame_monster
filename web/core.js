@@ -46,8 +46,10 @@ const state = {
   acc: '',
   pendingImage: null,        // 待发送图片：第一张（兼容旧逻辑）
   pendingImages: [],         // 待发送图片列表：{ mime, b64, url }
-  pendingDoc: null,          // 待发送文档：{ name, mime, b64, size }
+  pendingDocs: [],           // 待发送文档列表：{ name, mime, b64, size, seq }（一次可带多个）
+  pendingPastes: [],         // 待发送的长文本块：{ id, text }（不落盘、不走附件解析）
   pendingQuotes: [],         // 待发送引用：{ text }（只进本轮 prompt，不写入消息正文）
+  pendingRefs: [],           // 待发送上下文（# 菜单）：{ type, path/title… }，发送时交给服务端取正文
   pendingPresets: {},
   kbChanged: null,           // AI 本轮写入知识库/记忆的变更 id（供图谱高亮，关闭弹窗即清）
   kbFamily: '',              // 当前主题筛选（空 = 全部）
@@ -55,6 +57,7 @@ const state = {
   ideTree: null,
   ideOpen: '',               // 当前打开的文件（沙箱内相对路径）
   ideDir: '',                // 当前选中的目录（新建时的默认父目录）
+  ideClip: null,             // 文件树剪贴板：{ mode: 'copy' | 'cut', paths: [] }
   ideDirty: false,
   ideChanged: new Set(),     // AI 改动过、需要在文件树里高亮的文件
   // IDE 运行时字段：首次进入 IDE 前就需有默认值，否则点文件会因 undefined 抛错
@@ -99,8 +102,13 @@ const state = {
 /* 服务端只回最近 MSG_WINDOW 条消息（带 msg_total / msg_start）。
    前端把数组补齐成「全局下标」：老消息位置放 null，按下标访问的撤回 / 编辑 /
    版本预览等逻辑不用改；已展开过的旧消息优先保留，避免每次刷新回到 80 条。 */
-function applySessionsPayload(payload) {
+/* opts.keepCurrent（默认 true）：只更新会话数据，不把界面切到服务端 current。
+   只有「用户主动切会话 / 新建 / 删除 / 存档恢复」这类显式导航才传 false。
+   背景任务完成、/api/state 轮询、事件推送都走默认值，避免通知弹出的同时界面被切走。 */
+function applySessionsPayload(payload, opts) {
   if (!payload || !Array.isArray(payload.sessions)) return payload;
+  const keepCurrent = !(opts && opts.keepCurrent === false);
+  const uiCurrent = (state.sessions && state.sessions.current) || '';
   if (!state.msgCache) state.msgCache = {};
   // 覆盖前先把「当前会话已加载的那份」收进缓存，否则流式 done / 轮询会把
   // 用户展开过的旧消息页丢掉（服务端每次只回最近 80 条）。
@@ -144,6 +152,16 @@ function applySessionsPayload(payload) {
   const alive = new Set(payload.sessions.map((s) => s.id));
   Object.keys(state.msgCache).forEach((k) => { if (!alive.has(k)) delete state.msgCache[k]; });
   state.sessions = payload;
+  // 界面当前会话优先：除非调用方明确要求跟随服务端（切会话 / 新建 / 删除 / 恢复）
+  if (keepCurrent && uiCurrent
+      && payload.sessions.some((s) => s.id === uiCurrent)) {
+    payload.current = uiCurrent;
+  }
+  // 切会话时收掉旁注卡片并中止进行中的旁注（旁注不跨会话）
+  if (prevCur && payload.current && payload.current !== prevCur
+      && typeof window.asideOnSessionChange === 'function') {
+    try { window.asideOnSessionChange(payload.current); } catch (e) { /* 旁注是可选功能 */ }
+  }
   return payload;
 }
 
@@ -186,21 +204,88 @@ async function api(path, body) {
   throw new Error(msg);
 }
 
+/* ---------------- Toast：底部堆叠 ----------------
+   以前是单例 div：第二条提示直接把第一条顶掉，连点「复制」也只闪一下。
+   现在最多同时 3 条；同一句 2.6s 内只累加计数（×2 / ×3），点一下即可关掉。 */
+const TOAST_MAX = 3;
+const TOAST_MS = 1800;
+const _toastRecs = new Map();          // key -> { el, n, timer, key }
+
+function _toastStack() {
+  let s = $('#toast-stack');
+  if (!s) {
+    s = document.createElement('div');
+    s.id = 'toast-stack';
+    s.className = 'toast-stack';
+    s.setAttribute('role', 'status');
+    s.setAttribute('aria-live', 'polite');
+    document.body.appendChild(s);
+  }
+  return s;
+}
+
+function _dismissToast(rec) {
+  if (!rec || !rec.el) return;
+  clearTimeout(rec.timer);
+  if (_toastRecs.get(rec.key) === rec) _toastRecs.delete(rec.key);
+  const el = rec.el;
+  if (el.classList.contains('leaving')) return;
+  el.classList.remove('show');
+  el.classList.add('leaving');
+  setTimeout(() => el.remove(), 220);
+}
+
 function toast(msg, type) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.classList.remove('ok', 'err');
-  if (type === 'success' || type === 'ok') t.classList.add('ok');
-  else if (type === 'error' || type === 'err') t.classList.add('err');
-  t.classList.remove('hidden');
-  void t.offsetWidth;              // 强制重排，保证从隐藏态开始播入场过渡
-  t.classList.add('show');
-  clearTimeout(t._timer);
-  clearTimeout(t._hideTimer);
-  t._timer = setTimeout(() => {
-    t.classList.remove('show');
-    t._hideTimer = setTimeout(() => t.classList.add('hidden'), 200);
-  }, 1800);
+  const text = String(msg == null ? '' : msg);
+  if (!text) return;
+  const kind = (type === 'success' || type === 'ok') ? 'ok'
+             : ((type === 'error' || type === 'err') ? 'err' : '');
+  const key = kind + '|' + text;
+  const stack = _toastStack();
+  const prev = _toastRecs.get(key);
+  if (prev && prev.el.isConnected && !prev.el.classList.contains('leaving')) {
+    prev.n += 1;                       // 去重：同一句只累加次数，不再刷屏
+    const c = prev.el.querySelector('.toast-count');
+    if (c) { c.textContent = '×' + prev.n; c.hidden = false; }
+    clearTimeout(prev.timer);
+    prev.timer = setTimeout(() => _dismissToast(prev), TOAST_MS);
+    return;
+  }
+  // 超出上限：先送走最旧的一条（正在退场的不计入）
+  while (stack.querySelectorAll('.toast-item:not(.leaving)').length >= TOAST_MAX) {
+    const oldest = stack.querySelector('.toast-item:not(.leaving)');
+    if (oldest && oldest._rec) _dismissToast(oldest._rec);
+    else if (oldest) oldest.remove();
+    else break;
+  }
+  const el = document.createElement('div');
+  el.className = 'toast-item' + (kind ? ' ' + kind : '');
+  const msgEl = document.createElement('span');
+  msgEl.className = 'toast-msg';
+  msgEl.textContent = text;
+  const cnt = document.createElement('span');
+  cnt.className = 'toast-count';
+  cnt.textContent = '×1';
+  cnt.hidden = true;
+  el.appendChild(msgEl);
+  el.appendChild(cnt);
+  const rec = { el, n: 1, timer: 0, key };
+  el._rec = rec;
+  el.addEventListener('click', () => _dismissToast(rec));
+  stack.appendChild(el);
+  _toastRecs.set(key, rec);
+  void el.offsetWidth;                 // 强制重排，保证从隐藏态开始播入场过渡
+  el.classList.add('show');
+  rec.timer = setTimeout(() => _dismissToast(rec), TOAST_MS);
+}
+
+/* 一次性入场动画：先摘类、强制重排、再加回。
+   同一目标连续切换两次时，不加这一步第二次不会有动画。 */
+function replayEnter(el, cls) {
+  if (!el) return;
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
 }
 
 // 「XX 失败」统一提示（等价于 toast('XX失败：' + e, 'error')）

@@ -256,8 +256,10 @@ def _iter_starts(dtstart, rule, range_start, range_end):
 
     if freq == "DAILY":
         cur = dtstart
-        if range_start > cur:
-            days = int((range_start - cur).total_seconds() // 86400)
+        # range_start 是 float 时间戳，cur 是 datetime；先统一成时间戳再比较/相减，
+        # 否则有 FREQ=DAILY 日程时整张日程表都会 TypeError（工作台直接加载失败）。
+        if range_start > cur.timestamp():
+            days = int((range_start - cur.timestamp()) // 86400)
             cur += datetime.timedelta(days=max(0, days // step) * step)
         while cur.timestamp() < range_end and len(out) < _MAX_OCCURRENCES:
             ts = cur.timestamp()

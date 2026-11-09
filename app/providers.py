@@ -117,8 +117,33 @@ def _thinking(think, max_tokens):
     return {"type": "enabled", "budget_tokens": budget}
 
 
+def _mark_last_cacheable(conv):
+    """在最后一条消息的最后一个内容块打缓存断点。
+
+    Anthropic 的缓存按「tools → system → messages」的前缀匹配；system 打点
+    已经覆盖了 tools + system，再在对话末尾打一个断点，就能让整段历史前缀
+    一起复用（下一轮请求会命中这一轮的写点）。原地修改 conv，使用前已拷贝。
+    """
+    for m in reversed(conv):
+        content = m.get("content")
+        if isinstance(content, str):
+            if not content.strip():
+                continue
+            m["content"] = [{"type": "text", "text": content,
+                             "cache_control": {"type": "ephemeral"}}]
+            return True
+        if isinstance(content, list) and content:
+            last = content[-1]
+            if isinstance(last, dict):
+                content[-1] = dict(last)
+                content[-1]["cache_control"] = {"type": "ephemeral"}
+                return True
+            continue
+    return False
+
+
 def anthropic_body(model, messages, max_tokens=0, think=None, stream=True,
-                   tools=None, tool_choice=None, temperature=None):
+                   tools=None, tool_choice=None, temperature=None, cache=False):
     sys_text, conv = _split_system(messages)
     mt = int(max_tokens or 0) or DEFAULT_MAX_TOKENS
     body = {"model": model, "max_tokens": mt, "messages": conv}
@@ -130,7 +155,12 @@ def anthropic_body(model, messages, max_tokens=0, think=None, stream=True,
     if stream:
         body["stream"] = True
     if sys_text:
-        body["system"] = sys_text
+        if cache:
+            # 稳定段打点：命中部分约按 0.1x 计费，写入约 1.25x
+            body["system"] = [{"type": "text", "text": sys_text,
+                               "cache_control": {"type": "ephemeral"}}]
+        else:
+            body["system"] = sys_text
     th = _thinking(think, mt)
     if th:
         body["thinking"] = th
@@ -140,6 +170,8 @@ def anthropic_body(model, messages, max_tokens=0, think=None, stream=True,
             body["tools"] = _tools
     if tool_choice:
         body["tool_choice"] = tool_choice
+    if cache and body["messages"]:
+        _mark_last_cacheable(body["messages"])
     return body
 
 

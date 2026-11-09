@@ -43,6 +43,7 @@ const stockState = {
   chartBars: [],
   chartMarks: [],       // 当前标的的成交标注（与 chartBars 同一时间口径）
   markFilter: 'all',    // 成交标注筛选：all / me / ai
+  tab: 'pos',           // 侧栏标签：pos / rival / train
   analysis: null,       // 训练辅助数据（预测 / 状态 / 计分板 / 参考散户）
   analysisSeq: 0,
   predictDir: 'up',     // 预测方向：up / flat / down
@@ -54,6 +55,7 @@ const stockState = {
   searchPanel: null,    // 历史分析检索浮层
   compare: null,        // 多节点对比浮层
   timeline: [],         // 可回溯日期
+  risk: null,           // 组合风险指标（/risk 异步加载）
 };
 
 hallRegister({
@@ -89,6 +91,7 @@ function stockMount(root) {
   stockState.barsCursor = '';
   stockState.chartMarks = [];
   stockState.marksCache = {};
+  stockState.tab = 'pos';
   stockState.optimistic = null;
   stockState.addPop = null;
   stockState.analysis = null;
@@ -529,37 +532,45 @@ function stockRenderGame() {
     '<div class="stock-root">',
     '  <div class="stock-main">',
     '    <div class="stock-toolbar">',
-    '      <span class="stock-pill accent" id="stock-pill-cursor"></span>',
-    '      <span class="stock-pill" id="stock-pill-mode"></span>',
-    '      <span class="stock-pill" id="stock-pill-remain"></span>',
-    '      <span class="stock-pill" id="stock-pill-bench"></span>',
-    '      <span class="stock-pill regime" id="stock-pill-regime"></span>',
-    '      <span class="stock-pill dim" id="stock-pill-next"></span>',
+    '      <div class="stock-tb-group">',
+    '        <span class="stock-pill accent" id="stock-pill-cursor"></span>',
+    '        <span class="stock-pill" id="stock-pill-mode"></span>',
+    '        <span class="stock-pill" id="stock-pill-remain"></span>',
+    '        <span class="stock-pill dim" id="stock-pill-next"></span>',
+    '      </div>',
+    '      <div class="stock-tb-group">',
+    '        <span class="stock-pill" id="stock-pill-bench"></span>',
+    '        <span class="stock-pill regime" id="stock-pill-regime"></span>',
+    '      </div>',
     '      <span class="stock-spacer"></span>',
-    '      <button class="stock-btn primary" id="stock-advance">下一日</button>',
-    '      <button class="stock-btn" id="stock-auto">自动播放</button>',
-    '      <button class="stock-btn" id="stock-ai-all"'
+    '      <div class="stock-tb-actions">',
+    '        <button class="stock-btn primary" id="stock-advance">下一日</button>',
+    '        <button class="stock-btn" id="stock-auto">自动播放</button>',
+    '        <button class="stock-btn" id="stock-ai-all"'
       + ' title="让所有还没决策的 AI 一次做完">AI 一键决策</button>',
-    '      <span class="stock-menu-wrap">',
-    '        <button class="stock-btn" id="stock-history-menu" aria-haspopup="menu"'
-      + ' aria-expanded="false">历史分析 ▾</button>',
-    '        <div class="stock-menu hidden" id="stock-history-dropdown" role="menu">',
-    '          <button type="button" data-hm="back" role="menuitem">'
+    '        <span class="stock-menu-wrap">',
+    '          <button class="stock-btn" id="stock-history-menu" aria-haspopup="menu"'
+      + ' aria-expanded="false">更多 ▾</button>',
+    '          <div class="stock-menu hidden" id="stock-history-dropdown" role="menu">',
+    '            <button type="button" data-hm="back" role="menuitem">'
       + '<b>时间轴回溯</b><span>还原到某一天，只看不改</span></button>',
-    '          <button type="button" data-hm="search" role="menuitem">'
+    '            <button type="button" data-hm="search" role="menuitem">'
       + '<b>分析检索</b><span>按时间 / 类型 / 标的 / 关键词查找</span></button>',
-    '          <button type="button" data-hm="compare" role="menuitem">'
+    '            <button type="button" data-hm="compare" role="menuitem">'
       + '<b>历史对比</b><span>最多三个时间点并列查看</span></button>',
-    '        </div>',
-    '      </span>',
-    '      <button class="stock-btn ghost" id="stock-new">新开一局</button>',
+    '            <button type="button" data-hm="report" role="menuitem">'
+      + '<b>导出报告</b><span>下载本局 Markdown 复盘报告</span></button>',
+    '          </div>',
+    '        </span>',
+    '        <button class="stock-btn ghost" id="stock-new">新开一局</button>',
+    '      </div>',
     '    </div>',
     '    <div class="stock-msg hidden" id="stock-msg"></div>',
     '    <div class="stock-chart-card">',
     '      <div class="stock-chart-head">',
     '        <span class="stock-chart-title">K 线</span>',
-    '        <span class="stock-chart-sub">日 K · 均线 MA5 / MA20</span>',
     '        <span class="stock-chart-legend" id="stock-legend"></span>',
+    '        <span class="stock-spacer"></span>',
     '        <select class="stock-mark-filter" id="stock-mark-filter"'
       + ' title="成交标注按谁筛选">',
     '          <option value="all">成交：全部</option>',
@@ -571,7 +582,7 @@ function stockRenderGame() {
     '      </div>',
     '      <div class="stock-symbol-bar" id="stock-symbols"></div>',
     '      <div class="stock-chart-wrap" id="stock-chart-wrap">',
-    '        <svg id="stock-chart" class="stock-chart" viewBox="0 0 720 300"></svg>',
+    '        <svg id="stock-chart" class="stock-chart" viewBox="0 0 720 360"></svg>',
     '        <div class="stock-tip hidden" id="stock-tip"></div>',
     '      </div>',
     '    </div>',
@@ -584,57 +595,92 @@ function stockRenderGame() {
     '        </div>',
     '        <input id="stock-qty" type="number" min="' + (stockIsCrypto() ? '0.000001' : '100')
       + '" step="' + (stockIsCrypto() ? '0.001' : '100') + '" value="' + stockEsc(prevQty) + '">',
+    '        <div class="stock-quick" id="stock-quick">',
+    '          <button type="button" data-frac="0.25" title="按可用资金 / 可卖数量的四分之一">1/4</button>',
+    '          <button type="button" data-frac="0.5" title="按可用资金 / 可卖数量的二分之一">1/2</button>',
+    '          <button type="button" data-frac="1" title="尽量用满可用资金 / 全部可卖">全部</button>',
+    '        </div>',
+    '        <label class="stock-limit-toggle" title="不填价格即市价单，下一交易日开盘撮合">',
+    '          <input type="checkbox" id="stock-limit-on"> 限价',
+    '        </label>',
+    '        <input id="stock-limit" class="stock-limit-input hidden" type="number"'
+      + ' min="0" step="' + (stockIsCrypto() ? '0.0001' : '0.01') + '"'
+      + ' placeholder="限价，留空=市价">',
     '        <span class="stock-est" id="stock-est"></span>',
     '        <button class="stock-btn primary" id="stock-submit">提交委托</button>',
     '      </div>',
     '      <div class="stock-pending" id="stock-pending"></div>',
     '    </div>',
-    '    <div class="stock-predict-card">',
-    '      <div class="stock-card-title">预测训练'
-      + ' <span class="stock-ov-dim">先下注、后揭晓，练的是判断而不是盈亏</span></div>',
-    '      <div class="stock-predict-row">',
-    '        <select id="stock-p-target" title="预测对象">',
-    '          <option value="">当前标的（K 线所选）</option>',
-    '          <option value="benchmark">' + stockEsc(stockBenchName()) + ' 大盘</option>',
-    '        </select>',
-    '        <select id="stock-p-horizon" title="几个交易日之后">',
-    '          <option value="1">1 日后</option>',
-    '          <option value="3" selected>3 日后</option>',
-    '          <option value="5">5 日后</option>',
-    '        </select>',
-    '        <div class="stock-predict-dir" id="stock-p-dir">',
-    '          <button type="button" data-pdir="up" class="active">看涨</button>',
-    '          <button type="button" data-pdir="flat">看平</button>',
-    '          <button type="button" data-pdir="down">看跌</button>',
-    '        </div>',
-    '        <button class="stock-btn primary" id="stock-p-submit">提交预测</button>',
-    '      </div>',
-    '      <div class="stock-predict-status" id="stock-p-status"></div>',
-    '      <div class="stock-predict-list" id="stock-p-list"></div>',
-    '    </div>',
     '  </div>',
     '  <aside class="stock-side">',
-    '    <div class="stock-card">',
-    '      <div class="stock-card-title">参考散户'
-      + ' <span class="stock-ov-dim">风格对照 · 按总资产</span></div>',
-    '      <div id="stock-players"></div>',
-    '      <div class="stock-nav-wrap" id="stock-nav-wrap">',
-    '        <svg class="stock-nav-svg" id="stock-nav"></svg>',
+    '    <div class="stock-tabs" role="tablist">',
+    '      <button type="button" class="stock-tab active" role="tab"'
+      + ' aria-selected="true" data-tab="pos">持仓成交</button>',
+    '      <button type="button" class="stock-tab" role="tab"'
+      + ' aria-selected="false" data-tab="rival">对手</button>',
+    '      <button type="button" class="stock-tab" role="tab"'
+      + ' aria-selected="false" data-tab="train">训练</button>',
+    '    </div>',
+    '    <div class="stock-tabpanel" data-panel="pos" role="tabpanel">',
+    '      <div class="stock-card">',
+    '        <div class="stock-card-title">我的持仓'
+      + ' <span class="stock-ov-dim">按当前标的展开</span></div>',
+    '        <div id="stock-holdings"></div>',
     '      </div>',
-    '      <div class="stock-nav-legend" id="stock-nav-legend"></div>',
+    '      <div class="stock-card">',
+    '        <div class="stock-card-title">我的成交</div>',
+    '        <div id="stock-trades"></div>',
+    '      </div>',
     '    </div>',
-    '    <div class="stock-card">',
-    '      <div class="stock-card-title">决策计分板'
+    '    <div class="stock-tabpanel hidden" data-panel="rival" role="tabpanel">',
+    '      <div class="stock-card">',
+    '        <div class="stock-card-title">参考散户'
+      + ' <span class="stock-ov-dim">风格对照 · 按总资产</span></div>',
+    '        <div id="stock-players"></div>',
+    '        <div class="stock-nav-wrap" id="stock-nav-wrap">',
+    '          <svg class="stock-nav-svg" id="stock-nav"></svg>',
+    '        </div>',
+    '        <div class="stock-nav-legend" id="stock-nav-legend"></div>',
+    '      </div>',
+    '      <div class="stock-card">',
+    '        <div class="stock-card-title">AI 复盘</div>',
+    '        <div id="stock-journals"></div>',
+    '      </div>',
+    '    </div>',
+    '    <div class="stock-tabpanel hidden" data-panel="train" role="tabpanel">',
+    '      <div class="stock-card">',
+    '        <div class="stock-card-title">组合风险'
+      + ' <span class="stock-ov-dim">最大回撤 · 胜率 · 盈亏比</span></div>',
+    '        <div id="stock-risk"></div>',
+    '      </div>',
+    '      <div class="stock-card">',
+    '        <div class="stock-card-title">决策计分板'
       + ' <span class="stock-ov-dim">看判断质量，不只看盈亏</span></div>',
-    '      <div id="stock-scoreboard"></div>',
-    '    </div>',
-    '    <div class="stock-card">',
-    '      <div class="stock-card-title">AI 复盘</div>',
-    '      <div id="stock-journals"></div>',
-    '    </div>',
-    '    <div class="stock-card">',
-    '      <div class="stock-card-title">我的成交</div>',
-    '      <div id="stock-trades"></div>',
+    '        <div id="stock-scoreboard"></div>',
+    '      </div>',
+    '      <div class="stock-predict-card">',
+    '        <div class="stock-card-title">预测训练'
+      + ' <span class="stock-ov-dim">先下注、后揭晓</span></div>',
+    '        <div class="stock-predict-row">',
+    '          <select id="stock-p-target" title="预测对象">',
+    '            <option value="">当前标的</option>',
+    '            <option value="benchmark">' + stockEsc(stockBenchName()) + ' 大盘</option>',
+    '          </select>',
+    '          <select id="stock-p-horizon" title="几个交易日之后">',
+    '            <option value="1">1 日后</option>',
+    '            <option value="3" selected>3 日后</option>',
+    '            <option value="5">5 日后</option>',
+    '          </select>',
+    '          <div class="stock-predict-dir" id="stock-p-dir">',
+    '            <button type="button" data-pdir="up" class="active">看涨</button>',
+    '            <button type="button" data-pdir="flat">看平</button>',
+    '            <button type="button" data-pdir="down">看跌</button>',
+    '          </div>',
+    '          <button class="stock-btn primary" id="stock-p-submit">提交预测</button>',
+    '        </div>',
+    '        <div class="stock-predict-status" id="stock-p-status"></div>',
+    '        <div class="stock-predict-list" id="stock-p-list"></div>',
+    '      </div>',
     '    </div>',
     '  </aside>',
     '</div>',
@@ -679,6 +725,11 @@ function stockRenderGame() {
     chartWrap: root.querySelector('#stock-chart-wrap'),
     tip: root.querySelector('#stock-tip'),
     msg: root.querySelector('#stock-msg'),
+    holdings: root.querySelector('#stock-holdings'),
+    riskBox: root.querySelector('#stock-risk'),
+    quick: root.querySelector('#stock-quick'),
+    limitOn: root.querySelector('#stock-limit-on'),
+    limitInput: root.querySelector('#stock-limit'),
   });
 
   root.querySelectorAll('.stock-order-row [data-side]').forEach((btn) => {
@@ -692,6 +743,49 @@ function stockRenderGame() {
   });
   stockState.el.submit.onclick = () => stockSubmitOrder();
   stockState.el.qty.oninput = stockUpdateEstimate;
+  // 快捷仓位：按可用现金 / 可卖折算成数量，省得手算
+  if (stockState.el.quick) {
+    stockState.el.quick.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-frac]');
+      if (!btn) return;
+      stockFillQuick(Number(btn.dataset.frac));
+    });
+  }
+  // 限价开关：勾上才显示价格输入框，不填价格仍按市价单走
+  if (stockState.el.limitOn) {
+    stockState.el.limitOn.onchange = () => {
+      const on = !!stockState.el.limitOn.checked;
+      if (stockState.el.limitInput) {
+        stockState.el.limitInput.classList.toggle('hidden', !on);
+        if (on && !stockState.el.limitInput.value) {
+          const sel = stockSelectedSymbol();
+          if (sel && sel.last) stockState.el.limitInput.value = String(sel.last);
+        }
+        if (!on) stockState.el.limitInput.value = '';
+      }
+      stockUpdateEstimate();
+    };
+  }
+  if (stockState.el.limitInput) stockState.el.limitInput.oninput = stockUpdateEstimate;
+  // 侧栏三组标签：切换只改显示，训练页里净值曲线隐藏时量不到宽度，切回来要重绘
+  root.querySelectorAll('.stock-tab').forEach((tab) => {
+    tab.onclick = () => {
+      const key = tab.dataset.tab;
+      root.querySelectorAll('.stock-tab').forEach((x) => {
+        const on = x === tab;
+        x.classList.toggle('active', on);
+        x.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      root.querySelectorAll('.stock-tabpanel').forEach((p) => {
+        p.classList.toggle('hidden', p.dataset.panel !== key);
+      });
+      if (key === 'rival') stockDrawNav();
+      if (key === 'train') {
+        stockRenderRisk();
+        if (!stockState.risk) stockLoadRisk();
+      }
+    };
+  });
   stockState.el.advance.onclick = () => stockNextDay();
   stockState.el.auto.onclick = () => stockToggleAuto();
   if (stockState.el.aiAll) stockState.el.aiAll.onclick = () => stockDecideAll();
@@ -718,6 +812,7 @@ function stockRenderGame() {
       if (k === 'back') stockOpenHistory();
       else if (k === 'search') stockOpenSearch();
       else if (k === 'compare') stockOpenCompare();
+      else if (k === 'report') stockExportReport();
     };
     if (stockState.onDocClick) document.removeEventListener('click', stockState.onDocClick);
     stockState.onDocClick = () => closeMenu();
@@ -811,9 +906,11 @@ function stockApplyFull(game) {
   stockRenderPlayers();
   stockRenderJournals();
   stockRenderTrades();
+  stockRenderHoldings();
   stockRenderPending();
   stockUpdateAccount();
   stockUpdateEstimate();
+  stockLoadRisk();
 }
 
 /* 把增量切片并回本地 state：只覆盖 patch 里真的带了的字段 */
@@ -854,6 +951,7 @@ function stockApplyPatch(patch) {
   stockRenderToolbar();
   stockRenderPlayers();
   stockRenderSymbols();
+  stockRenderHoldings();
   if (patch.pending_orders !== undefined) stockRenderPending();
   if (patch.trades !== undefined) stockRenderTrades();
   if (patch.journals) stockRenderJournals();
@@ -861,6 +959,7 @@ function stockApplyPatch(patch) {
   if (stockState.game.cursor_date !== cursorBefore) {
     stockLoadBars();
     stockLoadAnalysis();      // 新的一天：预测可能刚结算，参考散户曲线也变了
+    stockLoadRisk();          // 资产曲线加了一日，回撤 / 波动要跟着重算
   }
   if (stockState.zoom && stockState.zoom.open) stockZoomDraw();
 }
@@ -1209,6 +1308,122 @@ function stockRenderTrades() {
   }).join('');
 }
 
+/* 我的持仓：全部持仓一张紧凑表，点一行切换到该标的 */
+function stockRenderHoldings() {
+  const box = stockState.el.holdings;
+  const g = stockState.game;
+  if (!box || !g) return;
+  const human = (g.players || []).find((p) => p.kind === 'human');
+  const rows = (human && human.positions) || [];
+  if (!rows.length) {
+    box.innerHTML = '<div class="stock-empty small">空仓（下单后下一交易日成交）</div>';
+    return;
+  }
+  box.innerHTML = rows.map((p) => {
+    const pnl = Number(p.pnl_pct) || 0;
+    return '<div class="stock-hold" data-hold="' + stockEsc(p.symbol) + '"'
+      + ' title="点击切换到 ' + stockEsc(p.name || p.symbol) + '">'
+      + '<div class="stock-hold-top"><b>'
+      + stockEsc(p.name || stockSymbolName(p.symbol)) + '</b>'
+      + '<span class="' + (pnl >= 0 ? 'up' : 'down') + '">' + stockPct(pnl) + '</span></div>'
+      + '<div class="stock-hold-num"><span>' + stockQtyText(p.qty) + stockUnit()
+      + '<em>可卖 ' + stockQtyText(p.available_qty) + '</em></span>'
+      + '<span>成本 ' + stockMoney(p.avg_cost) + '<em>现价 ' + stockMoney(p.last) + '</em></span>'
+      + '<span>市值 ' + stockMoney(p.market_value) + '</span></div></div>';
+  }).join('');
+  box.querySelectorAll('[data-hold]').forEach((el) => {
+    el.onclick = () => {
+      stockState.symbol = el.dataset.hold;
+      stockRenderSymbols();
+      stockLoadBars();
+      stockUpdateAccount();
+    };
+  });
+}
+
+/* 组合风险：口径全部来自后端 stockkit.risk，这里只负责显示，不自己算 */
+function stockRenderRisk() {
+  const box = stockState.el.riskBox;
+  if (!box) return;
+  const r = stockState.risk;
+  if (!r) { box.innerHTML = '<div class="stock-empty small">风险指标加载中…</div>'; return; }
+  const num = (v) => Number(v) || 0;
+  const rows = [
+    ['最大回撤', stockPct(-num(r.max_drawdown)), 'down'],
+    ['年化波动', num(r.annualized_volatility).toFixed(2) + '%', ''],
+    ['夏普比率', num(r.sharpe).toFixed(2), ''],
+    ['胜率', num(r.win_rate).toFixed(2) + '%', ''],
+    ['盈亏比', num(r.profit_factor).toFixed(2), ''],
+    ['超额收益', stockPct(num(r.excess_return)), num(r.excess_return) >= 0 ? 'up' : 'down'],
+  ];
+  box.innerHTML = rows.map((x) => '<div class="stock-risk-row"><span>' + x[0]
+    + '</span><b class="' + x[2] + '">' + x[1] + '</b></div>').join('')
+    + '<div class="stock-risk-note">平仓 ' + num(r.closed_trades).toFixed(0) + ' 笔 · 样本 '
+    + num(r.days).toFixed(0) + ' 个交易日</div>';
+}
+
+async function stockLoadRisk() {
+  const g = stockState.game;
+  if (!g) return;
+  const gen = stockState.gen;
+  const gid = g.id;
+  try {
+    const data = await api('/api/hall/stock/risk', { game_id: gid });
+    if (gen !== stockState.gen || !stockState.game || stockState.game.id !== gid) return;
+    stockState.risk = data.risk || data;
+  } catch (e) {
+    stockState.risk = null;
+  }
+  stockRenderRisk();
+}
+
+/* 快捷仓位：按可用资金 / 可卖数量折算，A 股向下取整到 100 股 */
+function stockFillQuick(frac) {
+  const g = stockState.game;
+  const sel = stockSelectedSymbol();
+  if (!g || !sel || !frac) return;
+  const human = (g.players || []).find((p) => p.kind === 'human');
+  if (stockState.side === 'sell') {
+    const pos = human && (human.positions || []).find((x) => x.symbol === sel.symbol);
+    const avail = (pos && Number(pos.available_qty)) || 0;
+    const qty = Math.floor(avail * frac * 1e6) / 1e6;
+    if (stockState.el.qty) stockState.el.qty.value = qty > 0 ? String(qty) : '';
+  } else {
+    const price = Number(sel.last) || 0;
+    const cash = (human && Number(human.cash)) || 0;
+    if (price <= 0) return;
+    let qty = cash * frac / price;
+    qty = stockIsCrypto() ? Math.floor(qty * 1e6) / 1e6 : Math.floor(qty / 100) * 100;
+    if (stockState.el.qty) stockState.el.qty.value = qty > 0 ? String(qty) : '';
+  }
+  stockUpdateEstimate();
+}
+
+/* 导出报告：后端返回文本 + 文件名，这里造一个 Blob 直接下载 */
+async function stockExportReport() {
+  const g = stockState.game;
+  if (!g) return;
+  stockMsg('正在生成复盘报告…');
+  try {
+    const data = await api('/api/hall/stock/report', { game_id: g.id, fmt: 'markdown' });
+    const r = data.report || data;
+    const text = String(r.text || '');
+    if (!text) throw new Error('报告内容为空');
+    const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = r.filename || ('stock-' + g.id + '.md');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    stockMsg('报告已下载：' + a.download);
+  } catch (e) {
+    stockMsg(e.message || e, true);
+  }
+}
+
 function stockRenderPending() {
   const box = stockState.el.pending;
   if (!box) return;
@@ -1281,13 +1496,36 @@ async function stockSubmitOrder() {
     stockMsg('数量必须大于 0', true);
     return;
   }
+  // 限价单：勾了「限价」且填了价格才生效；没勾/没填一律按市价单（limit_price=0）走，
+  // 与后端约定一致（0 = 市价）。
+  const limitOn = !!(stockState.el.limitOn && stockState.el.limitOn.checked);
+  let limitPrice = 0;
+  if (limitOn) {
+    limitPrice = Number((stockState.el.limitInput && stockState.el.limitInput.value) || 0);
+    if (!Number.isFinite(limitPrice) || limitPrice <= 0) {
+      stockMsg('限价单需要填写大于 0 的委托价，或取消勾选「限价」改用市价单', true);
+      return;
+    }
+    // 涨跌停越界在这里挡一次，不必等后端报错：A 股 ±10%，币市不设限价区间
+    if (!stockIsCrypto()) {
+      const base = Number(sel.last) || 0;
+      if (base > 0) {
+        const hi = base * 1.1, lo = base * 0.9;
+        if (limitPrice > hi + 1e-9 || limitPrice < lo - 1e-9) {
+          stockMsg('委托价 ' + stockMoney(limitPrice) + ' 超出当日涨跌停区间 '
+            + stockMoney(lo) + ' ~ ' + stockMoney(hi), true);
+          return;
+        }
+      }
+    }
+  }
   const g = stockState.game;
   stockState.busy = true;
   // 乐观更新：本地先把这笔待成交挂上，界面立刻有反馈，随后用服务端增量校正
   const prevPending = (g.pending_orders || []).slice();
   g.pending_orders = prevPending.concat([{
     id: 'local_' + Date.now(), symbol: sel.symbol, name: sel.name,
-    side: stockState.side, qty: qty, local: true,
+    side: stockState.side, qty: qty, limit_price: limitPrice, local: true,
   }]);
   stockRenderPending();
   stockMsg('正在提交委托…');
@@ -1297,6 +1535,7 @@ async function stockSubmitOrder() {
       symbol: sel.symbol,
       side: stockState.side,
       qty: qty,
+      limit_price: limitPrice,
       delta: 1,
     });
     if (data.patch) stockApplyPatch(data.patch);
@@ -1570,8 +1809,8 @@ function stockSvg(tag, attrs) {
 /* 小图（对局页那张）的几何：720×300 下沿用原值，保证现有小图外观稳定；
    gapRight 是后加的「绘图区右留白」—— 让最新一根 K 线不贴着右侧价格刻度 */
 const STOCK_CHART_GEOM = {
-  w: 720, h: 300, left: 8, right: 62, gapRight: 14, top: 14,
-  priceBottom: 210, volTop: 228, volBottom: 286,
+  w: 720, h: 360, left: 8, right: 62, gapRight: 14, top: 14,
+  priceBottom: 276, volTop: 292, volBottom: 346,
   fs: 1, barMax: 8,
 };
 
@@ -1762,52 +2001,75 @@ function stockDrawKline(opt) {
   drawMA(5, '#e0a33c');
   drawMA(20, '#4d6bfe');
 
-  // 成交标注：▲买入（红，标在成交价下方）· ▼卖出（绿，标在成交价上方）。
-  // x 由成交日定位到对应 K 线、y 由成交价走同一套价格刻度，所以和 K 线精准对齐。
-  // 同一天有多笔时按顺序纵向错开，否则会完全叠在一起、只能看见最后一笔。
+  // 成交标注：▲买入（蓝，标在成交价下方）· ▼卖出（橙，标在成交价上方）。
+  // 用蓝/橙而不是红/绿，是为了和「红涨绿跌」的 K 线本体区分开，一眼能看出这是「我的动作」
+  // 而不是「当天涨了」。x 由成交日定位到 K 线、y 由成交价走同一套价格刻度，与 K 线精准对齐。
+  // 同一天多笔：横向扇形展开（而不是无限纵向堆叠），并画一条引线连回成交价，
+  // 这样 5 笔以上也不会溢出绘图区，且每笔都看得出对应哪根 K 线的哪个价位。
   const tradeMarks = opt.marks || [];
   const marksByDate = {};
+  const markEls = [];
   if (tradeMarks.length) {
     const idxByDate = {};
     bars.forEach((b, i) => { idxByDate[b.date] = i; });
-    const stackAt = {};
+    const groupAt = {};
     tradeMarks.forEach((m) => {
-      const i = idxByDate[m.date];
+      (groupAt[m.date] = groupAt[m.date] || []).push(m);
+    });
+    Object.keys(groupAt).forEach((d) => {
+      const list = groupAt[d];
+      marksByDate[d] = list;
+      const i = idxByDate[d];
       if (i === undefined) return;                 // 不在可见窗口里的成交不画
-      (marksByDate[m.date] = marksByDate[m.date] || []).push(m);
-      const k = stackAt[m.date] || 0;
-      stackAt[m.date] = k + 1;
-      const x = left + (i + 0.5) * step;
-      const py = y(Number(m.price) || Number(bars[i].close));
-      const buy = m.side !== 'sell';
-      const color = buy ? '#e5534b' : '#2f9e6f';
-      const off = (10 + k * 11) * fs;
-      const apexY = buy ? py + off * 0.3 : py - off * 0.3;
-      const baseY = buy ? py + off : py - off;
-      const half = Math.max(3, bw * 0.7);
-      svg.appendChild(stockSvg('path', {
-        d: 'M' + x.toFixed(2) + ' ' + apexY.toFixed(2)
-          + ' L' + (x - half).toFixed(2) + ' ' + baseY.toFixed(2)
-          + ' L' + (x + half).toFixed(2) + ' ' + baseY.toFixed(2) + ' Z',
-        fill: color, opacity: 0.95,
-      }));
-      const tx = stockSvg('text', {
-        x: (x + half + 2 * fs).toFixed(2),
-        y: (buy ? baseY + 3 * fs : baseY).toFixed(2),
-        fill: color, 'font-size': String(9 * fs),
+      const cx = left + (i + 0.5) * step;
+      const n = list.length;
+      list.forEach((m, k) => {
+        const buy = m.side !== 'sell';
+        const color = buy ? '#4d6bfe' : '#e0a33c';
+        const py = y(Number(m.price) || Number(bars[i].close));
+        // 扇形展开：第 k 笔相对中轴偏移，越靠后的偏移越大；单笔时偏移为 0
+        const fan = n > 1 ? (k - (n - 1) / 2) : 0;
+        const x = cx + fan * Math.max(6, bw * 1.15) * fs;
+        const off = (12 + Math.abs(fan) * 3) * fs;
+        const apexY = buy ? py + off * 0.32 : py - off * 0.32;
+        const baseY = buy ? py + off : py - off;
+        const half = Math.max(5, bw * 1.1);
+        const g = stockSvg('g', {});
+        // 引线：从三角尖端连回成交价，明确「这笔标的是这个价位」
+        g.appendChild(stockSvg('line', {
+          x1: x.toFixed(2), y1: apexY.toFixed(2),
+          x2: cx.toFixed(2), y2: py.toFixed(2),
+          stroke: color, 'stroke-width': 0.8 * fs, opacity: 0.55,
+        }));
+        const tri = stockSvg('path', {
+          d: 'M' + x.toFixed(2) + ' ' + apexY.toFixed(2)
+            + ' L' + (x - half).toFixed(2) + ' ' + baseY.toFixed(2)
+            + ' L' + (x + half).toFixed(2) + ' ' + baseY.toFixed(2) + ' Z',
+          fill: color, opacity: 0.95,
+        });
+        g.appendChild(tri);
+        const label = (buy ? '买' : '卖') + stockQtyText(m.qty) + stockUnit()
+          + (stockWho(m) ? '·' + stockWho(m) : '');
+        const tx = stockSvg('text', {
+          x: x.toFixed(2), y: (buy ? baseY + 9 * fs : baseY - 4 * fs).toFixed(2),
+          fill: color, 'font-size': String(10 * fs), 'text-anchor': 'middle',
+          'paint-order': 'stroke', stroke: 'rgba(0,0,0,.55)', 'stroke-width': 2 * fs,
+        });
+        tx.textContent = label;
+        g.appendChild(tx);
+        g.setAttribute('class', 'stock-mark');
+        svg.appendChild(g);
+        markEls.push({ el: g, tri: tri, date: d });
       });
-      tx.textContent = (buy ? '买' : '卖') + stockQtyText(m.qty) + stockUnit()
-        + (stockWho(m) ? '·' + stockWho(m) : '');
-      svg.appendChild(tx);
     });
   }
 
-  // 日期刻度
-  const tickCount = Math.min(5, bars.length);
-  for (let i = 0; i < tickCount; i += 1) {
-    const idx = Math.round(i * (bars.length - 1) / Math.max(1, tickCount - 1));
-    const b = bars[idx];
-    const x = left + (idx + 0.5) * step;
+  // 日期刻度：按绘图区宽度自适应个数，小图 5 个、放大到整屏能到 8 个
+  const tickCount = Math.max(2, Math.min(8, Math.round(plotW / (90 * fs))));
+  const tickEvery = Math.max(1, Math.floor((bars.length - 1) / Math.max(1, tickCount - 1)));
+  for (let i = 0; i < bars.length; i += tickEvery) {
+    const b = bars[i];
+    const x = left + (i + 0.5) * step;
     const tx = stockSvg('text', {
       x: x, y: H - 6 * fs, fill: '#8a8f98', 'font-size': String(9 * fs), 'text-anchor': 'middle',
     });
@@ -1835,15 +2097,66 @@ function stockDrawKline(opt) {
   });
   const tip = opt.tip;
   const wrap = opt.wrap;
+  // 十字光标：横竖两条虚线 + 右侧价格签 + 顶部日期签，跟着鼠标走
+  /* display:none 而不是 opacity:0 —— 隐藏时必须不参与布局，
+     否则不可见的价签矩形会被判定为「遮挡」其他元素 */
+  const crossG = stockSvg('g', { display: 'none', 'pointer-events': 'none' });
+  const crossV = stockSvg('line', {
+    y1: top, y2: volBottom, stroke: '#8a8f98', 'stroke-width': 1 * fs,
+    'stroke-dasharray': '4 3', opacity: 0.75,
+  });
+  const crossH = stockSvg('line', {
+    x1: left, x2: plotRight, stroke: '#8a8f98', 'stroke-width': 1 * fs,
+    'stroke-dasharray': '4 3', opacity: 0.75,
+  });
+  const priceTagBg = stockSvg('rect', {
+    x: plotRight + 2 * fs, width: right - 6 * fs, height: 15 * fs, rx: 3 * fs, fill: '#4d6bfe',
+  });
+  const priceTagTx = stockSvg('text', {
+    x: plotRight + 5 * fs, y: 0, fill: '#fff',
+    'font-size': String(9.5 * fs), 'dominant-baseline': 'middle',
+  });
+  const dateTagBg = stockSvg('rect', {
+    y: H - 16 * fs, width: 62 * fs, height: 14 * fs, rx: 3 * fs, fill: '#4d6bfe',
+  });
+  const dateTagTx = stockSvg('text', {
+    y: H - 6 * fs, fill: '#fff', 'font-size': String(9.5 * fs), 'text-anchor': 'middle',
+  });
+  crossG.appendChild(crossV);
+  crossG.appendChild(crossH);
+  crossG.appendChild(priceTagBg);
+  crossG.appendChild(priceTagTx);
+  crossG.appendChild(dateTagBg);
+  crossG.appendChild(dateTagTx);
+  svg.appendChild(crossG);
+
   overlay.addEventListener('mousemove', (e) => {
     const rect = svg.getBoundingClientRect();
     const px = (e.clientX - rect.left) / Math.max(1, rect.width) * W;
+    const py = (e.clientY - rect.top) / Math.max(1, rect.height) * H;
     const idx = Math.max(0, Math.min(bars.length - 1,
       Math.floor((px - left) / step)));
     const b = bars[idx];
     if (!b) return;
     hl.setAttribute('x', (left + idx * step).toFixed(2));
     hl.setAttribute('opacity', '0.10');
+    // 十字：竖线吸附到 K 线中轴，横线跟随鼠标实际 y，价签显示该处的价格
+    const cx = left + (idx + 0.5) * step;
+    crossV.setAttribute('x1', cx.toFixed(2));
+    crossV.setAttribute('x2', cx.toFixed(2));
+    const cy = Math.max(top, Math.min(priceBottom, py));
+    crossH.setAttribute('y1', cy.toFixed(2));
+    crossH.setAttribute('y2', cy.toFixed(2));
+    const priceAt = hi - (cy - top) / Math.max(1, priceBottom - top) * (hi - lo);
+    priceTagBg.setAttribute('y', (cy - 7.5 * fs).toFixed(2));
+    priceTagTx.setAttribute('y', cy.toFixed(2));
+    priceTagTx.textContent = stockMoney(priceAt);
+    const tagW = 62 * fs;
+    dateTagBg.setAttribute('x', (cx - tagW / 2).toFixed(2));
+    dateTagBg.setAttribute('width', tagW.toFixed(2));
+    dateTagTx.setAttribute('x', cx.toFixed(2));
+    dateTagTx.textContent = String(b.date || '');
+    crossG.setAttribute('display', 'inline');
     if (opt.onHoverDate) opt.onHoverDate(b.date);
     if (tip) {
       const dayTrades = marksByDate[b.date] || [];
@@ -1864,6 +2177,7 @@ function stockDrawKline(opt) {
   });
   overlay.addEventListener('mouseleave', () => {
     hl.setAttribute('opacity', '0');
+    crossG.setAttribute('display', 'none');   // 鼠标移出要把十字一起收掉
     if (tip) tip.classList.add('hidden');
     if (opt.onHoverDate) opt.onHoverDate('');
   });

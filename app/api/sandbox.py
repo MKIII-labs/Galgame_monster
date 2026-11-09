@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 from app.store import _lock
-from app import agent, diffview, ide_complete, winproc
+from app import agent, diffview, git, ide_complete, ide_review, winproc
 from app.config import get_api_conf
 from app.llm import _quick_chat
 from app.registry import route
@@ -111,7 +111,7 @@ def _api_sandbox_delete(h):
         if err:
             return err
         try:
-            agent.delete_entry(sb, body.get("path"))
+            agent.delete_entry(sb, body.get("path"), bool(body.get("recursive")))
             return h._json({"ok": True})
         except agent.SandboxError as e:
             return h._json({"ok": False, "error": str(e)}, 400)
@@ -149,19 +149,59 @@ def _api_ide_complete(h):
         prefix = str(body.get("prefix") or "")
         suffix = str(body.get("suffix") or "")
         if not prefix and not suffix:
-            return h._json({"ok": False, "text": "", "error": "没有上下文"}, 400)
+            return h._json({"ok": False, "text": "", "texts": [], "error": "没有上下文"}, 400)
         sid = (s or {}).get("id") or body.get("session_id") or ""
         if not ide_complete.allow(sid):
-            return h._json({"ok": False, "text": "", "error": "请求过于频繁"}, 429)
+            return h._json({"ok": False, "text": "", "texts": [],
+                            "error": "请求过于频繁"}, 429)
+        # 候选数由前端按 Alt+] 需要传，默认 2 个；老前端只读 text，仍然兼容
         try:
-            text, why = ide_complete.complete(
+            want = int(body.get("candidates") or ide_complete.MAX_CANDIDATES)
+        except (TypeError, ValueError):
+            want = ide_complete.MAX_CANDIDATES
+        try:
+            texts, why = ide_complete.complete_candidates(
                 str(body.get("path") or ""), str(body.get("language") or "plaintext"),
-                prefix, suffix)
+                prefix, suffix, max_candidates=want)
         except Exception as e:
             ide_complete.note_result(sid, False)
-            return h._json({"ok": False, "text": "", "error": str(e)[:160]})
+            return h._json({"ok": False, "text": "", "texts": [], "error": str(e)[:160]})
         ide_complete.note_result(sid, not why)
-        return h._json({"ok": not why, "text": text, "error": why})
+        return h._json({"ok": not why, "text": texts[0] if texts else "",
+                        "texts": texts, "error": why})
+
+
+@route("/api/ide/review")
+def _api_ide_review(h):
+        """AI 审阅：scope=ai 审阅队列里的文件；scope=git 审阅未提交 / 单提交 / 分支差异。
+
+        只读：不写文件、不改审阅队列，结果仅用于展示摘要 / 风险 / 流程图。
+        """
+        body = h._body()
+        s, sb, err = h._sb_guard(body)
+        if err:
+            return err
+        scope = str(body.get("scope") or "ai").lower()
+        if scope == "git":
+            mode = str(body.get("mode") or "work").lower()
+            try:
+                d = git.diff_text(sb, scope=mode, rev=body.get("rev") or "",
+                                  base=body.get("base") or "",
+                                  head=body.get("head") or "HEAD")
+            except git.GitError as e:
+                return h._json({"ok": False, "error": str(e)}, 400)
+        else:
+            d = ide_review.ai_diff(sb, (s or {}).get("id") or "",
+                                   body.get("items") or [])
+        if not d.get("ok"):
+            return h._json({"ok": False, "error": d.get("error") or "没有可审查的改动"}, 400)
+        res = ide_review.review(d.get("label"), d.get("text"))
+        if not res.get("ok"):
+            return h._json(res, 400)
+        res.update({"label": d.get("label"), "files": d.get("files") or [],
+                    "skipped": d.get("skipped") or 0,
+                    "truncated": bool(d.get("truncated"))})
+        return h._json(res)
 
 
 @route("/api/sandbox/diff")
@@ -359,6 +399,97 @@ def _api_sandbox_move(h):
         return h._json({"ok": True, "path": agent._rel(sb, target)})
 
 
+def _unique_copy_target(d_abs, name, src_abs, is_dir):
+        """目标已存在时按 VS Code 的规则加后缀：a.txt → a copy.txt / a copy 2.txt。"""
+        def taken(p):
+            return os.path.exists(p) or os.path.normcase(p) == os.path.normcase(src_abs)
+        target = os.path.join(d_abs, name)
+        if not taken(target):
+            return target
+        stem, ext = (name, "") if is_dir else os.path.splitext(name)
+        for i in range(1, 1000):
+            suffix = " copy" if i == 1 else (" copy %d" % i)
+            p = os.path.join(d_abs, stem + suffix + ext)
+            if not taken(p):
+                return p
+        raise agent.SandboxError("同名副本过多")
+
+
+@route("/api/sandbox/copy")
+def _api_sandbox_copy(h):
+        """复制文件 / 目录到另一个目录（右键菜单与 Ctrl+C / Ctrl+V 用）。
+
+        目标已有同名项时自动改名，绝不覆盖；目录递归复制。"""
+        body = h._body()
+        s, sb, err = h._sb_guard(body)
+        if err:
+            return err
+        src = (body.get("from") or "").strip()
+        dst_dir = (body.get("to") or "").strip()
+        new_name = (body.get("name") or "").strip()
+        if not src:
+            return h._json({"ok": False, "error": "缺少 from"}, 400)
+        if new_name and ("/" in new_name or "\\" in new_name or new_name in (".", "..")):
+            return h._json({"ok": False, "error": "名称不合法"}, 400)
+        try:
+            s_abs = agent.resolve_path(sb, src)
+            d_abs = agent.resolve_path(sb, dst_dir or ".")
+        except agent.SandboxError as e:
+            return h._json({"ok": False, "error": str(e)}, 400)
+        if not os.path.exists(s_abs):
+            return h._json({"ok": False, "error": "源文件不存在"}, 400)
+        if os.path.normcase(s_abs) == os.path.normcase(agent._sandbox_root(sb)):
+            return h._json({"ok": False, "error": "不能复制沙箱根目录"}, 400)
+        if not os.path.isdir(d_abs):
+            return h._json({"ok": False, "error": "目标不是目录"}, 400)
+        is_dir = os.path.isdir(s_abs)
+        if is_dir and (os.path.normcase(d_abs) == os.path.normcase(s_abs)
+                       or os.path.normcase(d_abs).startswith(os.path.normcase(s_abs) + os.sep)):
+            return h._json({"ok": False, "error": "不能把目录复制到它自己的子目录里"}, 400)
+        name = new_name or os.path.basename(s_abs.rstrip("\\/"))
+        try:
+            target = _unique_copy_target(d_abs, name, s_abs, is_dir)
+        except agent.SandboxError as e:
+            return h._json({"ok": False, "error": str(e)}, 400)
+        with agent.WRITE_LOCK:
+            try:
+                if is_dir:
+                    shutil.copytree(s_abs, target)
+                else:
+                    shutil.copy2(s_abs, target)
+            except OSError as e:
+                return h._json({"ok": False, "error": "复制失败：%s" % e}, 500)
+        agent.invalidate_tree(sb)
+        return h._json({"ok": True, "path": agent._rel(sb, target),
+                        "renamed": os.path.basename(target) != name})
+
+
+@route("/api/sandbox/reveal")
+def _api_sandbox_reveal(h):
+        """在系统文件管理器中定位文件 / 目录（右键菜单用）。"""
+        body = h._body()
+        s, sb, err = h._sb_guard(body)
+        if err:
+            return err
+        rel = (body.get("path") or "").strip()
+        try:
+            target = agent.resolve_path(sb, rel) if rel else sb
+        except agent.SandboxError as e:
+            return h._json({"ok": False, "error": str(e)}, 400)
+        if not os.path.exists(target):
+            return h._json({"ok": False, "error": "路径不存在"}, 400)
+        try:
+            if os.name == "nt":
+                subprocess.Popen('explorer /select,"%s"' % target, cwd=sb,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.Popen(["xdg-open", os.path.dirname(target) if os.path.isfile(target) else target],
+                                 cwd=sb, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            return h._json({"ok": False, "error": "打开资源管理器失败：%s" % e}, 500)
+        return h._json({"ok": True})
+
+
 def _api_sandbox_open_vscode(h):
         body = h._body()
         s, sb, err = h._sb_guard(body)
@@ -438,7 +569,21 @@ def _api_agent_answer(h):
         if answers is None:
             answers = body.get("answer")
         ok = agent.submit_answers(body.get("qid"), answers)
-        h._json({"ok": ok})
+        if not ok:
+            # 超时 / 被取消 / qid 已失效：前端据此把卡片恢复成可操作并提示，
+            # 而不是让用户以为已经答上了。
+            return h._json({"ok": False, "error": "这条提问已超时或被取消"}, 409)
+        h._json({"ok": True})
+
+
+@route("/api/agent/ask/dismiss")
+def _api_agent_ask_dismiss(h):
+        """「让 AI 自己决定」：按给定说明唤醒等待线程，模型据此继续。"""
+        body = h._body()
+        ok = agent.dismiss_ask(body.get("qid"), body.get("note") or "")
+        if not ok:
+            return h._json({"ok": False, "error": "这条提问已超时或被取消"}, 409)
+        h._json({"ok": True})
 
 
 def _api_agent_undo(h):
@@ -454,6 +599,25 @@ def _api_agent_undo(h):
         token = body.get("token")
         ok = agent.undo(token) if token else False
         h._json({"ok": ok})
+
+
+@route("/api/agent/undo/preview")
+def _api_agent_undo_preview(h):
+        """回滚前预览：这次回滚会修改 / 删除 / 新建哪些文件（不落盘）。
+
+        tokens：要撤销的那批 token；scope=turn 表示「回滚本轮」。
+        路径按会话沙箱转成相对路径，前端直接显示。"""
+        body = h._body()
+        sid = str(body.get("session_id") or "")
+        if not sid:
+            return h._json({"ok": False, "error": "缺少 session_id"}, 400)
+        tokens = body.get("tokens")
+        if tokens is not None and not isinstance(tokens, list):
+            return h._json({"ok": False, "error": "tokens 需要是数组"}, 400)
+        _, sb = h._sb({"session_id": sid})
+        h._json(agent.preview_undo(sid, tokens=tokens,
+                                   scope=str(body.get("scope") or ""),
+                                   root=sb or ""))
 
 
 @route("/api/agent/steps")

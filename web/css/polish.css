@@ -337,11 +337,10 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
 .code-block.folded { position: relative; }
 
 /* --- Toast 三态：成功 ✓ / 失败 ! / 默认提示 --- */
-.toast { display: inline-flex; align-items: center; gap: 8px; }
-.toast.ok::before { content: '✓'; font-weight: 700; }
-.toast.err::before { content: '!'; }
-.toast.ok { background: var(--ok-strong); color: #fff; }
-.toast.err { background: var(--danger-strong); color: #fff; }
+.toast-item.ok::before { content: '✓'; font-weight: 700; }
+.toast-item.err::before { content: '!'; font-weight: 700; }
+.toast-item.ok { background: var(--ok-strong); color: #fff; }
+.toast-item.err { background: var(--danger-strong); color: #fff; }
 
 /* --- 加载骨架 --- */
 .skeleton { display: flex; flex-direction: column; gap: 10px; padding: 6px 0; }
@@ -361,6 +360,13 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
 }
 .msg-images { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-bottom: 6px; }
 .msg-images .msg-image { margin-bottom: 0; }
+/* 落盘文件已丢失：显示占位而不是静默删掉缩略图，避免看起来像「图片从未发过」 */
+.msg-image.missing {
+  align-items: center; justify-content: center;
+  padding: 8px 12px; font-size: 12px; color: var(--text-dim);
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-lg);
+  background: var(--bg-side); cursor: default;
+}
 
 /* --- 点击消息图片的全屏查看器：滚轮缩放 / 拖动平移 / 双击切换 --- */
 .img-zoom {
@@ -447,4 +453,81 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
 .agent-tools label {
   display: flex; align-items: center; gap: 4px;
   font-size: 11.5px; color: var(--text-dim); cursor: pointer;
+}
+
+/* ============================================================
+   阶段二 · 交互体验升级：流式滚动稳定 / 统一交互态 / 反馈 / 过渡
+   ============================================================ */
+
+/* --- 语义令牌（只新增，不改原有 --t-* / --ease，避免影响存量规则） --- */
+:root {
+  --ease-out: cubic-bezier(.22, .61, .36, 1);
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 240ms;
+  --ring: 2px solid color-mix(in srgb, var(--accent) 62%, transparent);
+}
+
+/* --- 消息区滚动：滚动条常驻占位，避免「出现 / 消失」把整列内容左右推 --- */
+#chat {
+  scrollbar-gutter: stable;
+  overscroll-behavior-y: contain;      /* 滚到顶/底不再把整页橡皮筋带动 */
+  scroll-padding-bottom: 24px;
+}
+
+/* --- 视图切换：面板淡入（只动 opacity，见 gal-ide.js 的说明） --- */
+@keyframes panelIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.panel-in { animation: panelIn var(--dur-2) var(--ease-out); }
+.chat-fade { animation: panelIn var(--dur-2) var(--ease-out); }
+
+/* --- 统一按钮手感：hover / active 都有短过渡，不再「瞬跳」 --- */
+button {
+  transition: background-color var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease),
+              color var(--t-fast) var(--ease),
+              opacity var(--t-fast) var(--ease),
+              transform var(--t-press) var(--ease);
+}
+button:disabled { cursor: not-allowed; }
+
+/* 可点 div 的按压反馈（折叠头 / 工具卡 / 模式卡等） */
+.think-head:active,
+.process-fold-head:active,
+.tool-head:active,
+.subagent-top:active,
+.set-card-head:active { background: var(--bg-active); }
+.mode-card { transition: background var(--t) var(--ease), border-color var(--t) var(--ease),
+                         transform var(--t-press) var(--ease), box-shadow var(--t) var(--ease); }
+.mode-card:active { transform: scale(.985); }
+
+/* --- 发送按钮：点击后进入「受理中」转圈，响应头回来即复原 --- */
+.send { position: relative; }
+.send.is-busy {
+  color: transparent;                  /* 藏掉箭头，露出转圈 */
+  pointer-events: none;
+  background: var(--accent-hover);
+}
+.send.is-busy::after {
+  content: '';
+  position: absolute; inset: 0; margin: auto;
+  width: 14px; height: 14px; box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, var(--on-accent) 38%, transparent);
+  border-top-color: var(--on-accent);
+  border-radius: 50%;
+  animation: sendSpin .62s linear infinite;
+}
+@keyframes sendSpin { to { transform: rotate(360deg); } }
+
+/* --- 触屏 / 无悬停设备：消息操作条常显（否则永远看不到按钮） --- */
+@media (hover: none) {
+  .msg-act-list { opacity: 1; transform: none; pointer-events: auto; }
+}
+
+/* --- 减弱动效：新增的入场动画一并不播 --- */
+@media (prefers-reduced-motion: reduce) {
+  .panel-in, .chat-fade { animation: none; }
+  .send.is-busy::after { animation-duration: 1.6s; }   /* 仍保留「在处理」的信号 */
 }

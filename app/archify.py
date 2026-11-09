@@ -35,6 +35,10 @@ DEFAULT_TIMEOUT = 180
 MAX_TIMEOUT = 600
 GATE_ORDER = ("validate", "deliver", "check", "browser-check")
 
+# Viewer 的按钮 / 图例 / 提示等界面文案由 meta.locale 决定（vendor/archify/locales）。
+# 上游默认 en；这里统一补 zh-CN，候选里显式写了 locale 的保持原样。
+DEFAULT_LOCALE = "zh-CN"
+
 
 def _read(path, cap=0):
     try:
@@ -127,6 +131,60 @@ def _json_receipt(text):
     return None
 
 
+def _apply_locale(path, locale=DEFAULT_LOCALE):
+    """给候选补上 `meta.locale`，让 Viewer 的按钮 / 图例 / 提示走中文目录。
+
+    模型只负责图的内容，不该每次都被要求记得写 locale；候选里已经有显式
+    locale 的保持原样（用户明确要英文时仍然生效）。返回是否改动过文件。
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except OSError:
+        return False
+    head = raw.lstrip()
+    if head.startswith("{") or head.startswith("["):
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            return False                  # 交给 validate 报具体语法错误
+        if not isinstance(obj, dict):
+            return False
+        meta = obj.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            obj["meta"] = meta
+        if str(meta.get("locale") or "").strip():
+            return False
+        meta["locale"] = locale
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(obj, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+        except OSError:
+            return False
+        return True
+
+    # explainer 的 Markdown 候选：@meta 是「键=值」指令，可以和其他参数写在同一行
+    m = re.search(r"^(@meta\b[^\n]*)$", raw, re.M)
+    if m:
+        if re.search(r"\blocale\s*=", m.group(1)):
+            return False
+        text = raw[:m.start(1)] + (m.group(1).rstrip() + " locale=" + locale) + raw[m.end(1):]
+    else:
+        # 有标题插在标题下一行，没有标题就放最前面；@meta 本身是独立指令行
+        lines = raw.split("\n")
+        at = 1 if lines and lines[0].startswith("# ") else 0
+        lines.insert(at, "@meta locale=" + locale)
+        text = "\n".join(lines)
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    except OSError:
+        return False
+    return True
+
+
 def schema_text(kind, with_example=True):
     """返回某图型的 schema + 一份官方示例，供模型照形状写候选。"""
     kind = str(kind or "").strip().lower()
@@ -140,6 +198,9 @@ def schema_text(kind, with_example=True):
         parts.append("### %s\n%s" % (name, body))
         budget -= len(body)
     head = ["【Archify schema】%s · v%s" % (kind, version() or "?")]
+    head.append("图内文字（标题 / 节点 / 分组 / 说明）默认用中文；只有用户明确要求其他语言时才改。"
+                "示例里的英文文案只用于理解结构，不要照抄。")
+    head.append("meta.locale 可以省略：工具会自动补 %s，Viewer 的按钮 / 图例随之汉化。" % DEFAULT_LOCALE)
     if kind in MARKDOWN_TYPES:
         head.append("候选是 Markdown（.archify.md），不是 JSON。")
     else:
@@ -246,6 +307,11 @@ def finalize(kind, candidate_path, output_path, sandbox, quality="showcase",
     if size > MAX_CANDIDATE:
         return ("❌ 候选文件太大（%.1f MB），上限 %d MB。"
                 % (size / 1048576.0, MAX_CANDIDATE // 1048576)), {}
+    # 汉化 Viewer：候选没写 meta.locale 时补 zh-CN；写失败也不阻断出图
+    try:
+        _apply_locale(candidate_path)
+    except Exception:                        # noqa: BLE001
+        pass
     q = "standard" if str(quality or "").strip().lower() == "standard" else "showcase"
     try:
         timeout = max(10, min(MAX_TIMEOUT, int(timeout or DEFAULT_TIMEOUT)))
@@ -287,6 +353,66 @@ def default_output(kind, sandbox):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(kind or "diagram"))[:30]
     return os.path.join(sandbox, ".archify", "%s-%s" % (safe, stamp), "%s.html" % safe)
+
+
+def workspace_root(sid):
+    """非 Agent 模式的落盘目录：data/archify/<sid>/。
+
+    没开 Agent / 没选沙箱时也能画图：候选、产物、CLI 的工作目录都放这里，
+    不进用户的沙箱，也不需要写入审批。
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(sid or "anon"))[:60] or "anon"
+    root = os.path.join(ROOT, "data", "archify", safe)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+# 产物在对话里用 iframe 内嵌：iframe 不能跨文档量高度，注入一段脚本
+# 把自身 scrollHeight postMessage 给父窗口，前端据此调高度。
+_HEIGHT_JS = b"""<script>
+(function () {
+  if (window.parent === window) return;
+  function send() {
+    try {
+      var d = document.documentElement, b = document.body;
+      var h = Math.max(d ? d.scrollHeight : 0, b ? b.scrollHeight : 0);
+      parent.postMessage({ __gmDiagram: 1, height: h }, '*');
+    } catch (e) {}
+  }
+  window.addEventListener('load', send);
+  setTimeout(send, 400);
+  setTimeout(send, 1500);
+  if (window.ResizeObserver && document.body) {
+    new ResizeObserver(send).observe(document.body);
+  }
+})();
+</script>"""
+
+
+def read_for_view(sid, rel):
+    """读一份产物 HTML（只允许 data/archify/<sid>/ 内），并注入高度上报脚本。"""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(sid or "anon"))[:60] or "anon"
+    root = os.path.abspath(os.path.join(ROOT, "data", "archify", safe))
+    p = os.path.abspath(os.path.join(root, str(rel or "").replace("/", os.sep)))
+    if not p.startswith(root + os.sep) or not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    if b"</body>" in raw:
+        raw = raw.replace(b"</body>", _HEIGHT_JS + b"</body>", 1)
+    else:
+        raw += _HEIGHT_JS
+    return raw
+
+
+def view_url(sid, rel):
+    """对话里内嵌用的地址（不带 X-Auth-Token，靠随机会话 id 当凭证，仅本机可访问）。"""
+    from urllib.parse import quote
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(sid or "anon"))[:60] or "anon"
+    return "/archify/%s/%s" % (safe, quote(str(rel or "").replace("\\", "/"), safe="/"))
 
 
 def prepare_inline(kind, text, sandbox):

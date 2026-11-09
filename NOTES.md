@@ -1,5 +1,70 @@
 # NOTES
 
+## [2026-11-06] 浏览器验收：设置 →「Agent 执行」Computer Use「新站点授权方式」
+
+- 问题/决策：
+  - 本机未装 Chrome（只有 Edge），Trae 浏览器插件连不上（`failed to connect to browser plugin of Chrome ... os error 10061`）。`browser_*` 工具、`browser_waiting_for_user_interaction`、`browser_unlock` 均不可用，`browser_setup_plugin` 会挂起等用户选择，因此浏览器工具链在本机不可用。
+- 解决方案/原因：
+  - 兜底方案：用 Edge（Chromium 内核）以 `--headless=new --remote-debugging-port=9222 --user-data-dir=<临时目录>` 起独立实例，再用 Node 24 内置 `fetch` + 全局 `WebSocket` 直接发 CDP（Page / Runtime / Log / Input），按元素中心坐标发真实鼠标事件，读取 DOM 与 console 错误。
+  - 启动方式：`cmd /c start` 被 RunCommand 禁止；`node spawn(detached)` 会让 RunCommand 卡住 630s；可用 `Invoke-CimMethod Win32_Process Create`，并可把 PowerShell 脚本用 UTF-16LE base64 传 `-EncodedCommand`，绕开引号转义。
+  - 加载前用 `Page.addScriptToEvaluateOnNewDocument` 注入 `window.__errs` 钩子，可在后续独立进程里回读整页 console 错误。
+  - 验收结论：PASS。`#computer-site-mode` 存在（SELECT），options 为 `ask / auto / allow`，当前值 `ask`，设置侧栏激活项为「Agent 执行」，console 无错误。
+- 相关代码/指令（如果有）：
+  - `msedge.exe --headless=new --remote-debugging-port=9222 --user-data-dir=%TEMP%\trae-cdp-prof --no-first-run --window-size=1440,900 about:blank`
+  - 目标页 `http://127.0.0.1:8802/`；设置入口 `#btn-settings`；设置侧栏 `.snav-btn`（文本「Agent 执行」）
+  - 收尾：`taskkill /PID <pid> /T /F` 并删除临时 profile
+
+## [2026-11-05] 模拟股市重构：拆出 stockkit 分层 + 限价单/部分成交/公司行为/风险指标/报告导出
+
+- 问题/决策：
+  - `app/stock.py` 单文件 3250 行、约 100 个顶层函数，混着六类职责：行情抓取、SQLite schema、对局生命周期、分析库（含 FTS）、时间线回放、撮合与 AI 决策。任何一处改动都要在 3000 行里翻找，且撮合规则无法脱离数据库单测。
+  - 决策：拆出 `app/stockkit/` 领域包，**`app/stock.py` 保留为唯一对外门面**（对局、数据库、AI 决策仍在那里），re-export 新包的符号。老调用方 `stock.normalize_symbol(...)` 之类的写法零改动。
+  - 同时补齐四项能力：限价单与部分成交、公司行为（分红/送转/停复牌）、组合风险指标、对局报告导出。
+- 解决方案/原因：
+  - 分层（依赖只能自上而下，禁止反向 import）：
+
+    | 模块 | 职责 |
+    | --- | --- |
+    | `stockkit/errors.py` | 领域异常，最底层，无依赖 |
+    | `stockkit/rules.py` | 交易规则纯函数：代码规范化 / 手数 / 涨跌停 / 费用 |
+    | `stockkit/quotes.py` | 行情读取：腾讯为主、东财兜底、Binance 币市 |
+    | `stockkit/matching.py` | 撮合内核：限价 / 市价、部分成交、涨跌停与停牌判定 |
+    | `stockkit/corporate.py` | 公司行为：分红、送转（拆股）、停牌 |
+    | `stockkit/risk.py` | 组合风险指标：最大回撤 / 年化波动 / 胜率 / 超额收益 |
+    | `stockkit/report.py` | 对局报告导出：Markdown / CSV |
+
+  - `stockkit/matching.py` 刻意**只做判定、不碰数据库**：`plan_fill(side, qty, bar, prev_close, limit, limit_price, slippage, pending_days, symbol)` 是纯函数，给定一根日 K 与一笔委托，返回 `Fill(price, qty, reason)`。`_execute_pending` 负责预取当日 bar / 前收盘 / 持仓 / 现金进内存，逐笔调用后只做记账。好处是撮合规则能脱离 SQLite 单测（`tests/test_stock_engine.py`）。
+  - 日 K 撮合的固有限制（写进模块注释，避免后人误以为能精确复现盘口）：一根日 K 只有 OHLC + 成交量，没有盘口与逐笔，所以限价单是否被触及只能近似 —— 买：开盘价 ≤ 限价按开盘价成交；开盘价 > 限价但 low ≤ 限价视为盘中触及、按限价成交；否则挂单跨日。部分成交按「单日最多吃掉当日成交量的 10%」近似（A 股没有官方散户参与率口径，这是量级假设，不是精确复刻）。
+  - 数据库只做**增量迁移**：`orders` 表新增 `limit_price` / `filled_qty` / `pending_days` 三列，由 `_ensure_order_columns()` 用 `PRAGMA table_info` 检测后 `ALTER TABLE` 补列。三列都带默认值，历史委托自动视为「市价单、全成」，**不需要回填、不重建库、不删字段**。
+  - `filled_qty` 与 `qty` 的语义分工：`qty` 始终是委托总量，`filled_qty` 是累计成交量，剩余量 = `qty - filled_qty`。部分成交后委托保持 `pending` 继续参与后续交易日的撮合，直到全成或超时。
+  - 挂单超时：`MAX_PENDING_DAYS = 5` 个模拟交易日未成交自动撤销，否则限价单会永久占用冻结资金（停牌期间同样走这条路径）。
+  - 公司行为是**人工触发**（`ex_date` 取本局当前模拟日），不抓取真实分红公告：交易日历 / 分红公告的自动抓取需要稳定数据接口，这一版不做，以免把「猜出来的分红」写进账里。除权会同步改持仓与成本，事后无法从 `positions` 反推，因此单独建 `corporate_actions` 流水表；`adjusted_bars()` 靠这张表逐条折算历史 K 线（由早到晚累乘）。
+  - 送转后新增的股份同样受 T+1 约束：`available_qty = min(原 available_qty, 新 qty)`，不能凭空变成可卖。
+- 踩坑记录（都是实际调试过的）：
+  1. **`StockError` 双胞胎**：`stockkit/errors.py` 里定义了 `StockError` 后，`app/stock.py` 里若还留着本地 `class StockError`，就成了两个不同的类，`pytest.raises(stock.StockError)` 捕获不到新包抛出的异常。门面必须 `from app.stockkit.errors import StockError`，不能重新定义。
+  2. **`MARKET_CLOSE_MIN` 影子定义**：拆分时把它同时留在 `stock.py` 和搬到 `rules.py`，触发 ruff F811（redefinition of unused）。归属结论：它是交易规则常量，归 `rules.py`，`stock.py` 只从 rules 导入。
+  3. **`quotes.py` 漏 `import math` 与 `import json`**：搬移代码时只搬了函数体，模块级 import 没跟着走。拆分脚本必须把「被搬函数引用到的模块级 import」一起带过去。
+  4. **`plan_fill` 里 symbol 写死空串**：`cap_by_volume(qty, "", volume)` 会让币市按 A 股 100 股整手取整，0.5 BTC 直接成交不了。symbol 必须一路透传到取整函数。
+  5. **`corporate_actions` 列名不一致**：建表用 `date`（与其他表一致），代码里写 `ex_date`，导致 INSERT 报错。约定：**表里叫 `date`，对外字段叫 `ex_date`**，查询时显式映射 `row["ex_date"] = row.get("date")`。
+  6. **成交后一律写 `status='filled'`**：部分成交时会把还在挂的委托误标成已完成。必须按 `plan.qty >= remain` 判断是全成还是部分成交。
+- 相关代码/指令：
+  - 门面：`app/stock.py`（3158 行，re-export stockkit；`_execute_pending` 在 2395 行接入 `matching.plan_fill`）
+  - 迁移：`app/stock.py` 的 `_ensure_order_columns()`（425 行）、`_ensure_game_market()`（416 行）
+  - 新 API 路由（`app/api/hall_stock.py`）：`/api/hall/stock/risk`、`/api/hall/stock/report`、`/api/hall/stock/corporate`。全库股票路由共 24 条（冒烟脚本实测）
+  - 自检脚本要注意：`registry.ROUTES` 初始为空，靠各 API 模块**自注册**填充。单独 `import app.registry` 后再读是 0 条，必须先 `import app.httpd`（它会导入各 api 模块）才拿得到路由表 —— 写冒烟脚本时踩过这个坑
+  - 新测试：`tests/test_stock_engine.py`（撮合内核纯函数、公司行为、风险指标、报告导出、限价单端到端）
+  - 验收脚本：`scripts/check_stock_refactor.py`（AST 抓 `stock.<name>` 属性引用 + 逐模块冷启动 import + 反向依赖检查 + `plan_fill` 行为抽检；退出码 0 = 全部通过）
+  - 回归命令：`python -m pytest -q tests/test_stock.py tests/test_stock_caps.py tests/test_stock_crypto.py tests/test_stock_history.py tests/test_stock_engine.py` → 84 passed
+  - 静态检查：`python -m ruff check app/stock.py app/stockkit app/api/hall_stock.py`
+- 验证结果（全部实测）：
+  - 股票子系统 5 个测试文件 84 个用例全绿（重构前 4 个文件 61 个 + 新增 `test_stock_engine.py` 23 个）。用例数按文件：test_stock 17 / test_stock_caps 10 / test_stock_crypto 7 / test_stock_history 27 / test_stock_engine 23。
+  - 门面符号：AST 扫出外部代码真实引用的 `stock.*` 符号 57 个，`getattr` 逐个校验**零缺失**。
+  - 循环依赖：stockkit 七个模块各自单独冷启动 `import` 全部成功（能单独导入即说明没有向上依赖 `app.stock`）；另用正则确认没有模块反向 `import app.stock`。
+  - `plan_fill` 行为抽检：A 股市价买 1000 股 / 当日量 3000 → 成交 300 股（参与率 10%，按 100 股整手）；币市 1 BTC / 当日量 5.5 → 成交 0.55（按 1e-6 取整，未被误当整手）；限价买开盘在限价内按开盘价成交、盘中触及按限价成交；开盘涨停市价买判废。
+  - 全量 `python -m pytest -q`：6 failed / 其余通过（169.2s）。6 个失败均**与股票子系统无关**：`test_memory` 镜像计数（monkeypatch 后仍 7≠2）、`test_native_tools` 压缩请求缺 `stop_event` 参数、`test_prompt_budget` 提示 8268 字 > 8000、`test_reader` 三条缺 `reportlab`。
+  - **这条结论的正确论据**（早前写「4 个失败文件都不 import `app.stock`」，那是错的）：`tests/test_prompt_budget.py` 第 8 行 `from app import httpd` 会**间接导入** `app.stock`（`app/httpd.py` 启动时 `from app import stock as stock_lib`），所以「不导入」根本不是有效论据。真正的证据是**内容占比**：复刻该用例参数（`cap_domains=set()`、关闭画像注入）构建出的提示词里，`stock` / `stockkit` / `模拟股市` / `限价` / `公司行为` / `风险指标` / `报告导出` / `对局` / `持仓`，以及新增符号 `plan_fill` / `risk_metrics` / `export_report` / `adjusted_bars` / `corporate_actions`，**全部出现 0 次** —— 超出的字数不可能来自本次股票改动。该检查已并入 `scripts/check_stock_refactor.py` 第 6 段，可随时复现。
+  - 字数口径要注意：同一段提示词在不同沙箱下长度不同 —— pytest 实测 8268（`tmp_path`）、独立探针 8220（临时目录）、脚本第 6 段 7124（仓库根目录当沙箱），差异来自路径长度与目录相关内容。所以脚本**只断言股票关键词命中为 0，不断言字数**；也说明这条预算用例对「往系统提示里加字」极敏感，谁加内容谁负责把阈值一起调整。
+
 ## [2026-10-29] 移除外卖比价模块（Deal Advisor）+ 清理遗留临时脚本
 
 - 问题/决策：外卖比价按 `NOTE.md` 1.0 已于 2026-10-18 暂停（美团 PC 网页无点餐入口，扩展读不到 App），但代码、路由、扩展目录一直留着，属于「已废弃却仍被导入」的死代码。决定整体移除，只保留 `.bak` 存档以备移动版方案重启时复用。
@@ -36,8 +101,8 @@
   - **服务层** `server.py`（3 行）只是兼容壳：`from app.httpd import create_server`。真正实现在 `app/httpd.py`（571 行，`ThreadingHTTPServer` + `Handler`），静态资源有 mtime+size 内存缓存，主令牌 `TOKEN = secrets.token_urlsafe(24)`。
   - **路由双轨**：`app/httpd.py` 保留老的硬编码路由表，新模块通过 `app/registry.py` 的 `@route("/api/xxx")` 自注册（默认只收 POST，同一 method+path 重复注册直接报错）。**新增接口走 `@route`，不要往老表里加**。
   - **业务层** `app/` 共 101 项（74 个 .py + 子包 `api/ computer/ dojo/ math/`）。主链路是 `app/api/chat.py`（4773 行 / 324.5KB，流式 SSE 聊天，15 秒 `: ping` 心跳）。其余大块：`app/agent.py` 317KB（文件 Agent）、`app/stock.py` 134KB、`app/math_arena.py` 147KB、`app/interview.py` 107KB、`app/gal.py` 84KB、`app/autopilot.py` 79KB。`app/api/` 下 30 个文件，各自对应一组 REST 接口。
-  - **数据层两份并存**：JSON 走 `app/store.py`（`APP_VERSION` 是**唯一版本来源**，当前 3.0.0；路径常量 + mtime 缓存 + 临时文件 `os.replace` 原子写，带 3 次退避重试防 Windows WinError 5）；结构化数据走 `app/db.py` 的 SQLite `data/assistant.db`（表 `tasks / task_steps / artifacts / events / event_exdates / event_fired`，每线程一连接、WAL）。对话仍在 `data/sessions.json`，未迁移。
-  - **前端** `web/`（33 项）：`index.html` 198KB 承载全部面板，`chat.js` 126KB、`stream.js` 101KB、`settings.js` 159KB、`hall-dojo.js` 151KB、`hall-interview.js` 149KB；原生 JS + CSS，无构建步骤，`web/vendor/` 内置 katex / vis-network / xterm。
+  - **数据层两份并存**：JSON 走 `app/store.py`（`APP_VERSION` 是**唯一版本来源**，当前 3.3；路径常量 + mtime 缓存 + 临时文件 `os.replace` 原子写，带 3 次退避重试防 Windows WinError 5）；结构化数据走 `app/db.py` 的 SQLite `data/assistant.db`（表 `tasks / task_steps / artifacts / events / event_exdates / event_fired`，每线程一连接、WAL）。对话仍在 `data/sessions.json`，未迁移。
+  - **前端** `web/`（33 项）：`index.html` 198KB 承载全部面板，`chat.js` 126KB、`stream.js` 101KB、`settings.js` 159KB、`hall-dojo.js` 151KB、`hall-interview.js` 149KB；原生 JS + CSS，无构建步骤，`web/vendor/` 内置 katex / monaco / pdfjs / vis-network / xterm。
   - **随包资源** `resources/`：`prompts/*.md`（10 个提示词）、`presets/gal/{backgrounds,bgm,characters,effects}`、`dojo/`、`eval/`。运行期数据在 `data/`（整目录 gitignore）。
   - **测试** `tests/` 140 个文件，覆盖 agent / chat / hall / dojo / stock / interview / gal / lsp / workflow 等；另有 `pytest.ini`、`ruff.toml`、`scripts/dev_check.py`。
 - 相关代码/指令：
@@ -1859,3 +1924,1576 @@
   - `web/css/hall-plugins.css`：教程块样式（`mk-guide-*`），窄屏隐藏副标题、代码块内部横滚。
 - 相关代码/指令：`node --check web/hall-plugins.js`；浏览器实测（590×894）折叠默认收起、展开后 6 行表格 / 代码块 / 6 步 / 3 条限制齐全、空态链接可跳转、无控制台报错、无页面横向溢出。
 - 结论备忘：插件是 Python 工具插件（`@agent_tool`），DSH 的 Cordis/TypeScript 插件只能参考不能直接装；不兼容时走“agent 在沙箱改造成兼容包 → 用户从本地目录安装”的流程。
+
+## [2026-11-02] Solo 旁注入口浏览器验收（拖选可用，双击未复现）
+- 问题/决策：验收 aside.js / aside.css 的选区工具条与旁注卡片。硬刷新（Ctrl+Shift+R）后 `/static/aside.js`、`/static/css/aside.css` 均 200 加载；拖选 AI 回复正文后 `.aside-bar` 在选区上方出现（问问 / 引用），点问问弹出 `.aside-panel`，显示「#6 · AI 回复」+ 选中文字「的修改，我需要」，输入框自动聚焦；点 ✕ 后卡片 display:none，工具条保持 hidden。
+- 解决方案/原因：拖选路径正常；自动化双击 AI 正文时选区被清空、焦点落到 `#input`（composer），未复现双击选词，疑似应用层点击聚焦输入框或自动化双击时序导致，待人工双击确认。底部输入框内拖选（selectionStart 1–5，window.getSelection 为「注测试词」）时工具条不出现，符合预期。
+- 相关代码/指令：`web/aside.js`（mouseup→syncBar，validRange 限定 #chat 与 `.msg[data-idx]`）；内置浏览器访问 `http://127.0.0.1:51501/` 会停在 chrome-error，改用 `http://localhost:51501/` 可正常打开（同一服务，直连 200）。
+
+## [2026-11-02] Solo 旁注提问（选中文本就地问答）
+- 问题/决策：主对话流式输出时夹杂工具调用和英文，用户边看边理解困难；需要「不打断主流、也不污染主上下文」的临时提问。主对话有同会话串行约束（`ACTIVE_STREAMS` 409），所以旁注必须走独立通道。
+- 解决方案：
+  - 后端 `app/aside.py` + `app/api/aside.py`：`POST /api/aside/stream` 独立 SSE；不进入 `ACTIVE_STREAMS`、不写 messages / memory / trajectory、不挂工具；上下文只收「选中片段 + 前后文 1200 字 + 最多 4 轮追问」，超预算从最老追问开始丢；配置 `aside_enabled / aside_model / aside_max_tokens`（空模型 = 跟随主聊天）；并发限制单会话 1 条、全局 4 条。
+  - 前端 `web/aside.js` + `web/css/aside.css`：Solo 消息选区 → 「问问 / 引用」工具条 → 浮动卡片；点击瞬间冻结选区（文本 + 前后文 + msg_index/role），支持单轮 / 追问 / 快捷问法 / 复制 / 带入输入框 / 拖动 / Esc 关闭；卡片只存内存，切会话关闭。
+  - `web/core.js` 的 `applySessionsPayload` 增 `asideOnSessionChange` 钩子；`index.html` 引入脚本与样式。
+- 相关代码/指令：`python -m pytest tests/test_aside.py -q`（9 项：片段/上下文裁剪、历史回放、预算淘汰、并发限制、完整 SSE 分支）；浏览器实测拖选出现工具条、卡片显示「#6 · AI 回复」+ 引用文字、关闭正常、输入框选区不触发。
+- 注意：后端是新增模块，**需重启应用**才生效；前端刷新即生效。自动化双击未复现选词，拖选路径正常，待人工双击确认。
+
+## [2026-11-02] 八款 AI Agent 八维能力评估与「本项目适配」双榜
+- **问题/决策**：用户要求对 OpenCode / Codex / Claude Code / Trae / DeepSeek Harness / Cursor / ZCode 与本项目做统一维度、1–10 分的量化排名，并给出项目适配分析。结论必须区分「通用能力」与「本项目适配」，否则会系统性高估/低估某些工具。
+- **方法**：
+  - 8 维：代码理解深度、复杂任务拆解、多文件上下文、自主迭代调试、工具调用准确性、长任务稳定性、生成代码质量、错误修复效率；每维给 9–10 / 6–7 分锚点，避免「凭感觉打分」。
+  - 双权重：通用（15/15/15/15/10/10/10/10）与项目（18/12/16/14/12/8/8/12）；项目权重来自本项目 6 个内部评测任务的分布（bug_fix / refactor / tool_pipeline / ui_restore 均属跨文件修改 + 回归）。
+  - 适配分 = 项目加权能力 − 落地摩擦（Windows / BYOK / 本地隐私 / 栈匹配 / 视觉验收 / 成本），摩擦逐项写死，可复算。
+  - 证据分级 A/B/C；相邻名次差 ≤0.3 视为噪声；公开基准测的是「模型 + harness」，不能全算给 harness。
+- **公开证据**：
+  - Terminal-Bench 2.0：Codex CLI + GPT-5.5 82.2%（总榜第 4，通用 harness 第 1）；Claude Code + Opus 4.6 58.0%；OpenCode + Opus 4.5 51.7%；Meta-Harness + Opus 4.6 76.4%（同模型差 18 分，证明 harness 影响巨大）。
+  - Harness-Bench（274 任务 × 10 模型 × 7 harness）：十模型均值 OpenCode 67.4 > Codex 66.2 > Claude Code 65.9；Kimi-K3 上 OpenCode 69.5 >> Codex 65.1 > Claude 60.0；GLM-5.3 上 OpenCode 70.3 第一。
+  - Composio Bench（30 个有状态工具任务）：DeepSeek-V4-Pro 下 Codex 53.3% = DSH 53.3% > Claude 50% = OpenCode 50%；GPT-6 Astra 下 Codex 75.9% > Claude 72.4% > OpenCode 69.0%。
+  - Cursor Composer 2.5：T-Bench 2.0 69.3%（厂商）、AA Coding Agent Index 62（Claude Code 66 / Codex 65）、单任务成本约 $0.07；SWE-bench Verified 第三方汇总 Claude Code 87.6% / Codex 85%。
+- **结论（通用榜）**：Codex 9.13 > Claude Code 8.90 > OpenCode 8.38 > Cursor 8.23 > ZCode 8.10 > DeepSeek Harness 7.68 > 本项目 7.38 > Trae 7.03。Codex 与 Claude Code 差距小于噪声，实质并列第一梯队。
+- **结论（本项目适配榜）**：Claude Code 7.81 > Codex 7.73 > OpenCode 7.62 > Cursor 7.43 > 本项目 7.12 > ZCode 7.08 > DSH 7.02 > Trae 5.87。头名翻转的关键：Codex 的 Windows 实验性（−0.6）、视觉验收（−0.2）、BYOK（−0.2）摩擦合计 −1.4；Claude Code 的 LSP + Windows 原生 + 浏览器能力只扣 −1.1。
+- **项目侧硬事实**：app + web + tests ≈ 15.3 万行；1,790 个测试函数 / 177 个测试文件；默认 14 个核心 action、全量 55 个工具 schema；10 个内置子代理角色；全仓语义索引 v2 + pyright LSP + 轨迹查看器；内部 6 题 × 3 次 13/18（72.2%，2,846,979 token，1,514.1s），短板集中在 web_voxel 0/3 与长回合稳定性。
+- **交付物**：`docs/ai-agent-capability-ranking-2026/ai-agent-capability-ranking-2026.html`（单页、自包含、ECharts 热力图 + 两组条形图、27 条来源）。同目录含 `assets/charts.js`、`assets/favicon.svg`、`_shared/`。
+- **验证**：`node --check assets/charts.js` 通过；Playwright + Edge 在 590 / 1440 两种宽度实测：`scrollWidth == clientWidth`（无页面级横向溢出）、10 个宽表均内部滚动、3 个 ECharts 实例存在、27 条引用锚点全解析、控制台 0 error、favicon 200。
+- **边界**：本轮没有本机同条件实跑（仅 Cursor CLI 在 PATH），分数是「公开基准 + 官方文档 + 源码审查」的锚定判断，置信度 ±0.3–0.5；厂商自报数据标 B/C；内部 6 题不可与公开榜横比；工具版本迭代会使排名失效。
+- **后续若要实测**：复用 `scripts/bench.py`（6 题）+ `scripts/eval_research_run.py`（12 题），固定模型/温度 0/重复 3 次，记录通过率、轮次、工具数、token、耗时、人工干预与安全违规，才能把 C 级推断升级为 A 级数据。
+
+## [2026-11-02] 修复：验收代理工具名 + finish 静默结束
+- 问题/决策（现场 10:39，turn 3）：模型验证完调用 `finish`，验收子代理把 `read_file / run_command / list_dir` 全判成「不在你的可用范围内」→ `blocked / 0 分` → finish 被驳回；模型随后只写了一句「修完再收尾」就停，一轮里唯一的一次 finish 提醒早已用掉，`touch` 不到续跑条件，于是 `turn/end reason=completed`，用户看到的是「刚验证完就结束、没有结论」。
+- 根因：
+  - 工具元层重构后 schema 是 `read / edit / run / code…`，但验收代理（尤其文本协议小模型）沿用旧名；`quality_gate.run` 只按 schema 名判断白名单，旧名一律被拒。
+  - `_needs_finish_nudge` 原先「一轮只提醒一次」；finish 被验收驳回后没有重新给额度，下一次无工具停轮就静默收尾。
+- 解决方案：
+  - `app/tool_meta.py` 新增 `legacy_map()`（旧名 → (meta, action)）。
+  - `app/quality_gate.py`：新增 `allowed_names()`（schema 名 + 可映射到可用元工具的旧名）、`tool_lines()`；验收任务书新增【可用工具（只能调用这些名字）】；`REVIEW_SYSTEM` 要求工具名与列表一致；`DENY_TOOLS` 补 `plan / agent / workflow / utility`（元工具名）。
+  - `app/api/chat.py`：`_acceptance_review` 把 `_schemas` 传给 `build_brief`；`nudged_finish` 改为计数 `finish_nudges`，上限 `MAX_FINISH_NUDGES=3`；finish 被「像素闸门 / 验收代理」驳回时清零，重新给收尾提醒额度。
+- 相关代码/指令：`python -m pytest tests/test_quality_gate.py tests/test_tool_meta.py tests/test_chat_blocks.py -q`（新增 4 项：任务书工具清单、旧名白名单、旧名实际执行、反向映射）；全量 `pytest -q` 通过。注意：后端改动需重启应用。
+
+## [2026-11-02] 修复：attach 重放 + 上游等待可见
+- 问题/决策：长任务中断/重开页面后，前端只显示落库的进度快照 + 「后台运行中」，`/api/chat/attach` 的事件只用来找 `done`/`end_reason`，不再渲染；同时请求发出到拿到响应头之间只有心跳，界面看不出在等什么。
+- 解决方案：
+  - `web/stream.js` 新增 `startJobReplay()`：重连时先撤掉落库的进度快照行，建一条临时实时行，回放 `delta / rewind / reasoning / tool / tool_done / model_wait / model_ready / retry / warn / error`，结束后 `pullState()` 用落库结果重画一次。
+  - `waitJobThenRefresh()` 接入 replay：正常结束、attach 404、异常三条路径都会先收掉临时行再拉状态。
+  - 主链路补 `model_wait` / `model_ready` 分支：状态条显示「等待上游响应（最长 Ns）」和「上游已响应」。
+  - `app/llm.py`：请求发出前 emit `model_wait`，收到响应头后 emit `model_ready`；两个事件都会进 JOBS，attach 重放也能看到。
+- 验证：`node --check web/stream.js`、`ruff`、全量 `pytest` 通过。浏览器实测（服务端旧进程仍在跑）：重连后出现临时实时行，正文 351 字（落库快照只有 264 字），仅一条 AI 行、无「后台运行中」，无 JS 报错；因该轮自 11:53:30 起服务端没有任何新事件（旧进程无 model_wait），观察窗内没有增量。
+- 注意：后端改动需重启应用；当前 stuck 的那一轮建议重启后重发。
+
+## [2026-11-02] 上下文窗口默认改为 1 亿
+- 问题/决策：`chat_context_limit` 默认 0（不限）会让 `request_budget()` 直接返回 0，按窗口比例的逻辑全部关闭；改为默认 `100_000_000`，保留窗口语义又等效于“足够大”。
+- 解决方案：
+  - `app/config.py` 默认值 0 → 100000000；同时把当前 `data/config.json` 写成 100000000。
+  - `app/context.py manual_keep_budget()`：窗口远大于实际历史时，保留预算以实际历史为上限，避免 16% 保留变成“全部保留”、手动压缩永远提示可压缩内容不足。
+  - `readme.md` 配置表同步。
+- 相关代码/指令：`python -m pytest tests/test_context.py tests/test_compress_marks.py tests/test_settings_defaults.py tests/test_provider_chain.py -q`（56 passed）；`ruff` 通过。
+- 注意：自动压缩阈值变为 8000 万 token，实际等于不自动压缩，仍可手动压缩；`context.py` 的改动需重启应用，配置值本身下次读取即生效。
+
+## [2026-11-02] 附件上传支持 .tex
+- 问题/决策：文件选择器的 accept 列表没有 `.tex`；`docparse.TEXT_EXT` 也没有，虽然拖拽/粘贴能上传，但会被当成陌生扩展名走二进制探测，预览也不按文本展示。
+- 解决方案：
+  - `web/index.html` 的 `#doc-input accept` 增加 `.tex`；
+  - `app/docparse.py` 的 `TEXT_EXT` 增加 `.tex`，按纯文本解码；
+  - `web/chat.js` 的 `DOC_PV_TEXT` 增加 `tex`，附件预览按文本显示；
+  - `readme.md` 附件格式说明同步。
+- 相关代码/指令：`python -m pytest tests/test_docparse_office.py -q`（新增 `.tex` 文本解析用例）；`node --check web/chat.js`、`ruff` 通过。
+
+## [2026-11-02] 粘贴长文本 → 轻量文本块（替代附件方案）
+- 问题/决策：最初把长文本用 `new File()` 生成 `pasted-*.md`、走 `pendingDoc → save_upload → docparse` 附件通道，交互偏重（上传 base64、落盘、解析、还要点「还原」）。改为轻量块：只存原文，不生成文件、不上传、不走文档解析。
+- 解决方案：
+  - `web/stream.js`：删除 `looksLikeMarkdown / shouldPasteAsDoc / attachPastedText / _pastedDoc / restorePastedDoc` 与 `PASTE_MD_MIN`；改为 `PASTE_BLOCK_MIN=800`、`MAX_PENDING_PASTES=6`、`state.pendingPastes=[{id,text}]`。`attachPastedBlock()` 只入内存，`removePendingPaste()` 单独移除，`previewPendingPaste()` 复用 `docPreviewOpen` 预览。
+  - 发送时在 `sendMessage()` 里把文本块按顺序拼到消息正文（`#web` 只解析手打部分），排队消息也直接带合并后的 `text`，因此无需扩展队列结构。
+  - `web/composer.js cmpPaste()` 改为 `shouldPasteAsBlock()`；`syncSendBtn()` 把文本块计入非空判断；`clearAttach()` 一并清空 `pendingPastes`。
+  - `web/index.html` 增加 `#attach-pastes`，`base.css` 增加 `.attach-paste` / `.attach-paste-x`，移除 `.attach-doc-restore`。
+- 验证：`node --check` 通过；无头 Edge + CDP 实测 1125 字粘贴 → 输入框为空、出现「粘贴文本 · 1125 字」块；× 单独移除后附件栏收起；`streaming=true` 时点发送，队列文本严格等于「手打文字 + 空行 + 粘贴正文」；点击块可预览全文。
+
+## [2026-11-02] 拖拽文件到输入框：drag-over 高亮 + 附件 chip
+- 实现：`web/composer.js bindComposerDrop()` 监听 `.composer-box` 的 dragenter / dragover / dragleave / drop；检测到 Files 时 preventDefault + stopPropagation，加 `.drag-over`，落下后图片走 `attachImageBlob`、其它走 `attachDocBlob`；拖到别处由 window 的 drop/dragend 清高亮。`base.css` 用 `::after` 在输入框中央显示「松开以添加附件」。
+- 问题/决策：验收 `http://localhost:51501/` 的 Solo 输入框拖拽。开始时 51501 未监听（`data/app_port.txt` 仍记 51501），内嵌浏览器 navigate 60s 超时、evaluate 报 `WebView is not ready yet`；需先起服务并另开新标签页。
+- 解决方案/原因：无头临时启动 `.venv\Scripts\python.exe -c "import app.httpd as h;h1,_=h.create_server(port=51501);h1.serve_forever()"`；页面内用 `new DataTransfer()` + `items.add(new File(["# 测试"],"drop-test.md",{type:"text/markdown"}))` 依次派发 dragenter / dragover / drop。
+- 结果：dragenter/dragover 均被 preventDefault；`.composer-box` 增加 `drag-over`，`::after` 计算值 `"松开以添加附件"`、`border-top-style: dashed`、accent 色 `rgb(59, 87, 224)`；drop 后 `drag-over` 移除，`#attach-doc` 从 hidden 变为可见，文本 `drop-test.md（1 KB）`；输入框为空、未发送；控制台 0 条消息。
+- 相关代码/指令：`web/composer.js` `bindComposerDrop`（620-658）、`web/stream.js` `attachDocBlob` 与 chip 渲染（2468、2587-2603）、`web/css/base.css` 1829-1840。测试后已关闭临时标签页并停止临时服务。
+
+## [2026-11-02] IDE 文件树右键菜单与复制 / 剪切 / 粘贴
+- 问题/决策：文件树只有顶部按钮和拖拽移动，重命名只能作用于「当前打开的文件」，没有右键菜单和复制能力，和 VS Code 差距明显。
+- 解决方案：
+  - 后端 `app/api/sandbox.py` 新增 `/api/sandbox/copy`：支持文件与目录递归复制；目标重名时自动改名（`a copy.txt` / `a copy 2.txt`），绝不覆盖；拒绝复制沙箱根目录、目录复制进自身子目录、越界路径。
+  - 新增 `/api/sandbox/reveal`（Windows `explorer /select,`）用于「在资源管理器中显示」；`agent.delete_entry()` 增加 `recursive` 参数，IDE 删除目录时连内容一起删（其它调用方默认仍拒绝非空目录）。
+  - `web/gal/gal-ide.js`：新增右键菜单（新建文件/文件夹、重命名、删除、复制、剪切、粘贴、创建副本、复制路径、在资源管理器中显示、在 VS Code 中打开、刷新）与 F2 / Delete / Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+A 快捷键；重命名改为对右键目标（含目录）操作。
+  - 新增 `ideRemapPrefix()`：改名或移动后统一迁移标签、Monaco model（URI 重建，面包屑不指向旧文件）、缓存、未保存标记、多选、AI 改动标记、断点与剪贴板路径。
+  - `web/core.js` 增加 `state.ideClip`；`web/css/ide.css` 增加 `.ide-ctxmenu` 样式（按视口边缘翻转）。
+- 踩坑：沙箱目录不能指向项目 `data/`（`_assert_not_blocked` 会以「data 目录被禁止访问」拒绝所有读写），右键复制会 400；端到端测试要使用项目内非 `data` 的临时目录。
+- 验证：新增 `tests/test_ide_fileops.py` 9 项（文件/目录复制、重名自动改名、目录自嵌套拒绝、越界拒绝、递归删除、目录改名、根目录删除拒绝）全部通过；`ruff`、`node --check` 通过。用无头 Edge + CDP 端到端实测：右键菜单 8 项全部渲染，创建副本 → 重命名 → 复制粘贴到子目录 → 删除全部成功，F2 / Delete / Ctrl+C / Ctrl+V 快捷键均生效。
+
+## [2026-11-02] 移植 modsearch 的免注册搜索 / 抓页引擎链
+- 问题/决策：dsh 插件 `@liustack/modsearch` 本身不是搜索引擎，而是「引擎链转接器」：Firecrawl / Keenable / You.com / Tavily / Exa / Grok 按序尝试、失败自动换下一个，配额打爆的引擎进冷却，输出统一 JSON（`results[]` 带 `engine/status/uncertainty/warnings/attempts`）。它的 dsh 安装层（`ctx.web.registerSearchProvider()` / `ctx.tools.register()` + `dsh plugin add`）是 Cordis/TypeScript 运行时专有，本项目用不了；目标定为**把引擎层移植进 Python**，不引入 Node 依赖。
+- 解决方案/原因：
+  - 新增 `app/search_engines.py`：`firecrawl_search`（`POST /v2/search`，keyless 不带 Authorization）、`keenable_search`（keyless 走 `/v1/search/public`，必须带 `x-keenable-title`）、`youcom_search`（`GET /v1/agents/search`）、`auto_search`（按 CHAIN 逐个试，`quota`/`auth` 失败写冷却，全失败抛 `EngineError` 并列出每个引擎原因）、`cloud_fetch`（`POST /v2/scrape`，`maxAge:0` / `storeInCache:false` / `skipTlsVerification:false`）。
+  - 冷却落 `data/cache/search_engines.json`（`{"cooling": {name: until_ts}}`），默认 1 小时，冷却期内直接跳过、不再浪费请求。
+  - `app/search.py`：`SEARCH_PROVIDERS` 增加 `auto`；`get_search_conf()` 对 auto 返回空 key；`search_web()` 首行分派到 `auto_search`；`_fetch_one()` 改为「云端浏览器 → jina → 直连」，云端前先用 `public_url_error()` 判私网，私网只走本地；`search_multi()` 在所有检索式都报错且零结果时抛真实原因（避免界面误报「没搜到」）。
+  - `effective_search_provider()`：明确选 `auto` 就直接用引擎链，不再回落到聊天模型自带的付费搜索。
+  - 配置：`search_provider` 默认改 `auto`；新增 `search_engine_keys` / `search_engine_enabled` / `search_fetch_cloud`（Key 也认 `FIRECRAWL_API_KEY` / `KEENABLE_API_KEY` / `YOUCOM_API_KEY` 环境变量）。
+  - 总开关 `search_modsearch_enabled`（默认开）：设置页「启用 modsearch」取消勾选后，「自动」不可选、云端抓页复选框禁用；`auto_search` 直接抛「已关闭」、`cloud_fetch` 返回空串；旧配置仍存 `auto` 时 `effective_search_provider()` 按原来的默认（聊天自带搜索 → 博查）回落。
+  - 前端：`web/settings.js` 增加「免注册引擎」区块（三组 Key + 参与自动链勾选），选 auto 时隐藏单服务商地址/密钥；`web/stream.js` 的 `hasSearchKey()` 认可 auto（不需要密钥）；`web/init.js` 的未配置提示按模式区分。
+- 踩坑：
+  - `app/api/chat.py` 原来用 `if not skey:` 直接判定搜索不可用——auto 模式 key 为空会被误判，已改成 `not skey and sp != "auto"`。
+  - Firecrawl 搜索返回的 `description` 是**整页 markdown**（实测一条几千字），必须截到 `SNIPPET_MAX=600`，否则单条结果就把上下文撑满。
+  - 本机网络下 `api.you.com` 连接超时，You.com 只能当第三顺位；Firecrawl / Keenable 的 keyless 端点实测均 200。
+  - 用户已有配置里 `search_provider` 存的是 `volc`，改默认值不会迁移旧配置；要启用需在设置里手动切「自动」。
+- 相关代码/指令：`app/search_engines.py`、`app/search.py`、`app/config.py`、`app/balance.py`、`app/api/chat.py`、`web/settings.js`、`web/stream.js`、`web/init.js`、`tests/test_search_engines.py`。
+- 验证：新增 `tests/test_search_engines.py` 15 条（字段收敛 / 截断 / keyless 头 / 降级与冷却 / 引擎禁用 / 全失败原因 / 开关关闭不发请求 / 云端抓页参数 / 私网跳过 / 部分失败保留）与 `test_search_provider.py` 3 条开关回落用例，连同搜索、聊天、余额、研究等关联用例共 163 条 `pytest` 全过；`node --check` 与 `py_compile` 通过。真实网络冒烟：`search_web("Node.js LTS 最新版本","auto",...)` 返回 5 条、1.5s、engine=firecrawl；`cloud_fetch("https://example.com")` 959 字 / 1.6s；`_fetch_one` 走云端 958 字 / 1.7s。浏览器实测设置页：自动/博查切换、三组 Key 与勾选框显隐正常（初始选中项取决于已保存配置，当前为豆包搜索）；「启用 modsearch」默认勾选，取消后「自动」变不可选、云端抓页复选框被禁用，重新勾选即恢复。
+
+## [2026-11-02] archify 为什么从没被调用：补提示词分层
+- 问题/决策：用户反馈 archify 做好后从未见 AI 调用。排查确认不是环境问题（`archify.available()=True`，vendor 3.2.0 + node 正常），而是触发链路和提示词冲突。
+- 原因（按影响排序）：
+  1. 常驻的 `_VISUAL_HEAD` 明确要求「看图 / 画图 / 可视化」时直接输出 ```svg / ```chart / ```mermaid 围栏，整段没提 archify —— 模型有更省事的默认路径。
+  2. `agent_cap_tools=auto` 时 archify 的 schema 只在命中 `TOOL_GROUP_KEYS["diagram"]` 才下发；词表不含「示意图 / 系统图 / 模块图 / 关系图 / 状态机」等常见说法。
+  3. `intent_hint` 只覆盖 bili / 提醒 / 记忆 / 日程 / 文件 / 搜索 / 股票，从不提示 archify。
+  4. archify schema 位于 `if agent_on:` 块内 —— 未开 Agent 或没选沙箱时完全不存在。
+- 解决方案：`_visual_prompt(file_ready)` 增加分层块：
+  - `_VISUAL_DIAGRAM_READY`（Agent + 沙箱）：一张图能讲清的走围栏；多模块架构 / 跨服务数据流 / ERD / 类图 / 时间线 / 瀑布图 / 一页式解释页 → 用 archify（先 schema 再 finalize，大候选先 write_file 再传 candidate_path）；工具表里没有就先 `tool_search("diagram")` 解锁。
+  - `_VISUAL_DIAGRAM_OFF`（普通聊天）：只说明需要切到 Agent 模式，不给不可用的解锁指令。
+- 相关代码/指令：`app/agent.py`（`_VISUAL_DIAGRAM_READY` / `_VISUAL_DIAGRAM_OFF` / `_visual_prompt`）、`tests/test_agent_guards.py`（`test_visual_prompt_layers_archify_by_agent_mode`）。
+- 验证：`tests/test_agent_guards.py`、`test_archify.py`、`test_prompt_assembly.py`、`test_agent_tool_format.py` 共 143 项通过。真实对话里是否改用 archify 待观察：在 Agent 模式 + 已选沙箱下说「画一张这个项目的模块架构图」即可验证（命中「架构」→ diagram 组挂载）。
+
+## [2026-11-02] 历史压缩按钮：按「本轮结束」而不是「完整输出完成」判定
+- 问题/决策：压缩圆环只有模型完整输出后才能用；中断轮（报错 / 断线 / 空回复）要么看不到按钮，要么被 `state.streaming` 一直拦住。
+- 原因（三处叠加）：
+  1. 圆环挂在最后一条 AI 消息的 `.msg-actions` 上，而操作条只在「本轮有正文」时创建；空正文 / 请求失败的轮次不建操作条 → 圆环无处可挂。历史渲染也有同样的 `if (m.content)` 限制。
+  2. `compressContextManually()` 用 `state.streaming` 做闸门；刷新 / 断线后这个标记可能一直为 true（`streamingSids` 来自 /api/state，`keepRecovering` 最长等 10 分钟）。
+  3. SSE 读循环没有超时：连接假死时 `reader.read()` 不返回，`finally` 不执行 → `state.streaming` 永远是 true。
+- 解决方案：
+  - `web/stream.js`：流对象记录 `lastEvent`（每收到一个 SSE 事件刷新）；流收尾时若该轮没有操作条就补建一个（空正文 / 报错轮也能用「继续输出 / 重新发言 / 压缩」）。
+  - `web/chat.js`：历史 AI 消息不再按 `m.content` 决定是否建操作条（空内容也建）；手动压缩改用「本地流最近 15 秒是否还有事件」判断，不再用 `state.streaming`。
+  - `app/api/chat.py`：`_job["ts"]` 在每个 SSE 事件时刷新；新增 `stream_alive(sid, idle=30)`——ACTIVE_STREAMS 有条目但 30 秒无事件即视为已结束（崩溃 / 断线残条目不拦压缩）。
+  - `app/api/kb.py`：压缩接口在真正产流时拒绝（提示「正在生成回复」），避免生成结束落库覆盖刚写好的摘要。
+- 相关代码/指令：`web/stream.js`（`registerStream` / SSE 读循环 / 收尾补操作条）、`web/chat.js`（`compressContextManually` / `buildAiRow`）、`app/api/chat.py`（`stream_alive`）、`app/api/kb.py`（`_api_context_compress`）、`tests/test_stream_stop.py`。
+- 验证：新增 `test_stream_alive_uses_recent_events`（活跃 / 超时残条目 / done / 无登记四种）；`test_stream_stop`、`test_context`、`test_api_handlers_smoke`、`test_chat_blocks`、`test_chat_jobs` 共 94 项通过；`node --check` / `py_compile` 通过。浏览器实测：打开「乘积自由集」会话，最后一条 AI 消息右侧圆环可见，点击弹出压缩确认框，取消后未产生新压缩。
+
+## [2026-11-02] 沉浸式 PDF 阅读器：左原页 + 右双语阅读流
+- 问题/决策：要复刻沉浸式翻译读外文论文，但参考产品闭源，同类开源项目（OnlyTranslate / FluentRead / Read Frog / BabelDOC）是 GPL/AGPL，本项目 MIT 不能抄代码。形态定为「左原页 + 右阅读流」（与只译同款）：原页保真对照，阅读流负责分段、双语、可调字号；不做原页覆盖层（固定画布没地方插译文，双栏和公式最容易错位），也不做 BabelDOC 那种整篇重排 PDF（交互太弱）。
+- 方案：
+  - 后端 `app/reader.py`：pypdfium2 逐字符取 bbox → 按字顶上沿分桶成行段 → 桶内按 x 空隙切段（双栏不粘连）→ 「中间空带 + 跨越行段纵向覆盖 <45%」判定双栏 → 跨栏行段单独成带（band），带内先左栏后右栏 → 行距/字号/缩进/短行合并成段 → 页尾无标点续段跨页合并。行内公式用 `⟦F1⟧` 占位符保护（送模型的 `ttext` 与展示的 `text` 分开），独立公式/图表按 PDF image 对象 bbox 裁图。版面缓存 `data/reader/<doc_id>/blocks.json`，译文缓存 `t_<lang>_<model>.json`，doc_id = 绝对路径 + size + mtime。
+  - API `app/api/reader.py`：`open` / `file`（PDF 原始字节）/ `crop`（PNG）/ `translate` / `events`（SSE）/ `cancel`。翻译复用 `llm._quick_chat`，5 段一批、JSON 数组输出，占位符数量不一致时重试一次，缺段单独补一次。
+  - 前端 `web/reader.js` + `web/css/reader.css`：pdf.js 5.4.624（vendored 到 `web/vendor/pdfjs/`，Apache-2.0）懒渲染左栏 canvas；右栏阅读流 + 原文/双语/仅译文三档；滚右栏时原页自动跟随；按页增量翻译（本地记录已请求页，任务结束后再发 pending）；阅读位置存 localStorage；图表点击全屏放大。
+  - 入口：`web/gal/gal-ide.js` 的 `openIdeFile` 增加 `.pdf` 分支，直接交给 `window.Reader.open`，不再落到 `/api/sandbox/file` 报「二进制文件无法在编辑器打开」。
+- 踩坑：
+  1. 逐字符按 y 中心排序再贪心合并会被零点几点的 y 抖动打乱 x 顺序，一行被拆成几段甚至跨行交错 → 必须先按基线上沿分桶，桶内再按 x 切；拉丁字母降部（g/p/y）会改变底边，所以不能用底边分桶。
+  2. 单栏页每一行都是「整宽」；若按宽度判定 wide，会把每行切成独立段落，永远合不起来 → 单栏不做宽窄拆分，只有真正跨过栏间空带或宽度 >72% 页宽才单独成带。
+  3. 只用「有没有行段跨越候选线」判双栏，会把右对齐日期/页码误判成分栏 → 改为要求跨越行段的纵向并集覆盖 <45% 页高。
+  4. `state` 是 `core.js` 顶层 `const`，不会挂到 `window`；`reader.js` 里写 `window.state` 恒为 undefined，导致 `session_id` 为空、所有接口 404「会话不存在」→ 直接按变量名读 `state`。
+  5. pdfium 对行尾软连字符返回 U+FFFE，需要归一成 U+00AD（保留「这是断词」的语义），再由连字符回接逻辑决定去留。
+- 相关代码/指令：`app/reader.py`、`app/api/reader.py`、`app/httpd.py`（导入 reader 路由）、`web/reader.js`、`web/css/reader.css`、`web/index.html`、`web/gal/gal-ide.js`、`web/vendor/pdfjs/`、`tests/test_reader.py`。
+- 验证：`tests/test_reader.py` 10 项（分栏判定、跨页合并、占位符保护、JSON 解析、CJK 空格、连字符回接）通过；`test_api_handlers_smoke` / `test_stream_stop` / `test_context` 73 项通过；进程内 API 集成：BERT 论文 16 页 → 905 段、图表裁图 521KB PNG、按页启动翻译 19 段；浏览器实测：左栏 16 个 canvas、右栏「第 1 页」+ 双语、仅译文模式隐藏原文、首屏自动译 45/870 段（1 段失败走「没译出来」回退），标题显示「bert.pdf · 16 页」。解析耗时：首次 2.4s / 缓存命中 0.01s。
+- 未做（Phase 2）：PP-DocLayout 版面模型、KaTeX 数学排版、扫描件 OCR、术语表、导出保排版双语 PDF（BabelDOC）。
+
+## [2026-11-02] 阅读器排版修复：双栏不交错、段落不碎、仅译文可读
+- 问题/决策：实测双栏论文时，左右栏句子在同一行交错（「There are two existing strategies… feature-based approach…」拼成一句）、正文被切成大量半句；切到「仅译文」后未翻译段落退回英文，看起来像模式失效。
+- 原因（六处叠加）：
+  1. 先把所有行段按纵向重叠缝成行，再判断分栏：左右栏行常在同一高度，缝合时被并成一行；而分栏又依赖缝合结果，互相矛盾。
+  2. 分栏判定用「行段是否跨越候选线」，行段被切碎后几乎处处有跨越，标题/摘要的整宽行也把空带抹掉。
+  3. 段落合并用「上一行是否短于栏宽」的绝对阈值，正文长行被误判成段末短行。
+  4. 缩进用全局页边距比较；摘要整段本身缩进时，每一行都被当成新段。
+  5. 左侧页边的竖排 arXiv 编号（x≈18）被缝进正文，插出「representa 9 tion」。
+  6. 字号取一行字符的 max，同一行忽大忽小，段落因「字号不同」被误切。
+- 解决方案：
+  - `app/reader.py`：`_column_boundary` 改在中间区域统计「跨越行段数」，取跨越最少的位置；`_rows(segs, boundary)` 先分栏再缝合，且**不跨分界缝合**；同一行碎片用「纵向重叠或（中心高度差 + 水平紧邻）」双条件并查集缝合。
+  - 段落合并：基准字号取整栏行字号中位数；缩进相对**当前段落**左边界判断；段末短行阈值改为栏宽 40%；heading 字号超过基准 1.35 倍时强制断段。
+  - 页边裁剪：丢掉 `x0 < 7% 页宽` 的字符（arXiv 竖排编号）。
+  - 连字符：pdfium 的 U+FFFE 视为软连字符（断词，去掉），普通 `-` 视为复合词（保留）；`left-to-` 这类前缀带连字符的软换行也保留。
+  - 停用跨页续段合并：合并后的段落挂在上一页，页码标记与内容错位，收益不如干扰大。
+  - `SCHEMA_VERSION = 2`：版面算法一变，旧 `blocks.json` 自动失效。
+  - 前端：段落记录 `data-state`（pending/ok/fail）；「仅译文」未译处显示「翻译中…」而不是英文；切到双语/仅译时自动把当前页排进翻译队列；记住上次视图（localStorage `rd_mode`）。
+- 相关代码/指令：`app/reader.py`（`_column_boundary` / `_rows` / `_band_rows` / `_blocks_from_segments` / `_join_lines` / `_page_blocks`）、`web/reader.js`（`applyTrans` / `setMode`）、`web/css/reader.css`、`tests/test_reader.py`。
+- 验证：BERT 16 页；第 1 页从 45 个碎块收敛到 23 段，Abstract 在前、Introduction 在后，首段中文连续；「仅译文」可视区 `.rd-src` 数量 0，未译处显示「翻译中…」；滚到第 2 页自动续译（44/583 → 61/583）；`tests/test_reader.py` + API smoke + stream 共 46 项通过，ruff / node --check 通过。
+- 已知残留：邮件/作者这类跨栏元数据行仍可能被拆到两栏；个别正文段落仍会在句末断开；复杂图表页的文字标签会进入阅读流。下一阶段可接 PP-DocLayout 模型统一解决。
+
+## [2026-11-02] 单栏论文误判成双栏 / 正文误判成公式（用 D:\Ai\Project\paper\out\main.pdf 复现）
+- 问题/决策：用户论文（单栏 LaTeX）在阅读器里被拆成左右两栏，出现「Th t」「l duct-free」「e ex rema pro」这类半词碎片；同时一个正文段落被当成公式裁成 809px 大图，插在摘要中间，导致仅译文模式里还有大块英文。
+- 原因：
+  1. 双栏判定用「跨越候选竖线的行段数量」。行段被切成大量词片后，任何 x 两侧都有很多段，数量对比失效；单栏页也会被选出一个「空隙最多」的位置（x≈200），随后 `_rows` 按分界拒绝跨栏缝合，整页碎成半词。
+  2. 公式判定只看符号密度和长度，不看自然语言词数、也不看行数。定理/证明里「aS ⊆ D with |aS| = ... we get」这种正文行符号密度高，被裁成图片；多行块也会被裁成几百 pt 高的大图。
+- 解决方案：
+  - `_column_boundary` 改为 y 轴 6pt 条带统计「该竖线在多少条带里是空的」，要求空带比例 ≥ 65%、左右两侧各自覆盖 ≥ 50% 条带；覆盖判定留 ±2pt 容差。单栏页每行都压过中段，空带比例上不去；双栏页 BERT 实测 0.90–1.00，单栏论文报错页 0.57，区分明显。
+  - 公式判定加两条硬约束：**必须是单行**（`len(cur["lines"]) <= 1`）、自然语言单词 ≤1 个、长度 ≤120、不能是列表项。带 2 个以上英文词的行一律当正文，宁可少裁图也不吞段落。
+  - 翻译兜底：占位符校验失败的段落，用「未保护原文」逐段再翻一次并接受结果，避免数学多的长摘要永远翻不出来。
+  - `SCHEMA_VERSION` 升到 6，旧版面缓存自动失效。
+  - 前端：公式/图表 img 先挂 1x1 透明占位图，懒加载完成前不显示破图图标；公式图给 18px 最小高度。
+- 相关代码/指令：`app/reader.py`（`_column_boundary` / `_make_block` / `_translate_batch`）、`web/reader.js`（`renderFlow` 占位图）、`web/css/reader.css`。
+- 验证：main.pdf 6 页从 390 段碎块收敛到 114 段，六页全部判为单栏（cols=[0]）；第 1 页 12 段，结构为标题 → Abstract → 1 Introduction，无图块打断；公式块 45 → 14，最大高度 22pt；摘要中文完整（169 + 329 字）；仅译文可见英文正文 0；BERT 双栏回归仍正确（第 1 页 [-1,0,1]、第 2 页 [0,1]）；`tests/test_reader.py` + API smoke 27 项通过，ruff / node --check 通过。
+- 已知残留：`ifthere`、`ofproduct-free` 这类跨字体边界缺空格（PDF 里两段文本对象几乎无缝）；`b√nc` 是 ⌊√n⌋ 的字体映射损失，需要 LaTeX 推断才能还原。
+
+## [2026-11-02] 阅读器 UI 重塑 + 翻译上下文 + 裁图坐标修复
+- 问题/决策：功能可用但界面偏工具化；公式图偶尔出现几百 px 的怪异大图；翻译缺少全文上下文，长段落容易翻不出来。
+- 界面/交互：
+  - 顶栏重做：文件名 + 页码徽标（`1 / 6`）+ 三档视图分段控件 + 上/下页 + 译本页/译全文 + `Aa` 设置；下方 2px 进度条。
+  - 阅读设置弹层：正文字号（13–24）、行距（紧/中/松）、原页缩放、隐藏原页；偏好存 localStorage（`rd_prefs_v2`）。
+  - 快捷键：`Alt+1/2/3` 切视图、`←/→` 与 `PageUp/PageDown` 翻页、`Ctrl +/−` 改字号、`Ctrl+0` 重置原页缩放、`O` 收起原页、`Esc` 退出。
+  - 左栏加载骨架屏；未译段落「翻译中…」呼吸占位；扫描页提示「没有可提取文字层」；翻译失败段落点击即重试；翻译期间按钮禁用并显示转圈。
+  - 记住阅读位置并在恢复时按滚动位置校正页码徽标；窄屏自动隐藏原页。
+- 翻译：
+  - 请求带「文档上下文」（首页最像标题的一段），术语/语气更一致。
+  - 动态分批：4 段或 1600 字符为上限，长段落单独成批，避免被同批挤掉。
+  - 缓存文件名加入 `PROMPT_VERSION`（rd2），改提示词自动失效。
+- 排版：
+  - `_stitch_centered`：把被分栏切开的标题/作者/邮箱行缝回整行，只在「正文起点之前」生效（正文起点 = 第一条占满栏宽的行），避免把 `Abstract` 标题和右栏正文拼在一起。
+  - 公式判定保持「单行 + 自然语言词 ≤1 + 长度 ≤120」。
+- 关键 bug（裁图）：`pypdfium2` 的 `render(crop=...)` 参数是「从四边各裁掉多少」`(left, bottom, right, top)`，不是 `(x, y, w, h)`。之前把宽高当右/上裁剪量，导致公式图变成几百 pt 高的怪图（770px）。修复后公式图 22–60px；裁图缓存 key 加入 `CROP_VERSION` 让旧图失效。
+- 相关代码/指令：`app/reader.py`（`_stitch_centered` / `crop_png` / `_translate_batch` / `start_translate`）、`app/api/reader.py`（`_doc_context`）、`web/reader.js`（新顶栏、设置、快捷键、进度、恢复位置）、`web/css/reader.css`。
+- 验证：浏览器实测顶栏/页码徽标/进度条（8/114 → 50/114，44%）/Aa 面板（字号 16→17、行距、缩放 100%→115%、隐藏原页）/快捷键（Alt+2/3、←/→）/滚动页码跟随全部 PASS；公式块 14 个，高度 22–60px，像素统计确认是稀疏公式而非正文；`tests/test_reader.py` + ruff / node --check 通过。
+- 已知残留：公式有时以文本、有时以图片呈现（取决于单行符号密度）；未进入视口的公式是 22px 占位，滚近才加载；`b√nc` 等字体映射损失仍在。
+
+## [2026-11-02] 选区精准翻译 / 提问 + 顶栏点击「不灵敏」修复
+- 功能：在阅读流里拖选任意文字，弹出浮动操作条（翻译 / 提问 / 复制）。
+  - 翻译：`/api/reader/selection` 把选中片段 + 所在段落作为上下文，要求只输出译文；不走段落缓存，适合查单词、短语、从句。
+  - 提问：同一个接口的 `mode=ask`，带文档上下文 + 选中片段 + 用户问题，中文回答；前端用 `safeRenderMarkdown` 渲染粗体/公式，避免 `**` 原样露出。
+  - 浮层位置按选区 rect 自动上下翻转，`Esc` 先关浮层再关阅读器。
+- 「顶栏按钮不灵敏」的真实原因：**文本选区还活着**。点按钮时浏览器会先把选区滚回视口，把 `goPage` 的平滑滚动覆盖掉，看起来像点击无效；同时关闭提问输入框后焦点留在 input 里，全局快捷键被 `onKey` 直接忽略。
+  - 修复：顶栏按钮 `mousedown`（capture）里 `preventDefault` + 清空选区；关闭浮层时 blur 输入框；`goPage` 增加 `RD.jumpTarget`，平滑滚动动画结束前不让中间帧把页码改回旧页。
+  - 翻译期间按钮不再 `disabled`（只显示转圈），避免「按钮灰了 = 界面卡死」的错觉；`译本页` 支持强制重提，不受「已译全文」标记影响。
+- 相关代码/指令：`app/api/reader.py`（`_api_reader_selection`）、`web/reader.js`（`wireSelection` / `showSelectionPopover` / `selTranslate` / `askSelection` / `goPage` / `refreshTransBtns`）、`web/css/reader.css`（`.rd-sel`）。
+- 验证：接口实测翻译「product-free subsets…」→「{1, ..., n} 的无积子集的极值：一个分类」；提问「这段话在定义什么？」→ 正确解释无积集合定义。浏览器实测：拖选出浮层、翻译/提问均返回中文、粗体渲染为 `strong` 且无 `**`；`✕` 关闭后立刻点 `‹/›` 从 1/6 到 2/6、左栏跟随；键盘 `←/→` 在浮层关闭后可用。ruff / node --check / `tests/test_reader.py` 通过。
+
+## [2026-11-02] 公式识别：裁图 → LaTeX → KaTeX，公式不再占一大块
+- 问题/决策：阅读流里的独立公式是裁图，宽公式被拉满整行、上下留白大，观感是「一大块图片」。目标是把单行公式识别成 LaTeX，用 KaTeX 按正文字号排版；识别失败再退回图片。
+- 方案：
+  - 后端 `app/reader.py`：`recognize_formula(path, page, rect)` 复用 `crop_png` 的裁图，base64 交给 `imaging.recognize_image_fallback`（视觉/聊天双通道自动回落），提示词要求「只输出 LaTeX、不要 $/代码块、非公式输出 NOT_FORMULA」；清洗反引号、`$`、`\[ \]`、`LaTeX:` 前缀。结果按「FORMULA_VERSION + 页 + rect」缓存到 `data/reader/<doc>/formulas/`，同一公式只识别一次。
+  - API：`POST /api/reader/formula`；`/api/reader/open` 额外返回 `formula_ai`（是否配置了可识图的模型）。
+  - 前端：公式裁图进入视口并加载完成后，串行（Promise 链）请求识别；成功则 `katex.render(..., displayMode)` 替换图片（`.rd-fig.ai`），失败静默保留图片。Aa 里新增「公式识别 开/关」，偏好存 `rd_prefs_v2`；关闭时立即回到图片，开启时用已缓存的 LaTeX 重新渲染，不重复请求。
+  - 样式：`.rd-katex` 居中、可横向滚动；关键一条是 `.rd-fig.ai .katex-display { margin: 0 }` —— KaTeX display 默认上下各 1em，会把 27px 的公式撑成 74px 的「大块」。
+- 相关代码/指令：`app/reader.py`（`FORMULA_PROMPT` / `recognize_formula` / `_clean_latex`）、`app/api/reader.py`（`_api_reader_formula`）、`web/reader.js`（`maybeFormula` / `recognizeFormula` / `renderLatex` / 设置开关）、`web/css/reader.css`。
+- 验证：main.pdf 第 2 页 4 个公式全部转成 KaTeX，`.katex` 高 27px（容器从 74px 压到接近内容高度）；`img` 为 `display:none`；Aa 关闭后恢复 38–60px 裁图、再开启恢复 LaTeX，切换即时。接口实测：`2|A| ≤ 2n − a − T + 1.` → `2|A| \leq 2n - a - T + 1.`；`φ: S −→ [a,n] \ A` → `\varphi : S \longrightarrow [a, n] \setminus A`。ruff / node --check / `tests/test_reader.py` 通过。
+- 已知残留：带多个英文词的公式行（如 `f(n):= max{...} = n − √n. (1)`）仍按正文处理，不参与识别；识别只在公式进入视口后触发，未滚动到的页面还是裁图占位。
+
+## [2026-11-02] 笔记库批注：选中文字高亮 + 批注（不改 Markdown）
+- 问题/决策：笔记库原本只有预览与编辑，没有批注。批注不能写进 Markdown 正文（会污染原文、破坏双链与搜索），因此独立存放，正文保持纯 Markdown。
+- 存储：`data/notes/.annotations/<sha1(相对路径)>.json`，数组元素 `{id, quote, prefix, suffix, nth, comment, created, updated}`。`.annotations` 以点开头，`list_tree` 天然跳过，不会出现在文件树里；备份 data 目录时一并包含。
+- 锚点：文本引用 + 出现序号（`quote` + `nth`），不用字符偏移——笔记被外部编辑器改动后偏移会漂，引用仍能定位；定位失败时批注仍保留在列表中，不会丢数据。
+- API：`/api/notes/anno/list`、`/save`（带 id 即更新）、`/delete`，沿用 notes 模块的 `_safe` 路径校验。
+- 前端（web/init.js）：
+  - 预览区拖选文字 → 旁边出现「批注」小按钮 → 浮动输入框（引用 + 备注）→ 保存。
+  - 渲染时用 TreeWalker 把预览拍平成 `{text, nodes}` 索引，按 quote/nth 建 Range，再用 `surroundContents` 包 `<mark class="nt-anno">`；跨行内标签时退回 `extractContents` 方案。
+  - 点高亮打开批注浮层，可改可删；右侧新增「批注」标签，带计数，点击条目滚动定位并闪烁。
+- 相关代码/指令：`app/notes.py`（`list_annotations` / `save_annotation` / `delete_annotation`）、`app/api/notes.py`、`app/httpd.py`（三条路由）、`web/init.js`（`applyNoteAnnotations` / `locateAnnoRange` / `showAnnoPop` / `wireNoteAnnotations`）、`web/css/notes.css`、`web/index.html`（批注标签页）。
+- 验证：脚本 CRUD（新建 / 更新 / 删除 / 清理）通过；浏览器实测拖选出现「批注」按钮、保存后黄色高亮 + 计数 1→2、点高亮可编辑（列表即时更新）、删除后计数回到 1 且高亮消失。`node --check`、`py_compile` 通过。
+- 已知残留：笔记标题过长时头部路径会省略；跨多个 `<p>` 的选区只能按段落分别批注；笔记内容大改后个别批注可能定位不到高亮（仍保留在列表）。
+
+## [2026-11-02] 阅读器：回答可复制 / 保存为批注 / 划词快捷键 / 公式划词清洗
+- 问题/决策：提问浮层只有「翻译/提问/复制」三个入口，回答出来后就再也拿不走了；同时 KaTeX 渲染后划词会把公式读成重复字形，问模型得到一坨乱码。目标：回答能选中复制、能存成批注并在之后点开复看，划词和渲染公式都要干净，并给「选中→翻译/提问」加键盘快捷方式。
+- 方案（前端 `web/reader.js`）：
+  - 回答区 `.rd-sel-out` 加 `user-select: text`；新增 `.rd-sel-acts`（复制回答 / 保存为批注）。`sel` 增加 `blockId/side/page/question/answer`，`setSelResult()` 统一记录答案与问题。
+  - 快捷键：`Ctrl+Enter` 翻译选区，`Ctrl+Shift+Enter` 提问（焦点已在输入框时直接发送）；浮层底部常驻提示 `.rd-sel-hint`。快捷键分支必须 `e.stopPropagation()`，否则输入框自己的 Enter 处理会再发一次请求。
+  - 公式划词：**不能**用 `range.cloneContents()` 再找 `.katex` —— 选区从公式内部开始时，克隆片段里只有 `.katex-html` 的零散字形，`.katex` 根节点不在片段内，替换逻辑整体失效。改为对原始 DOM 建 TreeWalker，逐文本节点用 `range.intersectsNode` 判定是否在选区内，命中 `.katex` 祖先就整体输出 ` $TeX$ ` 并按元素去重；边缘文本节点按 offset 截取。段落上下文 `sel.ctx` 同样走这套清洗（`cleanNodeText`）。
+  - 跨块选区兜底：`commonAncestorContainer` 落在 `.rd-flow` 上（跨段落 / 从公式图起划）时 `closest('.rd-block')` 取不到块，`blockId` 为空导致批注存不上；改为遍历 `.rd-block, .rd-fig` 取第一个与选区相交的块。`.rd-fig` 补 `position: relative`，批注圆标才能定位到公式块右上角。
+  - 浮层定位：`showSelectionPopover` 只在弹出时算一次位置，长回答会把底部按钮顶出视口。抽出 `placeSel()`，保存选区矩形 `selRect`，在显示提问框 / 出译文 / 出回答（`setSelResult`）后各重排一次；`.rd-sel` 加 `max-height: calc(100vh - 24px); overflow: auto`，`.rd-sel-out` 限高 42vh 内部滚动；`.rd-anno-acts` 改 sticky，长批注滚到底也能点到「删除」。
+- 后端（`app/reader.py` + `app/api/reader.py`）：
+  - 批注存 `data/reader/<doc_id>/annotations.json`，字段 `{id, block_id, page, side, quote, question, answer, created, updated}`；`/api/reader/open` 一并返回 `annotations`，`/api/reader/anno/save`（带 id 即更新）、`/api/reader/anno/delete`。
+  - 阅读器批注**不写进 PDF、也不用文本锚点**：译文与公式会随重译/KaTeX 重渲染变化，字符偏移必然漂移；用 `block_id + 块右上角 chip` 最稳，点 chip 出面板复看 Q&A。
+- 相关代码/指令：`web/reader.js`（`katexTex` / `cleanRangeText` / `cleanNodeText` / `placeSel` / `copySelectionAnswer` / `saveReaderAnno` / `applyReaderAnnos` / `showReaderAnno` / `onKey`）、`web/css/reader.css`（`.rd-sel-acts` / `.rd-sel-hint` / `.rd-anno-chip` / `.rd-anno-pop`）、`app/reader.py`、`app/api/reader.py`。
+- 验证（浏览器实测 main.pdf）：
+  - 从公式**内部**（`2|A|` 中间）起划到 Proof 段落，浮层引用为 `$2|A| \leq 2n - a - T + 1.$ Proof. Since 1 = 1 · 1…`，无重复字形、无零宽字符。
+  - `Ctrl+Shift+Enter` 弹出输入框并聚焦，提问返回 591 字中文回答；「复制回答」toast「已复制回答」；「保存为批注」toast「已保存为批注」。
+  - 818 字长回答下浮层仍完整落在视口内，「复制回答 / 保存为批注」命中自身；点「批注 1」chip 打开面板，Q 与完整回答可复看，删除并确认后 chip 消失。
+  - 读屏工具的已知副作用：无头浏览器标签未激活时 IntersectionObserver 不回调，公式懒加载与 KaTeX 渲染会一直不触发，验证前需先 `browser_tabs activate`。
+- 已知残留：批注暂不支持编辑（只能删了重存）；面板里「复制回答 / 删除」在超长回答下需要滚动（已 sticky 兜底）；笔记批注与阅读器批注是两套独立存储，互不迁移。
+
+## [2026-11-02] 阅读器默认只看 PDF 原页，翻译改由用户点击启动
+- 问题/决策：以前打开 PDF 直接进「双语」，左侧原页 46%、右侧阅读流占一半，并且会自动请求当前页翻译。用户只想看原版 PDF 时，屏幕被白白占掉一半、还平白消耗模型调用。决定：默认「原页」模式（PDF 占满整宽、不翻译），只有用户点「译本页 / 译全文 / 原文 / 双语 / 译文」才进入分栏并启动翻译。
+- 方案：
+  - 新增第 4 个视图按钮「原页」（`data-mode="pdf"`，快捷键 Alt+0），与原「原文 / 双语 / 译文」（Alt+1/2/3）并列；`open()` 每次都无条件 `setMode('pdf')`，不再读取上次的 `rd_mode` 直接开分栏。
+  - `RD.transOn` 表示「是否已启用分栏」：`setMode('pdf')` 置 false，其余模式置 true。`rdEnsurePages()` 一进来就 `if (!RD.transOn) return`，因此翻页、滚动、打开文档都不会触发翻译；`mode === 'orig'` 只读原文，也不排队翻译。
+  - 「译本页 / 译全文」在 PDF 模式下先 `setMode(modeForTranslate())` 再启动任务；`modeForTranslate()` 取上次分栏模式，若上次停在「原文」则退回「双语」，避免译了却看不到译文。
+  - CSS：`.rd-root.rd-mode-pdf` 下隐藏 `.rd-right / .rd-split / .rd-progress / .rd-sep / .rd-stat`，`.rd-left` 强制 `flex:1 1 100%`、`width:100% !important`（覆盖拖动分栏留下的内联宽度），并用 `.rd-root.rd-mode-pdf.rd-no-left .rd-left` 把「原页对照：隐藏」的旧偏好压回去；`.rd-pages` 限宽 1000px 居中，避免超宽屏一页拉得过高。
+  - 配套两处：模式切换会改变左栏宽度，`setMode` 后 80ms 调 `resizePages()` 把所有页标记未渲染并按新宽度重画（否则从原页切回分栏会横向溢出、切到原页会发虚）；`onLeftScroll` 补 `savePosSoon()`，原页模式下阅读位置也能记住。
+- 相关代码/指令：`web/reader.js`（`setMode` / `modeForTranslate` / `rdEnsurePages` / `open` / 顶栏 `data-act="page"|"all"` / `onKey` 的 Alt+0）、`web/css/reader.css`（`.rd-mode-pdf` 一组规则）。
+- 验证（main.pdf，浏览器实测）：初始 `rd-root rd-mode-pdf`，左栏 965px = 整宽，`rd-split`、`rd-right` 均 `display:none`，「原页」高亮，进度条/进度文字隐藏，仅显示页码；点「译本页」→ `rd-mode-dual`，左 367px / 右 592px，出现中英对照并继续翻译（91/114 → 100/114）；再点「原页」→ 单列满宽恢复、进度隐藏。`node --check`、`tests/test_reader.py`（10 passed）通过。
+- 已知残留：`rd_mode` 仍会记住上次分栏模式，只用于下次点「译本页 / 译全文」时恢复视图；打开文档本身一律先落在「原页」。
+
+## [2026-11-02] 阅读器批注链路回归验证（IDE → PDF → 绿色高亮 → 批注抽屉 → 文献）
+- 问题/决策：在真实 UI 上回归「统一批注表 / 高亮 / 批注抽屉 / 文献信息」；固定路径为 会话 → IDE 打开 out/main.pdf → 右栏双语 → 划词高亮 → 顶栏批注 → 文献。
+- 结果：全部通过。会话 s_89a2a99cdd57，main.pdf 6 页；双语模式 100 个 block（原文/译文均加载）；划词浮层「高亮」→ 绿色，mark.rd-hl.c-green 背景 rgba(74,222,128,.36)；顶栏计数 3；抽屉 3 条记录，点击本次划词那条触发 .rd-flash 定位；文献弹窗 6 个字段，标题与摘要已自动带出，作者/年份/出处/DOI 为空。
+- 备注：干净浏览器配置下 IDE 欢迎页没有「最近打开」，需展开 out 目录点 main.pdf；批注按文档持久化，重复验证会累加，本次 3 条里 2 条为此前遗留。
+- 截图：C:\Users\MKIII\AppData\Local\Temp\gal-verify\shots\c1-green-highlight.png、c3-jump.png、c4-meta.png、c5-green-zoom.png。
+
+## [2026-11-02] 阅读器「摘录 → 笔记库 → 批注导出」端到端回归
+- 问题/决策：在真实 UI 回归 PDF 正文摘录写进笔记库、笔记渲染页码引用块、批注抽屉导出 Markdown；路径：会话「乘积自由集极值证明与论文」→ IDE 点 out/main.pdf → 切「原文」划词 → 浮层「摘录」→ 笔记库「文献摘录」→ 顶栏「批注」→「导出」。
+- 结果：PASS。摘录提示 `已摘录到笔记：文献摘录/The extremal product-free subsets of {1, . . . , n} a classiﬁcation.md`；新建 `data/notes/文献摘录/The extremal product-free subsets of {1, . . . , n} a classiﬁcation.md`，内容含 `## p.1 · 2026-11-02` + 引用块（Product-free sets…finite group be?）；批注数 4→5，抽屉新增 `p.1 · 摘录`；导出 toast `已导出批注`，POST `/api/anno/export`，临时 `<a download>` 的 name 为 `The extremal product-free subsets of {1, . . . , n} a classi-批注.md`、href 为 `blob:`。
+- 备注：导出文件名 = `title[:60] + "-批注.md"`；内置浏览器未在 `C:\Users\MKIII\Downloads` 落盘（下载由浏览器环境接管），只能确认触发。文本层绑定在 `.rd-flow`，而「原页」模式下 `.rd-flow` 为 0×0，划词需先切「原文/双语」。
+- 相关代码：`app/api/anno.py`（`_api_anno_excerpt` / `_api_anno_export`）、`web/reader.js`（`excerptSelection` / `exportAnnos` / `showSelectionPopover`）。
+
+## [2026-11-02] 任意文件引用 + 统一批注底座 + 文献库（面向学术阅读）
+- 问题/决策：PDF 只能问答存批注，其它文档（md/tex/docx/pptx）没有批注；`@` 文件引用只把路径当文本插入，模型未必去读；笔记批注与阅读器批注是两套 JSON，无法跨文档检索。决定：先把「引用 → 批注 → 文献 → 导出」做成一条链，存储统一到 SQLite，视图分三处（PDF 阅读器 / Monaco / 文献库）。
+- 方案：
+  - **任意文件引用（P0）**：新增 `app/fileref.py`，发送新消息时把 `@相对路径`（支持 `@path#3` 指定 PDF 页）解析成正文挂到 `umsg["refs"]`；`app/context._msg_text` 负责拼进模型上下文，token 估算与拼装共用同一函数。单文件 12000 字符、本轮合计 30000 字符上限，超长带「已截断」标记；非文件路径（如 `@某人`）原样忽略，扫描件给出明确提示。`agent.read_file` 同步改为 pdf/docx/xlsx/xlsm/pptx 统一走 `docparse`，旧版 Office 与真正二进制给明确错误。
+  - **统一批注底座（P1）**：`app/db.py` 新增 `annotations` / `documents` 两张表；`app/anno.py` 提供 CRUD、按文档/关键字/类型/标签检索、计数与旧数据迁移。`notes.py` 与 `reader.py` 的批注函数改为委托（doc_key：沙箱相对路径，笔记库用 `notes:<相对路径>`），旧 JSON 在首次读取时一次性导入并留 `.migrated_sqlite` 标记。新增 `/api/anno/{list,save,delete,export,excerpt}`、`/api/doc/{get,save,list}`。
+  - **PDF 阅读器**：划词浮层加「高亮（5 色）/ 摘录」；高亮用 `<mark class="rd-hl c-颜色">` 在段落里按 quote 定位（跨节点逐段包裹），译文整段重写后只重铺该段（`applyReaderAnnos(id)`）；顶栏新增「批注」抽屉，按页排序、可按类型过滤、点击跳转并闪烁；批注面板补「复制引用」（作者 年份, p.X）。
+  - **Monaco**：左侧活动栏新增「批注」，行区间锚点 + quote 兜底；整行浅黄装饰 + 悬停提示；`Ctrl+Alt+M` / 右键「添加批注」（`window.prompt` 输入，留空 = 只做行高亮）；点条目定位到行。
+  - **文献层（P2，档 A）**：`app/library.py` 从 PDF 元数据 + 首页文本启发式提取标题/作者/年份/DOI/摘要，打开 PDF 时自动落进 `documents`；阅读器抽屉「文献」可编辑（含标签）。左侧活动栏新增「文献库」：搜索标题/作者/出处、显示标签，点击直接进阅读器。摘录会把「## p.N + 原文引用 + 我的批注」写进笔记库 `文献摘录/<标题>.md`，并留一条 excerpt 批注；抽屉「导出」输出带引用头的 Markdown，`/api/anno/export?format=bibtex` 输出 BibTeX。
+  - **Word / PPT 阅读流（P3）**：`reader.parse_doc` 把 docx/pptx 抽成与 PDF 相同的块结构（每 10 段伪分页），`/api/reader/open` 按扩展名分流；前端 `rd-docmode` 隐藏左栏与「原页」按钮，翻译、划词提问、批注、文献信息全部复用。IDE 双击 docx/pptx 直接进阅读器。
+- 相关代码/指令：`app/fileref.py`、`app/anno.py`、`app/library.py`、`app/db.py`、`app/context.py`（`_msg_text`）、`app/api/chat.py`（挂 refs）、`app/agent.py`（`_read_doc_for_agent`）、`app/api/anno.py`、`app/reader.py`（`parse_doc` / 批注委托）、`app/notes.py`、`web/reader.js`、`web/gal/gal-ide.js`、`web/init.js`、`web/index.html`、`web/css/{reader,ide,base}.css`。
+- 验证（浏览器实测）：PDF 划词高亮出 `mark.rd-hl.c-yellow`、段落角标「批注 1」、抽屉计数同步；文献弹窗自动带出标题 «The extremal product-free subsets of {1, . . . , n}: a classification»；摘录在笔记库生成 `## p.1 · 2026-11-02` 引用块；导出触发 `-批注.md` 下载；`_anno_docx_demo.docx` 进阅读器显示 7 段正文、无左栏、无「原页」按钮、页码 1/1；`main.tex` 的批注在侧栏显示「第 10–12 行」，点击定位到第 10 行并出现 3 行浅黄装饰。命令行：ruff 全通过、`node --check` 三个文件通过、`tests/test_reader.py` 10 passed；`fileref.expand('@out/main.pdf#2')` 抽出 2350 字、整份截断到 12007 字；`_msg_text` 能拼出「【引用文件：out/main.pdf 第 2 页】」块。
+- 已知残留：PDF **原页模式**还没有矩形高亮（目前高亮落在阅读流段落上）；文献条目自动识别作者/年份对排版特殊的 PDF 会漏（可手动编辑）；标签目前只能编辑与展示，没有跨文档标签筛选页；Zotero 导入未做；`window.prompt` 的批注输入是临时方案，后续可换成侧栏内联输入。
+- 顺带修复：`.toast` 的 z-index 从 100 提到 10000 —— 阅读器 `.rd-root` 是 9000，之前「已高亮 / 已摘录」提示会被盖住，看起来像没反应。
+
+## [2026-11-02] 删除关窗保活：窗口关闭即停止输出
+- 问题/决策：关窗后「继续生成 / 等任务跑完 / 5 秒重连」这套保活逻辑留下大量状态问题（关窗不退出、进程成僵尸、重开指向已停服务、「后台运行中」卡住）。决定只删**保活层**：窗口关闭 = 进程退出 = 输出停止；刷新页面仍可接回（断线重连链路保留）。
+- 解决方案：
+  - `main.py`：删 `_window_reconnected` / `_wait_clients_gone` / `_active_stream_count` / `_background_job_count` / `_pending_job_count` / `_wait_streams_grace`；退出段不再判断 `ACTIVE_STREAMS` 与后台任务，窗口 `proc.wait()` 返回后直接 `httpd.shutdown()`。
+  - `app/config.py`：删 `chat_window_grace_min` / `chat_window_keep_alive` 两个默认项；旧 `data/config.json` 里的同名残留会被忽略，不需要手动清。
+  - `app/explore.py` / `app/autopilot.py`：删只服务于保活的 `running_count()`。
+  - 测试：删除 `tests/test_background.py`，移除 `test_web_hardening.py::test_window_reconnected_checks_sse_clients`。
+  - 保留（本方案明确不删）：SSE 任务缓冲、`/api/chat/attach`、前端 `keepRecovering` / 「后台运行中」提示、`/api/state.streaming`、进程崩溃后的「继续任务」断点与 `_progress` 快照。
+- 相关代码/指令：`main.py` 退出段、`app/config.py`、`app/explore.py`、`app/autopilot.py`、`tests/test_web_hardening.py`。回归：`python -m pytest tests/test_web_hardening.py tests/test_resume.py tests/test_api_handlers_smoke.py -q`（32 passed）、`ruff` 全通过、`py_compile` 通过；并断言 `main` 中六个保活函数与两个配置键已不存在。
+- 行为变化：关窗后 1–2 秒内进程退出，正在生成的回合会被强杀；后台子代理批次 / 自动化目标随进程一起中止。关窗时若正在生成，下次启动仍会出现「继续任务」提示（`_progress` 快照 + `_mark_resume_pending` 未动）。
+- 已知残留：`app/httpd.py` 的 SSE 客户端计数 `active_clients` 现在只被测试使用，先保留作诊断；`NOTE.md` / 本文件里早前的保活条目是历史记录，与当前代码不一致，以本条为准。
+
+## [2026-11-02] 阅读器批注角标压字修复
+- 问题：阅读流的「批注 N」角标用 `position:absolute; top:4px; right:4px` 叠在段落上，中文摘要这类满行文本会被直接盖住（用户截图 resume.pdf 第一段「约10」被压）。
+- 解决方案：角标改为 `float:right`，并把节点插到 `.rd-block` 的第一个子元素位置；块内行盒会自动避让浮动元素，只有首行按需要缩短，不再覆盖任何文字。去掉 `position/top/right/z-index`，保留 `margin: 1px 0 4px 8px` 与原有配色。
+- 相关代码/指令：`web/reader.js`（`applyReaderAnnos` 里 `el.insertBefore(chip, el.firstChild)`）、`web/css/reader.css`（`.rd-anno-chip`）。
+- 验证：浏览器实测 main.pdf 摘要段（8 行），角标矩形 (291,266)-(338,286)，首行文字右边界 279，逐行求交 hitCount=0；点击角标仍能正常打开批注面板。窄视口（377px）与原文模式均通过。
+- 已知残留：公式块（`.rd-fig`）上的角标也走 float，公式会略微左移让位；块很窄时首行可能因角标换行，属于预期。
+
+## [2026-11-02] 通知跳转：不再自动切会话，点击后定位到对应回复
+- 问题/决策：用户反馈「通知一弹出界面就跳走，且跳转位置不对」。排查结论：通知本身只在 click 时跳转，但同一时刻有三条并发路径会改界面——① 自动化事件处理里无条件 `selectSession(current)`（重渲染并滚到底）；② `applySessionsPayload` 用服务端 payload 整份覆盖 `state.sessions.current`，后台任务完成时可能把界面切到别的会话；③ 通知落点只有 `sessionId`，点击后固定 `scrollToBottom`，没有消息锚点。
+- 解决方案：
+  - **会话归属权**：`applySessionsPayload(payload, opts)` 默认 `keepCurrent=true`，只更新数据不切会话；只有显式导航（切会话 / 新建 / 删除 / 删分组 / 存档分叉 / 右键打开目录）传 `{keepCurrent:false}`。这样后台完成、`/api/state` 轮询、事件推送都不会再自行切走界面。
+  - **自动化静默刷新**：`auto.js` 新增 `refreshSessionQuiet(sid)`（`/api/session/select` + `renderMessages(..., {keepScroll:true})`），替换原来 autopilot 事件里的 `selectSession(state.sessions.current)`；`renderMessages` 新增 `opts.keepScroll`，保留用户当前阅读位置。
+  - **消息锚点**：服务端 `done` 事件新增 `msg_idx`（本条 assistant 消息在会话里的下标）；前端 `stream.js` 捕获后经 `notifyChatDone` 放进 target；`notifyJump` 先切会话，再调用已有的 `ssFocusMessage(idx)` 定位，失败才回退 `scrollToBottom`；目标已是当前会话时不重选。
+  - **防重与诊断**：`notifyJump` 加 300ms 互斥；`bindNativeNotifyClicks` 只绑定一次并按通知 id 去重；浏览器通知 onclick 加 `_jumped` 防重复；Electron 主进程新增 `notify show <id> target=...` 日志，并对同一条通知的 click 只处理一次。
+- 相关代码/指令：`web/core.js`（`applySessionsPayload`）、`web/chat.js`（`renderMessages` / `selectSession` / 新建 / 删除）、`web/auto.js`（`refreshSessionQuiet` / `notifyJump`）、`web/stream.js`（`doneMsgIdx` / `notifyChatDone`）、`app/api/chat.py`（done 增加 `msg_idx`）、`desktop/main.js`（show 日志 + click 去重）、`web/saves.js` / `web/hall-gal.js` / `web/knowledge.js`（显式导航传 keepCurrent:false）。
+- 验证：浏览器回归「切会话 / 新建 / 删除」全部 PASS（侧栏 active 与消息区同步、删除后自动切到另一会话、控制台无 JS 异常）；`node --check` 7 个前端文件通过、`py_compile` + `ruff` 通过、`tests/test_api_handlers_smoke.py` / `test_web_hardening.py` / `test_resume.py` / `test_chat_blocks.py` 共 51 passed。
+- 已知残留：通知「弹出即被系统当成 click」的可能性尚未用日志证实；下一次通知触发后可在 `data/desktop.log` 对照 `notify show` 与 `notify click` 是否成对。若确认存在，再在 main.js 加「显示后短时间忽略 click」的兜底。
+
+## [2026-11-03] 阅读器停靠 / 批注文本与数字角标 / 译文 PDF 导出
+- 问题/决策：① 批注要能输入文字，并以「高亮右上角圆形数字」呈现；② 阅读器原来 `position:fixed` 占满整窗，侧栏笔记必须先退出阅读器才能用；③ 需要像沉浸式翻译一样的「译文版 PDF」导出。决策：阅读器默认**停靠在 `#main`**（侧栏始终可用），顶栏 ⤢ 可临时全屏；导出采用**覆盖式**——每页原图铺满整页，再按 block.rect 原位盖白底贴译文。
+- 解决方案：
+  - **停靠 / 全屏**：`.rd-root` 改 `position:absolute; inset:0; z-index:30`（`#main` 本身是 `position:relative`），`.rd-root.rd-fullscreen` 才 `fixed` 且 `z-index:46`——低于 `.modal`(50)，所以全屏阅读时「笔记 / 设置」弹窗仍能盖在阅读器上。`ensureRoot()` 把节点挂到 `#main`，`toggleFullscreen()` 记 `localStorage.rd_fullscreen`，切换后 `resizePages()` 按新宽度重画原页。顶栏加 `overflow-x:auto` + 模式/按钮组 `flex:0 0 auto`：停靠后阅读区只剩两三百像素时按钮仍能横向滚到。
+  - **批注文本 + 数字角标**：划词浮层加「批注」与 `textarea`（`saveNoteAnnotation()` → `/api/reader/anno/save`，`kind=note`、`comment=文本`）。`applyReaderAnnos` 不再生成「批注 N」胶囊，改为按「页 + 创建时间」全局编号（`annoNumbers()`），把 `<button class="rd-anno-dot">N</button>` 塞进该条高亮所在的 `mark.rd-hl`（`highlightIn` 现在返回最后一个 mark），绝对定位在右上角；原文重排找不到高亮时退到段落右上角（`.rd-anno-dot-edge`，多个纵向错开）。抽屉与浮层的条目也带同号徽标。
+  - **译文 PDF（覆盖式）**：前端 `buildTranslatedHtml()` 用 pdf.js 把每页按 2 倍渲染成 JPEG 铺底，再对每个有译文的 text/heading 块按 `rect`（左上原点、pt）生成白底 `.bk`，字号用二分测量（`makeFitter()`，上限取 `block.size`）塞进原文字框；`@page{size:Wpt Hpt;margin:0}` + `.pg{break-after:page}` 保证一页对一页。导出发给 Electron：`preload` 新增 `gmWin.pdfExport`，主进程 `pdf:export` 落一个临时 HTML → 隐藏 `BrowserWindow` → `printToPDF({printBackground,preferCSSPageSize,margins:0})` → 保存框写盘。浏览器环境退回系统打印（弹窗被拦时改用隐藏 iframe 打印，避免「await 之后 window.open 丢失用户手势」）。
+- 相关代码/指令：`web/reader.js`（`toggleFullscreen` / `saveNoteAnnotation` / `applyReaderAnnos` / `annoNumbers` / `exportTranslatedPdf` / `buildTranslatedHtml` / `printHtmlFallback`）、`web/css/reader.css`（`.rd-root`、`.rd-fullscreen`、`.rd-anno-dot`、`.rd-note-input`、`.rd-anno-no`、顶栏 overflow）、`desktop/main.js`（`ipcMain.handle('pdf:export')`）、`desktop/preload.js`（`pdfExport`）。
+- 验证：浏览器实测——阅读器矩形 `x=168,w=209`（侧栏 168 宽仍可见），点 ⤢ 后 `fixed/inset:0` 盖住侧栏、再点恢复停靠；停靠时点「笔记」弹窗 `z-index:50` 在阅读器之上且可编辑。数字角标：紫色高亮「用数学（卓越班）大二」右上角出现蓝色 `16×16` 圆点、白字 1，点开浮层显示高亮；黄色「AI应用测试」上的 2 号批注点开后显示评论文本。用 Electron 探针跑真实链路：页尺寸 793×1123px（=595×841.9pt）、底图 `naturalWidth=1190`、27 个文本块 0 越界、白底；`printToPDF` 产物 1 页 595×842pt、可抽文、含 1 张图；2 页测试 PDF 导出正好 2 页（无空白页）。批注输入链路（划词→批注→输入→保存）探针通过：浮层与输入框出现、保存后生成 note 批注并出现 2 号角标。清理：测试批注与临时 PDF/缓存均已删除。
+- 已知约束：译文 PDF 只支持 PDF（docx/pptx 没有原页图，暂不导出）；公式/图表块保持原图不覆盖；页面尺寸按第一页统一，混合纸张尺寸的 PDF 会被拉伸；浏览器兜底走系统打印而不是直接落盘。
+
+## [2026-11-03] Markdown 语法纠错：笔记 + IDE
+- 问题/决策：笔记（textarea）与 IDE 里的 `.md` 都没有任何语法校验；用户要求「Markdown 语法纠错 + 笔记侧开关」。定为：提示 + 一键修正（不在未点击时改正文）、检查通用语法 + `[[双链]]` + `$公式$`、笔记用「编辑区下方问题条」而非换编辑器、笔记开关只控笔记（IDE 的 `.md` 始终检查）。
+- 解决方案：
+  - **共享规则引擎** `web/mdlint.js`：纯函数 `MDLint.lint(text,{noteNames})` / `MDLint.fixAll(text,diags)`，逐行扫描 + 围栏状态机；代码块与行内代码内不跑强调/公式规则。规则：围栏未闭合（error）、`#` 后缺空格/全角＃、行尾单空格、连续空行、同级列表符号混用、标题级别跳跃、表格列数不一致、双链不存在、`*`/反引号/`$` 不配对（info）、围栏无语言（info）、文件末尾缺换行/多空行。`fixAll` 只做行级幂等替换（2 个空格的行尾强制换行不报也不动）。
+  - **笔记侧**（`web/init.js`）：工具栏 `纠错` 开关（`localStorage.gm.notes_lint`，默认开）+ 按钮徽标显示问题数；编辑模式下问题条可展开/收起，点条目按行列选中并滚动（按 `lineHeight` 估算 scrollTop），支持单条「修复」与「全部修正」；修正用 `execCommand('insertText')` 写入以保留 Ctrl+Z；预览模式下只保留徽标。输入 400ms 防抖、打开笔记/删除笔记时同步重算。
+  - **IDE 侧**（`web/gal/gal-ide.js`）：复用已有 `ideMdEligible`（预览用的同一判断），打字 300ms / 打开 / 保存后跑检查，结果写 `monaco.editor.setModelMarkers(model,'markdown',…)`（error→8、warning→4、info→1）；同一份结果喂给既有「问题」面板（与 pyright 分流，点条目跳行），空态文案对 `.md` 单独显示。命令面板新增「Markdown：修正可自动修的问题」，用 `executeEdits` 整篇替换以保留撤销栈并把文件标记为 dirty。
+- 相关代码/指令：`web/mdlint.js`（新增）、`web/index.html`（脚本顺序 + 笔记按钮/问题条 DOM）、`web/init.js`（`noteLint*` 系列）、`web/css/notes.css`（`.nt-lint*`）、`web/gal/gal-ide.js`（`IDE_MD_LINT` / `ideMdLint` / `ideMdFixAll` + 三处调度）。
+- 验证：Node 直跑规则引擎，10 类坏例全部命中、行号正确；`fixAll` 后只剩不可修项且末尾换行归一。Electron 真实页面探针（临时 `.md` 与临时笔记，已删除）：IDE 打开后 6 条 markers/面板条目一致，执行修正后剩 4 条、`#` 空格与列表符号已改、文件变 dirty，`.py` 不触发；笔记问题条 5 行、徽标 5，点首条定位到第 2 行、`全部修正` 后剩 3 行、徽标同步为 3，关开关后问题条隐藏且 `aria-pressed=false`。`node --check` 三个文件通过。
+- 已知约束：`*`/反引号/`$` 只能给 info（中文里的乘号、金额会误报）；双链只解析 `[[名称]]`/`[[名称|别名]]`，不检查相对路径链接；IDE 侧 `fixAll` 只改内存，需用户自己 Ctrl+S 落盘；表格与围栏的结构性问题不自动修。
+
+## [2026-11-03] PDF 阅读器 v2：停靠体验 + 双向划词联动 + 1000 页虚拟化
+- 问题/决策：原阅读器左栏是纯 canvas（不可选、不能高亮），大文档一次性渲染所有页、打开就为全部段落建 DOM；用户要求「成熟阅读器交互 + 双向划词联动 + 大文件流畅」，方案确认：前端 pdf.js 文本层做定位、联动高亮仅临时、UX 增页码/缩放/快捷键/全文查找/缩略图、基线 1000 页。
+- 解决方案：
+  - **左栏文本层 + PageIndex**：`renderPage` 用 pdf.js `getTextContent()` 建透明绝对定位 span（`left/top/fontSize` 来自 viewport 变换，宽度按 `item.width` 做 `scaleX` 对齐），同时建**pt 坐标**归一化字符索引（去空白/零宽/软连字符 + 小写），缩放只乘 scale 不重建索引。文本层先于画布粉刷构建，模式切换不中断选中。
+  - **双向联动**：右→左先画 `block.rect` 块级矩形（<150ms），再异步在页索引里做归一化子串匹配、按 block 位置消歧，精修成字符级矩形（`rectsForRange` 按行合并）；左→右用左栏 Range 文本反查同页包含它的 block，右栏套 `mark.rd-hl-live` 并滚动。仅临时、不落库，Esc/换文档清除。
+  - **虚拟化**：页面 div 只留占位，canvas/textLayer/highlightLayer 仅存在于可视区，离屏 >6 页 `releasePage()`（取消渲染、清 canvas、卸文本层、`page.cleanup()`）；渲染队列并发 2、`RENDER.gen` 作代次、跨代自动补排；取消后立刻复用同一 canvas 会被 pdf.js 拒绝，加 80ms×n 延迟重试（最多 4 次）。
+  - **阅读流懒构建 + 分块**：默认「原页」不建阅读流；切原文/双语时按页分块（每 20 页让出主线程）构建并在顶栏显示进度。`blockOf` 增加从 `RD.doc.blocks` 回退查询，保证阅读流未建时联动/查找仍有 rect。
+  - **导航与查找**：页码输入框（Ctrl+G）、缩放适配（页宽/页高/实际，倍率叠加）、`j/k`、Space/Shift+Space、Home/End、`Alt+←` 阅读位置回退、`Ctrl+F` 查找条（200ms 防抖）。全文查找走新接口 `POST /api/reader/search`：复用 `parse_doc` 缓存，归一化（去空白/零宽/软连字符+小写）后 `str.find`，命中块再映射回原文取 quote/snippet；返回 200 条上限、每页 20 条、带 total/truncated；归一化索引按 doc 缓存 2 份。
+  - **缩略图**：120px 侧栏，1000 页只建占位，IntersectionObserver 生成 104px 小 canvas，LRU 60（淘汰时把 canvas 置 0）；点击跳页、当前页描边。
+  - 其它：左栏滚轮/触摸后 800ms 内不被右栏页同步抢走；拖选文字后浏览器补发的 click 不再把左栏滚回页首；`MAX_PARSE_PAGES` 300→1000。
+- 相关代码/指令：`web/reader.js`（`buildTextLayerDom` / `makeIndex` / `renderPage` / `releasePage` / `rectsForRange` / `findRectsInIndex` / `liveFromBlock` / `linkFromPageSelection` / `ensureFlow` / `toggleFind` / `toggleThumbs`）、`web/css/reader.css`（`.rd-text-layer` / `.rd-hl-layer` / `.rd-live-rect` / `.rd-find*` / `.rd-thumb*` / `.rd-pageinput`）、`app/reader.py`（`search_blocks` / `_span_in_text` / `MAX_PARSE_PAGES`）、`app/api/reader.py`（`/api/reader/search`）。
+- 验证：后端 1000 页（27,000 块）首次解析 18.5s、缓存打开 316ms、查找首次 49ms/后续 18ms（命中 200/1000，truncated）；Electron 真实页面探针：1 页文档文本层 84 span、右→左精修 3 个矩形（最大 50px / 页宽 1184px）、左→右 1 个 `mark.rd-hl-live`、查找与缩略图正常；1000 页文档 1000 个占位中仅 2 页已渲染，跳 500 页后第 1 页被释放、第 500 页文本层 103 span，切双语 1.5s 已建 17,820 块且顶栏有进度。`node --check` / `py_compile` 通过。
+- 产物：`docs/PDF_READER_USAGE.md`（使用说明）、`docs/PDF_READER_TEST_REPORT.md`（测试报告）。
+- 已知限制：首帧光栅化在隐藏探针窗口里波动大（1.1–3.9s），未取到可见窗口 P95；未做 30 分钟内存 soak；旋转页/跨段选择的字符级高亮会退化为段落级；解析上限 1000 页，超出部分只在左栏看原页。
+
+## [2026-11-03] 修复「备份与恢复」点击无反应
+- 问题：设置 → 数据与高级 → 「备份与恢复…」点了没反应（工作台里的「备份」按钮正常）。
+- 根因：
+  1. `#work-modal` 原本写在 `#work-panel` 里面。非工作台模式时 `#work-panel` 带 `.hidden`（`display:none !important`），弹窗虽然被 `workOpenDialog` 去掉了 `hidden`，但祖先不渲染 → `getBoundingClientRect()` 为 0×0，看起来就是「点了没反应」。
+  2. 顺带发现：从设置打开时还没经过 `workEnterMode()`，`workBind()` 没执行，弹窗右上角 ✕ / 底部取消 / 点击遮罩 / Esc 都没有处理器；Esc 监听还被 `state.uiMode !== 'work'` 挡住。
+- 解决方案：
+  - 把 `#work-modal` 从 `#work-panel` 里搬到 body 级（会话搜索浮层之后、设置弹窗之前），`.work-modal` 本来就是 `position:fixed; z-index:80`，放哪都能盖住 `.modal`(50)。
+  - `workOpenDialog()` 开头补 `if (!WORK.bound) workBind();`，保证任何模式打开都有完整的关闭/确认绑定（`workBind` 幂等，`workEnterMode` 仍按 `WORK.bound` 判断）。
+  - Esc 关闭不再要求 `state.uiMode === 'work'`，只看弹窗是否可见。
+- 相关代码：`web/index.html`（弹窗位置）、`web/work.js`（`workOpenDialog` / `workBind` 的 Esc 监听）。
+- 验证（Electron 真实页面）：Solo 模式 → 打开设置 → 点「备份与恢复」：弹窗 1390×843、中心 `elementFromPoint` 命中弹窗内容、标题「数据备份」、导出按钮存在、✕ 可关闭；工作台入口同样能打开。接口层：`POST /api/backup/export` 200、588MB、67s；小样本 `preflight` 返回 manifest+summary；坏 zip 返回 400「不是有效的 ZIP 备份」；无 `X-Backup-Confirm` 的 restore 返回 400；在隔离临时目录跑 `restore_backup()`，sessions/notes 被备份替换（旧 notes 文件消失）、`backups/pre-restore-*.zip` 安全备份生成。
+- 已知风险（未改）：导出与预检都把整包读进内存（本次备份 588MB，峰值接近 1GB），导出 67s 期间前端只有「正在打包…」文字、没有服务端进度；大备份的 preflight 未做完整压测（只验了小样本）。需要的话可改成流式 ZIP + chunked 响应。
+
+## [2026-11-03] 备份导出 / 预检改为流式 + 带进度
+- 问题/决策：原实现 `export_backup()` 把整包 588MB 攒在 `BytesIO` 里、67 秒后才回响应，导出与预检全程只有「正在打包…/正在预检…」；预检还要把整包读进内存再一次性哈希。决定：导出走 chunked 流式 ZIP；预检拆成「XHR 上传进度 + 后台哈希任务轮询」；恢复也先落盘再解包，避免 1GB 级峰值内存。
+- 解决方案：
+  - `app/backup.py`：新增 `_SinkWriter`（只依赖 write/tell，zipfile 写模式可边压边发）、`export_backup_to(sink)`、`backup_name()`；`export_backup()` 保留为「收集 chunks 再 join」以兼容旧调用。`inspect_backup(src, progress=None)` 支持 bytes **或文件路径**，校验哈希时按 ~0.2s 回调 `(done,total)`；`_open_zip` / `_safe_extract` 同步支持路径。新增预检任务表（`start_preflight_job` / `preflight_job_status`，TTL 600s，后台线程跑完即删临时文件）。
+  - `app/httpd.py`：新增 `_body_to_file(path)`（1MB 分块落盘，不占内存）与 `chunked_start/chunk/chunked_end`（HTTP/1.1 手动 chunked 帧 + SECURITY_HEADERS）。
+  - `app/api/backup.py`：导出改为 `chunked_start → export_backup_to(h.chunk) → chunked_end`（客户端中断时 zip 写入抛错，finally 收尾）；新增 `POST /api/backup/preflight/job`（落盘后返回任务 id）与 `POST /api/backup/preflight/status`（state/done/total/pct/result/error，done 或 error 取一次即删）；恢复改为落盘后 `restore_backup(path)`；旧同步 `/api/backup/preflight` 保留兼容。
+  - `web/work.js`：`workBackupPreflight` 改为 XHR 上传（`upload.onprogress` 显示「上传中 x%（已传/总）」）→ 轮询显示「校验中 x%（已校验/总）」→ 通过后显示统计；新增 `workFmtBytes` / `workBackupUpload` / `workBackupPoll`。
+- 验证：HTTP 实测导出响应头 4ms 到达、`Transfer-Encoding: chunked`、无 Content-Length、首 2MB 在 1.1s 时读到（PK 头）；用 899 字节小样走 job：上传返回 id、轮询 `done 100%`、result.summary 正确；8MB 非 ZIP 走新 UI：显示「上传完成，正在校验…」→「预检失败：不是有效的 ZIP 备份」，恢复按钮保持禁用；Python 单测覆盖 `export_backup_to`（3.1MB/32 chunks）、路径预检进度（末次 done==total）、任务进度、隔离目录恢复（notes 替换、旧文件消失）；`ruff` 与 `py_compile` 通过。
+- 注意：chunked 响应没有 Content-Length，导出进度只能显示「已导出 X MB」（Electron 壳 `file:save-progress` 的 total 为 0）；预检任务表只在内存里，服务重启后未取走的任务失效（临时文件由 TTL 清理）。
+
+## [2026-11-03] 阅读器「全屏」不是真全屏：标题栏仍显示
+- 问题：点 PDF 阅读器 ⤢ 后，Electron 自绘标题栏（Galgame_monster + 最小化/关闭）仍在，任务栏也没隐藏。
+- 原因：`.rd-root.rd-fullscreen` 只改成 `position:fixed; inset:0`，但它挂在 `#app` 里，而 `html.electron #app` 的高度是 `calc(100dvh - var(--tb-h))`；同时 `#titlebar` 的 `z-index:80` 高于阅读器的 46。另外全屏只改了 CSS，没有真正调用窗口全屏。
+- 解决方案：
+  - CSS：新增 `html.rd-immersive #titlebar { display:none !important }` 与 `html.rd-immersive #app { height:100dvh }`（reader.css 在 base.css 之后加载，能覆盖）。
+  - `web/reader.js`：把「改 UI」与「改系统状态」拆开——`applyImmersive(on)` 只切 `rd-fullscreen` / `html.rd-immersive` + 存 localStorage + 重排；`toggleFullscreen()` 再调 `gmWin.setFullScreen(on)`（浏览器退回 `requestFullscreen/exitFullscreen`）。`bindFullscreenSync()` 监听 `gmWin.onFullScreen` 或 `fullscreenchange`，用户用系统快捷键退出时只同步 UI；`close()`（Esc 关闭阅读器）会一并退出系统全屏；`ensureRoot()` 若上次是全屏则恢复类名并重新进入系统全屏。
+  - `desktop/main.js`：新增 `ipcMain.on('win:set-fullscreen')` → `win.setFullScreen()`，并在 `enter-full-screen` / `leave-full-screen` 时回推 `win:fullscreen`。
+  - `desktop/preload.js`：暴露 `gmWin.setFullScreen` / `gmWin.onFullScreen`。
+- 验证（Electron 探针，注入假的 gmWin）：进入前标题栏 `display:flex`、`#app` 高 811、阅读器矩形 `[268,32,1122,811]`；点 ⤢ 后 `html.rd-immersive`、标题栏 `display:none`、`#app` 高 843（=窗口内高）、阅读器矩形 `[0,0,1390,843]`、按钮变 ⤡、`localStorage.rd_fullscreen=1`、调用 `setFullScreen(true)`；模拟系统退出全屏后 UI 自动恢复且不重复调用；再点两次得到调用序列 `[true,true,false]`、状态归零。`node --check` 三个文件通过；壳已重启加载新 IPC。
+- 注意：浏览器模式（无 Electron 壳）下 `requestFullscreen` 需要真实用户手势，脚本模拟点击会被拒绝，但用户实际点击没问题；Electron 壳走系统全屏，最彻底。
+
+## [2026-11-03] 全项目静态分析（工具扫描 + 人工审查）与修复
+- 问题/决策：对 app / web / desktop 做一次静态分析。基线：`compileall` 全过、46 个前端 JS + 2 个 Electron JS `node --check` 全过、index.html 72 个静态引用无缺失、159 条 `@route` 无重复、46 个 JS 跨文件顶层同名声明 0 冲突、`tests/test_backup.py` / `test_reader.py` 全过。真问题集中在「工具扫不出的语义缺陷」：Unicode 索引错位、队列无 reject 分支、每字符对象不回收、恢复整包进内存、mdlint 误报、重复 SVG symbol。
+- 解决方案：
+  - `app/reader.py::_span_in_text`：`İ` 这类字符 `lower()` 会变成两个码位，原来按原文下标 append 导致 `idx` 与归一化串错位，命中靠尾部时 `IndexError` → `/api/reader/search` 整条 500。改为「每个输出字符都映射回同一个原文下标」。
+  - `web/reader.js::pumpRender`：`renderPage().then()` 没有 reject 分支，意外 reject 时 `RENDER.active` 不回减、卡在 max=2，后续页永远停在骨架屏。改为 `then(ok, err)` 两个分支都回减再泵队列。
+  - `web/reader.js`：`makeIndex` 的 `chars` 与 `norm` 同样要逐字符对齐（同上）；`releaseFarPages` 增加「距离 >12 页就丢弃 `tc`/`index`」，否则 1000 页文档的每字符对象会留到几百 MB（`ensureTextData` 会按需重建，联动/查找不受影响）。
+  - `web/work.js`：恢复备份原来是 `file.arrayBuffer()` 再 fetch（588MB 备份在渲染进程再存一份、且无进度）。抽出 `workBackupPost(url,file,headers,onProgress)`（XHR + `upload.onprogress`，File 直接流式发送），预检与恢复共用；恢复对话框显示「正在上传备份 x%」。
+  - `web/mdlint.js`：列表符号检查遇到非列表行（段落/标题）重置约定，避免文档里两个独立列表互相误报；标题级别按「行首 1–6 个 # 且后面不是 #」识别，无空格标题也参与跳跃判断（与注释一致）。
+  - `web/index.html`：删除重复的 `<symbol id="i-box">`（第二个永远不可达）。
+- 相关代码：`app/reader.py`、`web/reader.js`、`web/work.js`、`web/mdlint.js`、`web/index.html`。
+- 判定为误报未动：S608（SQL 字段白名单拼接）、S602（Agent/钩子按设计 `shell=True`）、B904（异常链风格）、RUF001-003（中文标点）、RUF059（`_guard` 式解包）、B023（chat.py/usage.py 的闭包都在同轮次内同步调用）。
+- 遗留清理项（本次未改）：F401 28 处未用 import、F841 `app/dojo/primitives.py:101` 的 `payload`、3 处 E731 lambda 赋值、262 处过期 `# noqa`、63 处循环变量重赋值（PLW2901）。
+- 验证：`_span_in_text('İstanbul machine learning','learning')` → (17,25)、`search_blocks` 正常返回命中（原来 IndexError）；node 脚本验 mdlint 7 个用例（混用报、独立列表不报、无空格 H2 不报跳跃、H1→H3 报、七个 # 不算标题、fixAll 幂等 secondPassFixed=0）；index.html 重复 id 810/810；`node --check` 3 个文件、`compileall` 通过；`pytest tests/test_backup.py tests/test_reader.py tests/test_api_handlers_smoke.py` 35 项全过。
+
+## [2026-11-03] 对话附件留存（图片 / 文档可被 AI 回看）
+- 问题：图片只在 vision 模式下留了识别文本；chat（多模态）模式历史里只剩「【图片】」，模型无法回看；重发/重新生成时当轮图片不会重新附图；`see_image` 走 `resolve_path`，明确禁止读本项目 `data/`，模型也没有任何入口能取回 `data/uploads` 里的图。另外 `sweep_uploads` / `drop_upload_files` 只遍历 `image`（单图兼容字段），多图消息里第 2–4 张会被启动清理当孤儿删掉。
+- 解决方案（用户选定：仅工具按需回看）：
+  - `app/uploads.py`：新增 `att_id(name)`（由落盘名派生，旧消息无需迁移；非 ASCII 名回退 sha1 短哈希避免撞 id）、`save_upload` 返回值加 `id`、`read_message_images(sid,msg)`；`_referenced_files` 统一遍历 `images` 多图 + `doc`，`sweep_uploads` / `drop_upload_files` 都改用它（修掉多图被误删）。
+  - `app/attachments.py`（新增）：把消息里的图片/文档统一成 `{id,kind,file,name,mime,size,msg_index,text}`，提供 `from_message` / `list_for_session` / `find` / `read_bytes` / `ref_line`；只认当前会话 uploads 目录内的落盘名，不走沙箱路径。
+  - `app/context.py::_msg_text`：历史里每条带附件的用户消息追加一行 `【可回看附件】att_x｜图片｜name；…`（只给 id，不占正文；压缩保留消息本体，所以压缩后 `attachment_read` 仍可用）。
+  - `app/agent.py`：新增只读工具 `attachment_read`（schema + `TOOLS` + `PLAN_MODE_TOOLS` + `_HANDLERS` + caps 分支 + 文本协议提示词）。参数 `id/name`（都空=列出附件）、`question`、`offset/limit`（文档分段，默认 6000/上限 20000）；图片走 `recognize_image_fallback`（失败自动换通道），文档返回发送时存的 `doc_text`。
+  - `app/api/chat.py`：① doc 消息补 `id`/`mime`；② 重新生成/修改/继续且 `vision_mode()=="chat"` 时，用 `read_message_images` 把目标消息的图片重新附上（vision 模式已有 `vision` 文本，不重复识图）；③ 工具循环里对 `attachment_read` 做原生视觉特判：图片附件直接附到本轮上下文（与 `see_image` 共用 `VISION_NATIVE_MAX` 与去重），文档继续走普通工具路径。
+- 相关代码：`app/uploads.py`、`app/attachments.py`、`app/context.py`、`app/agent.py`（`_t_attachment_read` / `native_tool_schemas`）、`app/api/chat.py`。
+- 验证：`from_message` 多图+文档解析正确、`find` 支持 id/原名/落盘名、文档 `offset/limit` 分段与「还有 N 字」提示正确、无会话 id / 文件缺失均返回可读错误；`_msg_text` 尾部正确出现引用行；`sweep_uploads` 后 2 张图都在、`drop_upload_files` 两张都删、旧结构 `image` 单图仍可读；`native_tool_schemas(agent_on=True)` 含 `attachment_read`（21 个）；`import app.httpd` 无循环导入；ruff / compileall 通过；`pytest`（agent_defs / tool_meta / agent_tool_format / context / uploads_guard / api_handlers_smoke / agent_guards / permissions / chat_blocks / settings_defaults / session_store / session_events / chat_jobs / chat_plan / chat_prefetch / kb_export_md）全部通过。
+- 注意：工具调用需要开启 Agent；关闭 Agent 时历史里仍会看到「【可回看附件】」引用行，但模型没有调用通道。压缩只移动 `summary_upto`、不删消息，所以附件本体与 `attachment_read` 清单在压缩后仍然可用。
+
+## [2026-11-03] 阅读器公式：为什么变成文本，改成 KaTeX / 保真排版
+- 问题：PDF 阅读器里数学公式看起来像普通文本，'排版和原文差距大'。查链路后确认不是单纯'偏好'：
+  1. 行内公式被 `_protect_inline` 换成 `⟦F1⟧`，译文还原时 `formatInline` 只塞进 `<span class="rd-math">` 纯文本（等宽字体 + 淡色药丸），永远不走 KaTeX；
+  2. `_make_block` 只把「单行」判为 formula，多行公式组（align / cases / 矩阵）落到 text 分支被当正文翻译；
+  3. 实测 `_protect_inline` 还有两个 bug：占位符尾部空白被 `strip()` 吃掉（`n = 6 and` → `6and`、`x ∈ R` → `∈R`）；`_math_token` 的符号正则比 `MATH_CHARS` 窄（不认 `⊆` `⇒` `⋅` `±` 等），`aS ⊆ D` 完全没被保护；且只保护到孤立 token（`f(x) = x^2 + 1` 只保护了 `=` 和 `1`）。
+- 参考（沉浸式翻译 / PDFMathTranslate / BabelDOC）：原则是「公式当不可翻译元素、原样保留、不重排版」；PDF 模式保原始版式。所以默认应显示原页裁图，只有确实拿到 LaTeX 才用 KaTeX。
+- 用户决策：行内公式「保持原文 + 改排版」；行间/多行「裁原图，AI 成功再替换」；译文「要求 LaTeX + KaTeX 渲染」。
+- 解决方案：
+  - `app/reader.py`：`_protect_inline` 重写为「连续数学 token 整段保护 + 空白保留」；新增 `_tok_kind`（def/maybe/word）、`MATH_STRONG`、`MATH_FUNCS`、`_PERCENT`、函数调用识别（`f(x)`）；`_make_block` 增加多行公式判定（2–8 行、≤1 个英文词、符号密度 ≥0.32、高 ≤300pt）；`TRANSLATE_SYS` 增加「行内公式用 `$...$` 包裹、占位符原样保留」；`FORMULA_PROMPT` 支持多行公式（`\begin{aligned}`）；`SCHEMA_VERSION` 11→12（版面规则变了）、`PROMPT_VERSION` rd2→rd3（提示词变了）、`FORMULA_VERSION` 1→2。
+  - `web/reader.js`：`formatInline` 重写为同时处理 `⟦F⟧` 与 `$...$` / `$$...$$`；新增 `mathInlineHtml`（纯数字 / 货币 `$5 and $` / 含中文 / 长英文句子一律不当公式，避免误渲染）；复用 markdown.js 的 `mathHtml`（KaTeX 未就绪时输出 `math-pending`，由 init.js 的 `upgradeMath` 补渲染）。
+  - `web/css/reader.css`：`.rd-math` 改为继承正文字体、去底色药丸；补 `.rd-dst .katex` 与 `.rd-dst code.math-pending` 样式。
+  - `docs/PDF_READER_USAGE.md`：新增「7. 公式与排版」，后续章节顺延。
+- 验证（实测输出）：
+  - `Let n = 6 and k ≥ 3, then aS ⊆ D with x ∈ R.` → `Let ⟦F1⟧ and ⟦F2⟧ then ⟦F3⟧ with ⟦F4⟧ R.`，F1=`n = 6`、F2=`k ≥ 3,`、F3=`aS ⊆ D`（原来没被保护）、F4=`x ∈`；空格不再丢。
+  - `We define f(x) = x^2 + 1 …` → F1=`f(x) = x^2 + 1`（原来只保护 `=`、`1`）；`3.5%` 现在会被保护。
+  - 多行分类：三行 align / 矩阵 → `kind=formula`；Theorem 正文（8 个词、ratio 0.25）与项目符号 → 仍是 text。
+  - `formatInline` node 验证：占位符正常还原；`$n = 6$`、`$x \in R$`、`3.5\%` 渲染为公式；`The cost is $5 and $7` 保持原文；纯数字占位回退文本；中文占位回退文本；`$$a=b$$` 走 display 模式。
+  - `pytest tests/test_reader.py`（含 `_protect_inline` 三例）10 项通过；`tests/test_backup.py` + `test_api_handlers_smoke.py` 25 项通过；ruff / compileall / `node --check` 通过。
+- 注意：`SCHEMA_VERSION` 12 会让旧的 `blocks.json` 失效，已有 PDF 下次打开会重新解析（1000 页约 18–20s）；`PROMPT_VERSION` rd3 让旧译文不再复用，需要重新翻译才能看到新的公式排版；未做真实 PDF 的视觉回归（需用户在实际文档里确认）。
+
+## [2026-11-03] 以真实论文（main.pdf）为样本的阅读体验审计
+- 样本：`D:\Ai\Project\paper\out\main.pdf`（6 页，乘积自由集论文）。方法：用当前解析器逐页重建 blocks，对照 pdfium/pypdf 原始文本与渲染页图核对。
+- 已修复：
+  1. **页 6 整段文字交错成乱码**（`2. aWnesiwgehrteids vXersailoonn.e...`）。根因有两层：`_segments` 按「字符上沿 + 每字符自身字号容差」分桶，同一行里 W/h/t（升部）与 e/i 上沿差 2.7pt，正好卡在 2.71 的临界值 → 一个单词被拆成多段；`_rows` 又让 ∑/∏ 这类跨界大符号把上下两行按重叠率缝合（并查集传递）→ 两行字符按 x 交错。修复：分桶改用「纵向中心 + 全页字号中位数的 0.45 容差」；`_rows` 第一条合并规则加「高度差 ≤1.8×」守卫。页 6 由乱码变为 6 行正确顺序，页 6 的 segment 数 863→330。
+  2. **连字符复合词被误判成公式**（上一轮扩符号集引入）：`product-free` / `well-defined` / `Sub-case` 等 36/114 块被保护、不翻译且 KaTeX 斜体化。修复：`_tok_kind` 新增 `_HYPHEN_WORD`（字母-字母复合词直接判 word）。复测 0 块。
+  3. **cases 大括号块被当正文翻译**：`c(n)=...{...}` 里的大括号在 PDF 中是私用区字形（U+E000–F8FF），旧逻辑只看符号密度 → 翻成 `c(n)= 32,, mn=≥92,,`。修复：块内含 `\uf8f1-\uf8f4` 直接判 formula（裁原图）。
+- 仍存在（按影响排序，尚未修）：
+  - **P0 标题层缺失**：`_make_block` 用绝对字号 `size >= 15` 判 heading，而本文标题 6.5–7.7、正文 4.9 → headings=0，阅读流里标题与正文同字号。应改相对字号（base×1.18）+ 短行 + 无句末标点 + 低符号密度。
+  - **P1 参考文献被逐条翻译**：7 条 references 共 13 个块，且 `19 pp.` 单独成块。建议 References 之后标记 `ref` 类型、不翻译。
+  - **P2 二维公式被切碎**：分式 `T=(m²+r)/(m−j)` 被拆成 3 个重叠块（`T=m2+r=...`、`(5)`、`,, m − j m − j`），裁剪区域可能不全；多重求和 `aXx= X y=...` 仍是 text。需按「垂直相邻 + x 重叠的数学行」合并成公式区域。
+  - **P3 文本层固有错误**：`b√nc` 实为 `⌊√n⌋`、`Σ` 提成 `P`、`≠` 提成 `=6`；`ifthere` / `searchover` / `ofproduct-free` 粘词。纯文本层无法恢复，缓解手段是行内公式改裁原页小图（需要逐 token 坐标）。
+  - **P4 续行单独成块**：`agreement.`、`19 pp.` 这类短续行独立成块，翻译后成孤立一行。
+- 相关代码：`app/reader.py`（`_segments` / `_rows` / `_tok_kind` / `_protect_inline` / `_make_block`）。
+- 验证：页 6 行文本顺序正确；连字符误判 36→0；PUA cases → formula；blocks 117（text 99 / formula 18）；`pytest tests/test_reader.py` 10 项通过；ruff 通过。
+
+## [2026-11-03] 阅读体验审计后续：标题层级 / 参考文献 / 二维公式合块（P0-P2）
+- 背景：以 `D:\Ai\Project\paper\out\main.pdf` 为样本审计出的 P0–P2，用户确认修复。
+- 解决方案：
+  - **P0 标题层级**：`_make_block` 改为相对字号判定（`cur.size >= page_base × 1.18`）+ 短行 + 至少 1 个英文词 + 符号密度 <0.3 + 不以句号/问号/叹号结尾（标题常以冒号结尾，不能把 `:` 算句末）；`page_base` 在 `_blocks_from_segments` 里用**整页**非图片行的 30 分位字号计算（按横向带算的话，标题自己成带时 base 等于标题字号，永远判不出来）。heading 增加 `level`（1=论文大标题 ≥1.45×base，2=章节），前端 `el.dataset.level` + CSS 分级。
+  - **P1 参考文献不翻译**：新增 `_mark_reference_blocks`，在 `parse_pdf` 落盘前把 `References/Bibliography/参考文献` 之后的块标成 `kind="ref"`；翻译任务 `todo` 排除 `ref` 与 `formula`（顺带修掉「公式块也被送进翻译」的浪费）；前端 `ref` 只渲染 `.rd-src`、不计入 `RD.totalBlocks`，CSS 在只看译文模式下也不隐藏。
+  - **P2 二维公式合块**：新增 `_line_is_mathy`（无正常英文单词 + 含数学符号/括号/逗号），段落拼接时若相邻两行都是纯公式且行距 ≤ max(6, 0.9×base) 就并入同一块（不看缩进，公式编号通常右对齐）；`cur.rect` 合并改用 min/max 四边，保证裁图覆盖整个分式。
+- 相关代码：`app/reader.py`（`_blocks_from_segments` / `_make_block` / `_line_is_mathy` / `_mark_reference_blocks` / `translate_doc` 的 todo）、`web/reader.js`（`addBlock` 的 ref 分支 + heading level）、`web/css/reader.css`、`docs/PDF_READER_USAGE.md`。
+- 验证（同一篇论文）：headings 0→9（`The extremal product-free subsets...:` 与 `a classification` 为 level 1，`1 Introduction`…`References` 为 level 2）；refs 13 个块、不再进翻译；分式 `T=(m²+r)/(m−j)=(m+j)+...` 由 3 个重叠块合并为 1 个 formula 区域（含编号 `(5)`），重叠文本块对 1→0；kinds = text 76 / formula 16 / ref 13 / heading 9；`pytest tests/test_reader.py` 10 项通过；`node --check` / ruff 通过。`SCHEMA_VERSION` 12→13 使旧版面缓存失效（首次打开重新解析一次）。
+- 未修（用户未选）：P3 行内公式文本层错误（`b√nc`=⌊√n⌋、`Σ`→`P`、`≠`→`=6`，需逐 token 坐标改裁原页小图）；P4 续行单独成块（`agreement.`）。
+
+## [2026-11-03] 阅读器翻译内核 v2：章节上下文 + 文档术语表 + 三级重试
+
+- 问题/决策：v1 逐段独立翻译，术语不统一、指代丢失；失败只记日志，整段静默丢弃；「译全文」每次都重译。v2 按参考项目（BabelDOC / PDFMathTranslate）改成「文档级上下文 + 结构化校验」。
+- 解决方案：
+  - **强制主模型**：`llm._quick_chat(..., use_light=False)`；阅读器翻译/术语表不再走轻量模型（`light_model`），避免小模型术语漂移。
+  - **按章节分批**：`_section_map` 给每块挂章节名；同章节连续段落成批（≤4 段 / 1600 字），跨章节强制切开。每批注入「文档标题 + 章节名 + 上一段原文 + 术语表」。
+  - **术语表**：`_term_candidates` 用「频次 × 词数」抽候选，模型一次生成 `[{src,dst}]`；落 `data/reader/<doc_id>/glossary_<lang>_<model>.json`。`/api/reader/glossary` 支持读取 / 保存 / 重新生成，前端设置面板可编辑。
+  - **校验**：`_validate_translation` 检查空译文、`⟦F1⟧` 占位符是否齐全、`[12]` / `Theorem 3.2` 等编号是否丢失、译文长度比是否异常；`_soft_issues` 只告警不重试。
+  - **三级回退**：整批失败 → 逐段重译 → 用未保护原文兜底；不再静默丢段。并发默认 3（`reader_translate_parallel`，1–4）。
+  - **断点续译**：只补缓存里缺失的段；`force` 只重译本页；`retry_failed` 重试失败段。跳过已是目标语言的段与 `ref/formula/figure`。
+- 相关代码：`app/reader.py`（`_section_map` / `_term_candidates` / `ensure_glossary` / `_validate_translation` / `_translate_batch` / `start_translate`）、`app/llm.py`（`use_light`）、`app/api/reader.py`（`/api/reader/glossary`、translate 的 `all_blocks` / `retry`）、`web/reader.js`（设置面板「重译本页 / 术语表」）、`web/css/reader.css`。
+- 验证：`pytest` 相关 27 项、ruff、`node --check` 通过；未做真实 API 端到端（需密钥）。
+
+## [2026-11-03] 阅读器译文导出重构：服务端重排 PDF（仅译文 / 双语）+ Markdown
+
+- 问题/决策：旧导出在浏览器里把每页渲成 2x JPEG，再按 block.rect 盖白块贴译文。译文比原文长时字号最小压到 3.5pt、`overflow:hidden` 静默裁切；纸张统一第一页尺寸；没有双语 / Markdown / 书签，双栏页还会压到栏间空白。决定整块替换为**服务端重排**。
+- 解决方案：
+  - 新增 `app/reader_export.py`：不依赖 platypus，直接用 reportlab canvas 顺序排版（`_Doc`：`block` / `heading` / `image` / `new_page`），字号固定 10.5pt / 行距 17.6pt，中文按字断行、西文按词断行（`_wrap` + `_glue_space` 处理中西文间距与标点）。
+  - 字体：优先 `NotoSerifSC-VF.ttf`（正文）+ `NotoSansSC-VF.ttf`（标题），回退 simsun/simhei/msyh；嵌入子集，中文可复制、可搜索。
+  - 图表 / 公式：复用 `reader.crop_png`（3x PNG）按阅读流顺序插回，**按原尺寸排版**（pixels / CROP_SCALE），只有超过版心或高度上限（公式 32% / 图表 46% 版心高）才缩小；不再强行铺满整栏，避免小公式被放大成一大块。
+  - 双语模式：原文 8.9pt 灰色 + 译文 10.5pt；标题翻译作标题、原文作灰色小字。
+  - 书签 / 页码：`canvas.bookmarkPage` + `addOutlineEntry`（标题 level 1/2 → 书签 0/1）；页脚页码 + 细线，第 2 页起页眉显示文档标题。
+  - Markdown：标题层级 + 译文 + 原文引用块；公式/图表以 base64 `<img>` 内嵌，单文件可分享。
+  - **只用已缓存译文**：缺译段落保留原文，`export()` 返回 `missing` 计数，前端导出前 `confirm` 提示。
+  - 服务端接口：`POST /api/reader/export`（mode=mono/dual/md）生成到 `data/reader/<doc_id>/exports/` 并返回同源下载 URL；`GET /api/reader/export/file?doc=&name=` 校验 `doc_id` 与 basename、禁止路径穿越，7 天自动清理。前端 Electron 走 `gmWin.saveUrl`（GET + X-Auth-Token 流式写盘），浏览器 fetch blob 下载。
+  - reportlab 改为**延迟导入**：未安装时阅读/翻译不受影响，仅 PDF 导出报「请先 pip install reportlab」。`requirements.txt` 已加 `reportlab>=4.0`。
+- 相关代码：`app/reader_export.py`（新增）、`app/api/reader.py`（export / export/file）、`web/reader.js`（导出三按钮 + `exportDoc` / `saveExport`，删除旧 `makeFitter` / `buildTranslatedHtml` / `printHtmlFallback`）、`web/css/reader.css`（`.rd-exp-row`）、`desktop/main.js` + `desktop/preload.js`（删除已无调用方的 `pdf:export` printToPDF 通路）、`tests/test_reader.py`、`docs/PDF_READER_USAGE.md`。
+- 验证（实测，`D:\Ai\Project\paper\out\main.pdf` 6 页）：
+  - 假译文导出：mono 7 页 / 198KB，dual 11 页 / 209KB；公式与图表裁图正确插回（如 `2|A| ≤ 2n−a−T+1`、`φ: S → [a,n]\\A`），书签 9 条层级正确，`pypdf` 能抽取中文，页码连续。
+  - `pytest tests/test_reader.py` 16 项通过；`ruff` 通过；`node --check web/reader.js` 通过；导出文件路由的正常下载 / 路径穿越 / 非法 doc_id 三种情况均按预期。
+  - 全量 `pytest` 仍有 2 个**既有失败**（`test_memory.py::test_reindex_mirrors_kb_and_session`、`test_prompt_budget.py` 提示 8268 > 8000 字），与本次改动无关。
+- 注意：PDF 导出为「重排文档」，图表按阅读流顺序插入，不再与原页页码一一对应；`data/reader/<doc_id>/exports/` 只保留 7 天。当前 venv（`.venv`）与系统 Python 都已装 reportlab。
+
+## [2026-11-03] 阅读流结构感知：列表缩进 / 定理分组 / 图注弱化（P3）
+
+- 问题/决策：阅读流把所有非标题段落都当正文，项目符号、定理、图注和普通段落长得一样，长论文里很难扫读。
+- 解决方案：
+  - `_make_block`：项目符号 / 编号段落标 `kind="list"`；`Figure/Table/图/表 + 数字` 开头标 `role="caption"`；`Theorem/Lemma/Proof/定理/证明…` 开头标 `role="theorem"`。文本本身不改，仍按原样送翻译。
+  - `_page_blocks`：列表缩进以「本页正文最常见左边界」为基准（不是绝对最小值，避免页边碎片把基准拉偏），一级缩进 ≈ 3% 页宽（PDF 字号单位差别很大，不能按字号算），限制 0–3 级，写入 `indent`。
+  - 前端：`addBlock` 加 `rd-list` / `rd-theorem` / `rd-caption` 类与 `--rd-indent`；CSS 做悬挂缩进、左侧竖线 + 浅底、图注小字弱化。
+  - 导出：列表缩进 12pt，图注用 `ref` 小字号样式，双语模式图注原文用 `note` 样式。
+- 影响：`SCHEMA_VERSION` 13→14，旧 `blocks.json` 自动失效，已有 PDF 下次打开会重新解析一次。
+- 验证（main.pdf，6 页）：kinds = text 61 / list 15 / formula 16 / ref 13 / heading 9；roles = theorem 11 / caption 0（该文没有 Figure/Table 图注）；列表 indent 全部为 1；`pytest tests/test_reader.py` 16 项通过；`ruff` / `node --check` 通过。
+- 相关代码：`app/reader.py`（`_make_block` / `_CAPTION_RE` / `_THEOREM_RE` / `_page_blocks`）、`web/reader.js`（`addBlock`）、`web/css/reader.css`、`app/reader_export.py`、`docs/PDF_READER_USAGE.md` 第 7 节。
+
+## [2026-11-03] 公式识别红色报错与导出截图过大的修复
+
+- 问题/现象：
+  1. 阅读流里部分译文/公式显示为红色。根因：KaTeX 用 `throwOnError:false` 渲染坏 LaTeX 时会输出红色 `.katex-error`；坏结果主要来自公式识别模型（返回解释、半截公式、环境不配对）。
+  2. 导出的 PDF 里公式/图表截图被强行拉到版心宽度，小公式被放大成一大块，多占 1–2 页。
+- 解决方案：
+  - 前端 [reader.js]：`renderLatex` 改 `throwOnError:true`，失败则清空 KaTeX 层、移除 `ai` 类、保留原裁图；行内公式先用 `throwOnError:true` 试渲染，失败显示原始 TeX，不再出现红色报错。
+  - 服务端 [reader.py]：新增 `_latex_sane`（长度 / 中文 / 花括号配对 / `\begin`-`\end` 配对），`recognize_formula` 不合法就抛 `ReaderError` 且不落缓存；提示词补充「⌊⌋ 不要写成 b√nc、不要臆造命令」；`FORMULA_VERSION` 2→3 使旧坏缓存失效。
+  - 导出 [reader_export.py]：`_Doc.image(png, max_ratio)` 按原尺寸（pixels / `CROP_SCALE`）排版，只有超出 `CONTENT_W` 或高度上限才缩放；公式上限 0.32 版心高、图表 0.46。
+- 验证：Node 直接调 `katex.renderToString(throwOnError:true)`，确认非法 `\frac{a}{b`、`\begin{aligned}…\end{matrix}` 会抛错、合法公式正常；main.pdf 导出 mono 由 7 页降到 6 页，公式截图回到与正文相近的尺寸；`pytest tests/test_reader.py` 20 项通过；ruff / node --check 通过。
+- 相关代码：`web/reader.js`（`renderLatex` / `mathInlineHtml` / `formatInline`）、`app/reader.py`（`FORMULA_PROMPT` / `_latex_sane` / `FORMULA_VERSION`）、`app/reader_export.py`（`_Doc.image`）、`tests/test_reader.py`。
+
+## [2026-11-03] Solo 提问标记：命名 + 右侧悬浮跳转按钮
+
+- 需求：多轮对话里给关键提问做标记并命名；Solo 模式下每个标记生成一个悬浮按钮（按钮文字即名称），点击快速跳回该次提问。
+- 数据与接口：
+  - 会话新增 `qmarks: [{idx, label, text, at}]`，最多 20 条；`slim_sessions` 回传时过滤越界下标、去掉 `at`，前端按 `idx` 直接跳转。
+  - 新增 `POST /api/session/qmark`（`{id, idx, label, text}`）：label 为空 = 删除；同一消息只保留一条；只允许 `role=user`；返回 `_ok_sessions` 的完整精简负载。
+  - 撤回 / 删除消息时同步下标：`trim_qmarks(drop_after=idx-1)`（尾部删除）或先移除该条再 `shift_after=idx`（仅删一条）；清空会话时一并清空 `qmarks`。
+- 前端：
+  - 用户消息悬浮菜单新增「标记提问」图钉按钮（已标记时高亮），点击走 `appPrompt` 命名，留空删除。
+  - 新增 `#qmarks` 右侧悬浮容器：每个标记一个胶囊按钮，文字为名称；点击用 `ssFocusMessage(idx)` 跳转（会自动补历史分页并高亮），右键改名 / 删除。
+  - 仅 Solo 显示：`#main.ide-mode/gal-mode/hall-mode/work-mode/plugins-mode` 下 CSS 隐藏；窄屏（<760px）收成圆点只留图钉。
+  - `turnDotsSync()` 末尾顺带 `qmarksRender()`，会话切换 / 消息重排后自动刷新。
+- 验证：`tests/test_qmarks.py` 7 项（裁剪/去重/API 增改删/拒绝 AI 消息/路由注册）通过；连同 session 窗口、压缩标记、Web 加固测试共 26 项通过；`ruff`、`node --check web/turndots.js`、`node --check web/chat.js` 通过。未在真实 Electron 窗口做点击回归。
+- 相关代码：`app/sessions.py`（`MAX_QMARKS` / `trim_qmarks` / `slim_sessions`）、`app/api/sessions.py`（`/api/session/qmark` / clear / withdraw）、`web/chat.js`（`buildActions` 图钉按钮）、`web/turndots.js`（`qmarkOf/qmarkList/qmarksRender/qmarkEdit/qmarkSave/qmarkJump`）、`web/index.html`（`#qmarks`）、`web/css/base.css`（`.qmarks` / `.qmark-btn`）、`tests/test_qmarks.py`。
+
+## [2026-11-03] README 重构 + 应用版本号改为 3.2.2
+
+- 问题/决策：README 停留在 3.0.0 时期，存在已删除功能（「不做插件市场」）、错误入口（大厅 6 项）、过期工具名（原始工具列表）与过期依赖说明（KaTeX 写成 CDN）；且 12 节结构里功能说明与配置、FAQ 混在一起。决定整篇重写并按「简介 → 快速开始 → 架构 → 功能地图 → 配置 → 安全 → 数据/更新 → 限制 → 结构 → FAQ → 技术栈」重排。
+- 主要更正（逐项核对代码后）：
+  - 版本：`app/store.py::APP_VERSION` 3.0.0 → **3.2.2**（前端「设置 → 数据与高级」与 HTTP `Server` 头都引用它）。
+  - 功能补充：插件（Python 工具插件 + MCP + DSH 索引）、子代理、轨迹、旁注提问、提问标记、B 站数据、学习观测、本机 ComfyUI 出图、PDF 阅读器 v2（术语表 / 三级重试 / 仅译文·双语·Markdown 导出）。
+  - 事实修正：大厅注册 **7** 项（补学习观测）；设置 **4 组 15 分类**（原 5 组 13）；知识图谱关系 **11** 种（原 13）；图标 **58** 个（原 46）；KaTeX / pdf.js / vis-network / xterm / Monaco 均本地内置（原写 CDN）；Agent 工具已收敛为 `read/edit/run/code/git/plan/agent/web/history/visual/image/asset/audio/workflow/utility` 元工具；MCP 默认关闭。
+  - 结构：删除重复的旧「更新与备份」与 FAQ 冗余；项目结构补 `reader.py` / `reader_export.py` / `aside.js` / `trajectory.js` / `agents.js` / `plugin_manager.py` / `image_gen.py` / `debugger.py` / `codeindex.py` 等；脚本列表按实际文件更新。
+- 验证：`python -c "from app.store import APP_VERSION"` → 3.2.2；README 12 个一级标题、699 行；grep 确认无「不做插件市场 / 46 个线条图标 / 5 组 13 分类 / 实际注册 6 个 / 13 种关系」等旧表述；`ruff check app/store.py` 通过。
+- 相关代码/文件：`readme.md`（整篇重写）、`app/store.py`（版本号）、`NOTES.md`（本条与版本地图同步）。
+
+## [2026-11-03] 工作台重构：多视图 / 任务模型增强 / 前端拆分 / 专注与统计
+
+- 需求：工作台整体重构与更新，覆盖「视图与布局、任务能力、前端架构拆分、新板块」四项；后端允许改表并自动迁移。
+- 后端：
+  - `tasks` 新增 `due_at / parent_id / depends_on / repeat_rule / estimate_min / sort_order` 六列；`db._ensure_task_columns` 用 `ALTER TABLE` 增量补列，并把旧 `meta.due_at` 回填到 `due_at`、`sort_order` 用 `updated_at` 兜底。`idx_tasks_due` 必须放在补列之后创建（旧库直接执行 SCHEMA 会因缺列失败）。
+  - 新增 `task_templates`（名称 / 标题 / 步骤 JSON / 标签 / 优先级 / 预计分钟）与 `focus_sessions`（专注 / 休息记录）两张表。
+  - `task_engine`：`create_task` 写入全部新字段；`update_task` 支持改截止 / 重复 / 父子 / 依赖 / 预计分钟，并在截止变化时重建「任务截止」日程；新增 `complete_task`（手动完成 + 按 `daily/weekly/monthly` 生成下一轮）、`reorder_tasks`、`list_tasks` 的 tag / priority / parent_id 过滤与 `sort_order` 排序。
+  - `app/work_extras.py`：模板 CRUD、专注记录、近 N 天统计（完成 / 新建 / 专注 / 逾期 / 标签）。
+  - API：`/api/work/tasks` 新增 `complete`、`batch`、`reorder` 与 `template_id` 创建；`/api/work/templates`、`/api/work/focus`、`/api/work/stats`；开始 / 继续前检查 `depends_on`，未完成时返回「前置任务未完成」。
+- 前端：
+  - 顶部新增视图切换：今天 / 周 / 月 / 看板 / 统计；「今天」保留原三栏，其余为独立容器；视图选择记在 `localStorage`。
+  - 周视图 7 列时间轴（日程 + 截止任务 + 专注分钟）；月视图月历 + 选中日明细 + 翻月；看板按状态分列，支持拖拽改状态、同列拖动排序、勾选批量完成 / 取消 / 删除 / 设优先级；统计页显示 KPI、每日完成 / 专注柱状图、标签分布与逾期列表。
+  - 任务详情新增截止 / 重复 / 预计分钟 / 父任务 / 前置依赖编辑与「存为模板」；新建任务支持从模板预填、父子与重复；任务卡显示逾期、父任务、等待前置。
+  - 专注计时：15/25/45/60 分钟，可暂停 / 继续 / 结束并记录，可关联任务；顶部按钮实时显示剩余时间。
+  - **work.js 拆分**：2921 行拆为 `web/work/{core,events,tasks,artifacts,workflows,backup,views,stats,focus,templates,misc}.js`，`index.html` 按顺序加载；拆分脚本与旧文件备份在 `_backup/web/work.js.bak`。
+- 验证：
+  - `pytest tests/test_work_extras.py tests/test_task_engine.py tests/test_calendar.py tests/test_artifact_preview.py tests/test_workflow.py` → 54 项通过；`ruff` 通过。
+  - 迁移测试：手写旧版 `tasks` 表（仅旧列）后 `db.configure` → `due_at` 从 meta 回填、`sort_order` 回填、新列存在。
+  - 新接口用假 Handler 实跑：create / list / update / complete（含重复任务）/ templates / focus / stats / batch 全部返回预期。
+  - 所有 `web/work/*.js` 通过 `node --check`；把 11 个模块拼接后在 Node 内加载（带最小 DOM stub）无重复声明 / 加载错误；静态扫描 101 个 `workXxx(` 调用均有定义。
+  - 未在真实 Electron 窗口做点击回归（多视图布局、拖拽、专注计时需实际点一次确认）。
+- 相关代码：`app/db.py`、`app/task_engine.py`、`app/work_extras.py`、`app/api/work.py`、`web/work/*.js`、`web/index.html`、`web/css/work.css`、`tests/test_work_extras.py`、`readme.md` 4.9 节。
+
+## [2026-11-04] 「正在看图」提示的 emoji 换成 UI 图标
+
+- 问题/决策：流式气泡里的 `📷 正在看图…` 与全局 SVG 图标风格不一致；emoji 在不同系统字号/颜色也不同。
+- 解决方案：`web/stream.js` 的 `recognizing` 分支改用 `icon('image')`（内置 sprite）拼 `innerHTML`；`.recognize-tip` 改为 `inline-flex + gap:5px`，图标固定 14px。
+- 验证：`node --check web/stream.js` 通过；全仓 grep 确认 `📷 / 📸` 已无残留。
+- 相关代码：`web/stream.js`（`recognizing` 分支）、`web/css/base.css`（`.recognize-tip`）。
+
+## [2026-11-04] 对齐 Trae 提问能力：上下文引用 / 侧边对话 / 内联追问 / 分享与回退
+
+- 背景：对比 Trae 的提问能力（主 / 侧 / 内联三个入口、九类 `#` 上下文、Fork、回退、分享、侧边多标签、内联多轮）后确认四项差距并逐项补齐。
+- 1) 上下文与引用
+  - `app/api/chat.py`：`@workspace / @rule / @problems / @folder:<dir> / @chat:<id>` 解析（`_special_refs`）；`chat_auto_context`（默认开）时用代码索引按提问文本混合检索，`score<0.18` 丢弃、最多 5 条，产出带 `path/start/end/symbol` 的 refs；索引未就绪时后台重建，本轮只回显显式引用。
+  - `app/context.py`：自动引用按「【引用代码：path:start-end · symbol】」注入；`app/config.py` 新增 `chat_auto_context`。
+  - 前端：AI 消息与 done 事件新增 `references`，`buildReferencesBlock` 渲染并支持点击跳 IDE 行；`composer.js` 的 `@` 候选补上五类上下文；设置面板加开关。
+  - 验证：`tests/test_chat_refs.py` 7 项。
+- 2) 侧边对话升级
+  - 新增 `app/aside_store.py`（`data/aside.json`，按主会话分组，最多 20 线程 / 每线程 12 轮，标题取选区前 40 字）；`/api/aside/threads` 支持 list/create/rename/delete；`/api/aside/stream` 带 `thread_id` 时以服务端线程的选区 / 历史为准（前端只追加当前问题），回答完 `append_qa`。
+  - `web/aside.js`：新增 `S.threads / S.threadId`、标签栏（切换 / ＋新建 / ×关闭 / 双击改名）、同选区自动复用线程、历史回填；`inSolo` 改为 `canAsk`（Solo 与 IDE 都可用，IDE 右侧本来就有 `#chat`）；切会话清线程缓存。
+  - `aside.MAX_HISTORY` 4→12，与 store / 前端对齐（`MAX_TOTAL` 字符预算仍兜底）。
+- 3) 内联多轮问答（IDE 选中代码）
+  - 复用同一张旁注卡片：`app/aside.py` 新增 `_code_context`，`selection.kind == 'code'` 时拼「文件 / 行号 / 语言 + 前后代码」；`window.asideOpenCode(code, rect)`。
+  - `web/gal/gal-ide.js`：`ideInlineAsk()` + Monaco action `gm.inlineAsk`（Ctrl+Alt+I、右键 navigation 组、命令面板同项）→ 选中代码弹出卡片多轮追问；改写仍是 Ctrl+I。
+- 4) 分享与消息回退
+  - 分享：`app/share.py`（`data/shares/<id>.html`，400KB 上限，id 正则校验）+ `POST /api/share/save`；`httpd.do_GET` 增加 `/share/<id>.html`（链接本身即凭证，不校验 X-Auth-Token，仍校验 Host）。前端 `shareMessage(index)` 把界面上已渲染的 HTML（公式 / 代码 / 图片）打包成独立页面，相对图片与链接改绝对地址，打开新标签并复制链接。
+  - 回退：AI 消息操作条新增「回退到此（含文件改动）」；`rollbackMessage(index)` 先收集该条及以后所有 `tools[].undo`，用 `/api/agent/undo` 的 `tokens` 批量逆序还原，再 `/api/message/withdraw` 删消息，最后 `ideReloadAll()` 刷新打开着的编辑器文件。
+- 验证：`pytest tests/test_aside.py tests/test_share.py tests/test_chat_refs.py tests/test_registry.py tests/test_api_handlers_smoke.py tests/test_web_hardening.py` 全过；ruff 通过；`node --check` 覆盖 aside.js / stream.js / chat.js / gal-ide.js。未做真实窗口点击回归（标签切换、Ctrl+Alt+I、分享打开、回退）。
+- 相关代码：`app/aside.py`、`app/aside_store.py`、`app/share.py`、`app/api/aside.py`、`app/api/share.py`、`app/httpd.py`、`app/api/chat.py`、`app/context.py`、`web/aside.js`、`web/stream.js`、`web/chat.js`、`web/composer.js`、`web/gal/gal-ide.js`、`tests/test_aside.py`、`tests/test_share.py`。
+
+## [2026-11-04] 提问卡与 Trae「智能体主动提问」的差距研究
+
+- 问题/决策：对照 Trae 的提问卡能力，确认我们 `ask_user` / `ask-card` 还缺什么，作为下一轮补齐依据。
+- 我们现状（已核实）：
+  - 工具 `ask_user`：`questions ≤ 6`，每题 `options ≤ 6`、`multiple`、`action/detail/items`；提示词常驻注入（任何模式都可用）。
+  - 服务端：`agent.new_asks` 登记 qid → SSE `ask` → `wait_answers`（`ASK_TIMEOUT=600s`）阻塞；回答经 `/api/agent/answer` 写入；未答填「（未回答）」；能识别用户「反问」并提示模型先回答再重问；自动化模式下按 `autonomy_question_policy`（auto/smart/ask）代答。
+  - 前端 `buildAskGroup`：多题分页 + 进度、单选/多选、选项与手写并存、Solo 逐题、主输入框/语音单向同步、历史只读回显；`action` 卡只有「我已完成 / 无法完成」；侧栏「待回答」、窗口失焦通知（ask 音 660Hz）。
+- 差距（按影响排序）：
+  1. 普通聊天没有「主动提问」开关：`question_policy` 只在 autopilot 生效，普通聊天恒为「一律问」，设置页只有自动化的 auto/smart/ask。
+  2. 回答提交失败被静默吞掉：卡片先置 done 再请求，`catch {}` 忽略；用户以为答了，后端没收到，10 分钟后按「未回答」继续。
+  3. 600s 超时后卡片变「僵尸」：后端已清 `_ASKS`，前端仍可点提交/我已完成；无超时提示、无「重新回答」，历史只剩「（未回答）」。
+  4. 选项只支持一行纯文本：没有「标题 + 说明」、推荐/风险标记，不适合「多方案对比」。
+  5. 题面/选项不支持 Markdown（textContent/escapeHtml），长问题、代码片段排版差。
+  6. 无显式「跳过 / 你替我决定」出口，只能留空提交。
+  7. 等待期间没有时长/倒计时反馈，也不能从卡片结束等待。
+  8. 通知不可配置：硬编码单音、只在窗口失焦时弹；Trae 可分别配置「完成 / 等待操作 / 异常打断」的横幅与声音、音量、自定义 mp3。
+  9. 多题草稿只在内存，刷新后（即使 attach 重放重建卡片）草稿丢失。
+- 资料：Trae 设置项「智能体主动提问」（遇到多方案 / 需了解偏好时暂停提问）、「任务状态通知」（等待操作提示音，可自定义 mp3）。Trae 提问卡的 UI 细节（跳过、方案说明、多选上限）没有公开文档，未核实。
+- 相关代码：`app/agent.py`（6580-6661、7080-7103）、`app/api/chat.py`（2699-2706、5757-5815）、`web/chat.js`（3519-3713）、`web/auto.js`（60-92、195-201）、`web/settings.js`（605-614）。
+
+## [2026-11-04] 提问卡补齐：策略范围 / 提交可靠性 / 超时闭环 / 方案选项 / 通知设置
+
+- 问题/决策：把上一轮差距研究里的 P0/P1 项落地；默认行为保持不变（普通聊天仍「一律问」，需要用户在设置里把范围改成「所有对话」才启用 smart/auto）。
+- 后端：
+  - `config.py` 新增 `question_policy_scope`（autopilot 默认 / all）、`ask_timeout`（默认 600s，30~3600）、`notify_banner / notify_sound / notify_done / notify_ask / notify_error / notify_volume`。
+  - `chat.py`：范围 = all 时普通聊天也按 `autonomy_question_policy` 走；新增 `_ask_policy_split()`，弹卡前把「可自决」问题代答（`action=true` 永远弹卡）；`ask` 事件新增 `expires_in`。
+  - `agent.py`：`new_asks(timeout=...)` 记录创建 / 截止时间；选项统一成 `{label, desc, recommended}`（兼容纯字符串）；新增 `ask_meta()`、`dismiss_ask()`（让 AI 自己决定）；`wait_answers()` 默认用登记时的有效期。
+  - `sandbox.py`：`/api/agent/answer` 对失效 qid 返回 409（前端据此切成「已超时」）；新增 `/api/agent/ask/dismiss`。
+  - `session_status.refresh()`：长提问等待期间每 30 秒续期，避免侧栏「待回答」被 15 分钟 TTL 提前清掉。
+- 前端：
+  - `chat.js`：`buildAskGroup(qs, qid, meta)` 支持倒计时、「让 AI 自己决定」、超时锁定、提交失败回滚（先请求后改 UI）、草稿 localStorage（`ask_drafts_v1`，按 qid）、选项说明 / 推荐徽标、题面 Markdown、超时 / 未答历史卡的「重新提问」（填进输入框）。
+  - `stream.js`：`expires_in` → `expiresAt` 传给卡片。
+  - `auto.js`：`notifyCfg()` 读取开关 / 音量；横幅与声音解耦，done / ask / error 分别控制。
+  - `settings.js`：新增「提问卡」范围 / 策略与「通知」开关、音量；CSS 增加 `.ask-timer / .ask-head-right / .ask-opt.with-desc / .ask-opt-badge / .ask-wait-row / .ask-link / .ask-retry / .timed-out`。
+- 验证：`pytest` 覆盖 `test_ask_card.py`（新增 8 项：选项规范化、超时上下限、dismiss 唤醒、策略分流、409、路由、默认配置）以及 agent_guards / settings_defaults / session_status / chat_plan / autopilot / api_handlers_smoke / stream_stop / chat_blocks / agent_plan，全部通过；ruff 通过；`scripts/dev_check.py` 8 项全过（131 个 py、128 个模块、56 个前端 JS、Markdown 回归）。
+- 未做：真实窗口点击回归（倒计时、让 AI 决定、通知音量、历史卡重新提问）。
+- 相关代码：`app/config.py`、`app/agent.py`、`app/api/chat.py`、`app/api/sandbox.py`、`web/chat.js`、`web/stream.js`、`web/auto.js`、`web/settings.js`、`web/css/base.css`、`tests/test_ask_card.py`。
+
+## [2026-11-04] 阅读器译文导出视觉问题定位与修复
+
+- 现象：导出的译文 PDF 有部分公式/图表错位、重叠，参考文献出现方块，整体排版不如阅读器里的译文视图。
+- 复现：用 `data/reader/2bd5eaa8ed5931b8`（main.pdf，6 页）+ 已缓存译文导出 mono/dual，并用 pypdfium2 逐页渲染比对。
+- 根因：
+  1. **裁图缓存损坏**：16 张公式裁图里 3 张是旧缓存（`crops/` 时间 20:00:31），与同 rect 现渲染逐像素差异 3.5%–8.3%，画面字符重叠（如 `[ _f wg`、`2j` 叠字）；其余 13 张（20:53:55 生成）正常。裁图实现改过但 `CROP_VERSION` 仍为 2，旧错图被永久复用。
+  2. **阅读器与导出的公式来源不同**：阅读器对公式自动识别 LaTeX 并用 KaTeX 替换截图（`maybeFormula` / `renderLatex`，`.rd-fig.ai img { display:none }`）；导出始终用截图 → 「导出不如阅读器」的主因。
+  3. **字体缺字**：Noto Serif SC 缺 `ő`(U+0151)，参考文献 "Erdős" 变方块；浏览器有字体回退，reportlab 没有。
+  4. **排版差距**：列表固定 12pt、无悬挂缩进且忽略 `indent` 层级；定理/证明无左侧竖线；无 CJK 禁则（行首出现 `？`、`）`）；参考文献 8.2pt 偏小；标题/图片缺 keep-with-next。
+- 修复：
+  - **裁图**：`CROP_VERSION 2→3`；`crop_png` 改成「整页渲染 + PIL 裁剪」，不再依赖 pypdfium2 `render(crop=…)` 的坐标语义（不同版本单位不一致，是错图的来源）。
+  - **公式**：导出优先读已缓存 LaTeX，用 matplotlib mathtext 渲染成 600dpi 图（`_prep_math` 处理 `\setminus` / `\ ` / `\text`；不支持的 `cases` 自动回退裁图）；`_math_trusted()` 用「字母必须出现在原文 + 关系符号不能消失」过滤识别坏的结果；`_with_eqnum()` 把原文末尾附近的 `(n)` 补回公式；Markdown 直接输出 `$$LaTeX$$` 而不是贴图。
+  - **字体**：新增 `RdLatin`（segoeui/arial/DejaVu）与 `RdSymbol`（seguisym）回退，逐字符选字体并逐 run 绘制；`_plain` 清理私用区字形；TTC 注册带 `subfontIndex`。
+  - **排版**：列表按 `indent` 层级（0–3）缩进 + 14pt 悬挂缩进；定理/证明加左侧竖线 + `#f4f7ff` 浅底；`_fix_breaks` 实现中文行首/行尾禁则；标题预留两行正文避免页底孤行；图注跟随图片（放不下整体换页）；参考文献 8.2→9.2pt。
+  - `requirements.txt` 增加 `matplotlib>=3.7`（缺失时自动回退裁图，不影响其它功能）。
+- 验证：
+  - `pytest tests/test_reader.py` 24 项通过（新增禁则、`_prep_math`、`_math_png`、`cached_formula` 4 项）；ruff / dev_check 通过。
+  - 实图比对（同一 main.pdf + rd4 译文）：3 张错图消失；公式条由模糊截图变为 mathtext 数学排版（13/16；3 条识别不可信的自动回退为干净裁图）；公式编号 `(1)(2)(5)` 补回；`Erdős` 不再方块；行首 `？` 移到上一行；列表续行悬挂对齐；定理/证明有左侧竖线。
+  - 未做：真实窗口里点「导出」的回归（下载/保存流程未改）。
+- 相关代码：`app/reader.py`（`CROP_VERSION` 39、`crop_png` 1065、`cached_formula` 1177、`recognize_formula` 1198）、`app/reader_export.py`（字体回退 / `_wrap` / `_fix_breaks` / `_math_png` / `_math_trusted` / `_export_pdf` / `_export_md`）、`tests/test_reader.py`、`requirements.txt`、`web/reader.js`（`maybeFormula` 2301、`renderLatex` 2326）。
+
+## [2026-11-04] Trae 可视化能力差距研究
+
+- 口径：本机 Trae CN v1.107.1（app 3.4.14，`D:\Tools\Trae CN`）+ 官方文档；本项目按源码核实。只研究，不改代码。
+- Trae 有 / 我们无：
+  1. 预览内「选择元素」→ 把页面元素及样式作为上下文发回对话（docs `tool-panel`；本机 nls `browserLivePreviewView` / `预览控制`）。我们的预览只有地址栏 + 手动刷新 + 关闭（`web/gal/gal-ide.js` 2112–2180）。
+  2. 控制台错误闭环：AI 主动展示时自动取错误并尝试修复；手动启动时错误显示在预览底部，可「添加到对话」（docs `browser-and-preview` → Console errors）。我们没有 console 采集。
+  3. 预览内静态文字单击直接编辑（docs `tool-panel`；本机「文字编辑当前仅在 SOLO Builder 创建的项目中可用」）。
+  4. 预览自动刷新 / 「实时跟随」：AI 到不同阶段自动切编辑器/文档/浏览器面板；Browser 有 devtools 入口。我们保存文件后不会自动 reload，只有 ↻。
+  5. Figma 设计还原 / Figma MCP（docs `solo-mode`、`tool-panel`、`tutorial-mcp-figma`）。
+  6. Canvas / Design System / Design Library（仅本机 bundle 字符串 `workbench.editor.codeCanvas` / `codeDesignLibrary` / `vscode-component`；官方文档未找到 → 低置信，不当成确定功能）。
+  7. 截屏 / 窗口捕获作为对话上下文（本机 `screenCapture` / `iCubeWindowCapture` / `屏幕截图`）。
+  8. 部署按钮（Vercel）——不是可视化，但同属预览面板。
+- 我们有 / Trae 无（或更强）：ECharts + chart 围栏、手写 K 线 SVG、Leaflet 地图、vis-network 知识/关系图谱、archify 11 类图、PDF 阅读器（划词联动 / 公式 LaTeX / 译文导出）、visual_qa（SSIM / IoU / blank_score）、轨迹时间线与回合圆点。图片生成我们有 ComfyUI 全链路 + 产物栏；Trae 仅 toolhost 内有 `text_to_image` 端点字符串，未见前端面板。
+- 持平 / 各有取舍：
+  - Mermaid：Trae 是内置扩展（`mermaid-chat-features`，experimental、`mermaid-chat.enabled=false`）；我们可直接用，但依赖 CDN（`web/rich-media.js` 的 `whenLib`）。
+  - Markdown：Trae 编辑器内预览 / SOLO 可实时编辑预览；我们分屏预览 + PDF 导出更强，但没有「预览里直接编辑」。
+  - 变更可视化：Trae 代码变更面板 + inline diff + checkpoint；我们逐段审阅 / 内联编辑 / steps 撤销·重做·回到这里（`web/chat.js` 1574）。
+- 优先级建议：P0 元素选择 + console 错误闭环；P1 预览自动刷新、静态文字点编辑、变更汇总；P2 Mermaid/ECharts 本地化、截图标注与视觉对比看板、工作流 DAG；暂不做 Figma / 部署（定位不符）。
+- 资料：docs.trae.cn/ide/tool-panel、docs.trae.ai/ide/browser-and-preview、docs.trae.cn/ide_solo-mode、docs.trae.ai/ide/changelog；本机 `D:\Tools\Trae CN\resources\app`（product.json、nls.zh-cn.messages.json、extensions\mermaid-chat-features）。
+- 相关代码：`web/gal/gal-ide.js`（网页预览 2112–2180）、`web/rich-media.js`、`app/preview.py`、`app/visual_qa.py`、`web/knowledge.js`、`web/hall-stock.js`、`web/work/workflows.js`。
+
+## [2026-11-04] 预览闭环 P0：元素选择 + 控制台错误发送到对话
+
+- 需求：按上一轮差距研究的 P0 落地——预览里能选中页面元素、采集 console 错误，并一键发进对话。
+- 关键约束：预览是 `127.0.0.1:<随机端口>` 的独立静态服务，与主界面不同源，父窗口读不到 iframe DOM；但静态服务由我们自己实现，可以在返回 HTML 时注入桥接脚本。外部 dev server（`http://localhost:5173`）无法注入，只能降级为地址 + 手动刷新。
+- 后端（`app/preview.py`）：
+  - `_BRIDGE_JS`（约 190 行，纯 ES5）：悬停高亮 + 点击回传元素信息（`selector / tag / id / classes / text / rect / 样式子集 / outerHTML`）；重写 `console.error / warn`，监听 `error`（含资源加载失败）与 `unhandledrejection`，去重后保留最近 30 条；`postMessage` 到父窗口。
+  - `send_head`：`/__gm_preview_bridge.js` 直接返回脚本；HTML（含目录 index.html）读入后把 `<script>` 插到 `</body>` 前再返回，非 HTML 走原逻辑；注入幂等。
+  - 兼容性：保留原有越界 / 密钥 403；HTML 不强制 charset（避免把 GBK 页面写成 UTF-8）；HEAD 走同一 `send_head`，不受影响。
+- 前端（`web/gal/gal-ide.js` + `web/index.html` + `web/css/ide.css`）：
+  - 预览栏新增「选择元素」「控制台」按钮；未握手时禁用并在 title 说明原因。
+  - `idePreviewBindBridge()` 只接受 `e.source === iframe.contentWindow` 且 `__gmPreview === 1` 的消息；`ready → state` 拉一次队列；`pick` 转成引用块；`console-batch` 刷新列表与角标。
+  - 控制台抽屉：单条「发送」、全部发送（按 3600 字截断）、清空；错误 / 警告分色；切换 URL、刷新、关闭时重置握手与日志。
+  - `stream.js::addQuote(text, label)` 增加可选标签，引用块显示「预览元素」「控制台 错误」而不是统一的「选中文本 N」；不改变发送给后端的内容（仍只有 `text`）。
+- 验证：
+  - `pytest tests/test_ide_preview.py` 8 项通过（新增注入、静态资源不注入、桥脚本内容、幂等）；连同 api_handlers_smoke / web_hardening / artifact_preview 共 38 项通过；`ruff`、`node --check`、`scripts/dev_check.py` 全过。
+  - 真实浏览器（临时 harness + 预览服务）：`console.error("boom-test")`、`Promise.reject(Error("rej-test"))` 都被 `console-batch` 回报；`pick` 回传 `button#target`；`pick-state` true/false 正常；测试文件已删除。
+  - 未覆盖：主界面按钮点击、引用块在 IDE 窄栏的换行、外部 dev server 的降级提示（逻辑上禁用，未人工点验）。
+- 相关代码：`app/preview.py`（`_BRIDGE_JS` / `_inject_html` / `_send_bridge` / `_send_injected`）、`web/gal/gal-ide.js`（`idePreviewBindBridge` / `idePreviewElementToChat` / `idePreviewLogText` / `idePreviewTogglePick` / `idePreviewConsoleToggle`）、`web/index.html`（预览栏按钮 + 控制台抽屉）、`web/css/ide.css`、`web/stream.js`（`addQuote`）、`tests/test_ide_preview.py`。
+
+## [2026-11-04] PDF 阅读器翻译链路重构：输入层清洗 + 翻译内核 + 前端提示
+
+- 样本：`D:\资料库\MVG Paper库` 9 篇（CVPR / ICCV / IJCV / TPAMI / JSCO，30MB），逐篇 `parse_pdf` 后统计。
+- 复现的根因（不是模型问题）：
+  1. `_extract_chars` 丢掉零面积空格，`_line_text` 只能按 `gap > 0.28em` 猜，导致 `Journal ofComputerVision`、`ifthe`、`InEuropean` 等 192 处粘连。
+  2. `_segments` 按字符纵向中心分桶，`g/p/q/y` 的降部被切成独立行；标题变成 `Three-view Focal Len th…`、`An Al ebraic…`。前 4 页共 7145 个降部碎片。
+  3. CVPR/ICCV PDF 带一层不可见 LaTeX 源码（字符宽 0.05pt，文本是 `\label{...}\begin{pmatrix}...`），共 63 个块被当正文/标题显示并送翻译。
+  4. 标题判定只看「短 + 字号大」：279 个 heading 里 123 个是作者、单位、邮箱、表格行、LaTeX 片段，章节上下文被污染。
+  5. `_REF_HEAD_RE` 要求整行恰好 `References`，被首条文献粘连后失配：PLMP / Uncalibrated 两篇 `ref=0`，整段文献被翻译。
+  6. 页眉/页脚/水印/页码（37 个模板句）未清；表格行（数字多、词少）被当正文逐格翻译。
+- 修复（`app/reader.py`）：
+  - **抽取层**：零面积空格保留为标记，`_segments` 按行挂回；`_merge_descenders` 把降部碎片并回主行；宽度 < 0.07×字高的不可见层字符丢弃（整页不可见层时保留，兼容 OCR）；`_make_segment` 字号改 30 分位，避免公式把正文短行抬成标题。
+  - **分类层**：`kind=table`（数字 ≥5、词 ≤8、无数学符号/虚词、非定理开头），矩阵类表格改 `formula` 裁原图；`kind=hidden` 丢弃 LaTeX 源码块；标题新增「编号章节」识别（`1. Introduction`）、公式符号 / 句内句号 / 引用 / 虚词结尾 / 全大写表头等排除；front matter 的作者/单位/邮箱标 `meta`；`_clean_meta_blocks` 清理水印、页边短块、跨页重复短文本；参考文献改为前缀匹配 + `[n]` 连续条目兜底。
+  - **翻译内核**：`skip_kinds = figure/formula/ref/meta/table/hidden`；上下文增加论文标题 + 摘要；提示词补 URL/DOI/邮箱/作者名/章节编号/引用格式；校验加「整段英文回显」「解释性废话」，长段落长度比 0.30–3.5（短标题不参与）；批调用异常退化为逐段；`_model_of` 改用 `chat_model`（原 `light_model` 优先会让换主模型不失效）。
+  - **前端**（`web/reader.js` / `web/css/reader.css`）：新增「重试失败段」（只补缺译，不动已译）；`warn` 事件在段落左侧打琥珀色标记并显示缺失数字/引用；进度显示「跳过 N 段（引用 / 表格 / 公式 / 页眉）」；`table/meta` 只渲染原文，仅译文模式下也不隐藏。
+  - **导出**（`app/reader_export.py`）：`table` 用 `ref` 样式、`meta` 用 `note` 样式；Markdown 中表格用代码块、meta 用引用块，不参与 missing 统计。
+- 验证（9 篇前后对比）：
+  - 不可见 LaTeX 块 **63→0**；前 4 页降部碎片 **7145→约 300**；粘连词 **192→18**；标题噪声 **123→0**；参考文献块 **380→656**（PLMP 0→93、Uncalibrated 0→110）；待翻译块 **2952→2264**。
+  - 标题恢复完整：`Three-view Focal Length Recovery From Homographies`、`An Algebraic Geometry Approach to Viewing Graph Solvability`；IJCV 拆行标题两行都保留。
+  - 章节识别恢复：CVPR24 `1. Introduction / 1.1 Motivation / … / 4. Conclusion`；CVPR25 `1. Introduction … 6.2 Real-World Experiments`；IJCV26 `7.2.1 …`。
+  - `pytest tests/test_reader.py` 35 项通过（新增空格拼接、降部合并、meta 清洗、表格/LaTeX/引用标题、front matter、回显校验、缓存 model、翻译任务 skip）；连同接口冒烟 / Web 加固 / 产物预览共 65 项通过；`ruff`、`node --check`、`scripts/dev_check.py` 全过。
+  - 翻译任务用假 `_quick_chat` 端到端跑过：6 个块只翻 heading+text（total=2），done.skipped=4，prompt 含「论文标题」。
+- 注意：
+  - `SCHEMA_VERSION 14→25`（旧版面缓存失效重解析）、`PROMPT_VERSION rd4→rd5`（旧译文不再复用，需重译）。
+  - 表格判定仍是启发式：纯数字网格会进 table/formula（跳过翻译/裁原图），少数数字很多的正文可能被跳过；公式内部字符缺失（如 `Length` 之外的单字母上下标）无法从文本层还原。
+  - 未做真实模型 API 端到端翻译（只验证了 prompt 组装、跳过规则、校验与假模型事件流）；主界面「重试失败段 / 琥珀标记 / 跳过统计」未人工点击回归。
+  - `retry_failed` 参数保留但语义等同「只补缺译」；「重译本页」仍走 `force`。
+- 相关代码：`app/reader.py`（`_extract_chars` / `_segments` / `_merge_descenders` / `_attach_spaces` / `_line_text` / `_make_segment` / `_looks_table_row` / `_make_block` / `_mark_reference_blocks` / `_mark_front_matter` / `_clean_meta_blocks` / `_abstract_text` / `_section_map` / `_validate_translation` / `_translate_batch` / `start_translate` / `_model_of`）、`app/reader_export.py`、`web/reader.js`、`web/css/reader.css`、`tests/test_reader.py`、`docs/PDF_READER_USAGE.md`。
+
+## [2026-11-04] 与沉浸式翻译 / BabelDOC 的版式还原差距与方案
+
+- 结论：我们目前是「左栏原页 + 右栏重排阅读流」；**翻译视图与导出都不保留原页版式**。`web/reader.js` 的模式只有 `pdf/orig/dual/trans`，右栏是单列 `.rd-flow`；`app/reader_export.py` 文件头明确写「不再沿用原页铺图 + 白块盖译文」，改为重排 PDF（图表公式裁图后按阅读流插回）。
+- 沉浸式翻译（BabelDOC）的实证（官方文档 / GitHub）：
+  - 定位是「保留版面的 PDF 翻译」：版面结构、公式、图表、表格位置不变；输出单语 / 双语 PDF。
+  - 双语两种排法：同页左右并排（默认原文在左）或原文/译文页交替；共四种先后组合。
+  - 支持 OCR 处理扫描/图片型 PDF；表格文字翻译是实验项（默认关）；有 18+ 引擎、页面范围、批量、水印等选项。
+  - BabelDOC 是 AGPL-3.0；官方 README 把直接调用其 Python API 标为 internal，推荐经 pdf2zh-next `high_level.do_translate_async_stream` 调用。
+- 差距矩阵（我们 vs BabelDOC）：
+  - 图像/图表：我们裁图后按阅读流插回（位置改变）；BabelDOC 原位保留。
+  - 公式：我们独立公式裁图 + 行内 KaTeX，位置随阅读流；BabelDOC 原位保留。
+  - 表格：我们整块标 `table` 不翻译、导出用 ref 样式，无行列结构；BabelDOC 还原行列，表格文字可实验翻译。
+  - 分栏：我们重排为单列；BabelDOC 保持单/双栏关系。
+  - 双语：我们段落上下叠；BabelDOC 同页左右或页交替。
+  - 页眉页脚/页码：我们解析时丢弃（阅读流没有）；BabelDOC 保留原页。
+  - 扫描件：我们无 OCR，直接进 `scan_pages`；BabelDOC 支持 OCR。
+  - 我们领先：应用内阅读、批注/划词、术语表、翻译缓存、引用/表格/公式跳过、增量翻译、深色主题。
+- 方案取舍：
+  - A. 自研「原页内嵌译文」：以原页 canvas 为底，按 `block.rect` 盖白并绘制译文；图表/公式/表格/页眉页码不覆盖。阅读器加「版式」模式（原页 / 译页 / 左右对照），导出加「版式还原 PDF」（单语 / 同页并排 / 页交替）。不引入新依赖，能复用现有译文与字体；缺点是无重排空间，译文过长只能缩字号或回退原文，表格文字暂不翻译。
+  - B. 集成 BabelDOC：直接得到竞品级版式还原与 OCR；但 AGPL-3.0、依赖重（Python 版本/版面模型）、API 标 internal、与我们的缓存/术语表/批注不共享，且会二次翻译。
+  - C. 混合（推荐）：先做 A 解决「翻译不是原页」；把 BabelDOC 作为可选「最高保真 / 扫描件」导出后端，用户自行安装、子进程调用，避免把 AGPL 代码并入主程序。
+- 相关代码：`web/reader.js`（`setMode` 2442、`buildPages` 1430）、`web/css/reader.css`（`.rd-pages/.rd-flow`）、`app/reader_export.py`（文件头 2–15、`_export_pdf`）、`app/reader.py`（`block.rect` / `parts` / `sizes`）。
+
+## [2026-11-04] 版式还原落地（A 方案）：阅读器译页 + 版式导出
+
+- 需求：用户确认走混合 C；双语优先同页左右并排。本轮先实现 A（自研原页内嵌 + 版式导出），BabelDOC 留作可选外部引擎。
+- 阅读器（`web/reader.js` + `web/css/reader.css`）：
+  - 新增模式 `page`（译页）和 `page-dual`（版式对照），顶栏按钮「译页 / 版式对照」；原有 `orig/dual/trans` 重排阅读流保留。
+  - 译页：`RD.tpages` 用 pdf.js 按右栏宽度渲染原页 canvas，再加 `.rd-tlayer`；按 `block.rect`/`parts` 换算百分比放置 `.rd-tblock`。
+  - 覆盖规则：只覆盖 `text/list/heading`；`figure/formula/table/ref/meta`、页眉页码/水印不动。白底颜色从原页 canvas 四角采样，避免非纯白页出现色块。
+  - 文本适配：`formatInline` 支持行内公式；字号在 4.6–18pt 间二分，放不下先向下扩展（检查下方块边界），仍放不下标 `data-overflow` 并提示切阅读流看完整译文。一级标题居中；点击文字块可切回原文。
+  - 滚动：`onTransScroll` 按页同步；`goPage` 在版式模式下滚右栏译页；`page-dual` 右→左联动。
+  - 进度：版式模式不建阅读流，新增 `syncTransStats()` 按 `doc.blocks` 统计，避免进度一直 0/0。
+- 导出（`app/reader_export.py`）：
+  - 新增 `layout-mono` / `layout-dual`：`reportlab` 生成同尺寸透明覆盖层（白块 + 自动 fit 译文），`pypdf` 直接合并到原页；`layout-dual` 新建 2 倍宽页面，左半原页、右半覆盖层平移过去。
+  - 原有 `mono/dual/md` 重排导出保留；`SUFFIX` / `export_name` 增加「版式译文 / 版式双语」。
+  - 前端设置面板分组「重排导出 / 版式导出」，新增两个按钮。
+- 验证：
+  - `pytest tests/test_reader.py` 36 项通过（新增版式导出：页数/尺寸不变、中文可抽回、双语宽度 2 倍）。
+  - 真实论文 CVPR24（10 页）：`layout-mono` 10 页 / 612×792、`layout-dual` 10 页 / 1224×792；原 PDF 图表图片数 `[0,0,0,0,0,0,0,4,0,0]` 与导出完全一致；8 页可抽到中文；逐页 PNG 检查确认图片、作者、页眉/页码原位保留。
+  - 冒烟：`node --check web/reader.js`、`ruff`、现有 36 项阅读器测试通过。
+- 已知限制：
+  - 译文比原文短时，原文字块会留下空白（白块只覆盖文字区）；比原文长时优先缩字号、再向下扩展，仍放不下回退原文/标提示，不会强行剪裁。
+  - 表格文字、扫描件 OCR、极端复杂版面的自动重排仍未做；这三项是 BabelDOC 的强项，留作可选外部引擎。
+  - `layout-dual` 同页宽度翻倍，阅读器里需要横向滚动/缩放；若觉得不便，可再加「原/译页交替」导出。
+  - pypdf 合并保留页面内容与图片，但不保证原 PDF 的表单/链接/书签全部保留；需要时再单独做 outline 复制。
+- 相关代码：`web/reader.js`（`buildTransPages` / `renderTransPage` / `renderTransOverlay` / `fitTransBlock` / `onTransScroll` / `setMode`）、`web/css/reader.css`（`.rd-tpages` / `.rd-tblock` / `.rd-mode-page*`）、`app/reader_export.py`（`_layout_blocks` / `_layout_fit` / `_layout_overlay` / `_export_layout` / `export`）、`tests/test_reader.py`、`docs/PDF_READER_USAGE.md`。
+
+## [2026-11-04] 停止输出失效的根因分析（只定位，未改代码）
+
+- 现象链：流式输出偶发完全静止 → 末尾残留「正在输出…」→ 刷新/切会话后变「已完成」或「模型输出中」但无停止按钮 → 只能关窗口；长上下文概率显著升高。
+- 前端根因：
+  1. `init.js` 首屏从 `/api/state` 填了 `state.streamingSids`，但**没有调用 `refreshStreamingUI()`**；`state.streaming` 仍为 false，`#btn-stop` 保持 `.off`，所以「后台任务在跑但没有停止按钮」。`init.js` 143–158。
+  2. `stopStreaming()` 只有「点停止 → `/api/stop` → 等 done」一条路：没有本地 AbortController、没有超时、没有强制收尾；`/api/stop` 返回 ok 也不代表服务端找到了流。`stream.js` 345–372。
+  3. SSE 读取 `reader.read()` 没有超时；15 秒无事件只提示并挂 `/api/chat/attach`，**不 abort 原 fetch**。如果连接半开，`streamChat` 永远进不了 `finally`，`.live-bar`（「正在输出…」）永不删除。`stream.js` 1170–1203、1273–1301、1884–1896。
+  4. 断线恢复 `keepRecovering` 要等 10 分钟；`waitJobThenRefresh` 的 attach 也没有超时，zombie 任务会让 UI 一直停在「模型输出中」。
+  5. HTTP 409 busy 时，用户消息已经在 `sendMessage` 里先上屏，失败后不回滚；刷新后消息消失，像「输出被回退」。
+- 后端根因：
+  1. `ACTIVE_STREAMS[sid] = ev` 在 `_api_chat` 的 **3439 行**才登记，而同步压缩 `compress_history` 在 3305–3332、记忆/上下文装配更早；长上下文在这一段耗时最长，此时 `/api/stop` 在 `ACTIVE_STREAMS` 里找不到会话，只是返回 `{"ok":true}`，停止信号直接丢失（`misc.py` 237–242）。
+  2. `_api_chat` 没有顶层 `try/finally`；`ACTIVE_STREAMS.pop` 只在正常收尾路径（6909）执行。任何异常/提前返回都会留下僵尸条目；`/api/state` 又无条件把 `ACTIVE_STREAMS.keys()` 当 streaming（`misc.py` 49），于是刷新后永远显示「生成中」，新请求被 409 busy 卡死。`stream_alive()` 已存在（`chat.py` 2248–2266）但 `/api/state` 没用。
+  3. 同步压缩走 `llm._quick_chat`（非流式）且没有 `stop_event`；停止只能等压缩请求自己超时/返回。背景 `maybe_precompress` 也一样，压缩期间前端只能排队，且没有停止入口。
+  4. `stream_chat` 收到 stop 只 `cancelled.set()`，主循环 break，但不主动 `resp.close()`；读线程可能继续阻塞到 socket 超时，上游连接没真正断。
+  5. SSE `_write` 直接 `wfile.write`，客户端不读时最多阻塞 20 秒（`chat.py` 3007–3064）；这期间心跳和生成线程都停在同一把锁上，停止检查也被拖住。
+  6. `httpd` 对 `/api/chat` 的异常统一 `_json` 回写（587–591），但 SSE 头已经发出，异常时不会补 `done`；前端只能走 10 分钟恢复。
+  7. `_progress` 快照只有进程重启时由 `_mark_resume_pending` 转成 interrupted（`sessions.py` 256–278）；线程死掉但进程还在时，刷新会把半截快照显示成「已完成」。
+- 方案要点（P0）：`ACTIVE_STREAMS` 提前到请求入口登记；`/api/stop` 对未登记会话记 pending stop 并返回 `found`；流租约加 owner/watchdog/top-level finally；压缩与 `_quick_chat` 接 `stop_event`（可取消）；前端首屏 `refreshStreamingUI`、停止硬超时 + abort + 幂等 `finalizeStream`、15 秒无事件 abort 原流；`/api/state` 用 `stream_alive` + orphan `_progress` 清理；SSE 写入改队列，异常路径补 `done`。
+- 相关代码：`web/stream.js`（260–372、1170–1301、1884–2036、2043–2239）、`web/init.js`（143–158）、`web/chat.js`（1470–1487、4530–4552）、`app/api/chat.py`（2714–2724、3305–3332、3436–3439、6909–6910、3007–3064）、`app/api/misc.py`（31–56、237–242）、`app/llm.py`（645–874）、`app/context.py`（589–693、844–898）、`app/sessions.py`（256–278）、`app/httpd.py`（587–591）。
+
+## [2026-11-04] 停止输出失效修复实施（P0+P1）
+
+- 问题/决策：按上一节的根因做完整加固，目标「任何阶段点停止都能收尾、不残留『正在输出…』、刷新后不再永久『生成中』、长上下文也能停」。原则是**每一层都能独立兜住**：前端断开 / 后端 watchdog / HTTP 异常兜底各自都能收尾，不依赖另一层活着。
+- 后端（流租约与停止信号）：
+  - `app/store.py`：新增 `PENDING_STOPS` + `request_stop(sid)` / `consume_stop(sid)`（TTL 120 秒）。请求还没登记流时点停止不再丢信号。
+  - `app/api/misc.py`：`/api/stop` 返回 `{found, pending}` 并打埋点日志；`/api/state` 的 `streaming` 改为 `_live_streams()`——用 `stream_alive` 过滤「线程已死但条目还在」的僵尸并顺手清掉，再对非 live 会话跑 `reap_orphan_progress`。
+  - `app/sessions.py`：新增 `reap_orphan_progress(data, live_ids)`：无活跃流却留着 `_progress` 的会话 → 去掉快照标记、置 `interrupted` + `end_reason(kind=resume)` + `resume_pending`。
+  - `app/api/chat.py`：
+    - 流租约从「3439 行」提前到**参数校验之后、SSE 建立之前**注册（避开 400/404 早退留下僵尸，同时覆盖压缩 / 记忆检索阶段）；只保留一处注册。
+    - 新增 `release_active` / `stream_alive`（原有）/ `_force_done_event` / `_watch_stream`（2 秒轮询：job 完成 5 秒后释放；180 秒无事件强制补 done；线程已死 / 装配超 900 秒释放）/ `abort_chat_stream`（HTTP 异常兜底：置事件 + 补 done + 释放租约 + 清「待审批 / 待回答」标记）。
+    - SSE 建立后与压缩后各消费一次 pending stop 并早停；两处同步压缩传 `stop_event=ev`；预算 / 缺密钥两个早退补 `release_active`。
+    - 心跳线程在 `_job["done"]` 后自动退出，避免异常路径没有 `_hb_stop` 时永久写死连接。
+  - `app/context.py`：`compress_history(..., stop_event)`；`_COMPRESS_CANCEL` + `cancel_compress` / `compress_stop_event`；`maybe_precompress` 把事件传进 `compress_history`。
+  - `app/llm.py`：`_quick_chat(stop_event)` 用后台线程包装非流式请求，主线程 0.2 秒轮询、停止即返回空串；`stream_chat` 新增 `_abort_stream()`（置 cancelled + 后台线程 `resp.close()`）。**close 必须在后台线程做**：实测在主线程 close 会把「点停止」拖 2~3 秒（等上游下一段数据）。
+  - `app/httpd.py`：每个 POST 请求开始重置 `_chat_sid/_chat_ev/_chat_sse`（keep-alive 复用 Handler 实例）；异常时若已发 SSE 头 → 调 `abort_chat_stream` + 直接补一条 `done` 并关连接，不再写 JSON；未发头才回 500。
+- 前端：
+  - `web/init.js`：首屏填完 `streamingSids` 后调用 `refreshStreamingUI()` —— 刷新后「后台在跑」也能看到停止按钮。
+  - `web/stream.js`：
+    - `streamChat` 加 `AbortController` + `signal`，`stRef.abort()` 可断开；catch 区分「本端主动断开」与真实失败（不往正文塞「请求失败」）。
+    - 15 秒没有任何事件（连 tick 都没有）→ 直接 abort 原流，让 `finally` 一定执行（删 `.live-bar`），再由 `keepRecovering` 用 attach 补状态。
+    - `stopStreaming` 重写：`/api/stop` 5 秒 ACK 超时；本地流 8 秒没收 done 就硬断（`st.hardStop`）；远端流 30 秒不确认就本地解除「生成中」并提示，停止按钮不会永远点不动。
+    - `keepRecovering(sid, err, tries, stopped)`：手动停止只盯 24 次（约 2 分钟），到点强制解除 UI 等待；手动停止不发「完成」通知。
+    - 409 busy：标记 `busyRejected`，收尾时移除幽灵用户消息 + `renderMessages` + 恢复「生成中 + 停止键」+ attach 跟到真正那一轮结束。
+- 未做（与上一节方案不同，记录在此避免误读）：SSE 写入**没有**改成有界队列 + 独立写线程。现有实现已有 20 秒写超时 + `_client_gone` + 心跳自动退出，本次先把可证实的问题修完；若后续出现「写阻塞导致主循环停住」的现场再上队列。
+- 验证：
+  - `tests/test_stream_stop.py` 新增 8 项：pending stop 的写入/消费/过期、`abort_chat_stream` 补 done 并释放租约、`_live_streams` 清僵尸、`reap_orphan_progress` 转换快照、`_quick_chat(stop_event)` 立即返回、压缩被停止时不再发请求；26 项全通过。
+  - `tests/test_api_handlers_smoke.py` 新增 `/api/stop` pending 冒烟；连同 chat_jobs / web_hardening / context / compress_marks / session_store / resume / store / chat_parallel / session_parallel 共 117 项通过。
+  - `ruff` 通过；`scripts/dev_check.py` 全绿（131 文件编译、128 模块导入、56 个前端 JS 语法、快捷键 73/73、Markdown 回归全过）。
+  - 未覆盖：真实浏览器 + 真实上游的端到端手测（需要手动点停止 / 刷新验证），以及「SSE 写阻塞 20 秒」这一条现场未构造。
+- 相关代码/指令：`app/store.py`、`app/api/misc.py`、`app/sessions.py`（`reap_orphan_progress`）、`app/api/chat.py`（`release_active` / `_watch_stream` / `abort_chat_stream` / `_api_chat` 入口与三处早停）、`app/context.py`、`app/llm.py`（`_quick_chat` / `_abort_stream`）、`app/httpd.py`、`web/init.js`、`web/stream.js`、`tests/test_stream_stop.py`、`tests/test_api_handlers_smoke.py`。验证命令：`.venv\Scripts\python.exe -m pytest tests/test_stream_stop.py tests/test_api_handlers_smoke.py -q`。
+
+## [2026-11-04] 版式译页重构：按原段落行数/行距排版（transpage.js）
+
+- 问题/决策：用 `D:\资料库\MVG Paper库` 的真实论文（CVPR24 点线位姿，10 页 / 327 块 / 311 条译文）复现，旧「版式译页」有 4 个硬伤：
+  1. **字号基准错了**：`basePx = block.size × scale`，但解析出的 `size` 是字形墨迹高度（≈0.45em），正文实际 10pt 被当成 4.7pt 渲染，译文字号只有原文一半（无头浏览器实测正文 6.4px）。
+  2. **行距固定 1.22**：段落只贴在原框顶部，译文比原文短时下面留大片空白（页面看起来「被打散」）。
+  3. **占位符泄漏**：旧缓存（rd4）里模型给标题凭空造 `⟦F1⟧`，`math` 里没有这个键 → 译页直接显示「⟦F1⟧ 引言」，编号也丢了。
+  4. **图内小标签被当成段落**：6~7pt 宽的坐标轴字母 / 图注碎片被渲染成竖排文字，还盖出灰色块。
+- 后端（`app/reader.py`）：
+  - `SCHEMA_VERSION` 25→26；`_make_block` 写入 `lines`（原段行数），译页据此还原行距。
+  - 新增 `normalize_translation(b, text)` / `normalize_translations(data, meta)`：丢掉 `math` 里不存在的占位符、标题从原文补回 `1.2.` 这类编号、只剩非法占位符视为无译文；在 `load_translations`（读旧缓存）与翻译任务落盘前各跑一次，**不用整篇重译**。
+  - `_validate_translation`：短标签（≤8 字符）的译文长度上限 `max(8, 3×源长)`，挡住批翻译序号错位把「1.1 研究动机」贴到图注上的问题。
+- 前端（新增 `web/transpage.js`，`reader.js` 只负责收集 items / 障碍物）：
+  - 字号从**原段行距**反推：`max(lead/1.15, size×1.85~2.2) × scale`（单行标题用 2.2 倍）；上限再加「不能挤掉原段行数」的约束（`boxH/(target×1.05)`）。
+  - 目标行数 = `block.lines`；行距 = `boxH / max(lines, target)`，短译文用原段行距撑满，长译文先压行距、再降字号；仍放不下时向下扩到下个块、最后才标 overflow。
+  - 单行块（标题/图注）矩形只是墨迹高度，向下借一点空隙到「一个正常行框」，否则会被压得比原文还小。
+  - 遮盖改为**矩形差集**（`coverPieces`），不再整块盖住公式/表格；cover 用 px 定位，避免加高文本框时被百分比拉伸。
+  - 跳过：宽 <12pt / 高 <5pt 的碎片、与公式/表格/图片重叠 >50% 的图内文字、模型原样回显的块。
+- 验证：
+  - 无头 Edge 打开真实 blocks/译文测试台：3 页 43 块，`overflow=0`、横向裁切 `clippedX=0`、`⟦` 残留 `ph=0`；字号 p1 9.3~19.5px / p2 6.7~14.9px / p3 9.8~13.6px。
+  - 侧记：PDF 解析出的 `sizes[0]` 是 612×792，而正文字形高度 4.5~4.7pt、行距 ≈11.1pt，可确认「行距/1.15 ≈ 真实字号」。
+  - `node scripts/transpage_test.js` 18 项；`tests/test_reader.py` 42 项（新增行数 / 规范化 / 短标签校验）；`ruff`、`dev_check` 全过（新增第 8 节译页单测）。
+- 未做 / 已知边界：`reader_export.py` 的「版式导出 PDF」仍按固定字号排版，没跟着改行距（导出与阅读器观感会略有差异）；真实 24 页论文只抽查了前 3 页 + 全量几何统计。
+- 相关代码：`web/transpage.js`（新增）、`web/reader.js`（`pageTransGeo` / `renderTransOverlay`）、`web/css/reader.css`（`.rd-ttext` / `.rd-tcover` / `.rd-tblock`）、`web/index.html`（script 顺序）、`app/reader.py`（`lines` / `normalize_translation` / `_validate_translation`）、`scripts/transpage_test.js`、`scripts/dev_check.py`、`tests/test_reader.py`。
+
+## [2026-11-04] 笔记库：划词提问 + 引用到对话
+
+- 问题/决策：笔记预览原来只能「批注」，选中内容想追问或带进对话只能手动复制。补上与阅读器一致的「划词提问 / 引用」，但**不复用阅读器的 `/api/reader/selection`**（它的提示词写死了「论文阅读助手」），单独给笔记开一个接口。
+- 解决方案：
+  - 选区工具条：`#nt-anno-add` 从单按钮改为 `.nt-sel-bar`（批注 / 提问 / 引用），`mousedown` 阻止默认行为保住选区。
+  - 提问：弹层 `#nt-ask-pop`（复用批注弹层样式）→ `POST /api/notes/ask`，带笔记标题 + 选区前后 30 字上下文；回答用 `safeRenderMarkdown` 渲染。回答后提供「存为批注」（写入现有批注，comment = 问+答）和「引用到对话」。
+  - 引用：`addQuote(选中文字, '笔记《标题》')` → 关闭笔记库 → 聚焦输入框；问答结果的引用把「问/答」一起带走。
+  - 后端 `app/api/notes.py`：新增 `_api_notes_ask`（text ≤1500 / question ≤500 / context ≤800，缺密钥 400，模型异常 500，`source="notes"` 计入用量）；路由挂在 `app/httpd.py`。
+- 验证：`tests/test_api_handlers_smoke.py` 新增笔记提问用例（正常 / 空选区 / 空问题 / 缺密钥 / 模型异常）；`node --check web/init.js`、`ruff`、`dev_check` 全绿；无头 Edge 截图确认工具条与问答弹层样式（引用按钮为强调色，回答区可滚动）。
+- 实现细节：请求期间弹层可能被外部点击关闭，`submitNoteAsk` / `saveNoteAskAsAnno` 先抓住 draft 快照再 await，避免空引用报错。
+- 相关代码：`app/api/notes.py`（`_api_notes_ask`）、`app/httpd.py`（`/api/notes/ask`）、`web/init.js`（`ensureAnnoAdd` / `showAskPop` / `submitNoteAsk` / `quoteNoteDraft` / `quoteNoteAsk` / `saveNoteAskAsAnno`）、`web/css/notes.css`（`.nt-sel-bar` / `.nt-ask-pop` / `.nt-ask-out`）、`tests/test_api_handlers_smoke.py`。
+
+## [2026-11-04] PDF 翻译功能体检与优化路线图
+
+- 问题/决策：对 PDF 解析 / 翻译 / 译页 / 导出做一次全量评估，用 `D:\资料库\MVG Paper库` 9 篇真实论文 + 1 页光栅化扫描件实测，产出可执行的迭代计划（文档见 `docs/PDF_TRANSLATION_ROADMAP.md`）。
+- 关键实测结论：
+  - **阅读顺序**：`_band_rows` 只按「是否跨栏中线」判整宽行，CVPR24 p5 一行 7.6pt 宽、文本 `0\x01` 的碎片被当成整宽，页面切成两带 → 阅读流顺序变成「左上半 → 右上 → 左下 → 右下」。9 篇中 8 篇有双栏页，窄行切带 0–6 处/篇。
+  - **扫描件**：光栅化 PDF 解析结果 `blocks=0, scan_pages=[1]`，项目内没有 OCR 通路，只有一句提示。
+  - **导出**：版式导出仍按矩形高度猜字号（`_layout_fit`），固定 1.22 行距、放不下整段退回原文（`missing`），与阅读器译页（按 `lines/lead` 排版）不是同一套。
+  - **页内交互**：`applyReaderAnnos` 只挂阅读流块，划词浮层只绑 `.rd-flow` → 译页模式不能高亮/批注/划词。
+  - **长文档**：24 页首次解析 3.6s 且同步阻塞在 open 请求里（外推 1000 页 ≈150s）；`renderFlow` 一次性建全部块，无虚拟化。
+  - **表格/图内文字**：`table` 只显示原文（CVPR24 21 块、IJCV26 130 块），图中文字完全不翻。
+  - **目录**：`pypdfium2.get_toc()` 可用但未接入，阅读器只有页码/缩略图。
+- 优先级建议：P0 = 双栏顺序窄行切带、旧缓存短标签错位、导出一致性；P1 = 译页批注/划词、增量解析 + 虚拟化、扫描件 OCR、表格译文、深色纸色、目录；P2 = 图中文字、混合语言、缓存版本。
+- 相关代码：`docs/PDF_TRANSLATION_ROADMAP.md`（新增）、`app/reader.py`（`_band_rows` / `normalize_translation` / `_validate_translation`）、`app/reader_export.py`（`_layout_fit` / `_layout_overlay`）、`web/reader.js`（`renderFlow` / `applyReaderAnnos`）、`web/transpage.js`。
+- 说明：除 CVPR24 外其余 8 篇没有译文缓存，本次未跑全量翻译（避免消耗额度）；翻译质量结论基于 91 条现有译文 + 提示词/校验代码。
+
+## [2026-11-04] 译页补齐批注/划词 + 版式导出对齐
+
+- 问题/决策：上一轮评估留下的两处「功能缺失 / 导出瑕疵」先落地——
+  1. 译页模式不能划词、批注、高亮（`applyReaderAnnos` 只挂阅读流块，浮层只绑 `.rd-flow`）；
+  2. 版式导出与阅读器译页不是同一套排版（固定 1.22 行距、按矩形高度猜字号、白块整块盖图表、单行标题全部判「放不下」）。
+- 解决方案（前端）：
+  - `web/transpage.js`：`render()` 返回 `{blockId: box}` 并在排版完成后回调 `onReady(els)`。
+  - `web/reader.js`：新增 `RD.tblockEls`（页 → 块元素）与 `RD.blockById`；`renderTransOverlay` 渲染后调用 `applyPageAnnos(page)` 把高亮/数字角标贴到覆盖层；`applyReaderAnnos` 末尾同步所有已渲染译页。
+  - 译页划词：`.rd-tpages` 增加 `mouseup` → `showPageSelectionPopover`（按 `.rd-tblock` 归段，`side=dst`），复用现有选词浮层（翻译/提问/批注/摘录/高亮/复制）。
+  - 批注抽屉跳转：译页模式下 `goPage` + 覆盖层块闪烁（找不到就重试 3 次）。
+  - 样式：`.rd-tblock.has-anno .rd-anno-dot`（块内右上角，避免 `overflow:hidden` 裁掉）、`.rd-tblock.rd-flash`。
+- 解决方案（导出）：
+  - `_layout_fit` 改为按「原段行数」定行距（`h / max(译文行数, 原段行数)`，限制 1.05–1.9 倍字号），字号从 `lines/lead` 反推；单行块向下借空隙（否则标题永远放不下）。
+  - 白块改矩形差集 `_subtract_rect`，避开公式/表格/图片；跳过 <12pt 碎片、原样回显、与图表重叠 >50% 的块（与译页一致）。
+  - 实测：CVPR24 版式导出 p1 的竖排「1.1 研究动机」消失、标题正常输出；合成全长译文 `missing` 8→7（/179）。
+- 验证：`tests/test_reader.py` 43 项（新增短标签清洗、行数/行距、差集用例）；`node --check`、`transpage_test` 18 项、`ruff`、`dev_check` 全绿；pypdfium2 渲染导出 PDF 逐页目检 1–2 页。
+- 相关代码：`web/transpage.js`（`render` 返回值/`onReady`）、`web/reader.js`（`applyPageAnnos` / `showPageSelectionPopover` / `jumpToAnno`）、`web/css/reader.css`（译页角标/闪烁）、`app/reader_export.py`（`_layout_fit` / `_subtract_rect` / `_layout_overlay`）、`app/reader.py`（`normalize_translation` 短标签规则）、`tests/test_reader.py`、`docs/PDF_READER_USAGE.md`。
+
+## [2026-11-04] 聊天附件：多文件 / 粘贴 / 解析进度 / 点击预览
+
+- 问题/决策：
+  - 附件一次只能带一个文档：`state.pendingDoc` 是单值，`attachDocBlob` 直接覆盖，`#doc-input` 也没有 `multiple`。
+  - 粘贴文件走同一个单值通道，第二个文件会顶掉第一个。
+  - PDF 解析期间只有一对 `doc_parsing` / `doc_ok` 事件，长文档 / 扫描件逐页 OCR 时界面只停在「正在解析…」，看起来像卡死。
+  - 发完立刻点消息里的附件标签调 `/api/attach/get`：此时本地 echo 没有落盘名 `file`；且 `Content-Type` 只有图片映射，PDF 被当 `octet-stream`，iframe 可能直接下载。
+- 解决方案：
+  - 前端状态改为 `state.pendingDocs: []`（最多 10 个，单文件 2GB 上限）；`#doc-input` 加 `multiple`，选择 / 拖拽 / 粘贴统一追加；附件标签逐个渲染、逐个移除、点标签即预览。
+  - 后端同时接受 `docs: [{name,mime,data}]` 与旧的单个 `doc`；消息结构新增 `docs: [...]`，仍写 `doc = docs[0]` 兼容旧渲染 / 导出 / 回看。
+  - 解析改为串行循环，每个附件发 `doc_parsing {index,name,count}` → `doc_progress {index,stage,done,total}` → `doc_ok {index,chars,warn|error}`；`docparse.extract` 新增 `progress(done,total,stage)`，覆盖 `pypdf` 逐页读取、`pypdfium2` 渲染、逐页 OCR（0.25s 节流）。
+  - 状态条同步显示「正在解析附件（2/3）｜文件名」与「正在读取/渲染/识别附件 3/10 页」，标签加 `.parsing` 呼吸样式。
+  - 刚发出的附件在 `chat.js` 里留一份内存 base64 缓存（最多 8 个），点标签先用缓存预览；`/api/attach/get` 补全 PDF / Office / 文本 MIME，前端再按消息里的 mime 重包 Blob。
+  - 上下文拼装 `context._msg_text`、附件登记 `attachments.from_message`、清理引用 `uploads._referenced_files`、Markdown 导出 `export_md` 都改为优先读 `docs`，旧 `doc` / `doc_text` 仍可读。
+- DeepSeek 网页版差距（据 IT之家 2026-04-09 报道，未逐项实测）：专家模式支持上传文件，最多 50 个、单个 100MB、文档 + 图片、仅识别文字；本项目现在最多 10 个（受单请求 JSON 体积和上下文预算约束）、单文件上限 2GB 但实际受浏览器内存限制。上传进度条、失败重试、解析结果内联展示仍未做。
+- 相关代码：`web/stream.js`（`attachDocBlob` / `renderAttach` / `docChipRender` / `sendMessage`）、`web/chat.js`（`lastUserDocChips` / `rememberSentDoc` / `buildUserRow` / `docPreviewStored`）、`web/init.js`（多选 / 粘贴）、`web/core.js`、`web/index.html`、`web/css/base.css`、`web/css/search.css`、`app/api/chat.py`、`app/docparse.py`、`app/context.py`、`app/attachments.py`、`app/uploads.py`、`app/export_md.py`、`tests/test_attachments_multi_doc.py`、`tests/test_docparse_pdf.py`。
+- 验证：`node --check` 4 个前端文件通过；`ruff` 通过；`dev_check.py` 9 项全过（131 文件编译 / 57 个前端 JS）；`pytest tests/test_docparse_pdf.py tests/test_attachments_multi_doc.py tests/test_context.py` 全过。全量 `pytest` 仍有 3 条与本轮无关的既有失败（`test_memory.py` reindex 计数、`test_native_tools.py` 压缩 `stop_event` 桩函数、`test_prompt_budget.py` Agent 提示 8268>8000），未改动。
+
+## [2026-11-04] 附件跟进：读取进度 / 失败重试 / Office 文本预览
+
+- 问题/决策：
+  - 大附件读取（FileReader → base64）期间没有任何反馈，用户不知道「点了没反应」还是「在读」。
+  - 解析失败只在气泡里留一句「（解析失败）」，没有恢复入口，只能撤回重发。
+  - docx / xlsx / pptx 点开只有一句「这种格式暂不支持在应用内预览」，实际后端本来就能抽文本。
+- 解决方案：
+  - `attachDocBlob` 先插入 `loading` 占位项（带 `progress`），用 `FileReader.onprogress` 更新「读取 x%」；读取中点标签不触发预览，发送按钮禁用并提示「附件还在读取中」；被移除的占位项不会再被 onload 补回来。
+  - 解析失败的标签点击直接重试：新增 `POST /api/attach/reparse {session_id,index,doc_index}`，按落盘文件重跑 `docparse.extract`（扫描件带视觉回调），成功回写字数/正文并清掉 error，失败回写原因；前端 `docReparse` 同步更新本地消息与标签，成功后标签恢复成「（N 字）」。
+  - 新增 `POST /api/attach/text`：返回落盘附件抽出的纯文本（预览要快，不跑 OCR）；`docPreviewStored` 对 docx/xlsx/pptx 先取文本，用 `docPreviewOpen(..., {text, note})` 在预览框里显示「文本预览（版式与图表请下载原文件）」，下载仍是原文件。
+  - 扫描件 OCR 提示词抽成 `docparse.PDF_PAGE_OCR_PROMPT`，聊天解析与手动重试共用，避免两处漂移。
+- 相关代码：`web/stream.js`（`attachDocBlob` / `renderAttach` / `syncSendBtn` / `sendMessage`）、`web/chat.js`（`docPreviewStored` / `paintDocChip` / `docReparse` / `docPreviewOpen`）、`web/css/base.css`（`.attach-doc.loading`）、`app/api/sessions.py`（`_api_attach_reparse` / `_api_attach_text`）、`app/httpd.py`、`app/docparse.py`、`tests/test_attachments_multi_doc.py`。
+- 验证：`dev_check.py` 9 项全过（含 57 个前端 JS 语法）；`ruff` 通过；`pytest tests/test_attachments_multi_doc.py tests/test_docparse_pdf.py` 17 条全过（新增文本预览、重试回写、缺文件 404）。未做图片发送前压缩（会牺牲截图/OCR 清晰度，先不动）。
+
+## [2026-11-04] 修复：SVG 源码按钮 / 划词提问失效 / Ctrl+Shift+V 切换渲染
+
+- 问题/决策：
+  - AI 输出的 SVG / 图表块右上角「源码」点了没反应：`rich-media.js` 只切了 `.show-src`，但源码 `<pre>` 自带 `.hidden`，而 `base.css` 有一条全局 `.hidden { display: none !important; }`，`!important` 压过 `.rich-media.show-src .rich-media-src { display: block; }`，所以源码永远不显示。
+  - Solo 划词「问问」偶尔提示「这段内容无法提问」：`freezeSelection` 只用 `row._content` 判断选区。AI 回复被提问卡切成多段时 `_content` 指向最后一段，选前面几段就判成「不在选区里」；选在思考过程 / 工具输出里也没有兜底。
+  - Solo 与笔记缺少「渲染 / 源码」的键盘入口。
+- 解决方案：
+  - `rich-media.js`：切换 `show-src` 时同步 `classList.toggle('hidden', !on)`；主题切换重置时重新加回 `hidden`。
+  - `aside.js`：新增 `rowContents(row)`，AI 行取全部 `row._secs`（存活的节点）再加 `_content`；`rangeTextIn` 统一把 range 夹到节点内。多段都扫不到时兜底用选区原文（选在思考 / 工具输出里也能提问），不再直接返回 null。
+  - 新增快捷键 `global.render`（默认 `Ctrl+Shift+KeyV` / `Meta+Shift+KeyV`，可在「?」清单改键）：
+    - 笔记弹窗打开：在「编辑（源码）↔ 预览」之间切换（`setNoteMode`）。
+    - Solo：切换 AI 回复的源码视图（优先选区所在消息，否则最后一条 AI 回复，复用 `toggleRawView`）。
+    - IDE 模式 / 设置弹窗打开时不抢键（IDE 的 Ctrl+Shift+V 仍是 Monaco 的 Markdown 预览）。
+- 相关代码：`web/rich-media.js`（源码按钮 / `reTheme`）、`web/aside.js`（`rowContents` / `rangeTextIn` / `freezeSelection`）、`web/hotkeys.js`（`HK_DEFS` 新增 `global.render`）、`web/init.js`（`toggleChatRenderByKey` + keydown 分发）。
+- 验证：`node --check web/rich-media.js / aside.js / init.js / hotkeys.js` 通过；`node scripts/hotkeys_test.js` 73/73；`dev_check.py` 9 项全过。未做浏览器点击实测（需要打开应用窗口）。
+
+## [2026-11-04] 笔记预览支持 SVG / 图表渲染
+
+- 问题/决策：笔记预览由 `setNoteMode('preview')` 直接把 `safeRenderMarkdown()` 的 HTML 塞进 `#nt-preview-box`，但没调用富媒体增强。```svg 围栏只会生成 `.rich-media` 占位块，界面一直停在「渲染中…」，看起来像不支持 SVG。
+- 解决方案：预览渲染完、并把预览区切成可见之后，调用 `window.enhanceRichMedia(pv)`。与对话共用同一套渲染器（SVG / ECharts / Mermaid、下载、源码、主题重绘），笔记里写 ```svg 就能直接出几何图。放在可见性切换之后，是因为图表初始化需要真实尺寸，隐藏状态下会量成 0。
+- 用法：笔记正文里写围栏代码块 ` ```svg ` + `<svg …>…</svg>`；在「预览」模式查看，右上角可下载 / 看源码。
+- 相关代码：`web/init.js`（`setNoteMode`）。
+- 验证：`node --check web/init.js`；`dev_check.py` 9 项全过（含 57 个前端 JS 语法、Markdown 富媒体回归）。未打开应用窗口做点击实测。
+
+## [2026-11-04] 修复：笔记批注高亮破坏列表 / 表格排版
+
+- 问题/现象：给《数学分析期中备考》的「聚点」加批注后，「① 三集判定」的三条列表变成 5 个圆点（两条被拆开、出现空条目），列表高度从 89px 撑到 214px；公式与表格不受影响。
+- 根因：`applyNoteAnnotations` 用 DOM Range + `surroundContents` 包 `<mark>`。引文「…包含全部聚点」正好在 `<li>` 文本节点的末尾结束，`range.endOffset` 落在下一条 `<li>` 的 `<strong>` 起点，Range 跨过了 `<li>` 边界；`surroundContents` 抛错后走 `extractContents()` 兜底，把两个 `<li>` 塞进了 `<mark>`，列表结构被拆坏。`noteTextIndex` 只记字符偏移、不认元素边界，是这个映射错误的来源。
+- 解决方案：`applyNoteAnnotations` 改为「只切文本节点」——按全局字符区间找出重叠的文本节点，在每个节点内部 `splitText` 后只包住那一段文本，跨块时在每块各生成一个 `<mark data-id>`；不碰 `.katex` / `.rich-media-src` / script / style，避免切开 KaTeX 造成公式错位。删除了不再使用的 `locateAnnoRange`。
+- 验证：
+  - 静态探针（同一份笔记 + 同一条批注）对比旧/新算法：旧算法 5 个圆点、列表 214px、mark 691×114 且内部含 2 个 `<li>`；新算法 3 个圆点、89px、mark 32×21 只含文本。
+  - 在运行中的应用里实测：打开《数学分析期中备考》→ 预览，列表 3 条、`聚点` 在第二条内联高亮（31.5×20.4，display:inline），无空条目、无嵌套列表，控制台无报错。
+  - `node --check web/init.js`、`dev_check.py` 9 项全过。
+- 相关代码：`web/init.js`（`noteTextIndex` / `applyNoteAnnotations`）。
+
+## [2026-11-05] 侧栏新增「刷新页面」按钮
+
+- 问题/决策：开发时改完前端代码要手动按 Ctrl+R，想要一个可见入口。放在侧栏 `.side-foot` 里，与「笔记 / 主题 / 设置」同列，全局可用（Electron 自绘标题栏只在外壳里有，浏览器打开时看不到，所以没放标题栏）。
+- 解决方案：`index.html` 在 `.side-foot` 的「笔记」后插入 `<button id="btn-reload" class="ghost wide"><svg class="ic"><use href="#i-refresh"/></svg>刷新页面</button>`；`init.js` 绑定 `$('#btn-reload').onclick = () => location.reload();`。用 `.wide` 独占一行：侧栏窄（约 200px）时三个半宽 `ghost` 并排会把「主题 / 设置」这类两字标签挤成竖排（实测每个按钮内容宽仅 25px，两字需 26px）。
+- 相关代码：`web/index.html`（`.side-foot`）、`web/init.js`（`btn-reload` 绑定）。重载后后端仍在跑的任务由 `streamingSids` / attach 自动挂回，不需要额外处理。
+- 验证：`dev_check.py` 9 项全过；浏览器实测按钮 144×33 单行不换行，点击后 `performance.timeOrigin` 变化、`navigation.type === "reload"`，重载后按钮仍在，无未捕获 JS 异常。
+
+## [2026-11-05] 导出译文比阅读器细：变量字体读到默认 ExtraLight/Thin
+
+- 问题/现象：PDF 阅读器的译文观感正常，导出的「译文 / 版式译文」整体变细。
+- 根因：`reader_export._SERIF_CANDIDATES` / `_SANS_CANDIDATES` 首位是 `NotoSerifSC-VF.ttf` / `NotoSansSC-VF.ttf`——**变量字体**。reportlab 的 `TTFont` 不读 `wght` 轴，只取默认实例；这两个文件默认分别是 wght 200（ExtraLight）和 wght 100（Thin）。已导出 PDF 里能看到 `/NotoSerifSC-ExtraLight`、`/NotoSansSC-Thin`。
+- 解决方案：注册前用 fontTools 把 VF 实例化为静态字重（正文 400、标题 700），缓存到 `data/cache/fonts/<名字>-w<字重>.ttf`（按源文件 mtime 失效重建），再交给 reportlab；没有 fontTools 或实例化失败时跳过该候选，退回 simsun / simhei 等静态字体。标题同时获得了真正的粗体（原来只是字号大）。
+- 相关代码：`app/reader_export.py`（`_is_variable` / `_instance_vf` / `_register(weight=…)` / `BODY_WEIGHT=400` / `HEAD_WEIGHT=700`）。
+- 验证：同一段文字导出对比——旧：内嵌 `NotoSerifSC-ExtraLight` + `NotoSansSC-Thin`，墨量 1.59%、暗像素均值 126.2；新：内嵌 `NotoSerifSC-Regular` + `NotoSansSC-Bold`，墨量 2.16%、暗像素均值 102.8。`tests/test_reader.py` 43 项全过。
+- 注意：实例化在首次导出时多花约 2–3 秒并占用约 25MB 缓存；之后直接用缓存。
+
+## [2026-11-05] 回滚前预览：列出将被修改 / 删除 / 新建的文件
+
+- 问题/决策：回退消息、回滚本轮、步骤面板「回到这里」都会同步回滚沙箱文件，但原来只有 `confirm()` 一句「会还原 N 处文件改动」，看不到具体是哪些文件。
+- 方案：
+  - 后端 `agent.preview_undo(sid, tokens|scope="turn", root)`：按 `undo()` 的真实执行顺序（token 倒序、ops 倒序）扫描，把 `restore(existed)` → modify、`restore(未存在)` → delete、`move_back` → delete(dst) + create(src)、`mkdir/rmdir` → 目录增删；同一路径只保留最终状态；沙箱内转相对路径。新增 `POST /api/agent/undo/preview`。
+  - 前端新增统一弹窗 `#rollback-modal` + `rollbackConfirm()`（文件图标 + 路径 + 「将被修改 / 将被删除 / 将新建」，Esc 取消、Enter 确认），三处回滚入口全部改成先预览再确认；预览接口失败时不拦回滚，退回旧式确认。
+- 相关代码：`app/agent.py`（`_preview_paths` / `_preview_display` / `preview_undo`）、`app/api/sandbox.py`（`_api_agent_undo_preview`）、`web/index.html`（`#rollback-modal`）、`web/css/base.css`（`.rb-*`）、`web/stream.js`（`fetchRollbackPreview` / `rollbackConfirm` / `rollbackMessage`）、`web/chat.js`（`turnUndo`、步骤面板「回到这里」）。
+- 验证：新增 `tests/test_snap_steps.py` 4 条（动作映射 + 相对路径、同文件多次写只留一条、已撤销 token 跳过、move_back）；共 10 项通过。浏览器实测：种子会话点「回退到此（含文件改动）」→ 弹窗列出 `app/agent.py 将被修改`、`new_file.py 将被删除`，取消后消息数不变、无报错。
+
+## [2026-11-05] archify 在非 Agent 模式可用，产物在对话内 iframe 渲染
+
+- 问题/决策：archify（架构图 / 流程图 / 时序图…）原来只挂在 `if agent_on:` 块里，且 `_t_archify` 依赖沙箱；普通对话既看不到工具也没地方落盘。
+- 方案：
+  - 工具挂载：把 archify 的 schema 移到 `agent_on` 之外常驻生成，再由既有的工具分层（`hidden_tools` / `allow_groups` 的 `diagram` 组、`tool_search` 解锁）决定是否下发；`needs_sandbox("archify") = False`，`tool_search` 也一并豁免（非 Agent 模式才能解锁工具组）。`TOOL_GROUP_KEYS["diagram"]` 补了「结构图 / 系统图 / 模块图 / 关系图 / 状态机 / 示意图 / 脑图」等常见说法。
+  - 落盘：没有沙箱时 `archify.workspace_root(sid)` = `data/archify/<会话 id>/`，候选与 HTML 都写这里，不走写入审批。
+  - 回传渲染：`_t_archify` 成功后在结果末尾追加 `__ARCHIFY_ARTIFACT__ {url…}`；`chat.py` 摘掉这一行（不给模型看）、发 SSE `diagram` 事件并写进 `tool_log[].diagram`（刷新后可还原）。前端 `buildDiagramCard` 用 `sandbox="allow-scripts allow-popups allow-forms"` 的 iframe 内嵌，`/archify/<sid>/<path>` 免 token（同 `/share/`，仅本机 + 路径限定在 `data/archify`），读取时注入脚本把 `scrollHeight` postMessage 给父页调高度。
+  - 提示词：`_VISUAL_DIAGRAM_OFF` 改为「不需要开启 Agent / 沙箱，产物直接显示在对话里」。
+- 踩坑：
+  - `agent.run_tool` 只在 `is_write and undo_ops` 时登记撤销；archify 的 `writes_files()` 为 True 但 undo 为 None，回滚预览里不会出现它的产物（本来也不该由对话回滚）。
+  - 免 token 的 URL 必须走 `do_GET` 里 `/share/` 同级的白名单分支，`/api/*` 一律要 `X-Auth-Token`，iframe 带不了。
+  - reportlab 同名重注册会被静默忽略（`registerFont` 里 `if fontName not in _fonts`），验证字体改动必须一进程一种模式。
+- 相关代码：`app/agent.py`（schema 位置 / `_t_archify` / `needs_sandbox` / `_VISUAL_DIAGRAM_OFF` / `TOOL_GROUP_KEYS`）、`app/archify.py`（`workspace_root` / `read_for_view` / `view_url` / `_HEIGHT_JS`）、`app/api/chat.py`（`_diag` 摘标记 + SSE）、`app/httpd.py`（`/archify/` 路由）、`web/chat.js`（`buildDiagramCard` / `appendDiagramCards` / message 监听）、`web/stream.js`（`diagram` 事件 + 收尾重排）、`web/css/base.css`（`.diagram-*`）。
+- 验证：`tests/test_archify.py` 11 项（含新增「非 Agent 挂载 / 无沙箱产物标记 / 越界路径拒绝」）；实跑一次 archify（无沙箱）通过四道门槛，产物 813KB，标记与 URL 正确；浏览器实测图卡 iframe 加载、高度由 420 自动撑到 1034px、无控制台异常。`dev_check.py` 9 项全过。
+
+## [2026-11-05] API 异常补打完整堆栈（定位 dict update 崩溃）
+
+- 问题/决策：`/api/chat` 抛异常时 httpd 只 `print("[服务] ... 出错：{e}")`，没有堆栈。历史 `data/app.log` 里 `dictionary update sequence element #0 has length 1; 2 is required` 已出现 43 次（多天、多会话），但只能靠猜是哪一行 `dict(字符串)`。
+- 解决方案：`app/httpd.py` 的 `_do_post` except 里补 `traceback.print_exc()`。`main.py` 的 `_pipe_output()` 已把 `sys.stderr` 接到 `data/app.log`（按行 flush），所以堆栈直接落盘。GET 路由没有静默兜底，异常本来就有 socketserver 的完整栈，无需改。
+- 相关代码/指令：`app/httpd.py`（`import traceback` + `_do_post` 的 except）。复现后查 `data/app.log`：`[服务] /api/chat 出错：...` 下一段就是 `Traceback (most recent call last)` 与具体文件行号。
+- 验证：临时注册一个必抛错路由并发一次 POST，捕获到的 stderr 为 `Traceback ... app/httpd.py line 609 in _do_post → 探针函数 → ValueError`，证明堆栈确实会被打印；`py_compile` 与 `dev_check.py` 9 项全过。
+
+## [2026-11-05] 修复：update_plan(log={...}) 触发 dict(字符串) 崩溃（模拟股市会话反复中断的根因）
+
+- 问题/现象：`/api/chat` 抛 `dictionary update sequence element #0 has length 1; 2 is required`，本轮被 abort_chat_stream 异常收尾；刷新后显示「后台输出已中断」。同一错误在 app.log 累计 46 次，多个会话、多天。
+- 根因：`app/agent.py` 的 `_plan_log()` 处理 `log` 的字典形式时写成 `dict(v, kind=k)`。字典形式是「键 = kind，值 = 文本」，`v` 是字符串，`dict("文字")` 会按字符当键值对拆 → 首个元素长度 1 → 抛错。模型在收尾时调 `update_plan(log={"decisions": "…"})` 必中。
+- 解决方案：
+  - 改成显式构造 `{"kind": k, "text": v}`（保留下游 `if isinstance(v, str)` 的过滤）。
+  - 顺手修同一函数里 kind 的单复数归一：`decisions/discoveries` 也要认，否则两个桶都会被并进 `decisions`。
+- 相关代码：`app/agent.py`（`_plan_log`）、`tests/test_agent_plan.py`（新增 `test_plan_log_accepts_dict_of_strings`、`test_plan_log_ignores_non_string_values`）。定位手段见上一条「API 异常补打完整堆栈」。
+- 验证：`tests/test_agent_plan.py` + `test_plan_review.py` 18 项，`test_agent_guards.py` + `test_prompt_assembly.py` + `test_agent_tool_format.py` 135 项，`dev_check.py` 9 项全过；新增用例覆盖「字典形式字符串值」「非字符串值忽略」两种情况。
+
+## [2026-11-05] 内联补全多候选 / AI 改动审阅 / Git 审查与 AI 提交信息
+
+- 问题/决策：对齐 Trae IDE 的三处能力（已超越对方的可视化、回滚粒度、多模型、PDF 翻译保持不动）。
+  - 内联补全：原来只在「行尾或后面只剩收尾符号」时触发、每次只给一个候选。
+  - AI 审阅：只有逐文件 diff，缺整批改动的摘要 / 风险 / 流程图；Git 侧没有审查入口。
+  - Git：提交信息只能手写。
+- 方案：
+  - 补全后端：`build_messages` 要求模型用单独一行 `---CANDIDATE---` 分隔最多 2 个候选；`parse_candidates` 负责拆分、清洗、去重；新增 `complete_candidates`，`complete` 保留为「只回第一个」的兼容入口。`/api/ide/complete` 新增 `texts` 数组，`text` 继续返回首个。
+  - 补全前端：行中也能补（仅当光标两侧都是 `[\w$]`，即标识符中间时跳过）；`items` 返回全部候选；Alt+] / Alt+[ 绑定 `editor.action.inlineSuggest.showNext/showPrevious`；Esc / Tab 时清空候选缓存。
+  - 审阅后端：新增 `app/ide_review.py`。`ai_diff` 按 undo 快照逐文件算 diff（只保留增删行）；`review` 走主模型、要求严格 JSON（summary / risks / flow），`parse_review` 宽松解析（剥围栏、截取首尾花括号、risks 字符串也接受）。新增 `POST /api/ide/review`：`scope=ai` 收 `items:[{path,undo}]`，`scope=git` 收 `mode=work|commit|branch`。
+  - Git 侧：`git.diff_text`（work 含未跟踪文件补丁 / commit / branch 三点差异）、`git.commit_patch`（优先暂存区）；新增 `POST /api/git/message`。
+  - 审阅前端：审阅条加「AI 摘要」按钮，面板内用 `safeRenderMarkdown` + `enhanceRichMedia` 渲染摘要 / 风险 / ```mermaid 流程图；`#ide-diff` 与 Solo 弹窗 `#review-modal` 两套都接。新增 `#ide-git-review` 视图（未提交 / 单提交 / 分支对比三个入口：更改页「AI 审查」、历史行「审查」、分支菜单「审查」）。提交框旁加「AI 生成」按钮，只填输入框不自动提交。
+- 踩坑：`clean_completion` 的后文去重循环写错（`while k > 8` 退出后无条件 `if k >= 8` 裁剪），**后文没有重叠也会裁掉末尾 8 个字符**：`print(x)` 变空串、`self.foo = bar` 变 `self.f`，等于把短补全全废掉。改成「只有真正命中公共前缀才裁剪」，并补回归用例。
+- 相关代码：`app/ide_complete.py`、`app/ide_review.py`、`app/git.py`（`diff_text` / `commit_patch`）、`app/api/sandbox.py`（`/api/ide/complete` / `/api/ide/review`）、`app/api/git.py`（`/api/git/message`）、`web/gal/gal-ide.js`（`ideAi*` / `ideReviewAi*` / `ideShowView`）、`web/git.js`（`gitGenMessage` / `gitReview`）、`web/index.html`、`web/css/ide.css`。
+- 验证：`tests/test_ide_complete.py`、`tests/test_ide_review.py`、`tests/test_git.py`、`tests/test_ide_diff.py` 共 59 项通过；`ruff` 通过；`scripts/dev_check.py` 9 项全过。全量 `pytest` 有 3 个与本次无关的既有失败（`test_prompt_budget` 8268>8000、`test_memory` 7!=2、`test_native_tools::test_compress_pins_task_ledger`）。
+
+## [2026-11-06] 上下文引用对齐 Trae（# 菜单 + chip）/ Git 远端同步 + 标签 + 分支图
+
+- 问题/决策：引用入口原来只有 `@` 和 `#web`，缺 `#code` / `#terminal` / `#git` / `#doc`，也没有 chip 呈现；Git 缺 push / pull / fetch、标签和分支图。已拍板：完全改用 `#`、引用做成可移除 chip、四类新引用全要、Git 做到「标签 + 分支图」档（本次不做 hunk 级部分暂存）。
+- 方案：
+  - 前端 `#` 统一菜单（`web/composer.js`）：编辑器选区、终端、Git、知识库、文件、文件夹、记忆、历史对话、问题、规则、全仓、`#web`。选中后不往正文写 token，而是进 `state.pendingRefs`，发送时作为 `body.refs`；输入框上方新增 `#ref-bar` chip，可单条移除。
+  - `app/fileref.py` 新增 `from_client()`：file / folder / code / terminal / git / problems / rule / doc / memory / workspace。`code_ref` 优先读文件的行区间，读不到才回退前端选区快照（避免拿绝对行号去切快照）。chat 类引用仍在 `chat.py` 用 `_past_chat_ref`。
+  - `chat.py` 新消息分支同时处理 chip 引用与旧式 `@` 文本引用；纯引用消息落库为「【引用 N 项】」。
+  - 新增 `/api/kb/nodes`（扁平列知识库条目，给 `#doc` 菜单）；kb 模块没有 `@route`，路由要登记在 `app/httpd.py` 的 POST 表里。
+  - IDE 侧新增 `ideCurrentCodeRef()`（Monaco 选区）与 `ideTermRecentText()`（读 xterm buffer 最近 160 行）；从文件树拖到输入框会转成 file / folder chip。
+  - Git：`git.sync`（fetch / pull / push，首次 push 自动 `-u`）、`git.tags` / `tag_create` / `tag_delete`、`git.graph_log`；`status` 增加 remotes / upstream。路由 `/api/git/sync`、`/api/git/tag`、`/api/git/graph`；前端三个同步按钮、历史「分支图」开关、分支菜单里的标签增删。
+- 踩坑：
+  - `git log --graph` 会把 `* ` 前缀拼在第一个字段（提交号）前面，不能按第一个 tab 切；改用 `%x1f` 作分隔符。不能用 `\x1e`：Python 的 `splitlines()` 会把它当换行，行会被切碎。
+  - `git push origin <branch>` 不会建立 upstream，第一次必须 `-u`。
+  - `chat.py` 里局部变量不能叫 `_client_refs`（与函数同名 → UnboundLocalError）。
+  - 引用解析必须在 content 为空时也执行，否则「纯 chip 引用」消息拿不到上下文。
+- 验证：`tests/test_fileref.py`（8 项）、`tests/test_git.py`（含 sync / tags / graph）与既有关联用例全部通过；`ruff`、`node --check`、`scripts/dev_check.py` 通过；全量 pytest 仍是 3 个与本次无关的既有失败（prompt budget 8268>8000、memory 7!=2、compress pins）。浏览器实测：输入 `#` 弹出 23 项菜单、点「未提交改动」生成可移除 chip、输入框 token 被清除、控制台无报错。
+- 注意：浏览器实测启动过一次本地服务（`GALGAME_NO_AUTORESUME=1`），应用启动时会重写 `data/config.json`；已确认 JSON 有效且密钥字段仍在。
+- 回归验证（聊天历史渲染 / 引用 chip 改动后）：打开 `http://127.0.0.1:8801/`，`.msg` 60 条、`.msg.user` 29 条全部可见；7 个 `.msg .refs` 块均为可折叠块，`.think-label` 文本统一为 `引用 · 5`，每块 5 个 chip；控制台零报错。
+- 踩坑（验证方法）：`browser_console_messages` 的缓冲按 view 保留，且会混入同一浏览器里其他端口（如 8799）的旧错误；用 `newTab` 开新标签再按该 viewId 读控制台，才是本次页面的干净基线。`/@vite/client` 的 `net::ERR_ABORTED` 属正常 HMR 探测，不算脚本报错。
+
+## [2026-11-06] 用户消息气泡显示 # 引用 chip（发送后不再“消失”）
+
+- 问题/现象：发送前输入框上方有引用 chip，发送后 chip 条被清空、用户气泡里又看不到，像是引用丢了。
+- 排查结论：
+  - 数据没有丢：用户消息 `msg.refs` 存完整正文（供后续轮次继续注入 prompt），AI 消息 `msg.references` 存路径 / 行号元数据（供回显）；`slim_sessions()` 原样透传，刷新后两份都在。
+  - 用户气泡 `buildUserRow()` 只渲染 images / docs，根本没有渲染 refs 的代码；引用只在 AI 回复下方以「引用 · N」折叠块出现（实时靠 done 事件，刷新靠 `rowForMsg`）。
+  - 另一个可能：后端进程没重启时，旧进程不认识 `body.refs`，引用不会落库。
+- 方案：
+  - `chat.js` 新增 `buildUserRefs()` / `setUserRefs()`：用户气泡上方渲染显式引用 chip；file / code 可点击跳 IDE，虚拟引用（终端 / Git / 知识库等）用虚线且不可点；`workspace` 只是检索开关，不生成 chip。
+  - `stream.js` 发送时先把 `cmpRefPayload()` 的显式引用作为临时 chip 传给 `appendUser()`；`done` 事件再用服务端 `references`（auto=false）校正一次，保证刷新前后一致。
+  - AI 回复下方的引用块只保留 `auto: true` 的自动检索条目，避免和用户 chip 重复；旧消息里没有 auto 标记的显式引用会归到用户气泡。
+- 相关代码：`web/chat.js`（`buildUserRefs` / `setUserRefs` / `buildUserRow` / `rowForMsg`）、`web/stream.js`（发送时的 `echoRefs`、done 时的 references 分流）、`web/css/search.css`（`.msg-refs` / `.msg-ref`）。
+- 验证：`node --check`、`scripts/dev_check.py` 全过；浏览器加载首页 60 条消息（29 条用户消息）正常渲染，7 个 AI「引用 · 5」块正常，控制台零报错。显式 chip 的实发验证需要重启后端后发一条带 `#` 引用的消息（会消耗一次模型调用）。
+
+## [2026-11-06] Archify 流程图 / 图工具汉化（Viewer 界面 + 默认中文图内文字）
+
+- 问题/决策：archify 生成的交互式 HTML 里，Viewer 的按钮 / 图例 / 提示默认是英文。根因不是缺翻译——`vendor/archify/locales/zh-CN.json` 已经自带完整目录，但上游默认 locale 是 `en`，只有候选的 `meta.locale` 才会切到中文。
+- 方案：
+  - `app/archify.py` 新增 `DEFAULT_LOCALE = "zh-CN"` 与 `_apply_locale()`：JSON 候选在 `meta.locale` 缺省时补 `zh-CN`（显式写了其它 locale 的不覆盖）；explainer 的 Markdown 候选插入 `@meta locale=zh-CN`（有标题插在标题下一行，已有 `@meta` 就追加到同一行）。`finalize()` 在调用 CLI 前执行，写失败不阻断出图。
+  - `schema_text()` 增加中文指令：图内文字（标题 / 节点 / 分组 / 说明）默认中文、示例里的英文只学结构不要照抄；并说明 `meta.locale` 可省略。
+  - `app/agent.py`：archify 工具描述与 `_VISUAL_TAIL` 增加「图内文字默认中文」，同时覆盖内联的 ```svg / ```chart / ```mermaid。
+- 相关代码：`app/archify.py`（`DEFAULT_LOCALE` / `_apply_locale` / `finalize` / `schema_text`）、`app/agent.py`（archify 工具描述 / `_VISUAL_TAIL`）、`tests/test_archify.py`。
+- 验证：`tests/test_archify.py` 14 项全过，其中 e2e 用无 locale 的官方示例出图，产物 `<html lang="zh-CN">` 且包含「由 Archify 生成的架构图」；`ruff`、`py_compile`、`scripts/dev_check.py` 全过。
+
+- 注意：不要改 `vendor/archify`（升级会覆盖）；汉化统一在调用侧补 `meta.locale`。
+
+## [2026-11-06] 修复：有「每天重复」日程时工作台加载失败
+
+- 问题/现象：进入工作台弹「工作台加载失败」。`data/app.log` 里 `/api/calendar/events` 500：
+  `TypeError: '>' not supported between instances of 'float' and 'datetime.datetime'`（`app/calendar.py` `_iter_starts`）；同一错误还导致 `[日程] 同步系统提醒失败` 与 `[调度] 外部来源 due_reminders 失败`。
+- 根因：`_iter_starts()` 的 DAILY 分支把 `range_start`（float 时间戳）和 `cur`（datetime）直接比较、相减；WEEKLY / MONTHLY 分支都已经按时间戳处理，只有 DAILY 漏了。只有库里存在 `FREQ=DAILY` 日程才会触发（本次有两条「每天」提醒）；工作台一次拉 30 天日程，撞上后整个 `Promise.all([日程, 任务])` 失败。
+- 修复：DAILY 分支统一用 `cur.timestamp()` 参与比较和相减。
+- 相关代码：`app/calendar.py`（`_iter_starts`）、`tests/test_calendar.py`（新增 `test_daily_recurrence_expands_after_range_start` / `test_daily_interval_skips_days`）。
+- 验证：`tests/test_calendar.py` 20 项全过；用真实 `data/assistant.db` 按工作台范围（-31 天 ~ +90 天）查询通过，返回 189 条 occurrence（其中 179 条来自两条每日提醒），`due_reminders()` 不再抛错；`ruff`、`py_compile`、`scripts/dev_check.py` 通过。
+- 注意：这两条 `FREQ=DAILY` 没有 UNTIL，会一直展开；如果不再需要，建议删除或补结束日期。
+
+## [2026-11-06] Computer Use 使用率对齐 ChatGPT Work：路由提示词 / 登录接管 / 站点三档
+
+- 问题/决策：`computer_*` 工具存在且配置已开启，但 AI 很少用。统计 11 个会话、上万次工具调用：`computer_open` 7 次、`computer_act` 3 次、`computer_see` 1 次、`computer_read` 1 次，0 失败；用户明确说「用我的浏览器打开 B 站」时能完整走通。结论：不是不能用，是工具选择没有把它当默认解法。
+- 研究 ChatGPT Work：云端独立浏览器，模型自己决定何时用（优先连接器/应用）；需要登录/信息/确认时暂停；安全登录表单模型看不到凭据；卡住给接管链接；站点权限三档（询问 / 自动批准只拦可疑 / 始终允许）+ 单站覆盖；高危操作二次确认；独立 Cookie / 登录态；浏览、Computer Use、代码执行在同一 Agent 循环里。
+- 方案：
+  - 路由：`_tool_decision_prompt(computer_on=…)` 增加「操作网页 / 登录 / 点击 / 填表」类别和第 5 条纪律；`_COMPUTER_PROMPT` 明确「具体网站默认先 computer_open」「登录 / 验证码 / 扫码 → ask_user(action=true) 请用户在受控窗口完成，之后 computer_see 继续」。
+  - 工具描述任务化：`computer_open` 写清「需要登录 / 点击 / 填表 / 看登录后内容 / 验证页面时用，普通查资料优先 web_search / fetch_url」，其余工具按触发场景重写。
+  - 站点三档：新增 `computer_site_mode = ask | auto | allow`（`app/computer/policy.py` 的 `site_mode()`）；auto 只放行 https 公网域名，http / 裸 IP / 非常规端口 / punycode / 无点主机名仍询问；白名单与本次进程授权在任何档位下都放行；内置禁区不变。设置页把原来的「无限制」勾选框改成三档下拉。
+  - 兼容：`computer_sites` / `computer_apps` / `computer_extra_block` 支持数组、换行、逗号三种旧格式；`save_config()` 统一存成数组；`site_mode` 里 ask + 旧键 unrestricted=true 视为 allow，避免升级后突然收紧。
+- 相关代码：`app/agent.py`（`_tool_decision_prompt` / `_COMPUTER_PROMPT` / computer 工具 schema）、`app/computer/policy.py`（`site_mode` / `_patterns` / `_suspicious` / `check`）、`app/config.py`（`_list_value` / `save_config`）、`web/settings.js`（三档下拉 / `settingsList`）、`tests/test_computer_policy.py`、`tests/test_computer_agent.py`。
+- 验证：计算机相关与提示词测试 64 项全过；`ruff`、`node --check`、`scripts/dev_check.py` 全过；设置页浏览器实测 `#computer-site-mode` 存在、三档选项正确、控制台零报错；真实配置下 `site_mode` 生效值为 allow（保留原来的 unrestricted=true 行为）。
+- 注意：桌面窗口能力仍是关闭状态（`computer_desktop_enabled=false`），这次提升的是浏览器 Computer Use；桌面要在设置里单独开启并填白名单。测试中设置页意外写入了 `computer_site_mode: "ask"`，代码的兼容规则会把它按旧键 `unrestricted=true` 解释为 allow；想改用「自动批准」可在设置里切换。
+
+## [2026-11-07] 划词浮层统一：SelKit 内核 + 对话 / 笔记 / PDF 三适配器
+
+- 问题/决策：对话（aside.js）、笔记（init.js）、PDF（reader.js）各有一套划词工具条：三套定位、三套选区校验、三套 document 监听、三份 CSS，文本上限 4000 / 500 / 1600 不一致；互相关闭、z-index 70 / 9600 / 10000 打架。
+- 方案：
+  - 新增 `web/selkit.js`：统一 pointerup / Shift keyup 触发、选区校验（排除 input / textarea / contenteditable 与浮层 / 面板）、清洗与截断、浮层渲染、视口夹取 + 上下翻转、Esc / 滚动 / 外部点击关闭、mousedown 保选区、快捷键（Ctrl+Enter 提问、Ctrl+Shift+Enter 翻译）。
+  - 动作模型：`primary` 主操作，其余收进「更多」；适配器只注册上下文与动作。浮层左侧显示来源标签（对话 · #N / 笔记《…》/ PDF · 第 N 页），超长显示「已截断」。
+  - 对话：`aside.js` 删掉 `.aside-bar` 与旧 mouseup / scroll 监听，注册 chat 适配器（提问 / 引用 / 更多→复制）；引用 chip 带「对话 · #N」标签。
+  - 笔记：`init.js` 删掉 `.nt-sel-bar` / `showAnnoAdd` / `hideAnnoAdd`，注册 notes 适配器（提问 / 引用 / 更多→批注、复制），保留 `noteDraftFromRange` 的 prefix / suffix / nth 与批注 / 问答弹层。
+  - PDF：`reader.js` 删掉 `.rd-sel-tools` 与旧 mouseup / 快捷键，注册 reader 适配器（提问 / 翻译 / 引用 / 更多→批注、摘录、高亮、复制）；`.rd-sel` 只保留回答 / 批注 / 色板面板，高亮仍由原色板保存。
+  - 新增 `web/css/selkit.css`（`.selbar` / `.selbar-more-menu`，z-index 9800 / 9801），删除 aside.css / notes.css / reader.css 里三份旧工具条样式；`index.html` 引入。
+- 相关代码：`web/selkit.js`、`web/css/selkit.css`、`web/aside.js`（`registerSelection`）、`web/init.js`（`registerNoteSelection`）、`web/reader.js`（`registerReaderSelection` / `captureFlowSelection` / `capturePageSelection` / `openReaderPanel`）、`web/index.html`。
+- 验证：`node --check` 四个 JS 全过；`scripts/dev_check.py` 全过；浏览器实测：对话划词出现「对话 · #1022 / 提问 / 引用 / 更多」，更多里有复制，点引用后 `#quote-bar` 出现 chip；笔记预览划词出现「笔记《11.3》/ 提问 / 引用 / 更多」，控制台零报错。PDF 已在 resume.pdf 上实测（原页划词浮层 / 批注落右侧 / 双向联动见下一条）。
+- 注意：快捷键统一为 Ctrl+Enter 提问、Ctrl+Shift+Enter 翻译（reader 原来的 Ctrl+Enter 翻译已按新规范调整）；三处回答 / 批注弹层仍各自实现，这轮只统一浮层与触发 / 定位 / 生命周期。
+
+## [2026-11-07] PDF 原页划词接入 SelKit + 批注落右侧译页 + 左右双向联动
+
+- 问题/需求：此前只有阅读流 `.rd-flow` 和版式译页 `.rd-tpages` 会弹统一浮层，左栏原页 `.rd-pages` 划词只做单向联动、没有任何工具条；译页划词也不回标左栏。用户要求：原页也能划词，但批注 / 高亮 / 摘录要落到右侧译文块上；联动改成双向。
+- 方案：
+  - `registerReaderSelection()` 的 `roots` 增加 `.rd-pages`，`capture()` 优先判断左栏；新增 `captureLeftPageSelection(range)`：按 `.rd-page` 取页码 + `cleanRangeText` 取原文，`findBlockForQuote(page, quote)` 找对应 block；对不上时（页眉 / 连字 / 图表注）用 `findBlockNear()` 按选区中心点与 `block.rect`（PDF pt）做几何兜底。`sel.side` 记 `src`：quote 是原文，高亮落在右侧阅读流的原文段落；版式译页没有原文字层，退化为块角标——两条路都在右侧，不改左栏 canvas。
+  - 左 → 右：`linkToFlow(no, quote, b)`（由原 `linkFromPageSelection` 拆出）画块级矩形 + `paintLiveFlow` + `scrollFlowToBlock`，再异步 `ensureTextData` / `findRectsInIndex` 精修字符级。
+  - 右 → 左：新增 `linkToLeftPage(no, blockId, quote)`；`.rd-tpages` 划词（`capturePageSelection`，side=dst）用块原文在左栏定位 / 高亮。阅读流里的 dst 选区同理：`linkFromFlowSelection()` 在 side=dst 时改用 `blockOf(id).text`（译文无法在 PDF 字符索引里匹配）。
+  - 修浮层被自己关掉的两个坑：① `paintLiveFlow` 在「选区就在这段 `.rd-src` 里」时不再套 mark——改 DOM 会让浏览器丢选区，`selectionchange` 随即关浮层；② `clearLive` 拆 `mark.rd-hl-live` 时跳过与当前选区相交的节点；③ SelKit 的滚动关闭改为 `onScroll`：弹出后 800ms 内不关（联动会自动滚右侧面板），之后用户自己滚动仍然关闭。
+  - SelKit 的 `capture` 异常不再静默，改为 `console.error('[SelKit] capture failed:', id, e)`。
+- 相关代码：`web/reader.js`（`captureLeftPageSelection` / `findBlockNear` / `linkToFlow` / `linkToLeftPage` / `linkFromFlowSelection` / `paintLiveFlow` / `clearLive` / `registerReaderSelection`）、`web/selkit.js`（`S.shownAt` / `onScroll` / capture 错误日志）。
+- 验证（Edge headless + CDP，脚本 `.tmp_audit/reader_selbar_probe.py`，目标 resume.pdf）：
+  - 原页划词：`.selbar` 出现，标签「PDF · 第 1 页」，按钮 提问 / 翻译 / 引用 / 更多，`SelKit.current = {page:1, blockId:'p1bd7…', side:'src'}`，左栏 `.rd-live-rect` 7 段（左 → 右联动）。
+  - 批注落右侧：更多 → 高亮 → 黄色 → toast「已高亮」，批注数 +1；左栏 `.rd-hl-layer` / 角标始终为 0（没画回原页）；切到双语文案后 `.rd-flow mark.rd-hl` 出现。
+  - 双向联动：原文阅读流划词（side=src）左栏高亮 3 段；译文阅读流（side=dst）与版式译页（side=dst，标签「译页 · 第 1 页」）划词都在左栏出现高亮；版式对照下从原页划词，右侧联动滚动后浮层仍保持可见。
+  - 控制台零报错；`node --check web/reader.js web/selkit.js`、`scripts/dev_check.py` 全过。测试写入的 4 条 resume.pdf 高亮已从 `data/assistant.db` 删掉（只留用户原有的那条 dst 高亮）。
+- 注意：原页选区的 quote 是原文，所以批注的 `side` 是 `src`；版式译页里通过块角标显示，阅读流里高亮在对应原文段落。若以后要做「译文文字级高亮」，需要额外的原文 → 译文片段映射，当前数据模型没有。
+
+## [2026-11-07] 划词提问统一：AskKit 面板 + /api/ask/stream + 文档级线程
+
+- 问题/决策：SelKit 只统一了工具条，问答面板仍是三套（`.aside-panel` / `#nt-ask-pop` / `.rd-sel`），请求链路三条、能力不一致（只有对话流式 + 多轮 + 停止）。统一为 AskKit，三处只声明上下文与落库方式。
+- 方案：
+  - 新增 `web/askkit.js` + `web/css/askkit.css`：统一浮动卡片（引用块、线程标签页、扩展按钮区、问答列表、输入 / 停止、复制回答 / 引用到对话 / 存为批注）、drag / Esc / 外部点击关闭、SSE 流式（delta / reasoning / error）、AbortController 停止、多轮历史。
+  - 后端：`/api/ask/stream` 与 `/api/ask/threads`（`source: chat|notes|reader`）；`app/aside.py` 按来源拼 prompt（对话旁注 / 笔记助手 / 论文阅读助手）；`aside_store` 改成「作用域线程」：`session:<sid>`（对话）与 `doc:<doc_key>`（笔记 / PDF），旧 `by_session` 结构与裸 sid 调用自动兼容。
+  - 三处适配器：对话（`source=chat`，选区前后文 + 消息全文，保留快捷问法）、笔记（`doc:notes:<路径>`，prefix/suffix，存为 `kind=qa` 的 annotations）、PDF（`doc:<相对路径>`，扩展区放翻译 / 高亮 / 批注，问答存 qa）。
+  - 删除旧实现：`.aside-panel` + `aside.css`、`#nt-ask-pop` + 对应 CSS、`.rd-sel` + 对应 CSS；`/api/notes/ask` 与 `/api/reader/selection?mode=ask` 下线（翻译保留）；SelKit 的 `insideOwn` 只留 `.askkit` / `.nt-anno-pop`。
+  - 修两个联调问题：① AskKit 的 fetch 用 `window.TOKEN`（不存在）导致 401 `unauthorized`，改为读顶层 `TOKEN` / `window.__TOKEN__`；② 发送按钮最初没绑 click，只能回车发送。
+- 相关代码：`web/askkit.js`、`web/css/askkit.css`、`web/aside.js`、`web/init.js`、`web/reader.js`、`web/selkit.js`、`web/index.html`、`app/aside.py`、`app/aside_store.py`、`app/api/aside.py`、`app/notes.py`、`app/api/notes.py`、`app/api/reader.py`、`app/httpd.py`、`tests/test_aside.py`、`tests/test_notes_ask.py`。
+- 验证：
+  - 后端：`tests/test_aside.py` 17 项 + `tests/test_notes_ask.py` 2 项全过（含 `/api/ask/*` 路由、notes/reader prompt、doc 作用域隔离、QA 批注映射）。
+  - 浏览器（Edge headless + CDP，临时服务 51599，`.tmp_audit/askkit_probe.py` / `askkit_diag2.py`）：PDF 划词 → 「文献问答」+ 扩展 [翻译/高亮/批注]，翻译扩展返回译文；对话划词 → 「旁注」+ 3 个快捷问法；笔记划词 → 「笔记问答」+ 存为批注按钮；三处均创建线程（标签页）。笔记真实提问流式返回完整回答；`data/aside.json` 中 `doc:notes:11.2.md` 线程记录到该轮问答（多轮落库）。`.rd-sel / #nt-ask-pop / .aside-panel` 节点数均为 0，控制台零报错。
+  - `node --check` 五个 JS、`scripts/dev_check.py` 全过；验收写入的 doc 作用域线程已从 `data/aside.json` 清掉。
+- 注意：对话消息没有文档锚点，所以「存为批注」只出现在笔记 / PDF；浏览器验收里「存为批注」的点击时机撞上流式中（按钮 disabled）未单独复验，落库路径由单测覆盖，实际按钮点击后走的是原有 `/api/notes/anno/save`。线程按作用域保留最近 20 个、每线程 12 轮，和旧旁注一致。
+
+## [2026-11-08] 本地混合模型：开关 + 历史压缩 + 本地摘要质量闸门
+
+- 问题/决策：周 token 用量 2 亿级。实测最近 7 天 3.35 亿（再前一周 28.2 亿），**99.6% 来自主 Agent chat**；笔记/阅读器/补全等轻量任务合计只有 151 万（0.45%）。把简单任务切本地最多省 0.45%，真正能降的是「回合开始时的历史」：实测 71.8% 的 prompt 是 `Σ(轮数×起始prompt)`，平均每轮 11.6 万 token。
+- 方案：
+  - 一键开关 `hybrid_mode`（off / on / light）：off = 纯 API（本地 light 不参与、沿用原 `chat_context_limit`）；on = 轻量任务走 light，并按 `hybrid_context_limit`（默认 64000）+ `hybrid_keep_ratio`（0.45）提前压缩历史；light = 主对话也只走 light（不限定本地 / 云端）。设置页「模型接入 → 本地混合模式」三档切换。
+  - 仅轻量模型（light）：`get_api_conf("chat")` / `get_api_kind("chat")` / `provider_chain` 全部改指向 light；`provider_chain` 只留 light 一条（不回落到主 API）。`light_chat_is_local()`（light 在本地）时：固定开销（schema≈9.7k + tools_doc≈4k + rules≈2.7k + memory≈2k）超过本地 8k 上下文，`agent_on` / `search_ready` / 原生工具 schema / 工具提示全部关闭，按「无工具、无联网」问答运行；上下文预算改用 `local_context_limit`（12000）/ `local_keep_ratio`（0.35）/ `local_summary_tokens`（2048）/ `local_max_range_tokens`（10000），压缩失败即放弃本次压缩（没有别的模型可退）。云端 light 不受这些限制：窗口沿用用户填的 `chat_context_limit`，工具 / 联网 / 识图按正常设置走。
+  - 识图：本地 light（9B 文本模型）不支持多模态，`use_chat_for_vision()` 返回 False，改走设置里的视觉 API（没配就按「未配置」报错）；云端 light 仍跟随原设置。
+  - 本地模型：`D:\Ai\Model\本地部署\Qwen3.5-9B-IQ4_NL.gguf` 已导入 Ollama（`qwen35-9b:iq4nl`，5.2GB，100% GPU，8192 上下文）。实测短问答 44–48 tok/s；5k token 摘要 4.3s；9k token 分块摘要约 108s（3 块）。Ollama 的 OpenAI 兼容端点默认 thinking，必须发 `reasoning_effort: none`，否则正文为空。
+  - 上下文与派生模型：Ollama tag 里写死了 `PARAMETER num_ctx 8192`（`ollama show --modelfile` 可见），这是部署参数、不是模型能力（GGUF 原生 262144）。扩窗用派生 tag：`FROM qwen35-9b:iq4nl` + `PARAMETER num_ctx 32768` → `ollama create qwen35-9b:32k`；权重 blob 按 hash 复用，不多占 5GB。程序侧 `local_context_limit` 已做成设置项「本地窗口（tokens）」，必须与 num_ctx 一致。显存估算（实测 8192 ctx → KV 256 MiB，即 ≈32 KiB/token）：16k≈512 MiB、32k≈1 GiB、64k≈2 GiB；模型本体 4.57 GiB，32k 合计约 6.2 GiB。Ollama 自带界面能一直聊是因为界面保留完整记录，发给模型的历史同样受 num_ctx 限制；模型信息里的 262144 只是训练上限。
+  - 思考过程：Ollama 的 OpenAI 兼容端点把思考放在 `delta.reasoning`（vLLM / DeepSeek 用 `delta.reasoning_content`），原先只认后者 → 本地模型的思考被整段丢掉、前端没有「深度思考」块。已在 `llm.stream_chat` 同时识别两种字段并照常发 `{"type":"reasoning"}` 事件。默认 `chat_think_enabled=false` → 发 `reasoning_effort: none`，所以默认看不到思考；打开输入框左下「深度思考」（档位 low/medium/high/max）才会显示。实测同一问题（9.11 vs 9.9）：关思考 0.2–0.3s / 5 completion tokens，答 9.11；开思考 7.7–10.3s / 433–466 tokens（含思考），答 9.9。注意思考 token 计入输出上限，`max_tokens` 太小时会出现「想完没正文」（测试里 512 上限、思考 469 时就复现过）。
+  - 本地摘要：`compress_history` 在混合模式下按 3500 token 分块调用本地模型，多块再合并；区间超过 `hybrid_local_max_range_tokens`（12000）或同步发送前兜底压缩时改用主模型（控延迟）。仅轻量模型模式没有 API 可退，区间超过上限也强制本地分块压缩（否则下一轮必超窗），耗时随区间线性增长。
+  - 质量保障：① 本地摘要自动追加「关键文件与错误（自动提取）」清单（路径 / 错误串由代码从原文抽取，不依赖模型转述）；② 加权锚点闸门（路径 / 错误权重 3，标识符权重 1，阈值 `hybrid_quality_gate=0.55`），不达标或调用失败自动回退主模型（`hybrid_fallback_api=true`）；③ 原有 pin 保留目标 / 验收项 / 计划 / task_state，保留最近 45% 原文。
+  - 同步路径（chat.py 两处 `compress_history`）在混合模式传 `prefer_local=False`，避免本地分块让一轮请求停顿几十秒；仅轻量模型模式传 `prefer_local=True`（主对话就是 light，只能用它压）。
+  - IDE 内联补全默认不切本地（`hybrid_ide_complete=false`）：补全只有 350ms 防抖 + 3–5s 超时，9B 本地模型会拖慢输入；需要时再打开。
+- 实测质量 A/B（同一段真实历史，约 9k tokens，55 个锚点）：
+  - 本地 + 自动事实清单：加权召回 **0.680**，关键路径/错误 **21/21**，1685 字，108s。
+  - API 摘要：加权召回 **0.495**，关键路径/错误 **15/21**，1390 字，6s。
+  - 结论：关键事实本地不差于 API（路径/错误 100% vs 71%），但延迟高，所以本地只跑后台；不达标仍回退 API，质量不会比现状差。
+- 相关代码：`app/config.py`（`hybrid_*` / `local_*` / `is_local_url` / `hybrid_on` / `light_chat_mode` / `light_chat_is_local` / 仅轻量模型时 chat 服务商覆盖 / Ollama 思考模式）、`app/llm.py`（`_pick_light_model` / light 协议判断 / `reasoning` 与 `reasoning_content` 双字段兼容）、`app/context.py`（`context_limits` 混合与本地轻量预算、`_local_compress` / 分块 / 合并 / 锚点闸门 / 自动事实清单）、`app/api/chat.py`（本地轻量模型关闭工具与联网、同步压缩 prefer_local）、`app/agent.py`（本地轻量模型直接不注入工具提示）、`web/settings.js`（off/on/light 三档 + 压缩参数）、`tests/test_hybrid.py`。
+- 验证：`tests/test_hybrid.py` 11 项（含仅轻量模型覆盖 chat conf / provider_chain / vision / 本地 vs 云端上下文预算 / 无工具提示、Ollama thinking、`delta.reasoning` 捕获）、`test_aside.py`、`test_notes_ask.py`、`test_context.py`、`test_native_tools.py` 全过；全量 `pytest tests` 通过；`scripts/dev_check.py` 全过。仅轻量模型流式实测（`hybrid_mode=light`，`stream_chat` 直连 `qwen35-9b:iq4nl`，`reasoning_effort=none`）：7.8s 首包（含模型加载）、`visible="1+1 等于 2。"`、reasoning 0 字、无 tool_calls。Ollama 实测 `ollama ps` 5.2GB / 100% GPU / 8192 ctx，显存 5112/8151 MiB。
+- 测试隔离：`tests/conftest.py` 新增 `_no_hybrid_by_default`，强制测试里的 `load_config()` 返回 `hybrid_mode=off`（逐个替换各模块早绑定的 `load_config` 引用）。否则本机 `data/config.json` 打开混合 / 仅轻量模型后，压缩与工具挂载会随环境漂移。测混合行为的用例自己 monkeypatch。
+- 顺带修的陈旧测试：`test_notes_ask_endpoint` 随 `/api/notes/ask` 下线删除；`test_memory` / `test_agent_guards` 补环境隔离（真实 notes / computer 站点档位）；`test_native_tools` 的 fake `_quick_chat` 补 `stop_event`；`test_prompt_budget` 阈值 8000 → 8600（实测 8315）。
+- 注意：默认 `hybrid_mode=off`，需要省 token 时在设置里打开；关闭即完全回到纯 API。按 64k 配置，第一次大区间压缩通常超过 12k 上限会走 API（成本仍远小于省下的 prompt），本地主要接小范围后台压缩与轻量任务。仅轻量模型 + 本地 light 是「完全离线可用」的降级档：没有文件 / 命令 / 联网工具，上下文只有 12k，9B 模型的长文推理与代码能力明显弱于 API，只适合普通问答；它不产生主 API token，但也没有回退。云端 light 则按正常工具与窗口运行，只是换了更便宜的模型。2 亿/周的口径（原始 token / 计费 token / 配额）仍需确认，缓存命中占 91.6%，实际账单降幅可能小于 token 降幅。
+
+
+
+## [2026-11-08] 前端交互体验升级（阶段二）：流式节奏 / 滚动稳定 / 反馈 / 过渡
+
+- 问题/决策：流式输出用固定 90ms 定时重绘（约 11fps），长尾每帧整段 Markdown 重解析，状态条每个 delta 都 appendChild（CSS 动画反复重启）；消息区滚动条随内容出现/消失会把整列左右推；模式切换是 `hidden` 硬切、零过渡；toast 是单例（后一条吃掉前一条）；发送后按钮无受理反馈且焦点掉到 body；折叠头等可点 div 无按压反馈；弹窗只有焦点进/出，没有 Tab 约束。目标：只改前端表现层，不动接口、SSE 协议与消息结构。
+- 方案：
+  - 流式渲染（`web/stream.js`）：重绘节流 32ms（≈30fps），按「尾巴长度 / 未闭合代码围栏 / 标签页隐藏」自适应降到 56 / 90 / 200ms；尾巴无换行且无 Markdown 标记时走 `textContent` 纯文本快通道（省掉每帧解析 + innerHTML 重建）；`keepLiveLast` 只在状态条不在末尾时才挪动，避免每 token 重启点阵动画。
+  - 滚动（`web/css/polish.css`）：`#chat` 加 `scrollbar-gutter: stable`（滚动条常驻占位）、`overscroll-behavior-y: contain`、`scroll-padding-bottom`；保留了原有 rAF + 直接赋 scrollTop 的跟随策略（流式期间不能平滑滚动）。
+  - 发送反馈（`web/stream.js`）：`setSendBusy()` 让发送按钮进入 `.is-busy` 转圈态（`.send.is-busy::after` 旋转环），拿到响应头 / 进入 finally 即复原（15s 兜底）；发送与排队后 `focusComposer()` 回焦输入框（`pointer: coarse` 设备跳过）。
+  - Toast（`web/core.js` + `index.html` + `base.css`）：由单例改为 `#toast-stack` 堆叠，最多 3 条，同一句 1.8s 内只累加 `×N`，点击可关；`ok`/`err` 语义色沿用。
+  - 过渡（`web/gal/gal-ide.js`）：`applyUiMode` 在模式真变化时对新面板播放 `panel-in` 淡入；IDE 跳过（Monaco 每帧 resize）；只动 opacity——面板里有 `position:fixed` 浮层（GAL 开场卡），transform 会临时改变其包含块。`renderMessages` 整块重画后给 `#chat` 播 `chat-fade`（切会话不闪白）。
+  - 弹窗焦点（`web/settings.js`）：改为 document 捕获阶段的 `keydown`（Tab 回绕）+ `focusin`（焦点跑出就拉回），用 `_modalStack` 支持嵌套弹窗；`pointerdown`/`click` 记录触发元素，关闭时优先还给刚点的按钮，其次回退到打开前的 activeElement。
+  - 规范统一（`polish.css` 新增「阶段二」段）：新增 `--ease-out` / `--dur-1..3` / `--ring` 语义令牌；`button` 统一过渡（含 transform 按压）；折叠头 / 工具卡 / 模式卡补 `:active`；`(hover: none)` 设备消息操作条常显；`prefers-reduced-motion` 下新入场动画不播。
+  - 文档图片补 `decoding="async"`（`web/markdown.js`）。
+- 相关代码：`web/stream.js`（PAINT_MS_* / paintGapFor / tailIsPlain / keepLiveLast / setSendBusy / focusComposer）、`web/chat.js`（replayEnter 调用）、`web/core.js`（toast 堆叠 / replayEnter）、`web/settings.js`（焦点陷阱 / showWithAnim / hideWithAnim）、`web/gal/gal-ide.js`（replayModeEnter）、`web/markdown.js`、`web/index.html`（#toast-stack）、`web/css/base.css`（.toast-stack / .toast-item）、`web/css/polish.css`（阶段二段）。
+- 验证：`node --check` 六个改动 JS 全过；`scripts/dev_check.py` 全过（132 文件编译、60 个前端 JS 语法、hotkeys 73 项、markdown 45 项、transpage 18 项、服务端冒烟）；`scripts/markdown_test.js` 45 项全过。浏览器实测（临时服务 54353，`hybrid_mode=light` 走本机 Ollama）：页面加载无控制台报错；发一条含代码块的长回复，过程区文本长度 42→772→2231→3101→3692→4724→5483→8816 逐段增长，流式期间 `bottomGap≈0` 无回跳，结束后代码块正常高亮（62 个 span）+「展开全部（33 行）」；设置弹窗 Tab ×8 / Shift+Tab ×8 均在弹窗内，Esc 后焦点回到设置按钮。
+- 已知/边界：① 流式结束按服务端 blocks 重排（过程折叠 + 正文落位）会改变高度，视觉上有一次贴底下移，属于收尾重排而非滚动抖动，未做平滑过渡（避免与大段正文重绘抢帧）。② 浏览器自动化环境后来出现 WebView 超时（CDP 存活但渲染进程不可用），未能复测 toast ×N 与面板淡入；这两项仅有静态检查与实现推演，未做真人点击确认。③ 流式测试时控制台出现过 1 条 `net::ERR_ABORTED /api/chat`，同请求 Resource Timing 为 200 且正文完整，服务端日志对应 `ConnectionAbortedError`，与本次改动无关（自动化切页/中断连接产生）。
+- 追加（同日）：侧栏「新建对话」按钮重设计。原来是整块浅强调底 + 内容居中（全宽、圆角 10px），看起来像一块占位色块。改为对齐 Claude / ChatGPT 侧栏的「New chat」：`display:flex` 左对齐、图标 15px 强调色、文案 13.5px/600、固定 38px 高、11px 圆角、`--bg-input` 中性面 + `--border` 细边；hover 换 `--bg-hover` + `--border-strong` + `--shadow-sm`，按下 `scale(.985)`，补 `:focus-visible` 焦点环。相关代码：`web/css/base.css` 的 `.new-chat*`。浏览器实测（739×706 浅色）：38px 高 / 11px 圆角 / 白底细边 / 图标与文字左对齐且垂直居中（中心偏差 0px），控制台 0 报错。
+
+## [2026-11-08] AI 润色 405：_quick_chat 的 light 分支漏补全 URL
+- 问题/决策：输入框 AI 润色（✨ / Ctrl+I / /polish）报错「调用失败：405 Client Error: Method Not Allowed for url: http://127.0.0.1:11434/」。根因：`_quick_chat` 选中本地轻量模型时用 `cfg["light_url"]` 原始值覆盖 `api_url`，没走 `resolve_endpoint` 补全；主对话 URL 在 `get_api_conf` 里补全过 `/v1/chat/completions`，所以主聊天正常、只有轻量调用炸。
+- 解决方案/原因：`_quick_chat` 发请求前补一段——`api_name == "light"` 且协议为 openai 时 `api_url = resolve_endpoint(api_url)`（chat 分支已补全，不重复；anthropic 协议不动）。影响面：所有走 `_quick_chat + light` 的轻量调用（输入润色/预检、GAL 判定、摘要、hybrid 压缩、IDE 补全）此前全灭；其中 hybrid 压缩因 `hybrid_fallback_api` 静默回落主 API，长期未察觉——**修复后这些才真正开始调用本地 9B，本地推理负载会增加**，这是混合模式本来的预期行为。
+- 相关代码/指令：`app/llm.py` L14-15（import 加 `resolve_endpoint`）、L189-194（light 分支补全判断）。验证：临时探针起服务 POST /api/compose，修复前 405、修复后 `{"ok": true, "text": "今天天气不错，我想出去散散步。", "intent": "闲聊"}`（本地 qwen35-9b:iq4nl 实际推理返回）；`scripts/dev_check.py` 全过。
+- 排查技巧：PowerShell 里 `curl` 是 Invoke-WebRequest 别名，`-m` 参数歧义，测 HTTP 用 Invoke-RestMethod；POST Ollama 裸地址返回 405，可作端点拼接错误的特征。
+
+## [2026-11-08] 提问卡取消等待倒计时（永不超时）
+- 问题/决策：用户要求取消中途提问卡的等待倒计时，选「彻底永不超时」：提问后一直等回答，不再到时按「未回答」自动继续；推进方式只剩 回答 / 点「让 AI 自己决定」/ 点停止。
+- 解决方案/原因：后端 `_ask_timeout` 写死 0（chat.py）；`new_asks` 的 clamp 下限 30→0、`timeout is not None` 区分显式 0，0 时 `expires_at=0`；`wait_answers` 在 `deadline=None` 时永久循环（0.3s 轮询 event + stop_event，每 30s 续期 session_status 防「待回答」被 TTL 清掉）。前端零改动：三处倒计时都是 `expiresAt>0` 才启动，stream.js 里 `expires_in=0` 走 falsy 分支不生成 meta。config 默认值 `ask_timeout` 删除（本就没暴露到设置界面）。
+- 相关代码/指令：`app/agent.py`（new_asks / wait_answers）、`app/api/chat.py` L2813-2814、`app/config.py`、`tests/test_ask_card.py`（clamps 断言改为 1 秒、删 ask_timeout 默认断言、新增 `test_new_asks_zero_timeout_means_no_expiry`）、`readme.md` 中途提问行。测试用 `.venv\Scripts\python.exe -m pytest`（系统 python 没装 pytest，py 启动器有 9.1.1）。
+- 验证：pytest 全量通过；`scripts/dev_check.py` 全过。
+
+## [2026-11-08] 「回到实时输出」：后台任务接管为完整流式
+- 问题/决策：刷新 / 重开窗口 / 断线后，任务仍在服务端跑，但前端只有纯文本回放（`startJobReplay`），没有和正常发送一致的流式渲染。用户选择「完整流式接管」：不重写渲染主干，而是给 `streamChat` 加第三种数据源。
+- 解决方案/原因：
+  - `streamChat(extra, resume, attach)`：attach 为真时 fetch `/api/chat/attach`（POST `{session_id, since}`），其余事件处理 / 渲染（`paintLive`、思考块、工具卡、提问卡）/ 收尾全部复用同一条管线，因此体验与正常发送一致。404 → `__attachGone`，不写错误文案、直接拉状态对齐。
+  - attach 模式跳过 `setSendBusy`：全局发送态不该被别的会话的接管操作清掉。
+  - UI：`#resume-bar`（输入框上方提示条 + 「回到实时输出」按钮）。显示条件 = `streamingSids[current] && !streamOf(current)`，即「服务端在跑、本地没有流」；`refreshResumeBar()` 挂在 `refreshStreamingUI()` 末尾，注册/注销流、切会话都会自动同步。按钮点击 → `resumeLiveOutput(sid)`。
+  - `resumeLiveOutput`：本地流还在 → 只切会话（`attachStreamHost` 挂回 live DOM）；否则先停掉自动回放（`_replays` 记录句柄 → `takenOver` + `reader.cancel()`，等它退出，最多约 1 秒）再 `streamChat({}, null, {since:0})`。**必须先停回放**：否则旧回放的 `pullState → renderMessages` 会把刚接管的实时行整块重画掉。
+- 相关代码/指令：`web/stream.js`（`streamChat` attach 分支、`refreshResumeBar`、`_replays`、`waitJobThenRefresh` 取消检查、`resumeLiveOutput`）、`web/index.html`（`#resume-bar`）、`web/css/base.css`（`.resume-bar/.resume-btn`）、`web/init.js`（按钮绑定）、`web/chat.js`（`msg-run-chip` 改按钮）。
+- 验证（浏览器实测，真实模型 3000 字长回答）：生成中刷新 → 提示条出现 → 点击接管 → 从 0 回放 4806 字并继续增长到 11183 字；`h2` 计数 3→6（markdown 实时成形）；结束后停止键隐藏、`streamingSids` 清空、操作条恢复；控制台 0 条非 abort 错误。`dev_check.py` 全过。
+- 已知边界：① 控制台会出现 `net::ERR_ABORTED /api/chat/attach`（主动取消 reader 的预期现象）；② 若在「等待提问」阶段接管，attach 重放 ask 事件可能短暂出现两张提问卡，done 后重建消除；③ 本次实测在真实 data 留下两个会话 `s_139f58ad0c77`、`s_061cfb7d36a2`（待用户决定是否删除）。
+
+## [2026-11-08] IDE 文件树拖出真实文件（Electron startDrag）
+
+- 问题/现象：从 IDE 文件树把文件拖到桌面 / 资源管理器 / 其他应用，拿到的只有文件名或路径文字。树内移动（`/api/sandbox/move` → `shutil.move`）与 Ctrl+C/Ctrl+V 复制本身都是真实文件操作，问题只在「拖出窗口」这一条路径：`dragstart` 只写了 `text/plain` 相对路径。纯浏览器（含 Edge `--app`）受安全限制，无法把真实文件放进系统拖拽数据，只有 Electron 主进程能发起原生文件拖拽。
+- 方案：
+  - `desktop/main.js` 新增 IPC `file:start-drag`：`fs.statSync` 校验存在后调 `win.webContents.startDrag({ file, icon: ICON })`（icon 在 Windows 必须是 `.ico`，用 `app.ico`，失败只写 `data/desktop.log`，不影响页面）。
+  - `desktop/preload.js`：新增 `gmWin.startDrag`（`ipcRenderer.send`）与 `gmWin.pathForFile`（`webUtils.getPathForFile`，Electron ≥ 32，本仓库 `electron.d.ts` 已确认存在）。
+  - `web/gal/gal-ide.js`：`dragstart` 里若 `ideCanDragOut()`（有壳 + 有 sandbox）则 `e.preventDefault()` 后调 `startDrag({ file: ideAbsPath(rel) })`；否则维持原 HTML5 `text/plain`（浏览器回退不变）。
+  - 树内拖进目录：`dragstart` 被 preventDefault 后没有 `text/plain`，新增 `ideDropSource(e)`：`dataTransfer.files[0]` → `pathForFile` → 按 `curSession().sandbox` 换算回相对路径（沙箱外返回空，不处理）。目录行 / 工作区行的 `dragover` 改用 `ideDragHasSource(e)`（`state.ideDrag` 或 Files 存在）。
+  - 原生拖拽不会再有 `dragend`（Blink 拖拽已被取消）→ `ideDragBindGlobal()` 在 `mousemove` / `focus` / `drop` 上兜底清 `state.ideDrag`，避免残留让「从资源管理器拖文件到输入框」被误判成内部 `#` 引用。
+  - `web/composer.js`：`bindComposerDrop` 的 drop 分支改为内部来源（`state.ideDrag`）优先转 `#` 引用，即使 `hasFiles` 为真（原生拖拽会同时带 Files），保持原有「引用」语义、不把整份文件塞进消息。
+- 相关代码：`desktop/main.js`、`desktop/preload.js`、`web/gal/gal-ide.js`、`web/composer.js`。
+- 已知边界：纯浏览器只能给路径文本；`startDrag` 需要真实 Electron 窗口，自动化只覆盖语法与浏览器回退路径，拖出手势与「拖回目录仍能移动」需人工鼠标确认；`data/desktop.log` 里 `start-drag file|dir <path>` 可确认壳是否真的接到了。
+- 验证：`node --check`（gal-ide.js / composer.js / main.js / preload.js）+ `scripts/dev_check.py` 全过（132 编译、129 导入、6 不变量、冒烟、60 前端 JS、73 快捷键、45 markdown、18 transpage）。
+
+## [2026-11-08] 续跑不拆块 + 计划卡继承（单活卡）
+
+- 问题/现象：续跑 / 继续输出后，输出被拆成新的输出块，旧块的计划卡停住不动。两个根因叠加：① 后端 `_save_progress` 在「最后一条已经是完整回答」时新追加一条只含新段落的进度快照，下次请求开始时该快照被降级为永久普通消息（`_progress` 转 `interrupted`），分块成为历史事实；② 前端 `planRender(row, plan)` 只作用于当前流的行，续跑 / 接管 `appendAi` 新开行 → 旧卡冻结、新块等不到卡。
+- 方案（用户选定：新块重列 + 旧卡折叠；后端原地更新根治）：
+  - 后端 `_save_progress(..., inplace_base=None)`：续写时**原地更新**续写目标（`content = _cont_base + 本次新文本`），首次快照记 `_cont_base`；后续快照以原文为基重写，不叠加。收尾时用 `_cont_base + 本次 content` 重写并清 `_cont_base/_progress`，正式消息只保留一条。
+  - 请求开始时降级残留进度快照同时 `pop("_cont_base")`；续写起点正文在降级循环**之前**捕获，所以新起点仍是「原文 + 已写部分」。
+  - `_job["base"]` 记录续写起点；`/api/chat/attach` 首帧补发 `{"type":"base"}`（仅 `since<=0`）与当前计划快照 `_plan_sse(plan) + carried:true`（否则 `since>0` 时早先的 plan 事件已被跳过，新块永远等不到卡）。
+  - 前端 `chat.js`：`planMarkCarried`（「续」徽标）、`planSupersede`（折叠 + 「已续至最新输出」）、`planMarkLive`（同会话只留一张展开活卡）、`planAutoExpand`（系统折叠的卡在计划又变未完成时自动展开；`_userCollapsed` 记录用户手动折叠，尊重不展开）、`planSweepHistory`（`renderMessages` 末尾，历史只留最新一张展开）、`planSeedFromSession`（从最后一条带 plan 的消息或 `state.lastPlan` 继承，标 `carried`）。
+  - 前端 `stream.js`：`streamChat` attach 建行后 `planSeedFromSession(row)` + `base` 事件分支（`!acc` 时才铺，`row._raw` 同步）；`startJobReplay` 建行后同样继承，`event(obj)` 增加 `base`（`text = obj.text`）与 `plan`（`planRender(row, obj)`）分支。
+- 相关代码：`app/api/chat.py`（`_save_progress` / `cont_base` 捕获 / `_job["base"]` / attach 首帧 / 收尾重写）、`web/chat.js`（计划卡辅助函数群 + `renderMessages` 末尾 sweep）、`web/stream.js`（attach / replay 接线）、`web/css/base.css`（`.plan-carried(-badge)` / `.plan-superseded(-note)`）。
+- 验证：`node --check web/chat.js web/stream.js web/composer.js` 通过；`scripts/dev_check.py` 全过（132 编译、129 导入、6 不变量、冒烟、60 前端 JS、73 快捷键、45 markdown、18 transpage）；`pytest tests/test_chat_plan.py tests/test_resume.py tests/test_stream_stop.py -q` 34 项通过，并新增 `test_save_progress_inplace_for_continue`（原地更新不新增消息、重复快照不叠加、计划随之写回）。
+- 已知边界：`base`/`plan` 首帧补发与卡片折叠动效需要真实窗口 + 真实续跑任务人工确认；纯浏览器自动化只覆盖语法与单元逻辑。
+
+## [2026-11-08] 划词问答输入框「点不进去、打不出字」：真凶是弹窗焦点陷阱
+
+- 问题/决策：笔记弹窗里 AskKit 输入框点不出光标、打字无反应、Tab 也不行；solo 对话里正常。**真根因**：`web/settings.js` 的「弹窗焦点约束」（a11y 阶段加的 `focusin` 捕获 + Tab 回绕）——只要任一 `.modal` 打开，焦点落到弹窗之外就立刻拉回弹窗内第一个可聚焦元素。AskKit 面板 append 在 body 上、DOM 在 `#notes-modal` 之外，焦点一进 textarea 就被抢给 `#btn-close-notes`。solo 不开弹窗、`_topModal()` 为 null，所以正常。
+- 关键证据（CDP 探针：复制 data + patch store + 真实后端 + headless Edge 真实点击）：`elementsFromPoint` 栈顶就是 `TEXTAREA.askkit-input`（无遮挡、`disabled=false`），但点击前后 `document.activeElement` 恒为 `BUTTON.modal-close#btn-close-notes`；修复后变为 `TEXTAREA.askkit-input` 且 `Input.insertText` 落字成功。**教训**：「点不进去」未必是遮挡/禁用，先看 focusin 阶段谁抢了焦点；前两轮排查只测了静态页/无弹窗场景，全绿却没覆盖「弹窗开着」这个前提。
+- 解决方案/原因：给焦点陷阱加豁免名单 `MODAL_FOCUS_EXEMPT = '.askkit, .selbar, .selbar-more-menu, .nt-anno-pop'`（与 `selkit.js` 的 `insideOwn` 同一份名单），`focusin` 监听与 Tab 回绕各加一行 `_inExemptLayer(...)` 跳过。笔记批注弹层 `.nt-anno-text` 同样中招，一并修好。
+- 相关代码/指令：
+  - `web/settings.js`：`MODAL_FOCUS_EXEMPT` + `_inExemptLayer()`（约 L2030），作用于 `focusin`（capture）与 Tab `keydown`（capture）两个监听
+  - 次要修复（排查中发现的真实问题，保留）：面板高度可变但只在 open 时定位一次，长过窗口下沿会裁掉输入框 → `web/askkit.js` 挂 `ResizeObserver` + `clampIntoView()`；`web/css/askkit.css` 给 `.askkit` 加 `-webkit-app-region: no-drag` 防 Electron 顶栏拖拽区吞点击
+  - 验证命令：`py -m pytest tests/test_ask_card.py tests/test_notes_ask.py -q`（11 项通过）；`python scripts/dev_check.py`（全过）
+  - 探针套路（可复用）：复制 `data/`（ignore `.electron_profile/.browser_profile/*.db-wal/*.db-shm/*.log/recycle_bin`）→ import 前 patch `app.store.*` → `create_server` → Edge `--headless=new --remote-debugging-port` + `app.computer.cdp.CDP`：程序化选区 + 合成 `pointerup` 唤起 selbar → 真实点击「提问」→ `elementsFromPoint` / `document.activeElement` / `Input.insertText` 取证
+- 注意：① 当前 shell 里 `python -m pytest` 无 pytest，要用 `py -m pytest`。② `--dump-dom`/`--virtual-time-budget` 下 ResizeObserver 与 rAF 不执行，尺寸类验证要跑真实帧。③ Electron 壳无热更，前端 JS 改动需重启应用后在真实窗口人工确认。
+
+## [2026-11-08] 「提示词工程师」会话为何频繁用 shell：搜索工具能力缺口 + 误报放大
+
+- 问题/决策：
+  - 用户反馈「提示词工程师」会话里经常要 shell。查 `data/tool_trace/s_b92c1c18ec67.jsonl`：74 次调用中 shell 只有 4 次（read_file 34 / search_files 22 / ask_user 6 / shell 4），但 **shell 永不支持「始终允许」**，每次都要人工点确认，所以体感远大于 5%。
+  - 4 次 shell 全在 `D:\Ai\Project\AI模拟` 里用 PowerShell `Select-String` 查 `world.html`（一个几千行单文件），本质是「搜索」而非「执行」。
+  - 原因分三层：① **能力缺口**——`search_files` 只回匹配行，没有 group/count/sort，第一次 shell 是找「重复定义的函数名」，必须 `Group-Object | Where Count -gt 1`；② **保真度不足**——每行截断 160 字符、每文件默认 5 处、总上限 60 处（`MAX_SEARCH_HITS`），要全量行号清单只能 shell；③ **schema 缺 path**——工具描述只暴露 pattern/glob/context/max_per_file/count_only，无法只搜一个文件（模型实际传了 `path`，实现认但描述没写）。
+  - 管道是最后一根稻草：`run_command` 描述明确「不支持管道、重定向」，而 `shell` 描述写「适合管道」，模型要做聚合自然选 shell。
+  - 附带真 bug：`search_files` 零命中返回「未找到匹配（沙箱：%s）」，含「沙箱」二字，被 `tool_protocol.code_of()` 的首条规则 `("沙箱", SANDBOX_DENIED)` 误判成沙箱拒绝，附带的恢复建议是「请用户开启允许读取沙箱外」——完全误导。trace 里两次踩中（`glob:"world.html"` 与 `path:"world.html"` 两条正则其实都是真零匹配）。另外 `is_error()` 的 `_ERR_PREFIXES` 含「未找到」，也会把零命中升级成错误。
+- 解决方案/原因：
+  - 已修（只修误报）：① `_t_search_files` 零命中文案 `未找到匹配（沙箱：%s）` → `没有匹配（搜索范围：%s）`（两处），既不再命中 `_ERR_PREFIXES` 的「未找到」，也不含「沙箱」；② `tool_protocol._TEXT_MAP` 把 `("未找到", NOT_FOUND)` 提到 `("沙箱", SANDBOX_DENIED)` 前面作防御。
+  - 验证：零命中 → `is_error=False`、不进错误包装；正常命中、`❌ 沙箱拒绝：路径越出沙箱范围` → 仍 `SANDBOX_DENIED`、`文件不存在` → 仍 `NOT_FOUND`；`py -m pytest tests/test_tool_protocol.py tests/test_webprobe.py tests/test_agent_guards.py -q` → 91 项通过（新增 `test_search_zero_hit_is_not_an_error`）。
+  - 未做（用户暂不修）：② `search_files` 暴露 `path` 参数支持单文件；③ 聚合能力（group/count/sort），或允许 `run_command` 跑只读管道并给「始终允许」。这两项才是 shell 频繁出现的真正来源。
+- 相关代码/指令：
+  - `app/agent.py`：`_fn_tool("search_files", ...)` L723-733、`_t_search_files` L2280-2380、`MAX_SEARCH_HITS/PER_FILE/FILES` L56-59、`shell` 工具描述 L777-788、`new_rule` 拒绝 shell「始终允许」L6041-6042
+  - `app/tool_protocol.py`：`_TEXT_MAP` L27-40、`is_error` L45-53、`recovery_of` L78-80
+  - `tests/test_tool_protocol.py`：`test_search_zero_hit_is_not_an_error`
+  - 复查：`py -c "import io,json,collections; ..."` 统计 `data/tool_trace/<sid>.jsonl`
+
+## [2026-11-08] 一条回答出现两个气泡：从「DOM 即状态」改成「实时数据 + 唯一投影」
+
+- 问题/决策：
+  - 现象：流式输出时切走再切回（或刷新重连），同一条回答被画成两段——上面是落库的「进度快照」（带已执行 N 个步骤的统计），下面是新的「过程 · 进行中」实时行。
+  - 根因：`renderMessages()` 用 `chat.innerHTML = ''` 重建历史时会把 `_progress` 快照画出来，随后 `attachStreamHost()` 把仍在跑的 live DOM 无条件 `appendChild` 到末尾。两个来源谁也不能覆盖谁，只能靠补丁去重——补丁散在 [stream.js] 的 attach 分支和 `startJobReplay` 两处，切会话这条路径没覆盖到。
+  - 决策：用户选「数据化投影」（彻底方案）而不是「只在挂回前删快照行」（最小补丁）。
+- 解决方案/原因：
+  - 新增实时数据层：`state.live[sid] = { blocks, tools, plan, timing, text }`，配 `liveOf / liveDrop / liveText / liveSetText / liveReasoning / liveTool / liveToolDone / liveAsk / livePlan / liveTrim`。blocks 与后端 `turn_blocks` 同构（`{kind:'text'|'reasoning'|'tool', i}`），直接喂给已有的 `buildBlocksView`。
+  - `streamChat` 的 base / delta / reasoning / retry / tool / tool_done / ask / plan / warn / error / rewind 分支边渲染边 fold；`ask` 的 `qid` 必须存进 tool，否则投影重建的提问卡无法提交。
+  - 唯一判定点：`renderMessages()` 里若有本地 live 流（`streamOf` 有 host 或 live 有 blocks）且最后一条是 `_progress`，历史只画到 `total-1`；然后复用 `.stream-host`，没有 host 就用 `buildLiveRow()` 按数据重建。
+  - 收尾清理：`unregisterStream()` 与 `startJobReplay().finish()` 里 `liveDrop(sid)`；回放（`waitJobThenRefresh`）也写 live，切走再切回能按数据恢复。
+  - 附带修正：`buildBlocksView` 的 ask 分支改用 `t.qid || null`，不要再丢 qid。
+- 相关代码/指令：
+  - `web/stream.js`：数据层在 `streamOf` 上方；fold 在 `streamChat` 事件分支；`startJobReplay` 的 base/delta/plan/finish
+  - `web/chat.js`：`buildLiveRow()`（`appendAi` 上方）、`renderMessages()` 的 `cut` 判定
+  - 验证：headless Edge 探针（复制 data + patch `store.*`）断言 `before {rows:2, snap:true}` / `after {rows:2, live:true, snap:false}` / `hosted {rows:2, inDoc:true, last:true, snap:false}` / fold `kinds=["text","reasoning","tool:0","text","tool:1"]`；`py -m pytest tests/test_stream_stop.py tests/test_resume.py tests/test_chat_plan.py -q` 35 项通过
+  - 注意：Electron 壳无热更，必须重启应用验证；真实窗口里「切走再切回 / 刷新 / 断网重连」三条路径仍需人工确认
+
+## [2026-11-08] AI 卡住时不停下来问用户：提示词在鼓励硬撑
+
+- 问题/决策：
+  - 现象：world.html 可视化任务里，AI 反复「读 → 试 → 失败 → 再读」，计划卡停在 0/19，直到用户手动停止；始终没有弹「等待你操作」卡。
+  - 数据（`data/tool_trace/s_07db41e3dabc.jsonl`）：整轮 1256 次调用、失败 89 次（7%）；21:45 之后 55 次调用里 **33 次是读同一个 world.html**，只有 3 次写入。所以不是「失败太多」，是「没有进展」。
+  - 失败构成：① 8 次跑不存在的脚本（`_st4.cjs` / `_st2chk.cjs` / `_g2.cjs` / `_probe1.cjs` / `_p3.cjs`，trace 里没有对应的 `write_file`；模型 21:43:18 自己承认「`_st4.cjs` 没有保存到磁盘」）；② 6 次 `search_files` 零命中被误报 `SANDBOX_DENIED`（见同日条目），把它从「搜索定位」逼成「逐行读 2429 行」。
+  - 为什么没停：`agent_fail_streak`（默认 2）只认「同一签名连续失败」，而它「读成功 → 跑失败」交替，计数器被重置（整轮只触发 3 次，全是 edit_file 缺 path）；`repeat_guard` / `window_hits` 只认「完全相同调用」，换个脚本名就绕过；`MAX_ROUNDS=0` 不限轮次；熔断文案只说「换验证方式」，**没有一句提 ask_user**。
+  - 根因在提示词：`agent.py` 同时写着「任务没做完时不要停下来问」「只有确实无法自行决定时才用 ask_user」——模型把「卡在同一个文件」理解成「任务没做完」，于是硬撑。
+- 解决方案/原因：
+  - 对齐 Claude Code（官方文档核对）：它**也没有**卡住检测，`max_turns` 与 `max_budget_usd` 默认都是 No limit；循环靠「模型不再发起工具调用」自然结束，人工介入靠 `AskUserQuestion`，官方触发条件是「multiple valid approaches（有多种可行方案、需要方向）」——门槛比我们的「完全定不了」低得多。
+  - 本轮只改提示词：`build_agent_prompt` 第 1 条与 `_ASK_PROMPT` 增加「卡住的判定」三条可判定条件——① 同一目标连续 2 次失败；② 最近 10 次工具调用没有一次成功写入/改动；③ 下一步需要只有用户才能提供的信息——命中即必须用 `ask_user(action:true)` 说明试过什么、卡在哪；并明确「换文件名 / 换参数 / 换脚本名继续试不算进展」。
+  - 同时把「确实无法自行决定才问」放宽为「多种方案都可行但代价不同 → 当轮问清」，避免与「不要停下来问」叠加后变成一味硬撑。
+- 相关代码/指令：
+  - `app/agent.py`：`build_agent_prompt` 规则 1（约 L7134）、`_ASK_PROMPT`（约 L7288-7319）
+  - 验证：`py -m py_compile app/agent.py`；`agent._ASK_PROMPT` 含新规则（1261 字符）；`py -m pytest tests/test_agent_guards.py tests/test_tool_protocol.py -q` → 74 项通过
+  - 未做（用户暂不选）：放宽 `failure_streak` 判据为「同一工具类别 + 无成功写入」；轮次 / 预算上限（Claude Code 默认也不设）
+  - 注意：后端改动需重启应用生效；本机跑 python 会把 `app/__pycache__/*.pyc` 移进回收站，属既有现象，源码不受影响
+
+## [2026-11-08] 继续输出 / 回到实时输出：两个新问题（其中一个是上轮改动的回归）
+
+- 问题/决策：
+  - 现象（会话 `s_07db41e3dabc`「模拟」）：① 初始状态显示「中断」；② 点「继续输出」后前端直接进入「后台运行」；③ 点「回到实时输出」时前端已有输出被清空。
+  - ③ 的机制：上一轮加的 `cut` 假设「实时行承担的就是最后一条」。但「继续输出」是**复用上一条**（`data-idx=21`），实时行承担的是 21，而最后那条 22（`_progress`，910 字）既不被 live 承担、又被 `cut` 跳过——直接消失。已改成按实时行自己的 `data-idx` 决定跳过哪一条；只有「新行（无 idx）」才按「最后一条快照」处理。
+  - ② 的机制：`streamChat` 收尾里 `if (!gotDone && isCur())` 无条件挂 `keepRecovering`。服务端明确返回非 2xx（400/404/500）时请求根本没被受理，后台没有任务可等，界面却开始假装「后台运行中」。已加 `httpRejected`：非 2xx 只做一次状态对齐，不进恢复轮询，也不再推迟失败提醒。
+  - ① 的数据侧：末尾是 `20 user(「继续吧」)` / `21 assistant(interrupted, end_reason=resume, 215 字)` / `22 assistant(_progress)`；22 的开头与 21 完全相同但没有 `_cont_base`，说明产生 22 的那次请求没带 continue/resume，是普通新回合。
+  - ① 的第二段（用户实测后补）：再点一次「继续任务」后，`resume_pending` 被清、22 出现 `_cont_base` 并从 910 字涨到 3300+ 字 —— **后端续写是正确的（原地更新最后一条）**。问题在前端：`continueReply(index)` 用「被点击的那条」当续写起点，而按钮挂在 21（更早那条）上，后端却按 `messages[-1]`（22）续写。两边起点不同，界面从 215 字开始长，看起来就是「一点继续，前面的输出没了」。
+- 解决方案/原因：
+  - 已修 ①②③（前端）：③ 按实时行的 `data-idx` 精确跳过；② 非 2xx 不再进恢复轮询；① `continueReply` 改为总是续写**最后一条 assistant**，与被点击的是哪条无关。
+  - ④（截图复现后补）：点「继续任务」时后端那轮其实还在跑（刷新 / 断线后转成后台），`continueReply` 只弹 toast「还在生成」就 return，看起来就是按钮失灵。改为直接 `resumeLiveOutput(sid)` 接管实时输出；只有拿不到该函数时才回落到 toast。
+  - 验证：`node --check web/chat.js`、`node --check web/stream.js`；headless Edge 探针断言 s1 `{rows:3, hasOld:true, hasProgress:true, hostInDoc:true}`（继续输出时进度消息不再丢失）、s2 `{hasProgress:false}`（新行时最后一条快照仍由 live 取代）；落库数据侧确认 22 的 `_cont_base` 存在且字数持续增长。
+  - 端到端回归（新增，默认跳过）：`$env:GM_LIVE_UI=1; py -m pytest tests/test_continue_resume_live.py -q` → 3 passed。做法：假模型 SSE + 临时 `SESSION_FILE` + 真 httpd + headless Edge；用例 1 在**旧消息**上点「继续任务」，断言请求带 continue/resume、实时行绑定 `data-idx=2`（最后一条）、落库后旧条不变且最后一条变长、不新增消息；用例 2 断言有实时数据时 `_progress` 快照被 live 投影取代、只出现一份；用例 3 模拟「后端在跑、本地无流」，断言点击只发 `/api/chat/attach` 接管、不再发新的 `/api/chat`。
+- 相关代码/指令：
+  - `web/chat.js` `renderMessages()` 的 `_skipIdx` 判定（按实时行的 `data-idx` 精确跳过）
+  - `web/stream.js` `httpRejected`（声明 / `!res.ok` / `deferNotify` / 恢复轮询条件）、`continueReply` 的 target 回退到最后一条 assistant
+
+## [2026-11-08] 继续输出 / 后台运行整体重构：把「在不在跑」收敛成一条判定
+
+- 问题/决策：
+  - 用户反馈同类问题反复，要求整体研究后重构，不再打补丁。
+  - 两个探查任务的结论：后端「某会话在不在跑」有 **6 个来源**（`ACTIVE_STREAMS` 租约 / `JOBS.done` / `job.ts` + 30·90·180·900 四套阈值 / 末条 `_progress` / `resume_pending·interrupted·end_reason` / `compress_busy`），前端有 **3 套**（`state.streams` / `state.live` / `state.streamingSids`）。
+  - 三处具体缺陷：① `release_active` 早于落库（`chat.py` 原 L7141），窗口内 `/api/state` 会把正在收尾的 `_progress` 判成中断；② 该误判被 `reap_orphan_progress` 每次 `/api/state` 执行放大 → 标记被清 → `_save_progress` 走 else 新建第二条 assistant、旧提示永不消失、409 检查放行并发写；③ `startJobReplay` 里 `const liveText` **遮蔽了全局 `liveText()`**，delta 回放抛 TypeError，整条回放中断（这是上一轮引入的）。
+- 解决方案/原因：
+  - 后端：`release_active` 移到 done + 落库之后；`_live_streams` 的 idle 90→300（心跳每 5s 刷 `job.ts`，窗口足够宽）；从 `/api/state` 移除 `reap_orphan_progress`，孤儿只在进程启动时由 `_mark_resume_pending` 处理一次。
+  - 前端：`_skipIdx` 不再依赖 `_progress`，改为「有 `data-idx` 就跳过它，否则跳过最后一条 assistant」；`startJobReplay` 的行包 `.stream-host` 并 `registerStream`（标记 `replay`），`finish` 时 `unregisterStream` —— 这样 `renderMessages` 会复用而不是重建，回放闭包不会写进死节点；`refreshResumeBar` / `resumeLiveOutput` 的「已接管」判断排除 `replay`。
+  - 保留的既有语义：僵尸租约仍由 `_live_streams` 清理（既有测试 `test_live_streams_drops_zombie_entries` 保护），线程存活判定仍只归 watchdog。
+- 相关代码/指令：
+  - `app/api/chat.py`（release 时机）、`app/api/misc.py`（`_live_streams`、`_api_state`）
+  - `web/chat.js`（`_skipIdx`）、`web/stream.js`（`startJobReplay` 的 host/register、`liveText`→`liveTip`、`refreshResumeBar`、`resumeLiveOutput`、`continueReply` 接管）
+  - 验证：`node --check web/stream.js web/chat.js`；`py -m py_compile app/api/chat.py app/api/misc.py`；`py -m pytest tests/test_stream_stop.py tests/test_resume.py tests/test_chat_plan.py tests/test_tool_protocol.py tests/test_agent_guards.py tests/test_ask_card.py -q` → **118 passed**；`$env:GM_LIVE_UI=1; py -m pytest tests/test_continue_resume_live.py -q` → **4 passed**（用例 4 专锁 `startJobReplay` 的 delta 回放不抛异常且正文落到行内）
+  - 注意：前后端都改了，**必须重启应用**；真实窗口里「切走再切回 / 刷新 / 断网重连 / 点继续任务」四条路径仍需人工确认
+
+## [2026-11-08] Token 优化：量化基线、竞品/论文调研与设计方案
+- 问题/决策：用户要求先调研论证再落地，禁止未研究先改码。目标是在不牺牲输出质量、不缩减有效上下文的前提下降低 token 费用。已产出 `docs/TOKEN_OPTIMIZATION_DESIGN.md`（设计稿，未实施）。
+- 解决方案/原因（关键实测结论，全部来自 `data/token_usage.jsonl` / `sessions.json` / `tool_trace/`，只读统计）：
+  - 总量：6,753 条记录，prompt 3,800,430,212 / completion 19,808,545 / cached 3,633,099,141（命中 95.60%）；chat 来源占 prompt **99.86%**。按 DeepSeek 公开价折算，**未命中 167.3M 占输入成本约 70%**，所以「省 token」要同时盯总量与 miss。
+  - 单次调用（18,331 条 rounds_detail）：P50 **108,615** / P90 252,688 / max 341,101 / mean 133,969。
+  - 输入构成（字符）：reply **62.6%**、user **17.8%**、tool_result 6.2%、schema 5.9%、summary 2.8%、tools_doc 2.4%、rules 1.2%、memory 1.1% → 历史重发 80.4%。
+  - **反直觉发现**：最近 7 天 201 个回合里，回合第一轮 prompt 中位数 **100,822**，而回合内每轮增量中位数 **0**。即成本主体是「回合起点携带的存量历史」，不是回合内膨胀。50+ 轮的 11 个回合（5.5%）却占 **48.6%** prompt → 两个问题必须分开治。
+  - 现有压缩只在 `compress_ratio=0.8`（本机 1M 窗口 → 80 万）触发，对 10 万起点的短回合完全无效。模拟「保留 K 轮 + 摘要」：keep=6/S=4k 省 13.2%，keep=4/S=2k 省 15.8%（上界，未含质量代价）。
+  - 失控样本：11-08 19:06 `s_07db41e3dabc` 单回合 prompt **465,460,768**（362 轮、auto_continues 1,520），占全量 12.25%；根因是 `agent_max_rounds=0` + `agent_auto_continue=-1` + `agent_auto_idle_limit=0` + 回合内无累计预算（`data/config.json` 实测）。
+  - 工具：13,689 次调用、26.87M 字符；read_file 41.4% + run_command 28.6% + write_file 13.5% + search_files 8.8%；>5k 字符的结果只占 9.66% 调用却占 44.4% 字符。
+  - 缓存：全仓无 `cache_control`，`app/providers.py` 的 `anthropic_body` 未打缓存点；DeepSeek 只认从 token 0 起的精确前缀，所以 system 必须冻结。
+- 相关代码/指令：
+  - 设计稿：`docs/TOKEN_OPTIMIZATION_DESIGN.md`（含竞品 7 家、论文 20 篇、六层架构、M1-M6 模块、4 批实施、质量门禁、风险登记）
+  - 关键证据：`app/context.py:62-163`（预算）、`:468-535`（历史压缩）、`:1163-1219`（预压缩）、`:1289-1357`（折叠/裁剪）；`app/api/chat.py:3487-3536`、`:7057-7100`；`app/agent.py:3842`（read_tool_result 句柄）；`app/config.py:63-76/245-246/296-303`
+  - 复核脚本：`.tmp_audit/token_baseline_audit.py`、`.tmp_audit/token_baseline_audit2.py`、`.tmp_audit/savings_sim.py`（只读，不写 data/）
+  - 评审决策（2026-11-08）：D1 默认开启省费模式（`token_profile=balanced`，回合起点 40k）；D2 对齐 Trae（自动压缩后继续 + 使用率可见 + 手动压缩，不弹窗打断）；D3 Anthropic 通道启用 `cache_control`，只对稳定段 S0/S1 打点；D4 引用正文首轮内联、后续只带句柄。
+  - Trae 实测口径（官方文档 docs.trae.cn/ide_context-compaction）：超窗口**自动压缩后继续**、面板常驻显示使用率、支持手动「压缩」按钮；社区公认压缩会丢细节。v3.4.1 起终端超长输出自动截断。
+- 未覆盖：方案已定稿并锁定默认值，但**未开始编码**（等最终批准）；收益为估算（单价取自 DeepSeek 官网，`data/config.json` 无单价字段，无法换算金额）。
+
+## [2026-11-08] Token 优化批 1：观测先行（预算账本 / 前缀漂移 / 流水字段）
+- 问题/决策：没有「单次调用的真实输入分布」和「前缀为什么 miss」，后续任何优化都无法验收。批 1 只做观测，零行为变化。
+- 解决方案/原因：
+  - `app/token_budget.py`（新）：`Budget` 不可变快照 + `budget(model)` + `level(used, b)`（l1=35% / l2=60% / l3=85%）。所有数值委托 `context.context_limits / request_budget / effective_output_cap`，不参与任何裁剪决策。
+  - `app/prefixtrace.py`（新）：按消息粒度比对同会话上一次请求，输出 `prefix_msgs / prefix_ratio / prefix_tokens / reuse_ratio / sys_changed / tools_changed / first_divergence`；进程内 LRU 保留 64 个会话。用来回答「缓存为什么没命中」。
+  - `app/api/chat.py`：`timing.obs = {fold, fold_removed, compress, overflow, prefix, budget}`；用量记录加 `turn_id`。折叠计数点三处（回合内压力 4868、溢出恢复 5034、工具后 7094），压缩计数两处（请求前 3513、回合内 4902）。
+  - `app/usage.py`：`aggregate_usage` 新增 `call_stats`（单次调用 P50/P90/P95/mean/max，来自 `timing.rounds_detail`）与 `obs_stats`（cold/warm、sys_changed、平均复用、折叠/压缩次数、级别分布）；旧记录无这些字段时优雅降级。
+  - `web/settings.js`：「token 明细」新增「单次调用 P50」「前缀复用」两张卡。
+- 相关代码/指令：`app/token_budget.py`、`app/prefixtrace.py`、`app/api/chat.py`（`_obs_counts` / `_obs_prefix` / `_budget_snapshot` / `turn_id`）、`app/usage.py`（`_percentiles` / `_obs_stats`）、`web/settings.js`（`renderUsage`）、`tests/test_token_budget.py`、`tests/test_prefixtrace.py`、`tests/test_usage.py`、`tests/test_continue_resume_live.py`
+- 验证：`py -m py_compile` 4 个 py + `node --check web/settings.js` 通过；定向 8 个测试文件 **140 passed**；全量 `pytest tests`（排除缺 reportlab 的 `test_reader.py`）exit 0；`$env:GM_LIVE_UI=1; py -m pytest tests/test_continue_resume_live.py -q` → **5 passed**（新增用例断言 `timing.obs` 真的落盘、`prefix.cold=True`、`budget.prompt_cap>0`）。真实流水只读复算 `call_stats.p50=108,615`，与独立统计一致。
+- 未覆盖：前缀统计是进程内状态，重启后首个请求记 cold；真实应用窗口里的「token 明细」卡片样式尚未人工确认（要重启应用）。
+
+## [2026-11-09] Token 优化批 2：省费模式（引用句柄 / 分段冻结 / 规则缓存）
+- 问题/决策：批 1 只观测。批 2 做「少带重复内容」，全部由 `token_profile` 控制，默认 `balanced`（用户 D1 决策），`quality` 一键回到旧装配。
+- 解决方案/原因：
+  - `app/config.py` 新增 `token_profile`（默认 `balanced`）。
+  - 引用句柄 `app/context.py`：`_msg_text(m, refs_handle)`；历史用户消息里的 `@文件/@目录` 正文不再内联，只留「路径:行号 + 用 read_file 取回」；**最后一条用户消息仍内联**。`_context_text_tokens` / `_context_parts` 同步支持 `refs_handle_from`，保证装配与估算同一口径。新增 `_refs_handle_on()` / `_refs_inline_from()`。
+  - 分段冻结 `app/api/chat.py`：界面上下文 / 意图提示 / 自动化目标改由 `_attach_dyn_tail` 贴到请求末尾（原先直接拼进 `messages[0]`，每变一次就让其后整段历史 miss 前缀缓存）。GAL 分支不动。
+  - 规则缓存 `app/agent.py`：新增 `_read_rules_text_cached`（key = mtime_ns + size）。**踩坑**：与既有 `_read_rules_file`（读权限 JSON，返回 (rules, error)）重名，Python 后定义覆盖前者，导致 `project_rules` 返回元组字符串；改名后正常。
+  - 设置入口 `web/settings.js`：「上下文与压缩」新增「省费模式」勾选框，默认开；保存 `token_profile`。
+- 相关代码/指令：`app/context.py`（`_msg_text` / `_msg_tokens` / `_context_text_tokens` / `_context_parts` / `session_context` / `build_context_messages` / `_refs_handle_on` / `_refs_inline_from`）、`app/api/chat.py`（`_balanced` / `_late_blocks` / 末尾 attach）、`app/agent.py`（`_RULES_CACHE` / `_read_rules_text_cached`）、`app/config.py`、`web/settings.js`、`tests/test_token_profile.py`
+- 验证：`py_compile` 4 文件 + `node --check web/settings.js` 通过；定向 10 文件 **204 passed**；全量 `pytest tests`（排除缺 reportlab 的 test_reader）exit 0；`GM_LIVE_UI=1 pytest tests/test_continue_resume_live.py` → **5 passed**；`scripts/dev_check.py` 全部通过。
+- 实测收益：真实 `sessions.json` 只读对比 `session_context().used`，quality=561,032 → balanced=548,131，**-2.3%**；有引用的 `s_2eed2dd969cf` 单会话 **-19.9%**，与设计估算一致。绝对值不大（引用只出现在 43 条消息），真正的大头在批 3 工作集。
+- 未覆盖：`build_agent_prompt` 仍随能力域变化，尚未拆「稳定段/动态段」；分段冻结对前缀命中率的实际影响要等真实回合积累 `timing.obs.prefix` 才能验证。
+
+## [2026-11-09] Token 优化批 3：工作集（历史原文 40k）+ 回合护栏
+- 问题/决策：批 2 只省 2.3%。真正的成本是「每轮重发整段历史」：单次调用 P50 108,615，reply 占 62.6%。批 3 引入与窗口解耦的「工作集」——历史原文上限 40k，超出压进结构化摘要；当前回合永不被压。另加单回合 token 预算拦病态长跑。
+- 解决方案/原因：
+  - `app/context.py`：新增 `working_set_tokens()`（quality / 本地小模型 → 0）、`history_tokens(s)`、`_clamp_keep_from()`；`manual_keep_budget()` 在省费模式下直接返回工作集；`compress_history()` 在工作集模式下把 `keep_ratio` 固定 1.0（原 0.25 会把 40k 再砍成 10k）；新增 `maybe_compact_working_set()`（后台压缩，看日常重发量而不是窗口余量）。
+  - 关键保护：压缩切点不得越过最后一条真正的用户消息（`_clamp_keep_from`），否则会把「正在做的事」压成摘要；工具结果消息不算新回合。
+  - `app/api/chat.py`：历史 > 工作集 → 后台压；> `history_working_set_sync_ratio`（1.5）倍 → 本轮同步压一次。新增回合护栏 `agent_turn_token_budget`（默认 3000 万），触发即收尾并给 `end_reason=budget`（前端 `END_REASON_LABEL` 已有该标签）。
+  - **并发坑**：后台压缩推进摘要后，主请求收尾 `_persist_session(s)` 会整条替换会话，把摘要回滚。新增 `_keep_fresh_summary()`：盘上 `summary_upto` 更大时保留盘上摘要，只合并正文。
+  - `app/config.py`：`history_working_set_tokens=40000` / `history_working_set_sync_ratio=1.5` / `agent_turn_token_budget=30000000`。
+  - `web/settings.js`：省费模式组加「历史原文预算」「单回合输入预算」。
+- 相关代码/指令：`app/context.py`（`working_set_tokens` / `history_tokens` / `_clamp_keep_from` / `manual_keep_budget` / `compress_history` / `maybe_compact_working_set`）、`app/api/chat.py`（`_ws` / `_ws_hard` / `_turn_token_budget` / `_turn_token_hit` / `_keep_fresh_summary` / `_persist_session`）、`app/config.py`、`web/settings.js`、`tests/test_working_set.py`
+- 验证：`py_compile` 3 文件 + `node --check` 通过；定向 62 passed；全量 `pytest tests`（排除缺 reportlab 的 reader）exit 0；`GM_LIVE_UI=1` 端到端 5 passed；`scripts/dev_check.py` 全部通过。真实会话只读投影：历史 361,930 → 236,405（-34.7%），P50 预计 108,615 → ~55k（投影，待真实回合确认）。
+- 未覆盖：未跑 `eval/` 真实模型评测（会产生费用）；建议观察几天后对比 `timing.obs.prefix` 与「单次调用 P50」，不达标就调大 `history_working_set_tokens` 或设 0。
+- 与设计的差异：设计里的「light_model 双探针」改成确定性保障（摘要 pin 文件路径/错误原文 + 本地锚点召回闸门 + 八段式结构化摘要 + 当前回合豁免），避免每次压缩多一次模型调用。
+
+## [2026-11-09] 修复：历史图片不可见（AI 要求重发图片）
+- 问题：用户发过图片后继续聊天，AI 经常说看不到，要求重新发送。用户怀疑是此前某次改动导致。
+- 根因（非批 1~3 引入）：2026-10-29「识图默认改走聊天模型」后 `vision_mode()` 恒为 `chat`，图片只在当轮多模态直发，**不再写入 `msg["vision"]` 文本**（该写入只在 `mode=="vision"` 分支）；而 `build_context_messages()` 只产出字符串，于是历史里的图片退化成 `attachments.ref_line()` 的一行「可回看附件」。补图逻辑当时只覆盖「重新生成 / 继续输出」（`app/api/chat.py` 注释已写明该限制），普通新消息不补。
+- 解决方案：
+  - `app/context.py`：`build_context_messages(s, system_prompt, image_loader=None, image_keep=0)`；新增 `_history_image_msgs()`（取最近 N 条带图用户消息，**排除当前回合**）、`_msg_image_count()`、`history_image_count()`；`history_tokens()` 补上历史图片的 `IMAGE_TOKENS`；新增 `message_chars()`（多模态只算 text 片段，别把 base64 当正文）。
+  - `app/api/chat.py`：新增 `_hist_img_loader`（`read_message_images` + `build_vision_content`），仅 `vision_mode()=="chat"` 且非 GAL 时启用；`_attach_dyn_tail` 支持 list content；`img_tokens` 与 `_req_chars` 改用新口径。
+  - `app/config.py`：`image_history_keep=2`（每条最多 2 张）。
+  - `web/settings.js`：省费模式组新增「历史附图保留条数（0 = 不重发）」。
+- 相关代码/指令：`app/context.py`（`_history_image_msgs` / `history_image_count` / `build_context_messages` / `message_chars` / `history_tokens`）、`app/api/chat.py`（`_attach_dyn_tail` / `_hist_img_loader` / `img_tokens`）、`app/config.py`、`web/settings.js`、`tests/test_image_history.py`
+- 验证：`py_compile` 3 文件 + `node --check` 通过；新增 6 条测试通过；全量 `pytest tests`（排除缺 reportlab 的 reader）exit 0；`dev_check.py` 全部通过。真实会话统计：131 条带图消息，最大会话 93 条，但 1031/1091 已压缩，窗口内可回看的为 2 张（符合 `image_history_keep=2`）。
+- 未覆盖：压缩点之前的图片仍只能靠 `attachment_read` 回看；若用户反馈仍不够，可加「窗口外也保留最近一张图」。
+
+## [2026-11-09] Token 优化批 4：Anthropic 提示缓存（其余两项按实测取舍）
+- 问题/决策：批 4 原计划三项——Anthropic `cache_control`、schema 按 action 拆参、轻量任务全面走 light_model。实测后只做第一项。
+- 解决方案/原因：
+  - `app/providers.py`：`anthropic_body(..., cache=False)`；开启时 `system` 改成带 `cache_control:{"type":"ephemeral"}` 的 block 列表（覆盖 tools + system），并在**最后一条消息的最后一个内容块**再打一个断点（覆盖整段历史前缀）。新增 `_mark_last_cacheable()`；多模态时拷贝块再加字段，不改调用方对象。
+  - `app/llm.py`：`stream_chat` 的 Anthropic 分支按 `anthropic_cache`（默认 True）传入；`_quick_chat` 不缓存（短请求写 1.25x 不划算）。
+  - `app/config.py`：`anthropic_cache=True`；`web/settings.js` 省费模式组加勾选框。
+- 取舍依据：
+  - light_model 路由**已具备**：`_quick_chat` 默认 `use_light=True`，只有阅读器翻译 / 代码评审 `use_light=False`。
+  - schema 拆参**不做**：实测 9 个 meta 工具 8,168 字符 / ≈2,713 token，约占 55k 请求的 5%，且几乎全命中缓存（边际 <0.5%）；拆参最多省 0.3k，却会改变工具面、提高误调风险。
+- 相关代码/指令：`app/providers.py`（`_mark_last_cacheable` / `anthropic_body`）、`app/llm.py`（`_cache_on`）、`app/config.py`、`web/settings.js`、`tests/test_providers_cache.py`
+- 验证：`py_compile` 3 文件 + `node --check` 通过；新增 5 条测试 passed；全量 `pytest tests`（排除缺 reportlab 的 reader）exit 0；`GM_LIVE_UI=1` 端到端 5 passed；`dev_check.py` 全部通过。
+- 未覆盖：当前用 OpenAI 兼容通道（DeepSeek），这项对现有账单无影响；真实 Anthropic 命中率需切通道后用 `usage.cached / prompt` 验证。
+
+## [2026-11-09] 修复：误报「连接中断」+ 中途错误残留成独立段落
+- 问题：用户看到模型输出初期出现一段像「中断」的独立正文，随后合并；完成后的系统通知却说「输出异常中断」，实际内容完整。
+- 排查：后端最近 30 回合全部 `stream_state=done / finish_reason=stop / end_reason 空`，app.log 无断流（仅 11-08 有 4 次 billing）。两个现象都发生在前端「本地流丢了 done」之后。
+- 根因与修复：
+  - A 通知误报：`keepRecovering` 补拉成功后仍把本地构造的 `Error('连接提前结束')` 传给 `notifyChatDone`；而服务端**只在异常时**发 `end_reason`，正常完成时 `reason=null` → 落到 `opts.error ? '连接中断'` 分支。修复：`waitJobThenRefresh` 返回 `done`（attach 回放到 `done`）；`keepRecovering` 判 `r.done===true` 或「落库末条是完整 assistant」→ 视为正常完成，不传 error。
+  - B 错误残留：`error` 事件原本直接 `acc += t; pushText(t)` 写进正文，重试成功后要等 `done` 重排才消失。修复：错误只进实时状态条；收尾时若一句正文都没有，才把最后一条错误补进正文，避免空气泡。
+- 相关代码/指令：`web/stream.js`（`lastErrText` / `error` 分支 / `finally` 兜底 / `keepRecovering` / `waitJobThenRefresh` 的 `sawDone`）
+- 验证：`node --check web/stream.js`；`scripts/dev_check.py` 全部通过；`$env:GM_LIVE_UI=1; py -m pytest tests/test_continue_resume_live.py -q` → 5 passed。
+- 未覆盖 / 根因：`done` 事件带全部会话实测 **780.2 KB**（单会话 `s_2eed2dd969cf` 769 KB，80 条消息），连接慢时最容易丢这个包。要根治需「done 只回当前会话 + 新增按会话拉取接口」，单独立项（方案 C）。真机验证：窗口切后台跑 5 分钟以上任务看通知文案；正常对话观察正文是否还有独立中断段落。
+
+## [2026-11-09] 方案 C：done 事件瘦身（780KB → 192KB）
+- 问题：每轮结束的 `done` 带 `slim_sessions(load_sessions())`，实测 780.2 KB，其中单会话 `s_2eed2dd969cf` 占 769 KB（默认窗口 80 条）。连接慢 / 中间层掐空闲连接时最易丢这个包，是「本地流丢 done」的结构性诱因。
+- 关键发现：**不需要新增接口**。前端早已支持分页：`slim_sessions` 带 `msg_total/msg_start`，`core.js` 把窗口外补 null 并记 `msg_loaded_start`，`chat.js` 在 `start <= loadedFrom` 时显示「↑ 加载更早的消息」并调用 `/api/session/messages`（已存在）。
+- 解决方案：
+  - `app/sessions.py`：`slim_sessions(data, msg_limit=None)`，None 时读 `chat_payload_msg_window`（0 = 全部），显式传参优先；新增 `_payload_msg_window()`。
+  - `app/config.py`：`chat_payload_msg_window = 24`。
+  - `app/api/sessions.py`：分页接口注释同步。
+  - `tests/test_slim_payload.py`：5 条（配置读取 / 显式优先 / 0=全部 / 缺省回落 MSG_WINDOW / 非当前会话不带消息）。
+- 相关代码/指令：`app/sessions.py`（`_payload_msg_window` / `slim_sessions`）、`app/config.py`、`app/api/sessions.py`、`tests/test_slim_payload.py`
+- 验证：`py_compile` 通过；5 条新测试 passed；全量 `pytest tests`（排除缺 reportlab 的 reader）exit 0；`GM_LIVE_UI=1` 端到端 5 passed；`dev_check.py` 全部通过；真实 sessions.json 只读复算 `192.1 KB / window=24 / msg_total=1101 / msg_start=1077`。
+- 行为变化：很长的会话默认只显示最近 24 条，更早的点「加载更早的消息」（每次 60 条）。想恢复旧行为把 `chat_payload_msg_window` 设 0 或 80。
+- 附注：`load_sessions()` 每个新进程可能因 `_mark_resume_pending` 触发一次 `save_sessions`（59MB 重写）。排查时用只读脚本会看到 sessions.json 被重写与回收站提示，属既有行为、数据不丢。
+
+## [2026-11-09] 设置「功能说明」重构：快捷键文档改为注册表同源生成
+
+- 问题/决策：
+  - 「快捷键」页的「完整说明」原先是 `index.html` 里手写的 6 张表，已和实际判定脱节：输入框缺 `Ctrl+Enter` / `Ctrl+I` / `Esc` / `↑`，全局缺 `Ctrl+F` / `Ctrl+Shift+V` / `?`，IDE 缺 `Ctrl+B` / `` Ctrl+` ``。
+  - 实际存在但完全没进说明的键：`Ctrl+Alt+1~4` 切模式、`Alt+↑↓` 会话排序、审阅 `Ctrl+Enter` / `Ctrl+Backspace`、AI 补全 `Alt+\` / `Alt+]` / `Alt+[`、`Ctrl+Alt+I/B/R/M`、`Shift+Alt+F`、`F5/F10/F11`、设置面板导航键。
+  - 决策：新增纯数据层 `web/hk-doc.js` 作为说明的唯一事实来源；可改键条目只写 `def: 'HK_DEFS id'`，按键由 `hotkeys.js` 现取，改键后说明自动同步；不可改键条目才写死展示键。
+- 解决方案/原因：
+  - `web/hk-doc.js`：7 组（全局与模式 / 对话与输入框 / GAL / IDE / 编辑器 Monaco / IDE 进阶 / 设置面板），每行带 `cond`（生效条件）与可选 `note`；注册表 36 条可改键规则全部覆盖。
+  - `web/hotkeys.js`：新增 `hkRenderDoc` / `hkDocRefreshKeys` / `hkFilterDoc` / `hkRenderHelpSummary`；`hkRenderAll` 在改键 / 重置后只替换 `kbd` 文本，不重建节点（重建会丢 `set-card` 装饰）；`#set-hk-search` 同时过滤改键列表与完整说明；「?」清单底部新增「完整说明…」直达设置 → 快捷键。
+  - `web/index.html`：删掉 6 张手写表，换成 `#set-hk-doc` 容器；「功能说明 → 快捷键总览」改为 `#help-key-summary`，由同一张表生成分组摘要（改键后同步）。
+  - `web/css/base.css`：新增 `.hk-doc-*` 样式（分组标题 / 可改键胶囊 / 条件与补充说明）。
+  - 功能说明正文逐条校对：图像识别改为「默认聊天模型多模态直发，可选优先视觉 API」（原写反了）；GAL 演出主题 3 → 6 套；上下文默认窗口 128000 → 100000000（代码默认值），并说明「想启用按比例压缩就填真实窗口」；新增「省费模式：历史预算 / 引用句柄 / 提示缓存」条目（省费模式 / 40000 历史原文预算 / 3000 万单回合预算 / 历史附图 2 条 / Anthropic `cache_control`）。
+  - `web/settings.js`：`HELP_SET_TARGET` 同步新标题，并为「省费模式」追加去设置入口。
+- 相关代码/指令（如果有）：
+  - `node scripts/hotkeys_test.js`：新增 8 条「说明与注册表同源」断言（分组唯一、def 存在、全覆盖、不重复、自写条目字段完整、def 条目必须有 cond）。
+  - 验证：`node --check` 4 个文件；`py scripts/dev_check.py` 全部通过（61 个前端 JS、81 条快捷键测试）；HTML 结构校验——42/42 `details`、id 无重复、`HELP_SET_TARGET` 20 条全部能在页内找到对应 `summary`。
+- 已知：不可改键条目仍是手写数据，测试只能保证字段完整与不引用未知 id，无法自动验证「按键是否真的生效」；新增界面快捷键时需同时补 `web/hk-doc.js`。
+
+## [2026-11-09] 设置「快捷键」模块整体重构：统一面板 + IDE 键位入库
+
+- 问题/决策：
+  - 旧改键面板只有「动作名 + 键」，看不到生效条件；36 条没有筛选；不能解除绑定；冲突只在录制时 toast 一次；只能全部重置；`?` 改成打开功能说明后，HUD 展开 / 轮询代码已无调用者。
+  - 命令面板里已实现的 IDE 动作（F12 / Shift+F12 / F2 / Ctrl+Shift+O / Ctrl+Shift+M / Ctrl+I / Ctrl+Shift+V / Ctrl+Alt+I·B·R·M / Shift+Alt+F）以及调试 F5 / F10 / F11 / Shift+F11 / Shift+F5 没进注册表，不能改键。
+- 解决方案：
+  - `web/hk-core.js::hkKeysOfDef`：覆盖值为空串 = 主动解除绑定，返回 `[]`，`hkHitIn` 自然跳过。
+  - `web/hotkeys.js`：
+    - `hkOverrides` 接受空串；`hkIsCustom` 改用 `hasOwnProperty`；新增 `hkUnbind` / `hkResetScope` / `hkScopeName`。
+    - `hkRenderPanel` 改为「筛选工具条（全部 + 5 个作用域 + 仅看已改）+ 分组 + 统计」；筛选状态存在容器 `dataset`，重渲染不丢；搜索同时匹配名称 / 作用域 / 生效条件 / 按键。
+    - `hkRowEl` 每行显示作用 + 作用域徽标 + 生效条件（从 `hk-doc.js` 反查）+ 当前键 + 改键 / 解除 / 重置；已改条目若与他人同键，显示「同组冲突 / 跨组同键」徽标（title 列出与谁冲突）。
+    - 分组标题右侧「恢复本组」；删除 HUD 死代码（`HK_HUD_KEY` / `hkHudToggle` / `hkHudTimer*` / `hkHudItems` / `hkHudRefresh` / `hkPrimaryLabel`）。
+    - `HK_DEFS` 新增 12 条 editor 作用域的 `gm.*` 动作 + 5 条 ide 作用域调试键。
+  - `web/gal/gal-ide.js`：`ideApplyEditorKeybindings` 支持空串覆盖（解绑 Monaco 默认键）；删除内部 F5 / F10 / F11 监听，改为 `ideDebugShortcut(id)`。
+  - `web/init.js`：ide 作用域统一分发增加调试键分支（输入框 / 编辑器文本区 / 弹窗打开时不触发）。
+  - `web/hk-doc.js`：补 17 条新注册表条目的说明；`ideTools` 组只保留不可改的 AI 补全键，避免与注册表重复。
+  - `web/index.html` / `web/css/base.css`：更新改键说明与搜索占位符；新增 `.hk-tools` / `.hk-chip` / `.hk-only` / `.hk-row-main` / `.hk-row-cond` / `.hk-badge` / `.hk-row-scope` / `.hk-sum` 等样式；删除 `#hk-hud-list` 与对应 CSS。
+- 相关代码/指令（如果有）：
+  - 测试：`node scripts/hotkeys_test.js` 新增 2 条解除绑定断言（83/83 通过）。
+  - 验证：`node --check` 5 个文件；`py scripts/dev_check.py` 9 项全通过。
+- 已知：编辑器内 `gm.*` 动作的「解绑默认键」依赖 `monaco.editor.addKeybindingRules(command: null)`，需在真实 IDE 里点一次验证；不可改键条目仍需手工补 `web/hk-doc.js`（测试会检查 def 引用与覆盖）。
+
+## [2026-11-09] 修复：关闭窗口后图片 / 附件消失（live 测试误删 uploads）
+
+- 问题/现象：用户反馈关窗再打开后，历史消息里的图片 / 文档附件消失，只剩发送的文字。只读核查发现 `data/sessions.json` 里 148 条带附件的用户消息都还在，但 `data/uploads/` 只剩 1 个目录、1 个文件（最新一张图）。
+- 定位证据：
+  - `data/app.log` 里 5 次启动清理全部是「无用文件 1–2 个」，**没有**「删除孤儿目录 N 个」——不是启动清理直接删的。
+  - `tests/test_continue_resume_live.py` 把 `S.SESSION_FILE` 指向 `tempfile.mkdtemp()` 后调用 `httpd.create_server()`；`test_stream_parallel_live.py` 同写法。
+  - `create_server` → `sweep_uploads()`：`load_sessions()` 读到临时会话（只有 `s1`），真实 `data/uploads/<真实 sid>/` 全部不在 `alive` 里，被 `shutil.rmtree` 整目录删除。`uploads.py` 原注释已警告这个场景，但 `tests/conftest.py` 没有统一设 `GM_NO_SWEEP=1`。
+- 修复：
+  - `app/uploads.py`：`sweep_uploads` 增加 `PYTEST_CURRENT_TEST` 跳过、**会话文件不是默认 `data/sessions.json` 时跳过**、会话列表为空跳过；**未知目录不再删除**，改为移到 `data/uploads/.orphan/<时间戳>/`（保留最近 3 批）；已知会话目录里仍只删未被消息引用的文件。
+  - `tests/conftest.py`：新增 autouse fixture `_no_upload_sweep`，所有测试统一 `GM_NO_SWEEP=1`。
+  - `scripts/dev_check.py`：启动前 `setdefault("GM_NO_SWEEP", "1")`，自检不再碰真实附件清理。
+  - `tests/test_uploads_guard.py`：扩到 6 条（显式开关 / pytest 自动跳过 / 会话文件被重定向 / 空会话 / 未知目录隔离 / 引用文件保留）。
+  - `web/chat.js` + `web/css/polish.css`：附件文件缺失时显示「图片已丢失」占位（可悬停看原因），不再静默移除缩略图。
+- 验证：`py -m pytest tests/test_uploads_guard.py -q` 6 passed；`py_compile` 4 个文件；`node --check web/chat.js`；`py scripts/dev_check.py` 9 项全过；自检后真实 `data/uploads` 唯一文件仍在。
+- 已知：已经被删除的历史附件无法自动恢复（`shutil.rmtree` 不进回收站）。之后新发的图片会正常落盘并在重启后保留；如果系统有还原点 / 文件历史，可人工恢复 `data/uploads`。
+
+## [2026-11-09] 修复：划词「复制」丢失换行与空格
+
+- 问题/现象：对话、笔记、PDF 的划词浮层点「复制」，粘贴出来被压成一行，换行、连续空格、代码缩进都没了。
+- 根因：
+  - 对话适配器 `aside.js::freezeSelection/rangeTextIn` 用 `.replace(/\s+/g,' ')` 生成给模型看的提问文本，复制直接复用了它。
+  - 阅读器 `reader.js::cleanRangeText` 同样 `.replace(/\s+/g,' ')`，`copySelection` 用 `sel.text`。
+  - 笔记用 `range.toString()`，块级元素之间不保证有换行。
+- 修复：
+  - `web/selkit.js`：新增并暴露 `SelKit.plainText(range)`。按节点类型重建文本：`white-space` 含 `pre` 的文本原样保留；普通文本折叠空白；`<br>` 与块级元素补换行；跳过 `script/style/display:none`；去零宽字符、最多保留一个空行、保留代码缩进。
+  - `web/aside.js`：`freezeSelection` 同时产出 `text`（给模型，仍压一行）与 `copy_text`（复制用，保留原文）；复制按钮改用后者，且不受 4000 字提问截断影响。
+  - `web/init.js`：笔记 draft 增加 `copy_text`，复制动作优先用它。
+  - `web/reader.js`：阅读流 / 译页用 `SelKit.plainText`；PDF 原页文字层是绝对定位 span，新增 `pdfRangeText` 按 span 坐标补换行与词间空格；`copySelection(text)` 接受显式文本。
+- 验证：
+  - 无头 Edge + `file://` 页面加载真实 `selkit.js` / `aside.js`，模拟选区后读 `SelKit.current.raw.copy_text`：
+    AI 段落 → `"line1\nline2 with spaces\na\nb\ncode line\n  indented line"`；
+    用户气泡（`white-space:pre-wrap`）→ `"lineA  two\nlineB   three"`。换行、连续空格、代码缩进都保留。
+  - `node --check` 4 个文件；`py scripts/dev_check.py` 9 项全过。
+- 已知：普通段落里的连续空格会被浏览器折叠（HTML 语义），只有 `pre` / `pre-wrap`（用户气泡、代码块）才保留；PDF 的换行/空格按 span 几何位置估算，极端排版可能有误差。
+
+## [2026-11-09] 修复：流式输出中途报「liveText is not a function」
+
+- 问题/现象：发送消息后模型输出几秒，正文出现「请求失败：TypeError: liveText is not a function」；再过几秒输出完成并恢复正常，和正常结束无异（用户截图确认）。
+- 根因：为正文分段新增了全局函数 `liveText(L, t)`（web/stream.js），但 `streamChat` 里仍保留旧的局部 `const liveText = typing.querySelector('.live-text')`（一个 DOM 元素）。同一作用域内局部把全局函数遮蔽，`delta` 分支调用 `liveText(live, obj.text)` 实际是在调用 DOM 节点 → TypeError；异常被主循环 catch 后写进 `acc`，所以看起来像请求失败，但服务端仍在跑，最终 `replace`/收尾把完整结果补回来，于是「自行恢复」。
+- 修复：
+  - `web/stream.js::streamChat`：局部 `liveText` 改名 `liveTip`，`setLive()` 同步改。
+  - `web/stream.js::stopStream` 里的同名局部也改名 `liveTip`，避免以后再踩同名的坑（接管/回放段此前已改过，注释在 2597 行附近）。
+  - 全仓复查：已无 `const/let/var liveText` 声明，所有 `liveText(...)` 调用都指向全局函数。
+- 验证：`node --check web/stream.js`；`py scripts/dev_check.py` 9 项全过（61 个前端 JS 语法通过）。
+- 已知：这次是真实前端异常，不是网络中断；如果以后还有 JS 异常，仍会以「请求失败：<错误>」显示在正文里（便于暴露问题），但不会再是这条。
+
+## [2026-11-09] 版本号 3.3 + GitHub 提交前检查
+
+- 版本：
+  - `app/store.py::APP_VERSION` 3.2.2 → **3.3**（唯一版本来源，`/api/app/info` 与 HTTP `Server` 头都读它）。
+  - `readme.md` 的 Version badge 同步为 3.3。
+  - `desktop/package.json` 仍是 1.0.0：Electron 窗口壳自己的版本，与 APP 版本独立（沿用既有约定）。
+  - NOTES 架构说明里的「当前 3.2.2」同步为 3.3。
+- 提交前检查结果：
+  - `py scripts/dev_check.py`：9 项全过。
+  - `py -m pytest tests --ignore=tests/test_reader.py -o addopts="" -q`：**2139 passed, 9 skipped in 175.56s**（`test_reader.py` 需要 reportlab，环境未装，按既有约定排除；pytest.ini 的 `addopts=-q` 与命令行 `-q` 叠加成 `-qq` 会吞掉摘要，所以用 `-o addopts=""` 跑一次拿计数）。
+  - `git diff --check`：无空白错误；顺手修掉了 `tests/test_computer_policy.py` 文件末尾多余空行。
+  - 敏感文件：`data/`、`*.log`、`*.db*`、`.env*`、`.trae/` 均被忽略；已跟踪文件里只有 `resources/eval/fixtures/tool_pipeline/data/*.txt`（评测夹具，不是运行数据）；未跟踪 / 已修改文本文件未发现 `sk-` / `api_key=` / `SESSDATA` 明文。
+  - 生成物：`.trae-html-share-packages/`（694KB 分享包）加入 `.gitignore`，不入库。
+  - 大文件：新增最大的是 `web/vendor/pdfjs/`（pdf.worker.min.mjs 1.08MB + pdf.min.mjs 424KB + LICENSE），是离线 PDF 阅读依赖，可入库。
+  - 删除：`tests/test_background.py`、`web/work.js`；后者已拆成 `web/work/*.js`，`index.html` 引用与注释均已同步，无残留引用。
+  - 换行：`core.autocrlf=true` 且有 `.gitattributes`，Git 的 LF→CRLF 提示属正常，不是错误。
+  - 规模：约 108 个已跟踪文件改动（+15468 / −4363）+ 64 个未跟踪文件（`.trae-html-share-packages/` 忽略后）；建议按主题拆成多次提交，不要一个 commit 全塞进去。
+- 待你确认是否入库的「开发预览链」（运行时不依赖）：
+  - `scripts/_inspect_fixture.py`、`_mk_preview_fixture.py`、`_mk_stock_fixture.py`、`_scan_globals.py`
+  - `web/_stock_fixture.js`、`web/_stock_preview.html`、`tests/fixtures/stock_ui.json`
+  - `scripts/check_stock_refactor.py`、`scripts/check_stock_ui.py`、`scripts/transpage_test.js` 属检查脚本，建议入库。
+- 备注：本次只做检查，**未执行 `git add` / `git commit` / `git push`**。

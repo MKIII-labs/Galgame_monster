@@ -717,3 +717,168 @@ def test_run_command_aborts_on_stop_event(tmp_path):
     used = time.time() - t0
     assert used < 5, "命令停止用了 %.1fs" % used
     assert "终止" in text
+
+def test_stream_alive_uses_recent_events(monkeypatch):
+    """压缩互斥：ACTIVE_STREAMS 里有残条目、但久无事件的会话要算「已结束」。"""
+    from app import store
+    from app.api import chat as chat_api
+
+    sid = "pytest_stream_alive"
+    monkeypatch.setitem(store.ACTIVE_STREAMS, sid, threading.Event())
+    monkeypatch.setitem(chat_api.JOBS, sid, {"sid": sid, "events": [], "seq": 0,
+                                             "done": False, "ts": time.time()})
+    assert chat_api.stream_alive(sid) is True
+
+    # 超过 idle 没有事件：崩溃 / 断线留下的残条目，不能一直拦着压缩
+    chat_api.JOBS[sid]["ts"] = time.time() - 120
+    assert chat_api.stream_alive(sid) is False
+
+    # 已经发出 done：明确结束
+    chat_api.JOBS[sid]["done"] = True
+    chat_api.JOBS[sid]["ts"] = time.time()
+    assert chat_api.stream_alive(sid) is False
+
+    monkeypatch.delitem(store.ACTIVE_STREAMS, sid, raising=False)
+    assert chat_api.stream_alive(sid) is False
+
+
+def test_request_stop_falls_back_to_pending(monkeypatch):
+    """请求还没登记流时点停止：要留下 pending stop，等登记时消费（长上下文压缩阶段）。"""
+    from app import store
+
+    sid = "pytest_pending_stop"
+    store.PENDING_STOPS.pop(sid, None)
+    monkeypatch.delitem(store.ACTIVE_STREAMS, sid, raising=False)
+
+    r = store.request_stop(sid)
+    assert r == {"found": False, "pending": True}
+    assert store.consume_stop(sid) is True
+    assert store.consume_stop(sid) is False          # 只生效一次
+
+    # 已经有流：直接置事件，不写 pending
+    ev = threading.Event()
+    monkeypatch.setitem(store.ACTIVE_STREAMS, sid, ev)
+    assert store.request_stop(sid) == {"found": True, "pending": False}
+    assert ev.is_set()
+    assert sid not in store.PENDING_STOPS
+    monkeypatch.delitem(store.ACTIVE_STREAMS, sid, raising=False)
+
+
+def test_pending_stop_expires():
+    """pending stop 不能无限期保留：超时后下一次发送不该被误停。"""
+    from app import store
+
+    sid = "pytest_pending_expired"
+    store.PENDING_STOPS[sid] = time.time() - store.PENDING_STOP_TTL - 1
+    try:
+        assert store.consume_stop(sid) is False
+        assert sid not in store.PENDING_STOPS
+    finally:
+        store.PENDING_STOPS.pop(sid, None)
+
+
+def test_abort_chat_stream_releases_lease_and_emits_done(monkeypatch):
+    """httpd 异常兜底：释放流租约 + 给 attach 补一条 done，避免永久 busy。"""
+    from app import store
+    from app.api import chat as chat_api
+
+    sid = "pytest_abort_stream"
+    ev = threading.Event()
+    monkeypatch.setitem(store.ACTIVE_STREAMS, sid, ev)
+    monkeypatch.setitem(chat_api.JOBS, sid, {"sid": sid, "events": [], "seq": 0,
+                                             "done": False, "ts": time.time()})
+    try:
+        chat_api.abort_chat_stream(sid, ev, "boom")
+        assert ev.is_set()
+        assert sid not in store.ACTIVE_STREAMS
+        job = chat_api.JOBS[sid]
+        assert job["done"] is True
+        last = job["events"][-1]
+        assert last["type"] == "done" and last["stopped"] is True
+        assert "boom" in last["error"]
+    finally:
+        monkeypatch.delitem(chat_api.JOBS, sid, raising=False)
+        monkeypatch.delitem(store.ACTIVE_STREAMS, sid, raising=False)
+
+
+def test_live_streams_drops_zombie_entries(monkeypatch):
+    """/api/state 不能把「线程早死了」的会话报成生成中（刷新后永久 409 的根源）。"""
+    from app import store
+    from app.api import chat as chat_api, misc
+
+    live, dead = "pytest_live_stream", "pytest_dead_stream"
+    monkeypatch.setitem(store.ACTIVE_STREAMS, live, threading.Event())
+    monkeypatch.setitem(store.ACTIVE_STREAMS, dead, threading.Event())
+    monkeypatch.setitem(chat_api.JOBS, live, {"sid": live, "events": [], "seq": 0,
+                                              "done": False, "ts": time.time()})
+    monkeypatch.setitem(chat_api.JOBS, dead, {"sid": dead, "events": [], "seq": 0,
+                                              "done": False, "ts": time.time() - 600})
+    try:
+        got = misc._live_streams()
+        assert live in got
+        assert dead not in got
+        assert dead not in store.ACTIVE_STREAMS       # 顺手清掉僵尸登记
+    finally:
+        monkeypatch.delitem(chat_api.JOBS, live, raising=False)
+        monkeypatch.delitem(chat_api.JOBS, dead, raising=False)
+        monkeypatch.delitem(store.ACTIVE_STREAMS, live, raising=False)
+
+
+def test_reap_orphan_progress_converts_snapshot():
+    """没有活跃流却留着 _progress：要转成「可继续」的中断态，而不是假装已完成。"""
+    from app.sessions import reap_orphan_progress
+
+    data = {"sessions": [
+        {"id": "a", "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "半截", "_progress": True}]},
+        {"id": "b", "messages": [
+            {"role": "assistant", "content": "跑着", "_progress": True}]},
+    ]}
+    assert reap_orphan_progress(data, {"b"}) is True
+    a = data["sessions"][0]
+    assert "_progress" not in a["messages"][-1]
+    assert a["messages"][-1]["interrupted"] is True
+    assert a["messages"][-1]["end_reason"]["kind"] == "resume"
+    assert a["resume_pending"] is True
+    # 还在跑的那个会话不能动
+    assert data["sessions"][1]["messages"][-1]["_progress"] is True
+    assert reap_orphan_progress({"sessions": []}, set()) is False
+
+
+def test_quick_chat_stop_returns_immediately(monkeypatch):
+    """压缩用的非流式调用：停止信号一到就返回，不再等上游。"""
+    from app import llm
+
+    ev = threading.Event()
+    ev.set()
+    t0 = time.time()
+    out = llm._quick_chat("k", "http://127.0.0.1:1/v1", "m",
+                          [{"role": "user", "content": "hi"}], stop_event=ev)
+    assert out == ""
+    assert time.time() - t0 < 1.0
+
+    # 请求已发出后点停止：主线程最多等 0.2 秒一次轮询
+    ev2 = threading.Event()
+
+    def _slow(*a, **k):
+        time.sleep(3)
+        raise AssertionError("停止后不该再等这个请求")
+
+    monkeypatch.setattr(llm, "_post_retry", _slow)
+    threading.Timer(0.3, ev2.set).start()
+    t0 = time.time()
+    out2 = llm._quick_chat("k", "http://127.0.0.1:1/v1", "m",
+                           [{"role": "user", "content": "hi"}], stop_event=ev2)
+    assert out2 == ""
+    assert time.time() - t0 < 1.5
+
+
+def test_compress_history_skips_when_stopped():
+    """压缩阶段点停止：不再发摘要请求（长上下文停止慢的主因之一）。"""
+    from app import context
+
+    ev = threading.Event()
+    ev.set()
+    s = {"id": "x", "messages": [{"role": "user", "content": "a"}] * 10}
+    assert context.compress_history(s, "", stop_event=ev) is False

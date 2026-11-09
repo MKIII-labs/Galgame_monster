@@ -90,7 +90,8 @@ function inlineFmt(s) {
     if (/^(https?:)?\/\//i.test(src) || /^\//.test(src)) {
       const href = safeHref(src);
       return href === '#' ? m
-        : '<img class="md-img" src="' + href + '" alt="' + alt + '" loading="lazy">';
+        : '<img class="md-img" src="' + href + '" alt="' + alt
+          + '" loading="lazy" decoding="async">';
     }
     return '<span class="md-img md-img-sandbox" data-src="' + src +
       '" data-alt="' + alt + '">图片加载中…</span>';

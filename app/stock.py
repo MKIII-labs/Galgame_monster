@@ -27,48 +27,25 @@ from app import llm
 from app.config import get_api_conf
 from app.store import DATA_DIR
 
+from app.stockkit.rules import (  # noqa: F401
+    BENCHMARK_SYMBOL, BENCHMARK_NAME, MAX_SYMBOLS, MIN_SYMBOLS, MAX_AI,
+    MAX_ORDERS_PER_DAY, MAX_SINGLE_POSITION, MARKET_CLOSE_MIN, DEFAULT_FEES,
+    CRYPTO_SYMBOLS,
+    CRYPTO_DEFAULT, CRYPTO_BENCHMARK, CRYPTO_BENCHMARK_NAME, CRYPTO_FEES,
+    CRYPTO_QTY_DECIMALS, _SYMBOL_RE, is_crypto, normalize_symbol, symbol_code,
+    is_etf, lot_size, limit_pct, calc_fee
+)
+from app.stockkit.quotes import (  # noqa: F401
+    TENCENT_QUOTE, TENCENT_KLINE, TENCENT_SEARCH, EASTMONEY_KLINE, BINANCE_KLINES,
+    BINANCE_TICKER, HTTP_TIMEOUT, USER_AGENT, _BARS_CACHE, _BARS_TTL, _QUOTE_CACHE,
+    _QUOTE_TTL, _CACHE_LOCK, _http_get, _drop_partial_today, _fnum, _qnum, _bar_row,
+    fetch_daily, _fetch_daily_tencent, _fetch_daily_eastmoney, _fetch_daily_binance,
+    fetch_benchmark, fetch_quotes, search_symbols
+)
+from app.stockkit import corporate, matching, report, risk  # noqa: F401
+
+
 STOCK_DB = os.path.join(DATA_DIR, "stock.db")
-
-TENCENT_QUOTE = "https://qt.gtimg.cn/q="
-TENCENT_KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-TENCENT_SEARCH = "https://smartbox.gtimg.cn/s3/"
-EASTMONEY_KLINE = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-
-BENCHMARK_SYMBOL = "sh000300"
-BENCHMARK_NAME = "沪深300"
-
-MAX_SYMBOLS = 12
-MIN_SYMBOLS = 2
-MAX_AI = 3
-MAX_ORDERS_PER_DAY = 5
-MAX_SINGLE_POSITION = 0.35          # 单只标的不超过总资产 35%
-MARKET_CLOSE_MIN = 15 * 60 + 5      # 15:05 之后才认为当日日 K 已收定
-HTTP_TIMEOUT = (5, 15)
-USER_AGENT = "Galgame_monster/1.0 (local stock simulation)"
-
-DEFAULT_FEES = {
-    "commission": 0.00025,          # 佣金 0.025%
-    "min_commission": 5.0,          # 单笔最低 5 元
-    "stamp_duty": 0.0005,           # 印花税 0.05%，仅卖出
-    "transfer_fee": 0.00001,        # 过户费 0.001%，双边
-    "slippage": 0.001,              # 模拟滑点 0.1%
-}
-
-# ---- 币市（Binance 公共行情，不需要 key）----
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
-BINANCE_TICKER = "https://api.binance.com/api/v3/ticker/24hr"
-CRYPTO_SYMBOLS = {"BTCUSDT": "比特币", "ETHUSDT": "以太坊", "SOLUSDT": "Solana"}
-CRYPTO_DEFAULT = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-CRYPTO_BENCHMARK = "BTCUSDT"
-CRYPTO_BENCHMARK_NAME = "比特币"
-CRYPTO_FEES = {
-    "commission": 0.001,            # 单边 0.1%
-    "min_commission": 0.0,
-    "stamp_duty": 0.0,
-    "transfer_fee": 0.0,
-    "slippage": 0.0005,             # 0.05%
-}
-CRYPTO_QTY_DECIMALS = 6             # 币的最小交易单位：0.000001
 
 PERSONAS = [
     {"id": "ai_value", "name": "价值派老陈",
@@ -83,341 +60,17 @@ PERSONAS = [
 ]
 
 
-class StockError(Exception):
-    """可读的业务错误（行情失败、订单非法、对局不存在等）。"""
+# StockError 现在定义在 stockkit.errors：全仓只有一个类对象，
+# 否则 `except stock.StockError` 抓不到 stockkit 内部抛出的异常。
+from app.stockkit.errors import StockError  # noqa: E402,F401
 
 
 # ============================================================
-# 行情：代码、搜索、报价、日 K
+# 行情辅助缓存（行情抓取本身已搬到 stockkit.quotes）
 # ============================================================
 
-_SYMBOL_RE = re.compile(r"^(sh|sz)(\d{6})$")
-
-
-def is_crypto(symbol):
-    """BTCUSDT / ETHUSDT / SOLUSDT。币市没有 sh/sz 前缀。"""
-    return str(symbol or "").strip().upper() in CRYPTO_SYMBOLS
-
-
-def normalize_symbol(raw):
-    """把 600519 / sh600519 / SH600519 统一成 sh600519；币市统一成 BTCUSDT。"""
-    s = str(raw or "").strip().lower().replace(" ", "")
-    if not s:
-        raise StockError("代码为空")
-    if s.upper() in CRYPTO_SYMBOLS:
-        return s.upper()
-    m = _SYMBOL_RE.match(s)
-    if m:
-        return s
-    if re.match(r"^\d{6}$", s):
-        if s[0] in "65":            # 6xxxxx 沪市股票 / 5xxxxx 沪市 ETF
-            return "sh" + s
-        if s[0] in "0123":          # 0/3 深市股票，1 深市 ETF/LOF
-            return "sz" + s
-    raise StockError("无法识别的代码：%s" % raw)
-
-
-def symbol_code(symbol):
-    if is_crypto(symbol):
-        return str(symbol).upper()[:-4]      # 去掉 USDT
-    return normalize_symbol(symbol)[2:]
-
-
-def is_etf(symbol):
-    if is_crypto(symbol):
-        return False
-    code = symbol_code(symbol)
-    return code.startswith(("51", "56", "58", "15", "16"))
-
-
-def lot_size(symbol):
-    """A 股与场内 ETF 都是 100 份一手；币市按 0.000001 递增，没有整手概念。"""
-    return 0 if is_crypto(symbol) else 100
-
-
-def limit_pct(symbol, name=""):
-    """涨跌停幅度：ST 5%，科创/创业板 20%，其余 10%。ETF 按 10% 简化。币市无涨跌停。"""
-    if is_crypto(symbol):
-        return 0.0
-    if "ST" in str(name or "").upper():
-        return 0.05
-    if symbol.startswith("sh688") or symbol.startswith("sz30"):
-        return 0.20
-    return 0.10
-
-
-def calc_fee(side, amount, fees=None):
-    """按成交额算费用（元）。买入不收印花税。"""
-    f = dict(DEFAULT_FEES)
-    f.update(fees or {})
-    amount = max(0.0, float(amount or 0))
-    fee = max(amount * float(f["commission"]), float(f["min_commission"]))
-    fee += amount * float(f["transfer_fee"])
-    if str(side) == "sell":
-        fee += amount * float(f["stamp_duty"])
-    return round(fee, 2)
-
-
-def _http_get(url, params=None, timeout=HTTP_TIMEOUT, encoding=None):
-    try:
-        r = requests.get(url, params=params, headers={"User-Agent": USER_AGENT},
-                         timeout=timeout)
-    except requests.exceptions.RequestException as e:
-        raise StockError("行情请求失败（%s）" % type(e).__name__)
-    if r.status_code >= 400:
-        raise StockError("行情接口返回 HTTP %s" % r.status_code)
-    if encoding:
-        return r.content.decode(encoding, "replace")
-    return r
-
-
-def _drop_partial_today(bars, now=None):
-    """交易时段内最后一根日 K 是未收盘的临时 bar，结算前必须丢掉。"""
-    if not bars:
-        return bars
-    now = now or datetime.datetime.now()
-    today = now.date().isoformat()
-    if bars[-1].get("date") != today:
-        return bars
-    if now.hour * 60 + now.minute < MARKET_CLOSE_MIN:
-        return bars[:-1]
-    return bars
-
-
-def _fnum(v, default=0.0):
-    try:
-        x = float(v)
-        return x if math.isfinite(x) else default
-    except (TypeError, ValueError):
-        return default
-
-
-def _qnum(v):
-    """数量输出：整数股保持 int，币市小数保留 6 位。"""
-    try:
-        f = float(v or 0)
-    except (TypeError, ValueError):
-        return 0
-    if abs(f - round(f)) < 1e-9:
-        return int(round(f))
-    return round(f, CRYPTO_QTY_DECIMALS)
-
-
-def _bar_row(date, open_, close, high, low, volume, amount=0.0):
-    return {"date": str(date)[:10], "open": _fnum(open_), "close": _fnum(close),
-            "high": _fnum(high), "low": _fnum(low), "volume": _fnum(volume),
-            "amount": _fnum(amount)}
-
-
-_BARS_CACHE = {}
-_BARS_TTL = 300
-_QUOTE_CACHE = {}
-_QUOTE_TTL = 5
-_CACHE_LOCK = threading.Lock()
-# 指标文本按「对局 + 模拟日」缓存：同一交易日的 3 个 AI 共用一次 K 线计算
 _IND_CACHE = {}
 _IND_CACHE_MAX = 16
-
-
-def fetch_daily(symbol, count=320, use_cache=True):
-    """取日 K（前复权）。腾讯失败自动退到东财。返回按日期升序的 bar 列表。"""
-    symbol = normalize_symbol(symbol)
-    count = max(20, min(int(count or 320), 1000))
-    key = (symbol, count)
-    now = time.time()
-    if use_cache:
-        with _CACHE_LOCK:
-            hit = _BARS_CACHE.get(key)
-            if hit and now - hit[0] < _BARS_TTL:
-                return [dict(x) for x in hit[1]]
-    bars = []
-    if is_crypto(symbol):
-        bars = _fetch_daily_binance(symbol, count)
-    else:
-        try:
-            bars = _fetch_daily_tencent(symbol, count)
-        except StockError:
-            bars = []
-        if not bars:
-            bars = _fetch_daily_eastmoney(symbol, count)
-    if not bars:
-        raise StockError("拿不到 %s 的历史行情" % symbol)
-    bars.sort(key=lambda x: x["date"])
-    if use_cache:
-        with _CACHE_LOCK:
-            _BARS_CACHE[key] = (now, [dict(x) for x in bars])
-    return bars
-
-
-def _fetch_daily_tencent(symbol, count):
-    # 指数没有复权概念；股票 / ETF 用前复权，避免除权缺口造成假暴跌。
-    # 注意不能用「代码以 000 开头」判断指数：sz000001 是平安银行，不是指数。
-    code = symbol_code(symbol)
-    is_index = symbol.startswith("sh000") or code.startswith("399")
-    qfq = "" if is_index else "qfq"
-    url = "%s?param=%s,day,,,%d,%s" % (TENCENT_KLINE, symbol, count, qfq)
-    data = _http_get(url).json()
-    node = ((data or {}).get("data") or {}).get(symbol) or {}
-    arr = node.get("qfqday") or node.get("day") or []
-    out = []
-    for row in arr:
-        if not isinstance(row, (list, tuple)) or len(row) < 6:
-            continue
-        out.append(_bar_row(row[0], row[1], row[2], row[3], row[4], row[5],
-                            row[6] if len(row) > 6 else 0))
-    return out
-
-
-def _fetch_daily_eastmoney(symbol, count):
-    market = 1 if symbol.startswith("sh") else 0
-    secid = "%d.%s" % (market, symbol_code(symbol))
-    params = {
-        "secid": secid, "klt": 101, "fqt": 1, "beg": 19900101, "end": 20500101,
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-    }
-    data = _http_get(EASTMONEY_KLINE, params=params).json()
-    klines = ((data or {}).get("data") or {}).get("klines") or []
-    out = []
-    for line in klines:
-        parts = str(line).split(",")
-        if len(parts) < 6:
-            continue
-        out.append(_bar_row(parts[0], parts[1], parts[2], parts[3], parts[4],
-                            parts[5], parts[6] if len(parts) > 6 else 0))
-    return out[-count:]
-
-
-def _fetch_daily_binance(symbol, count):
-    """Binance 日线。返回按日期升序；丢弃尚未收盘的当日 K。"""
-    limit = max(20, min(int(count or 320), 1000))
-    data = _http_get(BINANCE_KLINES, params={
-        "symbol": symbol, "interval": "1d", "limit": limit}).json()
-    if not isinstance(data, list):
-        raise StockError("拿不到 %s 的币市行情" % symbol)
-    now_ms = int(time.time() * 1000)
-    out = []
-    for row in data:
-        if not isinstance(row, (list, tuple)) or len(row) < 7:
-            continue
-        try:
-            if int(row[6]) > now_ms:        # close_time 还没到 → 当日 K 未收定
-                continue
-            date = datetime.datetime.fromtimestamp(
-                int(row[0]) / 1000, datetime.timezone.utc).strftime("%Y-%m-%d")
-        except (TypeError, ValueError, OSError):
-            continue
-        out.append(_bar_row(date, _fnum(row[1]), _fnum(row[4]), _fnum(row[2]),
-                            _fnum(row[3]), _fnum(row[5]),
-                            _fnum(row[7]) if len(row) > 7 else 0))
-    return out[-limit:]
-
-
-def fetch_benchmark(count=320, use_cache=True, symbol=BENCHMARK_SYMBOL):
-    """基准日 K：A 股用沪深300，币市用 BTC。同时充当交易日历。"""
-    return fetch_daily(symbol, count, use_cache=use_cache)
-
-
-def fetch_quotes(symbols):
-    """批量取实时/延时报价。返回 {symbol: {...}}；拿不到的标的不出现在结果里。"""
-    syms = [normalize_symbol(s) for s in (symbols or [])]
-    if not syms:
-        return {}
-    now = time.time()
-    with _CACHE_LOCK:
-        cached = {s: _QUOTE_CACHE[s][1] for s in syms
-                  if s in _QUOTE_CACHE and now - _QUOTE_CACHE[s][0] < _QUOTE_TTL}
-    missing = [s for s in syms if s not in cached]
-    if missing:
-        stocks = [s for s in missing if not is_crypto(s)]
-        coins = [s for s in missing if is_crypto(s)]
-        if stocks:
-            text = _http_get(TENCENT_QUOTE + ",".join(stocks), encoding="gbk")
-            for line in text.splitlines():
-                m = re.search(r'v_((?:sh|sz)\d{6})="(.*)";', line)
-                if not m:
-                    continue
-                symbol, payload = m.group(1), m.group(2)
-                p = payload.split("~")
-                if len(p) < 6:
-                    continue
-                item = {
-                    "symbol": symbol,
-                    "code": p[2] if len(p) > 2 else symbol[2:],
-                    "name": p[1] if len(p) > 1 else symbol,
-                    "price": _fnum(p[3]),
-                    "prev_close": _fnum(p[4]),
-                    "open": _fnum(p[5]),
-                    "volume": _fnum(p[6]) if len(p) > 6 else 0,
-                    "time": p[30] if len(p) > 30 else "",
-                    "change": _fnum(p[31]) if len(p) > 31 else 0,
-                    "change_pct": _fnum(p[32]) if len(p) > 32 else 0,
-                    "high": _fnum(p[33]) if len(p) > 33 else 0,
-                    "low": _fnum(p[34]) if len(p) > 34 else 0,
-                }
-                cached[symbol] = item
-                with _CACHE_LOCK:
-                    _QUOTE_CACHE[symbol] = (now, dict(item))
-        for symbol in coins:
-            try:
-                d = _http_get(BINANCE_TICKER, params={"symbol": symbol}).json() or {}
-            except StockError:
-                continue
-            if not isinstance(d, dict) or not d.get("lastPrice"):
-                continue
-            item = {
-                "symbol": symbol, "code": symbol_code(symbol),
-                "name": CRYPTO_SYMBOLS.get(symbol, symbol),
-                "price": _fnum(d.get("lastPrice")),
-                "prev_close": _fnum(d.get("prevClosePrice")),
-                "open": _fnum(d.get("openPrice")),
-                "volume": _fnum(d.get("volume")),
-                "time": "", "change": _fnum(d.get("priceChange")),
-                "change_pct": _fnum(d.get("priceChangePercent")),
-                "high": _fnum(d.get("highPrice")),
-                "low": _fnum(d.get("lowPrice")),
-            }
-            cached[symbol] = item
-            with _CACHE_LOCK:
-                _QUOTE_CACHE[symbol] = (now, dict(item))
-    return {s: cached[s] for s in syms if s in cached}
-
-
-def search_symbols(keyword, limit=8):
-    """中文名 / 拼音 / 代码搜索。币市走固定名单，A 股走腾讯联想。"""
-    q = str(keyword or "").strip()
-    if not q:
-        return []
-    up = q.upper()
-    coins = []
-    for sym, nm in CRYPTO_SYMBOLS.items():
-        base = sym[:-4]
-        if up in (sym, base) or q in nm:
-            coins.append({"symbol": sym, "code": base, "name": nm, "type": "币"})
-    if coins:
-        return coins[:max(1, int(limit or 8))]
-    text = _http_get(TENCENT_SEARCH, params={"q": q, "t": "all"}, encoding="utf-8")
-    m = re.search(r'v_hint="(.*)"', text)
-    if not m:
-        return []
-    try:
-        payload = json.loads('"' + m.group(1).replace('"', '\\"') + '"')
-    except Exception:
-        payload = m.group(1)
-    out = []
-    for item in payload.split("^"):
-        parts = item.split("~")
-        if len(parts) < 5:
-            continue
-        market, code, name, _pinyin, typ = parts[:5]
-        if market not in ("sh", "sz") or typ not in ("GP-A", "ETF"):
-            continue
-        symbol = market + code
-        out.append({"symbol": symbol, "code": code, "name": name,
-                    "type": "ETF" if typ == "ETF" else "股票"})
-        if len(out) >= max(1, int(limit or 8)):
-            break
-    return out
 
 
 # ============================================================
@@ -494,7 +147,13 @@ CREATE TABLE IF NOT EXISTS orders (
   fill_date     TEXT NOT NULL DEFAULT '',
   fill_price    REAL NOT NULL DEFAULT 0,
   fee           REAL NOT NULL DEFAULT 0,
-  created_at    REAL NOT NULL
+  created_at    REAL NOT NULL,
+  -- 限价单支持（0 = 市价单）。旧库由 _ensure_order_columns 补列。
+  limit_price   REAL NOT NULL DEFAULT 0,
+  -- 已成交数量：部分成交时 qty 保持「委托总量」，这里记累计成交量
+  filled_qty    REAL NOT NULL DEFAULT 0,
+  -- 已经挂了多少个模拟交易日（超时撤单用）
+  pending_days  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_stock_orders_game ON orders(game_id, status);
 
@@ -617,6 +276,23 @@ CREATE INDEX IF NOT EXISTS idx_stock_predictions_date
   ON predictions(game_id, player_id, created_date);
 CREATE INDEX IF NOT EXISTS idx_stock_predictions_hit
   ON predictions(game_id, player_id, hit, created_date);
+
+-- 公司行为流水：分红 / 送转 / 停复牌。只追加不修改，复权时按日期倒序叠加。
+-- 之所以要单独存表：除权会同步改持仓与成本，事后没法从 positions 反推，
+-- 图表的复权序列也必须知道「哪天发生了什么」才算得出来。
+CREATE TABLE IF NOT EXISTS corporate_actions (
+  id            TEXT PRIMARY KEY,
+  game_id       TEXT NOT NULL,
+  symbol        TEXT NOT NULL,
+  date          TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  per_share     REAL NOT NULL DEFAULT 0,
+  ratio         REAL NOT NULL DEFAULT 1,
+  note          TEXT NOT NULL DEFAULT '',
+  created_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stock_corp_game
+  ON corporate_actions(game_id, symbol, date);
 """
 
 _local = threading.local()
@@ -746,6 +422,29 @@ def _ensure_game_market(conn):
     print("[模拟股市] games 已补充 market 列")
 
 
+def _ensure_order_columns(conn):
+    """旧库的 orders 表补上限价 / 部分成交相关列。
+
+    SQLite 的 ALTER TABLE 不支持 IF NOT EXISTS，只能先 PRAGMA 看列名。
+    新列都带默认值，历史委托自动视为「市价单、全成」，不需要回填数据。
+    """
+    info = conn.execute("PRAGMA table_info(orders)").fetchall()
+    if not info:
+        return
+    cols = {r["name"] for r in info}
+    added = []
+    for name, ddl in (
+        ("limit_price", "REAL NOT NULL DEFAULT 0"),
+        ("filled_qty", "REAL NOT NULL DEFAULT 0"),
+        ("pending_days", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in cols:
+            conn.execute("ALTER TABLE orders ADD COLUMN %s %s" % (name, ddl))
+            added.append(name)
+    if added:
+        print("[模拟股市] orders 已补充列：%s" % ", ".join(added))
+
+
 def init_db():
     global _inited
     with _init_lock:
@@ -755,6 +454,7 @@ def init_db():
         conn.executescript(SCHEMA)
         _ensure_player_pk(conn)
         _ensure_game_market(conn)
+        _ensure_order_columns(conn)
         _setup_fts(conn)
         conn.commit()
         _inited = True
@@ -2539,13 +2239,17 @@ def _pending_buy_cost(conn, game, player_id):
     """未成交买单占用的资金：连表一次拿齐现价（原来每笔委托一次查询）。"""
     total = 0.0
     for r in conn.execute(
-            "SELECT o.qty, "
+            "SELECT o.qty, o.limit_price, o.filled_qty, "
+            "COALESCE((SELECT SUM(o2.filled_qty) FROM orders o2 WHERE o2.id=o.id),0) AS n, "
             "(SELECT b.close FROM bars b WHERE b.game_id=o.game_id AND b.symbol=o.symbol "
             " AND b.date<=? ORDER BY b.date DESC LIMIT 1) AS px "
             "FROM orders o WHERE o.game_id=? AND o.player_id=? AND o.status='pending' "
             "AND o.side='buy'",
             (game["cursor_date"], game["id"], player_id)).fetchall():
-        amount = float(r["px"] or 0) * float(r["qty"])
+        # 只冻结「还没成交」的那部分；限价单按限价冻结（成交只会更便宜）
+        left = max(0.0, float(r["qty"] or 0) - float(r["filled_qty"] or 0))
+        unit = float(r["limit_price"] or 0) or float(r["px"] or 0)
+        amount = unit * left
         total += amount + calc_fee("buy", amount)
     return total
 
@@ -2558,7 +2262,15 @@ def _pending_qty(conn, game_id, player_id, symbol, side):
     return int((r["n"] if r else 0) or 0)
 
 
-def place_order(game_id, player_id="you", symbol="", side="buy", qty=0, reason=""):
+def place_order(game_id, player_id="you", symbol="", side="buy", qty=0, reason="",
+                limit_price=0):
+    """下单（市价 / 限价）。
+
+    `limit_price=0` 是市价单（与旧行为一致）；>0 为限价单，撮合时由
+    `stockkit.matching` 判断当天是否触价，没触到就挂到后面的交易日，
+    超过 `MAX_PENDING_DAYS` 自动撤销。买单的资金校验按「限价 × 数量」
+    估算（限价不会高于你愿意付的价格），而不是按现价，否则挂单会占不到钱。
+    """
     init_db()
     with _GAME_LOCK:
         conn = get_db()
@@ -2587,6 +2299,21 @@ def place_order(game_id, player_id="you", symbol="", side="buy", qty=0, reason="
             if qty % lot_size(s) != 0:
                 raise StockError("数量必须是 %d 的整数倍" % lot_size(s))
         side = "sell" if str(side).lower() in ("sell", "卖出", "s") else "buy"
+        # 限价：0 = 市价单。价格精度按标的最小变动单位收口，
+        # 避免 12.345678 这种前端传入的浮点尾数进到撮合与冻结资金计算里。
+        try:
+            lp = float(limit_price or 0)
+        except (TypeError, ValueError):
+            raise StockError("限价必须是数字")
+        if lp < 0:
+            raise StockError("限价不能为负")
+        if lp > 0:
+            if crypto:
+                lp = round(lp, CRYPTO_QTY_DECIMALS)
+            else:
+                lp = round(lp, 2)
+            if lp <= 0:
+                raise StockError("限价必须大于 0")
         if side == "sell":
             pos = _position(conn, game_id, player_id, s)
             # 币市 7×24、无 T+1；股票仍按可卖数量（当天买入不可卖）
@@ -2600,7 +2327,8 @@ def place_order(game_id, player_id="you", symbol="", side="buy", qty=0, reason="
             px = _last_close(conn, game_id, s, game["cursor_date"])
             if px <= 0:
                 raise StockError("没有可用行情，暂时不能买入")
-            amount = px * qty
+            # 限价买入：冻结资金按限价算（成交只会更便宜），仓位上限也按限价估
+            amount = (lp if lp > 0 else px) * qty
             cost = amount + calc_fee("buy", amount)
             left = float(p["cash"]) - _pending_buy_cost(conn, game, player_id)
             if left + 1e-6 < cost:
@@ -2629,10 +2357,10 @@ def place_order(game_id, player_id="you", symbol="", side="buy", qty=0, reason="
             (game_id, s)).fetchone()
         conn.execute(
             "INSERT INTO orders(id,game_id,player_id,created_date,symbol,side,qty,status,"
-            "reason,reject,fill_date,fill_price,fee,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "reason,reject,fill_date,fill_price,fee,created_at,limit_price,"
+            "filled_qty,pending_days) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (oid, game_id, player_id, game["cursor_date"], s, side, qty, "pending",
-             str(reason or "")[:200], "", "", 0, 0, now))
+             str(reason or "")[:200], "", "", 0, 0, now, lp, 0, 0))
         conn.commit()
         out = _row(conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone())
         out["name"] = name["name"] if name else s
@@ -2695,27 +2423,38 @@ def _execute_pending(conn, game, date):
                 "stamp_duty": game["stamp_duty"], "transfer_fee": game["transfer_fee"]}
         for o in orders:
             pid, sym = o["player_id"], o["symbol"]
-            bar = bars.get(sym)
-            if (not bar or float(bar["volume"] or 0) <= 0
-                    or float(bar["open"] or 0) <= 0):
-                _reject(conn, o, "停牌或没有当日行情")
+            total = float(o["qty"] or 0)
+            done = float(o["filled_qty"] or 0)
+            remain = total - done
+            if remain <= 1e-9:               # 历史委托 / 并发重入：其实已经全成
+                conn.execute("UPDATE orders SET status='filled' WHERE id=?", (o["id"],))
                 continue
-            pc = prevs.get(sym, 0.0)
-            lim = limit_pct(sym, names.get(sym) or "")
-            # 币市 lim=0：没有涨跌停，跳过这组判断（否则 1+0 会把所有委托都判成涨停/跌停）
-            if pc > 0 and lim > 0:
-                if o["side"] == "buy" and float(bar["open"]) >= pc * (1 + lim) - 1e-6:
-                    _reject(conn, o, "开盘涨停，买不进")
-                    continue
-                if o["side"] == "sell" and float(bar["open"]) <= pc * (1 - lim) + 1e-6:
-                    _reject(conn, o, "开盘跌停，卖不出")
-                    continue
-            qty = float(o["qty"])
-            if o["side"] == "buy":
-                px = float(bar["open"]) * (1 + slippage)
-            else:
-                px = float(bar["open"]) * (1 - slippage)
-            px = min(max(px, float(bar["low"])), float(bar["high"]))
+            # 成交判定全部交给撮合内核（纯函数，可单测）：市价 / 限价、部分成交、
+            # 涨跌停与停牌都在 matching.plan_fill 里决定，这里只负责记账。
+            plan = matching.plan_fill(
+                o["side"], remain, bars.get(sym),
+                prev_close=prevs.get(sym, 0.0),
+                limit=limit_pct(sym, names.get(sym) or ""),
+                limit_price=float(o["limit_price"] or 0),
+                slippage=slippage,
+                pending_days=int(o["pending_days"] or 0),
+                symbol=sym)
+            if plan.reason:                  # 判废：停牌 / 涨跌停 / 数量非法
+                _reject(conn, o, plan.reason)
+                continue
+            if not plan.filled:
+                # 今天没触价：委托继续挂着。累计挂单天数，到上限就超时撤单，
+                # 否则限价单会永久占用冻结资金（停牌期间也走这里）。
+                days = int(o["pending_days"] or 0) + 1
+                if days >= matching.MAX_PENDING_DAYS:
+                    _reject(conn, o, "挂单超过 %d 个交易日未成交，已自动撤销"
+                            % matching.MAX_PENDING_DAYS)
+                else:
+                    conn.execute("UPDATE orders SET pending_days=? WHERE id=?",
+                                 (days, o["id"]))
+                continue
+            qty = plan.qty
+            px = plan.price
             amount = px * qty
             fee = calc_fee(o["side"], amount, fees)
             p = players.get(pid) or _player(conn, gid, pid)
@@ -2771,9 +2510,15 @@ def _execute_pending(conn, game, date):
                     conn.execute(
                         "DELETE FROM positions WHERE game_id=? AND player_id=? AND symbol=?",
                         (gid, pid, sym))
+            done_now = done + qty
+            filled = done_now >= total - 1e-9
+            # 部分成交：qty 仍是委托总量，filled_qty 记累计成交量，status 保持 pending，
+            # 明天继续撮合剩下的；全部成交才置 filled。fill_price / fee 记的是**这一笔**的，
+            # 累计值看 trades（每次成交都单独落一行）。
             conn.execute(
-                "UPDATE orders SET status='filled', fill_date=?, fill_price=?, fee=? WHERE id=?",
-                (date, px, fee, o["id"]))
+                "UPDATE orders SET status=?, fill_date=?, fill_price=?, fee=?, "
+                "filled_qty=? WHERE id=?",
+                ("filled" if filled else "pending", date, px, fee, done_now, o["id"]))
             conn.execute(
                 "INSERT INTO trades(id,game_id,player_id,symbol,side,date,qty,price,fee,"
                 "amount,realized_pnl,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -3248,3 +2993,166 @@ def ai_decide(game_id, player_id):
         conn.commit()
         return {"accepted": accepted, "rejected": rejected,
                 "journal": journal, "analysis": analysis, "reused": False}
+
+
+# ============================================================
+# 绩效指标 / 报告导出 / 公司行为（逻辑在 stockkit，这里只做取数与落库）
+# ============================================================
+
+def _equity_series(conn, game_id, player_id):
+    """按模拟日取总资产序列（只取已有快照，缺日不补）。"""
+    return [float(r["equity"] or 0) for r in conn.execute(
+        "SELECT equity FROM snapshots WHERE game_id=? AND player_id=? ORDER BY date",
+        (game_id, player_id)).fetchall()]
+
+
+def risk_metrics(game_id, player_id="you"):
+    """单个参与者的绩效指标：回撤 / 波动 / 夏普 / 胜率 / 盈亏比 / 超额收益。
+
+    口径全部来自 `stockkit.risk`（纯函数）：
+    资产曲线用逐日快照，成交用已平仓（卖出）记录，超额收益对基准。
+    """
+    init_db()
+    conn = get_db()
+    with _GAME_LOCK:
+        game = _game(conn, game_id)
+        cursor = game["cursor_date"]
+        p = _player(conn, game_id, player_id)
+        values = _equity_series(conn, game_id, player_id)
+        trades = trades_for(game_id, player_id, limit=2000)
+        initial = float(p["initial_cash"] or 0)
+        equity = values[-1] if values else initial
+        total_pct = ((equity / initial - 1.0) * 100) if initial > 0 else 0.0
+        bm = _benchmark_stats(conn, game, cursor)
+        out = risk.summary(values, trades,
+                           total_return_pct=total_pct,
+                           benchmark_return_pct=float(bm.get("return_pct") or 0))
+        out["player_id"] = player_id
+        out["equity"] = round(equity, 2)
+        return out
+
+
+def export_report(game_id, fmt="markdown", player_id="you"):
+    """把一局对局导出成报告文本（markdown / csv）。
+
+    只读：不改任何数据。返回 ``{"text", "filename", "format"}``，
+    文件名由 `stockkit.report.filename` 给出，前端可直接当下载名。
+    """
+    init_db()
+    with _GAME_LOCK:
+        state = game_state(game_id)
+        state["risk"] = risk_metrics(game_id, player_id)
+        state["market_state"] = state.get("regime")
+        # 报告里的成交表用人类玩家视角（AI 的成交另有一份完整导出）
+        state["trades"] = trades_for(game_id, player_id, limit=200)
+        text = report.render(state, fmt)
+        name = report.filename(state, fmt)
+    return {"text": text, "filename": name, "format": str(fmt or "markdown").lower()}
+
+
+def apply_corporate_action(game_id, symbol, action, player_id="you"):
+    """把一条公司行为落到某一局：调持仓、进现金、按需复权历史 K 线。
+
+    当前实现是**人工触发**（`ex_date` 就是本局当前模拟日），不依赖外部数据源：
+    交易日历 / 分红公告的自动抓取需要稳定的数据接口，这一版不做，
+    以免把「猜出来的分红」写进账里。
+
+    返回 ``{"kind", "symbol", "players", "cash_total"}``：
+    ``players`` 是受影响参与者的数量，``cash_total`` 是本次派现总额。
+    """
+    init_db()
+    with _GAME_LOCK:
+        conn = get_db()
+        game = _game(conn, game_id)
+        if game["status"] != "running":
+            raise StockError("这一局已经结束了")
+        s = normalize_symbol(symbol)
+        if not _is_tradable(conn, game_id, s):
+            raise StockError("这只标的不能交易")
+        act = corporate.normalize_action(action, s)
+        kind = act["kind"]
+        cursor = game["cursor_date"]
+        act["ex_date"] = act.get("ex_date") or cursor
+
+        if kind in (corporate.SUSPEND, corporate.RESUME):
+            # 停复牌只影响撮合判定，不改持仓；这里只做一次显式校验后返回
+            return {"kind": kind, "symbol": s, "players": 0, "cash_total": 0.0}
+
+        affected, cash_total = 0, 0.0
+        for pos in conn.execute(
+                "SELECT * FROM positions WHERE game_id=? AND symbol=? AND qty>0",
+                (game_id, s)).fetchall():
+            res = corporate.apply_to_position(pos["qty"], pos["avg_cost"], act)
+            qty, avg, cash = res["qty"], res["avg_cost"], res["cash"]
+            if qty <= 0:
+                conn.execute(
+                    "DELETE FROM positions WHERE game_id=? AND player_id=? AND symbol=?",
+                    (game_id, pos["player_id"], s))
+            else:
+                # 送转后新增的股份同样受 T+1 约束：可卖数量不超过原可卖数量
+                avail = min(float(pos["available_qty"] or 0), qty)
+                conn.execute(
+                    "UPDATE positions SET qty=?, available_qty=?, avg_cost=? "
+                    "WHERE game_id=? AND player_id=? AND symbol=?",
+                    (qty, avail, avg, game_id, pos["player_id"], s))
+            if cash > 0:
+                conn.execute(
+                    "UPDATE players SET cash=cash+? WHERE game_id=? AND id=?",
+                    (cash, game_id, pos["player_id"]))
+                cash_total += cash
+            affected += 1
+        # 记录流水：adjusted_bars 靠它复权。没有流水就无法知道「历史该按什么比例折算」。
+        conn.execute(
+            "INSERT INTO corporate_actions(id,game_id,symbol,date,kind,per_share,ratio,"
+            "created_at) VALUES(?,?,?,?,?,?,?,?)",
+            ("ca_" + uuid.uuid4().hex[:10], game_id, s, act["ex_date"], kind,
+             float(act.get("per_share") or 0), float(act.get("ratio") or 1), time.time()))
+        conn.commit()
+        return {"kind": kind, "symbol": s, "players": affected,
+                "cash_total": round(cash_total, 2)}
+
+
+def corporate_actions(game_id, symbol=""):
+    """一局的全部公司行为流水（新的在前），供前端展示与审计。"""
+    init_db()
+    conn = get_db()
+    with _GAME_LOCK:
+        _game(conn, game_id)
+        sql = "SELECT * FROM corporate_actions WHERE game_id=?"
+        args = [game_id]
+        if symbol:
+            sql += " AND symbol=?"
+            args.append(normalize_symbol(symbol))
+        sql += " ORDER BY date DESC, created_at DESC"
+        rows = []
+        for r in conn.execute(sql, args).fetchall():
+            row = _row(r)
+            # 表里的列叫 date（与其他表一致）；对外的公司行为字段沿用 ex_date
+            row["ex_date"] = row.get("date") or ""
+            rows.append(row)
+        return rows
+
+
+def adjusted_bars(game_id, symbol, limit=120):
+    """复权后的日 K：把历史按本局已录入的公司行为逐条折算。
+
+    从最早的一条行为开始逐次作用到整段序列上（`corporate.adjust_history`
+    只折算除权日**之前**的 K 线），所以多条行为会自然累乘。
+    币市没有公司行为，直接返回原始 K 线。
+    """
+    s = normalize_symbol(symbol)
+    bars = bars_for(game_id, symbol, limit)
+    if isinstance(bars, dict):
+        rows = bars.get("bars") or []
+    else:
+        rows = bars or []
+    if not rows or is_crypto(s):
+        return bars
+    actions = corporate_actions(game_id, s)
+    for act in reversed(actions):        # 由早到晚，保证折算顺序正确
+        if act["kind"] not in (corporate.CASH_DIVIDEND, corporate.SPLIT):
+            continue
+        rows = corporate.adjust_history(rows, act)
+    if isinstance(bars, dict):
+        return dict(bars, bars=rows)
+    return rows

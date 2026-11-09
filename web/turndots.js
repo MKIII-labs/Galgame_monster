@@ -166,6 +166,106 @@ function tdOpen(on) {
 /* 供 chat.js 在每次重排消息后调用 */
 function turnDotsSync() {
   tdRender();
+  qmarksRender();
+}
+
+/* ============================================================
+   提问标记：给关键提问起名，Solo 模式右侧一个标记一个悬浮按钮。
+   数据存在会话的 qmarks 里（服务端持久化），按钮点击复用 tdJump。
+   ============================================================ */
+
+function qmarkOf(idx) {
+  const s = typeof curSession === 'function' ? curSession() : null;
+  const list = (s && s.qmarks) || [];
+  const want = Number(idx);
+  return list.find((m) => Number(m && m.idx) === want) || null;
+}
+
+function qmarkList() {
+  const s = typeof curSession === 'function' ? curSession() : null;
+  return ((s && s.qmarks) || [])
+    .filter((m) => m && Number.isFinite(Number(m.idx)))
+    .map((m) => ({ idx: Number(m.idx), label: String(m.label || ''), text: String(m.text || '') }))
+    .sort((a, b) => a.idx - b.idx);
+}
+
+function qmarksRender() {
+  const box = $('#qmarks');
+  if (!box) return;
+  const items = qmarkList();
+  box.innerHTML = '';
+  box.classList.toggle('hidden', !items.length);
+  items.forEach((it) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'qmark-btn';
+    btn.dataset.idx = String(it.idx);
+    btn.title = (it.label || '提问标记') + (it.text ? '：' + it.text : '')
+      + '\n单击跳转，右键改名 / 删除';
+    btn.innerHTML = (typeof icon === 'function' ? icon('pin') : '')
+      + '<span class="qmark-label"></span>';
+    btn.querySelector('.qmark-label').textContent = it.label || ('标记 ' + (it.idx + 1));
+    btn.onclick = () => qmarkJump(it.idx);
+    btn.oncontextmenu = (e) => { e.preventDefault(); qmarkEdit(it.idx); };
+    box.appendChild(btn);
+  });
+}
+
+/* 跳转优先用 ssFocusMessage：它会先把目标之前的消息分页补回来，
+   再定位 / 高亮；tdJump 只适合「已经在当前渲染窗口里」的索引。 */
+function qmarkJump(idx) {
+  if (typeof ssFocusMessage === 'function') {
+    ssFocusMessage(idx).catch(() => tdJump(idx));
+    return;
+  }
+  tdJump(idx);
+}
+
+function syncQmarkBtn(idx) {
+  const row = document.querySelector('.msg[data-idx="' + idx + '"]');
+  const btn = row && row.querySelector('.msg-act[data-qmark]');
+  if (btn) btn.classList.toggle('act-on', !!qmarkOf(idx));
+}
+
+/* 消息悬浮菜单 / 悬浮按钮右键共用：留空 = 删除标记 */
+async function qmarkEdit(idx) {
+  const s = typeof curSession === 'function' ? curSession() : null;
+  const m = s && s.messages && s.messages[idx];
+  if (!m || m.role !== 'user') { toast('只能标记用户提问', 'error'); return; }
+  const cur = qmarkOf(idx);
+  const preview = (typeof tdPreview === 'function' ? tdPreview(m) : String(m.content || ''))
+    .slice(0, 18);
+  const promptText = cur
+    ? '重命名这个标记（留空 = 删除标记）'
+    : '给这次提问起个名字（会显示在右侧悬浮按钮上）';
+  let val;
+  try {
+    val = await appPrompt(promptText, cur ? cur.label : preview);
+  } catch (e) {
+    toast('无法打开输入框', 'error');
+    return;
+  }
+  if (val === null) return;                       // 取消
+  const label = String(val).trim().slice(0, 40);
+  if (!label && !cur) return;                     // 新建时留空：什么都不做
+  await qmarkSave(idx, label, preview);
+}
+
+async function qmarkSave(idx, label, preview) {
+  const s = typeof curSession === 'function' ? curSession() : null;
+  if (!s) return;
+  try {
+    const r = await api('/api/session/qmark', {
+      id: s.id, idx: idx, label: label, text: preview,
+    });
+    if (!r || !r.ok) throw new Error((r && r.error) || '保存失败');
+    if (r.sessions) applySessionsPayload(r.sessions);
+    qmarksRender();
+    syncQmarkBtn(idx);
+    toast(label ? '已标记：' + label : '已取消标记', 'success');
+  } catch (e) {
+    toast('标记失败：' + (e.message || e), 'error');
+  }
 }
 
 function bindTurnDots() {

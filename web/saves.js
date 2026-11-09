@@ -99,7 +99,7 @@ async function savesRestore(saveId, mode) {
   try {
     const r = await api('/api/save/restore', { session_id: s.id, save_id: saveId, mode: mode });
     if (!r || !r.ok) throw new Error((r && r.error) || '失败');
-    applySessions(r);
+    applySessions(r, { keepCurrent: mode !== 'branch' });
     if (mode === 'branch') {
       closeSaves();
       toast('已分叉出新会话');
@@ -120,7 +120,7 @@ async function forkFromMessage(index) {
   try {
     const r = await api('/api/save/branch', { session_id: s.id, upto: index + 1 });
     if (!r || !r.ok) throw new Error((r && r.error) || '失败');
-    applySessions(r);
+    applySessions(r, { keepCurrent: false });   // 分叉：服务端把 current 指向新会话
     toast('已分叉出新会话');
     if (state.uiMode === 'gal') galRenderFromSession();
     else renderMessages();

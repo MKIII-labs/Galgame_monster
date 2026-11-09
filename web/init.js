@@ -110,6 +110,35 @@ function upgradeCode() {
   });
 }
 
+/* Ctrl+Shift+V（Solo）：切换 AI 回复的「渲染 / 源码」。
+   有选区时用选区所在的那条；否则用最后一条 AI 回复。 */
+function toggleChatRenderByKey() {
+  const rows = Array.prototype.slice.call(
+    document.querySelectorAll('#chat .msg.ai[data-idx]'));
+  if (!rows.length) { toast('还没有可切换的 AI 回复'); return; }
+  let row = null;
+  try {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount && !sel.isCollapsed) {
+      let node = sel.getRangeAt(0).startContainer;
+      while (node && node !== document) {
+        if (node.nodeType === 1 && node.classList && node.classList.contains('msg')) break;
+        node = node.parentNode;
+      }
+      if (node && node.nodeType === 1 && node.classList.contains('ai')
+          && node.dataset.idx !== undefined) {
+        row = node;
+      }
+    }
+  } catch (e) { /* 读不到选区就退回最后一条 */ }
+  if (!row) row = rows[rows.length - 1];
+  if (typeof row._raw !== 'string' || !row._content) {
+    toast('这条回复暂不支持源码视图');
+    return;
+  }
+  toggleRawView(row);
+}
+
 /* ============================================================
    初始化
    ============================================================ */
@@ -151,6 +180,9 @@ async function init() {
   renderSessions();
   renderMessages();
   renderContextBar(data.context);
+  // 远端流（刷新后本地没有流对象）也要立刻把「停止」按钮亮起来：
+  // 以前只填了 streamingSids，没有同步 UI，结果界面显示「模型输出中」却没有停止键。
+  if (typeof refreshStreamingUI === 'function') refreshStreamingUI();
   if (_running.indexOf(String(state.sessions.current)) >= 0
       && typeof keepRecovering === 'function') {
     toast('检测到后台任务仍在运行，完成后会自动刷新');
@@ -161,6 +193,8 @@ async function init() {
 
   $('#btn-new').onclick = newSession;
   $('#btn-send').onclick = sendMessage;
+  // 「回到实时输出」：把后台仍在跑的任务接回前端完整流式渲染
+  if ($('#btn-resume')) $('#btn-resume').onclick = () => resumeLiveOutput(state.sessions.current);
   $('#attach-remove').onclick = clearAttach;
   $('#btn-stop').onclick = stopStreaming;
   if ($('#queue-cancel')) $('#queue-cancel').onclick = () => cancelSendQueue();
@@ -213,6 +247,9 @@ async function init() {
     const head = card.querySelector('.modal-head');
     if (head) makeDraggable(card, head);
   });
+
+  // 刷新页面：和 Ctrl+R 等价（后端仍在跑的任务会在重载后自动挂回）
+  $('#btn-reload').onclick = () => location.reload();
 
   $('#btn-theme').onclick = () => {
     const next = isDarkTheme() ? 'light' : 'dark';
@@ -290,7 +327,9 @@ async function init() {
 
   $('#btn-search').onclick = () => {
     if (!state.searchEnabled && !hasSearchKey()) {
-      toast('尚未配置搜索 API 密钥，请在「设置 → 联网与数据源」中填写');
+      toast(state.config.search_provider === 'auto'
+        ? '自动模式下所有引擎都被关闭了，请在「设置 → 联网与数据源」至少勾选一个'
+        : '尚未配置搜索 API 密钥，请在「设置 → 联网与数据源」中填写');
       return;
     }
     state.searchEnabled = !state.searchEnabled;
@@ -665,6 +704,16 @@ async function init() {
     b.onclick = () => ideToggleSide(b.dataset.act);
   });
   if ($('#ide-open-vscode')) $('#ide-open-vscode').onclick = ideOpenInVsCode;
+  if ($('#ide-anno-add')) $('#ide-anno-add').onclick = () => ideAnnoAdd();
+  if ($('#ide-anno-refresh')) $('#ide-anno-refresh').onclick = () => ideAnnoLoad(state.ideOpen);
+  if ($('#ide-doc-refresh')) $('#ide-doc-refresh').onclick = () => ideDocsLoad($('#ide-doc-q') ? $('#ide-doc-q').value : '');
+  if ($('#ide-doc-q')) {
+    $('#ide-doc-q').addEventListener('input', () => {
+      clearTimeout(window.__ideDocTimer);
+      window.__ideDocTimer = setTimeout(
+        () => ideDocsLoad($('#ide-doc-q').value), 250);
+    });
+  }
   // 沙箱内搜索
   if ($('#ide-search-input')) {
     $('#ide-search-input').addEventListener('keydown', (e) => {
@@ -691,12 +740,20 @@ async function init() {
     if (state.uiMode !== 'ide') return;
     const hit = hkHit(e, ['ide']);
     if (!hit) return;
+    // 调试键只在焦点不在输入框 / 编辑器文本区时生效（与旧实现一致）
+    if (hit.id.indexOf('ide.debug') === 0) {
+      const tag = (e.target && e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (document.querySelector('.modal:not(.hidden)')) return;   // 弹窗打开时不启动调试
+    }
     e.preventDefault();
     if (hit.id === 'ide.save') saveIdeFile();
     else if (hit.id === 'ide.open') idePaletteOpen('file');
     else if (hit.id === 'ide.palette') idePaletteOpen('cmd');
     else if (hit.id === 'ide.sidebar') ideToggleSidebar();
     else if (hit.id === 'ide.terminal') ideTermToggle();
+    else if (hit.id.indexOf('ide.debug') === 0
+             && typeof ideDebugShortcut === 'function') ideDebugShortcut(hit.id);
   });
   // 对话内查找（Ctrl+F）；GAL 模式下不接管，设置面板打开时也不抢
   document.addEventListener('keydown', (e) => {
@@ -712,6 +769,26 @@ async function init() {
     findOpen();
   });
   setupFindBar();
+
+  // Ctrl+Shift+V：切换「渲染 / 源码」。笔记里是预览 ↔ 编辑；Solo 里切最后一条
+  // AI 回复（有选区时切选区所在的那条）。IDE 模式让给 Monaco 的 Markdown 预览。
+  document.addEventListener('keydown', (e) => {
+    const hit = hkHit(e, ['global']);
+    if (!hit || hit.id !== 'global.render') return;
+    const settings = $('#modal');
+    if (settings && !settings.classList.contains('hidden')) return;   // 设置弹窗优先
+    const notes = $('#notes-modal');
+    if (notes && !notes.classList.contains('hidden')) {
+      if (!state.noteCurrent) { toast('先打开一篇笔记'); return; }
+      e.preventDefault();
+      setNoteMode(state.noteMode === 'edit' ? 'preview' : 'edit');
+      toast(state.noteMode === 'edit' ? '已切换到编辑（源码）' : '已切换到预览');
+      return;
+    }
+    if (state.uiMode !== 'solo') return;      // IDE / GAL 的 Ctrl+Shift+V 有别的语义
+    e.preventDefault();
+    toggleChatRenderByKey();
+  });
 
   // 会话搜索：居中浮层（匹配标题与对话正文）
   if (typeof bindSessionSearch === 'function') bindSessionSearch();
@@ -762,7 +839,8 @@ async function init() {
     e.target.value = '';
   };
   $('#doc-input').onchange = (e) => {
-    if (e.target.files && e.target.files[0]) attachDocBlob(e.target.files[0]);
+    // 支持一次选多个：全部追加到待发送附件（不再互相覆盖）
+    for (const f of (e.target.files || [])) attachDocBlob(f);
     e.target.value = '';
   };
   // 粘贴：图片走图片通道，其余文件走文档通道（读剪贴板里的文件需 Chrome 91+ / Edge 等 Chromium 桌面版）
@@ -775,7 +853,7 @@ async function init() {
     if (!picked.length && dt.files) for (const f of dt.files) picked.push(f);
     if (!picked.length) return;                 // 剪贴板里没有文件 → 保留文本粘贴的默认行为
     e.preventDefault();
-    // 一次粘贴多张图时全部附上；文档仍保持「一次一个」
+    // 一次粘贴多个文件时全部附上；文档也支持多个，追加而不是覆盖
     for (const f of picked) {
       if (f.type && f.type.startsWith('image/')) attachImageBlob(f);
       else attachDocBlob(f);
@@ -1073,14 +1151,19 @@ function renderNotesTree() {
 async function openNote(path) {
   if (!path) return;
   if (state.noteCurrent && state.noteCurrent !== path) await saveNoteNow();
-  const r = await api('/api/notes/get', { path: path });
+  const [r, ar] = await Promise.all([
+    api('/api/notes/get', { path: path }),
+    api('/api/notes/anno/list', { path: path }),
+  ]);
   if (!r || !r.ok) { toast('打开失败：' + ((r && r.error) || '笔记不存在')); return; }
   const prev = state.noteCurrent;
   state.noteCurrent = path;
+  state.noteAnnos = (ar && ar.items) || [];
   $('#nt-path').textContent = path;
   $('#nt-textarea').value = r.content || '';
   renderBacklinks(r.backlinks || []);
   setNoteMode(state.noteMode || 'preview');
+  noteLintSchedule();               // 预览模式也要先把问题数算出来（按钮上有徽标）
   renderNotesTree();
   highlightNotesNode(prev, path);   // 只改高亮，不重建图谱（不丢缩放/平移）
 }
@@ -1095,12 +1178,146 @@ function setNoteMode(mode) {
     pv.querySelectorAll('a.wikilink').forEach((a) => {
       if (!resolveNotePath(a.dataset.note)) a.classList.add('missing');
     });
+    applyNoteAnnotations(pv);
   }
+  renderNoteAnnos();
   ta.classList.toggle('hidden', !has || state.noteMode !== 'edit');
   pv.classList.toggle('hidden', !has || state.noteMode !== 'preview');
   $('#nt-empty').classList.toggle('hidden', has);
   $('#nt-edit').classList.toggle('active', state.noteMode === 'edit');
   $('#nt-preview').classList.toggle('active', state.noteMode === 'preview');
+  // 笔记预览与对话共用同一套富媒体渲染（```svg / ```chart / ```mermaid）。
+  // 只在 innerHTML 里生成占位块、不调用 enhance 的话，图形会一直停在「渲染中…」。
+  // 放在可见性切换之后：图表初始化需要真实尺寸，隐藏状态下会量成 0。
+  if (state.noteMode === 'preview' && has && window.enhanceRichMedia) {
+    window.enhanceRichMedia(pv);
+  }
+  renderNoteLint();
+}
+
+/* ============================================================
+   Markdown 语法纠错（笔记侧）
+   ------------------------------------------------------------
+   规则引擎在 web/mdlint.js（与 IDE 共用），这里只负责：
+   · 开关（localStorage，默认开）
+   · 编辑区下方的问题条：点击跳行、单条修复、全部修正
+   · 顶部按钮上的问题数徽标（预览模式也看得到）
+   只做「提示 + 一键修正」，不会在用户没点的时候改正文。
+   ============================================================ */
+const NOTE_LINT_KEY = 'gm.notes_lint';
+let noteLintTimer = 0;
+let noteLintItems = [];
+let noteLintCollapsed = false;
+
+function noteLintEnabled() {
+  try { return localStorage.getItem(NOTE_LINT_KEY) !== '0'; } catch (e) { return true; }
+}
+
+function setNoteLintEnabled(on) {
+  try { localStorage.setItem(NOTE_LINT_KEY, on ? '1' : '0'); } catch (e) { /* 隐私模式忽略 */ }
+}
+
+function noteLintSchedule() {
+  clearTimeout(noteLintTimer);
+  if (!noteLintEnabled() || !state.noteCurrent || !window.MDLint) {
+    noteLintItems = [];
+    renderNoteLint();
+    return;
+  }
+  noteLintTimer = setTimeout(noteLintRun, 400);
+}
+
+function noteLintRun() {
+  const ta = $('#nt-textarea');
+  if (!noteLintEnabled() || !state.noteCurrent || !window.MDLint || !ta) {
+    noteLintItems = [];
+    renderNoteLint();
+    return;
+  }
+  try {
+    noteLintItems = MDLint.lint(ta.value, { noteNames: Object.keys(notesNameIndex()) });
+  } catch (e) {
+    noteLintItems = [];
+    if (window.console) console.error('[mdlint] 检查失败', e);
+  }
+  renderNoteLint();
+}
+
+function noteLintBadge() {
+  const on = noteLintEnabled();
+  const btn = $('#nt-lint');
+  if (btn) {
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.title = on ? 'Markdown 纠错：已开启（点击关闭）' : 'Markdown 纠错：已关闭（点击开启）';
+  }
+  const n = on ? noteLintItems.length : 0;
+  const b = $('#nt-lint-n');
+  if (b) b.textContent = n ? String(n) : '';
+}
+
+function renderNoteLint() {
+  noteLintBadge();
+  const box = $('#nt-lint-box');
+  if (!box) return;
+  const show = noteLintEnabled() && !!state.noteCurrent &&
+    state.noteMode === 'edit' && noteLintItems.length > 0;
+  box.classList.toggle('hidden', !show);
+  if (!show) { box.innerHTML = ''; return; }
+
+  const list = noteLintItems;
+  const fixable = list.filter((x) => x.fix).length;
+  const head = '<div class="nt-lint-head"><b>⚠ ' + list.length + '</b> 处问题' +
+    (fixable ? '<button class="nt-lint-fix" data-lint-fix-all>全部修正（' + fixable + '）</button>' : '') +
+    '<button class="nt-lint-collapse" data-lint-collapse>' + (noteLintCollapsed ? '展开' : '收起') + '</button>' +
+    '</div>';
+  if (noteLintCollapsed) { box.innerHTML = head; return; }
+
+  box.innerHTML = head + '<div class="nt-lint-list">' + list.map((it, i) => {
+    const ico = it.severity === 'error' ? '✖' : (it.severity === 'warning' ? '⚠' : 'ⓘ');
+    return '<div class="nt-lint-row ' + it.severity + '" data-lint-row="' + i + '">' +
+      '<span class="nt-lint-ico">' + ico + '</span>' +
+      '<span class="nt-lint-msg">' + escapeHtml(it.message) + '</span>' +
+      '<span class="nt-lint-line">L' + (it.line + 1) + '</span>' +
+      (it.fix ? '<button class="nt-lint-fix-one" data-lint-fix="' + i + '" title="只修正这一条">修复</button>' : '') +
+      '</div>';
+  }).join('') + '</div>';
+}
+
+function noteLintGoto(it) {
+  const ta = $('#nt-textarea');
+  if (!it || !ta) return;
+  if (state.noteMode !== 'edit') setNoteMode('edit');
+  const lines = ta.value.split('\n');
+  let off = 0;
+  for (let i = 0; i < it.line; i++) off += (lines[i] || '').length + 1;
+  const col = Math.max(1, it.col || 1);
+  const start = off + col - 1;
+  const end = start + Math.max(1, (it.endCol || col + 1) - col);
+  ta.focus();
+  try { ta.setSelectionRange(start, Math.min(end, ta.value.length)); } catch (e) { /* 忽略 */ }
+  const lh = parseFloat(getComputedStyle(ta).lineHeight) || 24;
+  ta.scrollTop = Math.max(0, (it.line + 0.5) * lh - ta.clientHeight / 2);
+}
+
+function noteLintApply(items) {
+  const ta = $('#nt-textarea');
+  if (!ta || !window.MDLint) return;
+  const r = MDLint.fixAll(ta.value, items || []);
+  if (!r || r.fixed <= 0 || r.text === ta.value) { toast('没有可自动修正的问题'); return; }
+  // 用 execCommand 写入：textarea 的 Ctrl+Z 能一步撤回整次修正
+  const keepSel = ta.selectionStart;
+  const keepTop = ta.scrollTop;
+  ta.focus();
+  try { ta.setSelectionRange(0, ta.value.length); } catch (e) { /* 忽略 */ }
+  let ok = false;
+  try { ok = document.execCommand('insertText', false, r.text); } catch (e) { ok = false; }
+  if (!ok) ta.value = r.text;
+  try { ta.setSelectionRange(Math.min(keepSel, ta.value.length), Math.min(keepSel, ta.value.length)); } catch (e) { /* 忽略 */ }
+  ta.scrollTop = keepTop;
+  scheduleNoteSave();
+  noteLintRun();
+  toast('已修正 ' + r.fixed + ' 处');
 }
 
 function scheduleNoteSave() {
@@ -1183,6 +1400,7 @@ async function deleteCurrentNote() {
   state.noteMode = 'preview';
   $('#nt-textarea').value = '';
   $('#nt-path').textContent = '未打开笔记';
+  noteLintSchedule();
   renderBacklinks([]);
   setNoteMode('preview');
   renderNotesTree();
@@ -1317,7 +1535,350 @@ function switchNotesTab(name) {
   $$('#notes-modal .ntab').forEach((t) => t.classList.toggle('active', t.dataset.ntab === name));
   $('#nt-graph').classList.toggle('hidden', name !== 'graph');
   $('#nt-backlinks').classList.toggle('hidden', name !== 'backlinks');
+  $('#nt-annos').classList.toggle('hidden', name !== 'annos');
   if (name === 'graph') drawNotesGraph();
+  if (name === 'annos') renderNoteAnnos();
+}
+
+/* ---------- 笔记批注：选中预览文字加批注，不改动 Markdown 正文 ---------- */
+let noteAnnoPop = null;
+let noteAnnoDraft = null;
+
+function noteTextIndex(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  const nodes = [];
+  let text = '';
+  let n;
+  while ((n = walker.nextNode())) {
+    nodes.push({ node: n, start: text.length });
+    text += n.nodeValue || '';
+  }
+  return { nodes, text };
+}
+
+/* 批注高亮：只在**文本节点内部**切分并包 <mark>。
+   不能对整段 Range 调 surroundContents —— 当引文结束时正好落在下一个文本节点
+   的开头（例如「…聚点」紧接着下一条 <li> 的 <strong>），Range 会跨过 <li> 边界，
+   surroundContents 抛错后走 extractContents，把 <li> 整个塞进 <mark>，
+   列表 / 表格结构就被拆坏了。这里永远不包元素，跨块时逐块高亮。 */
+function applyNoteAnnotations(root) {
+  const items = state.noteAnnos || [];
+  if (!items.length) return;
+  items.forEach((a) => {
+    const quote = a && a.quote;
+    if (!quote) return;
+    const { nodes, text } = noteTextIndex(root);
+    const want = Math.max(0, Number(a.nth) || 0);
+    let idx = -1;
+    let from = 0;
+    for (let i = 0; i <= want; i++) {
+      idx = text.indexOf(quote, from);
+      if (idx < 0) break;
+      from = idx + 1;
+    }
+    if (idx < 0) idx = text.indexOf(quote);
+    if (idx < 0) return;
+    const end = idx + quote.length;
+    nodes.forEach((it) => {
+      const node = it.node;
+      const v = node.nodeValue || '';
+      if (!v) return;
+      const s = it.start;
+      const e = s + v.length;
+      if (e <= idx || s >= end) return;
+      // 公式 / 隐藏源码不切：KaTeX 的内部结构被切开会让 math 排版错位
+      if (node.parentElement
+          && node.parentElement.closest('.katex, .rich-media-src, script, style')) return;
+      const a0 = Math.max(0, idx - s);
+      const b0 = Math.min(v.length, end - s);
+      let target = node;
+      if (a0 > 0) target = target.splitText(a0);
+      if (b0 - a0 < target.nodeValue.length) target.splitText(b0 - a0);
+      const mark = document.createElement('mark');
+      mark.className = 'nt-anno';
+      mark.dataset.id = a.id;
+      mark.title = a.comment || '';
+      target.parentNode.replaceChild(mark, target);
+      mark.appendChild(target);
+    });
+  });
+}
+
+function renderNoteAnnos() {
+  const box = $('#nt-annos');
+  const cnt = $('#nt-anno-count');
+  const items = state.noteAnnos || [];
+  if (cnt) cnt.textContent = items.length ? String(items.length) : '';
+  if (!box) return;
+  box.innerHTML = items.length
+    ? items.map((a) => '<div class="nt-anno-item" data-id="' + escapeHtml(a.id) + '">' +
+        '<div class="q">“' + escapeHtml(a.quote) + '”</div>' +
+        '<div class="c">' + escapeHtml(a.comment) + '</div></div>').join('')
+    : '<div class="hint">在右侧预览里选中一段文字，点「批注」写下想法。</div>';
+  box.querySelectorAll('.nt-anno-item').forEach((el) => {
+    el.onclick = () => {
+      const a = (state.noteAnnos || []).find((x) => x.id === el.dataset.id);
+      const mark = document.querySelector('#nt-preview-box mark.nt-anno[data-id="' + el.dataset.id + '"]');
+      if (mark) {
+        mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        mark.classList.add('flash');
+        setTimeout(() => mark.classList.remove('flash'), 1000);
+        if (a) showAnnoPop(a, mark.getBoundingClientRect());
+      } else if (a) {
+        showAnnoPop(a, { left: box.getBoundingClientRect().left, right: 0, top: 120, bottom: 120 });
+      }
+    };
+  });
+}
+
+function noteDraftFromRange(range) {
+  const pv = $('#nt-preview-box');
+  const { text } = noteTextIndex(pv);
+  const quote = range.toString();
+  if (!quote) return null;
+  const pre = document.createRange();
+  pre.selectNodeContents(pv);
+  try { pre.setEnd(range.startContainer, range.startOffset); } catch (e) { return null; }
+  const start = pre.toString().length;
+  let nth = 0;
+  let from = 0;
+  let hit;
+  while ((hit = text.indexOf(quote, from)) >= 0 && hit < start) {
+    nth++;
+    from = hit + 1;
+  }
+  const copyText = (window.SelKit && typeof window.SelKit.plainText === 'function')
+    ? window.SelKit.plainText(range)
+    : quote;
+  return {
+    quote: quote.slice(0, 500),
+    copy_text: copyText,
+    prefix: text.slice(Math.max(0, start - 30), start),
+    suffix: text.slice(start + quote.length, start + quote.length + 30),
+    nth,
+    comment: '',
+    rect: range.getBoundingClientRect(),
+  };
+}
+
+/* 预览区选区工具条：批注 / 提问 / 引用 */
+function noteTitle() {
+  const name = String(state.noteCurrent || '').split('/').pop().replace(/\.md$/i, '');
+  return name || '未命名笔记';
+}
+
+/* 笔记预览的划词浮层：UI 由 web/selkit.js 统一渲染，这里只注册适配器。 */
+let noteSelRegistered = false;
+
+function copyPlainText(text) {
+  const t = String(text || '');
+  if (!t) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(
+      () => toast('已复制'),
+      () => toast('复制失败', 'error'));
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = t;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); toast('已复制'); }
+  catch (e) { toast('复制失败', 'error'); }
+  ta.remove();
+}
+
+function registerNoteSelection() {
+  if (noteSelRegistered || !window.SelKit) return;
+  noteSelRegistered = true;
+  window.SelKit.register({
+    id: 'notes',
+    roots: () => [$('#nt-preview-box')],
+    maxText: 500,
+    capture: (range) => {
+      const pv = $('#nt-preview-box');
+      if (!pv || !state.noteCurrent || !pv.contains(range.commonAncestorContainer)) return null;
+      const raw = String(range.toString() || '').trim();
+      // 与旧行为一致：超过 500 字不弹（批注锚点按原文计算，截断会挂错位置）
+      if (!raw || raw.length > 500) return null;
+      const draft = noteDraftFromRange(range);
+      if (!draft || !String(draft.quote || '').trim()) return null;
+      return {
+        text: draft.quote,
+        rect: draft.rect || range.getBoundingClientRect(),
+        label: '笔记《' + noteTitle() + '》',
+        raw: draft,
+      };
+    },
+    actions: [
+      { id: 'ask', label: '提问', icon: 'chat', primary: true,
+        run: (ctx) => noteAskOpen(ctx.raw, ctx.rect) },
+      { id: 'quote', label: '引用', icon: 'note', primary: true,
+        run: (ctx) => quoteNoteDraft(ctx.raw) },
+      { id: 'anno', label: '批注', icon: 'pencil',
+        run: (ctx) => showAnnoPop(ctx.raw, ctx.rect) },
+      { id: 'copy', label: '复制', icon: 'copy',
+        run: (ctx) => copyPlainText(ctx.raw.copy_text || ctx.raw.quote) },
+    ],
+  });
+}
+
+/* 引用选中片段到主对话：关闭笔记库并聚焦输入框，用户接着提问即可 */
+async function quoteNoteDraft(draft) {
+  if (!draft || !draft.quote) return;
+  noteAnnoDraft = draft;
+  if (typeof addQuote !== 'function') { toast('当前界面不支持引用', 'error'); return; }
+  addQuote(draft.quote, '笔记《' + noteTitle() + '》');
+  try { await closeNotesModal(); } catch (e) { /* 保存失败也要让引用生效 */ }
+  const input = $('#input');
+  if (input) input.focus();
+  toast('已引用到对话，直接提问即可');
+}
+
+/* ---------- 划词提问：AskKit 统一面板（多轮 + 线程落库） ---------- */
+
+function noteAskOpen(draft, rect) {
+  if (!draft || !String(draft.quote || '').trim()) return;
+  if (!window.AskKit) { toast('问答面板未加载，请刷新页面', 'error'); return; }
+  const path = state.noteCurrent || '';
+  if (!path) return;
+  window.AskKit.open({
+    scope: 'doc:notes:' + path,
+    source: 'notes',
+    selection: {
+      kind: 'note', text: draft.quote, prefix: draft.prefix, suffix: draft.suffix,
+      nth: draft.nth, title: noteTitle(), path: path,
+    },
+    anchor: 'note:' + path + ':' + draft.nth + '|' + String(draft.quote || '').slice(0, 40),
+    label: '笔记《' + noteTitle() + '》',
+    quote: draft.quote,
+    title: '笔记问答',
+    rect: rect || draft.rect,
+    persist: (qa) => saveNoteAskAsAnno(draft, path, qa),
+    onQuote: (text) => {
+      if (typeof addQuote !== 'function') { toast('当前界面不支持引用', 'error'); return; }
+      addQuote(text, '笔记问答《' + noteTitle() + '》');
+      window.AskKit.close();
+      closeNotesModal().then(() => {
+        const input = $('#input');
+        if (input) input.focus();
+      }).catch(() => {});
+      toast('已引用到对话');
+    },
+  });
+}
+
+/* 回答存为批注：统一 annotations 表（doc_key = notes:<路径>，kind=qa）。 */
+function saveNoteAskAsAnno(draft, path, qa) {
+  return api('/api/notes/anno/save', {
+    path: path, id: '',
+    quote: draft.quote, prefix: draft.prefix, suffix: draft.suffix, nth: draft.nth,
+    question: (qa && qa.question) || '', answer: (qa && qa.answer) || '',
+  }).then((r) => {
+    if (!r || !r.ok) throw new Error((r && r.error) || '保存失败');
+    state.noteAnnos = r.items || [];
+    renderNoteAnnos();
+    setNoteMode('preview');
+    return true;
+  });
+}
+
+function ensureAnnoPop() {
+  if (noteAnnoPop) return noteAnnoPop;
+  const el = document.createElement('div');
+  el.id = 'nt-anno-pop';
+  el.className = 'nt-anno-pop hidden';
+  el.innerHTML = '<div class="nt-anno-quote"></div>' +
+    '<textarea class="nt-anno-text" placeholder="写下你的批注…"></textarea>' +
+    '<div class="nt-anno-acts">' +
+      '<button class="ghost nt-anno-del hidden">删除</button>' +
+      '<span class="nt-anno-gap"></span>' +
+      '<button class="ghost nt-anno-cancel">取消</button>' +
+      '<button class="primary nt-anno-save">保存</button>' +
+    '</div>';
+  document.body.appendChild(el);
+  el.querySelector('.nt-anno-cancel').onclick = hideAnnoPop;
+  el.querySelector('.nt-anno-save').onclick = saveAnnoPop;
+  el.querySelector('.nt-anno-del').onclick = deleteAnnoPop;
+  el.addEventListener('mousedown', (e) => e.stopPropagation());
+  noteAnnoPop = el;
+  return el;
+}
+
+function hideAnnoPop() {
+  if (noteAnnoPop) noteAnnoPop.classList.add('hidden');
+  noteAnnoDraft = null;
+}
+
+function showAnnoPop(info, rect) {
+  if (!info) return;
+  noteAnnoDraft = Object.assign({}, info);
+  const pop = ensureAnnoPop();
+  pop.querySelector('.nt-anno-quote').textContent =
+    info.quote.length > 80 ? info.quote.slice(0, 80) + '…' : info.quote;
+  pop.querySelector('.nt-anno-text').value = info.comment || '';
+  pop.querySelector('.nt-anno-del').classList.toggle('hidden', !info.id);
+  pop.classList.remove('hidden');
+  const w = Math.min(360, window.innerWidth - 24);
+  pop.style.width = w + 'px';
+  const h = pop.offsetHeight || 150;
+  const left = Math.max(8, Math.min(window.innerWidth - w - 8, rect.left));
+  let top = rect.bottom + 8;
+  if (top + h > window.innerHeight - 8) top = Math.max(8, rect.top - h - 8);
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
+  setTimeout(() => pop.querySelector('.nt-anno-text').focus(), 0);
+}
+
+async function saveAnnoPop() {
+  const pop = noteAnnoPop;
+  if (!pop || !noteAnnoDraft || !state.noteCurrent) return;
+  const comment = pop.querySelector('.nt-anno-text').value.trim();
+  if (!comment) { toast('批注内容不能为空'); return; }
+  const r = await api('/api/notes/anno/save', {
+    path: state.noteCurrent, id: noteAnnoDraft.id || '',
+    quote: noteAnnoDraft.quote, prefix: noteAnnoDraft.prefix,
+    suffix: noteAnnoDraft.suffix, nth: noteAnnoDraft.nth, comment: comment,
+  });
+  if (!r || !r.ok) { toast('保存失败：' + ((r && r.error) || '')); return; }
+  state.noteAnnos = r.items || [];
+  hideAnnoPop();
+  setNoteMode('preview');
+  toast('批注已保存');
+}
+
+async function deleteAnnoPop() {
+  if (!noteAnnoDraft || !noteAnnoDraft.id || !state.noteCurrent) return;
+  if (!confirm('删除这条批注？')) return;
+  const r = await api('/api/notes/anno/delete', { path: state.noteCurrent, id: noteAnnoDraft.id });
+  if (!r || !r.ok) { toast('删除失败'); return; }
+  state.noteAnnos = r.items || [];
+  hideAnnoPop();
+  setNoteMode('preview');
+  toast('批注已删除');
+}
+
+function wireNoteAnnotations() {
+  const pv = $('#nt-preview-box');
+  if (!pv) return;
+  registerNoteSelection();
+  pv.addEventListener('click', (e) => {
+    const mark = e.target.closest('mark.nt-anno');
+    if (!mark) return;
+    const a = (state.noteAnnos || []).find((x) => x.id === mark.dataset.id);
+    if (a) showAnnoPop(a, mark.getBoundingClientRect());
+  });
+  document.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.selbar') || e.target.closest('.selbar-more-menu') ||
+        e.target.closest('#nt-anno-pop') || e.target.closest('.askkit')) return;
+    if (noteAnnoPop) noteAnnoPop.classList.add('hidden');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (noteAnnoPop) noteAnnoPop.classList.add('hidden');
+  });
 }
 
 async function searchNotes(q) {
@@ -1343,6 +1904,7 @@ async function openNotesModal() {
     const files = flattenNotes(state.noteTree);
     if (files.length) await openNote(files[0].path);
   }
+  noteLintBadge();                  // 没有打开笔记时也让开关状态/徽标正确
 }
 
 // 供工作台「记忆 → 打开来源」跳到指定笔记
@@ -1368,8 +1930,36 @@ function bindNotesEvents() {
   $('#nt-delete').onclick = deleteCurrentNote;
   $('#nt-edit').onclick = () => setNoteMode('edit');
   $('#nt-preview').onclick = () => setNoteMode('preview');
-  $('#nt-textarea').addEventListener('input', scheduleNoteSave);
+  $('#nt-textarea').addEventListener('input', () => { scheduleNoteSave(); noteLintSchedule(); });
   $('#nt-textarea').addEventListener('blur', () => { if (state.noteMode === 'edit') saveNoteNow(); });
+  $('#nt-lint').onclick = () => {
+    const next = !noteLintEnabled();
+    setNoteLintEnabled(next);
+    if (!next) noteLintItems = [];
+    renderNoteLint();
+    if (next) noteLintSchedule();
+    toast(next ? '已开启 Markdown 纠错' : '已关闭 Markdown 纠错');
+  };
+  $('#nt-lint-box').addEventListener('click', (e) => {
+    if (e.target.closest('[data-lint-collapse]')) {
+      noteLintCollapsed = !noteLintCollapsed;
+      renderNoteLint();
+      return;
+    }
+    if (e.target.closest('[data-lint-fix-all]')) {
+      noteLintApply(noteLintItems.filter((x) => x.fix));
+      return;
+    }
+    const one = e.target.closest('[data-lint-fix]');
+    if (one) {
+      e.stopPropagation();
+      const it = noteLintItems[Number(one.dataset.lintFix)];
+      if (it) noteLintApply([it]);
+      return;
+    }
+    const row = e.target.closest('[data-lint-row]');
+    if (row) noteLintGoto(noteLintItems[Number(row.dataset.lintRow)]);
+  });
   $('#nt-search').addEventListener('input', (e) => {
     clearTimeout(noteSearchTimer);
     const q = e.target.value.trim();
@@ -1386,6 +1976,7 @@ function bindNotesEvents() {
     const clean = name.replace(/[\\/:*?"<>|]/g, '').trim();
     if (clean) newNote(clean + '.md');
   });
+  wireNoteAnnotations();
 }
 
 document.addEventListener('DOMContentLoaded', init);

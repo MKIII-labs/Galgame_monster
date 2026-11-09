@@ -46,3 +46,12 @@ def test_stale_entries_expire(monkeypatch):
     now = status.time.time()
     monkeypatch.setattr(status.time, "time", lambda: now + status.TTL + 1)
     assert status.snapshot() == {}
+
+
+def test_refresh_keeps_waiting_entry(monkeypatch):
+    """长提问（最长 1 小时）每 30 秒续期，侧栏「待回答」不会被 TTL 提前清掉。"""
+    status.mark("s1", "ask")
+    now = status.time.time()
+    monkeypatch.setattr(status.time, "time", lambda: now + status.TTL + 1)
+    status.refresh("s1", "ask")
+    assert status.snapshot() == {"s1": "ask"}

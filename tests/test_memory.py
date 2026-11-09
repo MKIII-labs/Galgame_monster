@@ -110,6 +110,8 @@ def test_reindex_mirrors_kb_and_session(monkeypatch):
         "id": "s1", "memory": {"nodes": [{"id": "n2", "title": "用户偏好",
                                          "content": "喜欢短句", "category": "偏好",
                                          "created_at": 1}]}}]})
+    # 不镜像真实 data/notes：否则本机笔记会混进 mirrored 计数
+    monkeypatch.setattr(memory.noteslib, "_all_notes", lambda: {})
     result = memory.reindex()
     assert result["mirrored"] == 2
     items = memory.search("北极星")

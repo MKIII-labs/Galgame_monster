@@ -8,6 +8,7 @@
 连接策略：**每个线程一个连接**（sqlite3 连接不能跨线程共享）。
 WAL 模式让读写互不阻塞；synchronous=NORMAL 在本地单机场景下兼顾安全与速度。
 """
+import json
 import os
 import sqlite3
 import threading
@@ -30,6 +31,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   status      TEXT NOT NULL DEFAULT 'pending',
   priority    INTEGER NOT NULL DEFAULT 0,
   tags        TEXT NOT NULL DEFAULT '',
+  due_at      REAL NOT NULL DEFAULT 0,
+  parent_id   TEXT NOT NULL DEFAULT '',
+  depends_on  TEXT NOT NULL DEFAULT '',
+  repeat_rule TEXT NOT NULL DEFAULT '',
+  estimate_min INTEGER NOT NULL DEFAULT 0,
+  sort_order  REAL NOT NULL DEFAULT 0,
   created_at  REAL NOT NULL,
   updated_at  REAL NOT NULL,
   started_at  REAL NOT NULL DEFAULT 0,
@@ -67,6 +74,30 @@ CREATE TABLE IF NOT EXISTS artifacts (
   meta       TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_templates (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  title       TEXT NOT NULL,
+  steps       TEXT NOT NULL DEFAULT '[]',
+  tags        TEXT NOT NULL DEFAULT '',
+  priority    INTEGER NOT NULL DEFAULT 0,
+  estimate_min INTEGER NOT NULL DEFAULT 0,
+  created_at  REAL NOT NULL,
+  updated_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS focus_sessions (
+  id         TEXT PRIMARY KEY,
+  task_id    TEXT NOT NULL DEFAULT '',
+  title      TEXT NOT NULL DEFAULT '',
+  start_at   REAL NOT NULL,
+  end_at     REAL NOT NULL,
+  minutes    INTEGER NOT NULL DEFAULT 0,
+  kind       TEXT NOT NULL DEFAULT 'focus',   -- focus | break
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_focus_start ON focus_sessions(start_at DESC);
 
 CREATE TABLE IF NOT EXISTS events (
   id            TEXT PRIMARY KEY,
@@ -164,6 +195,46 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 CREATE INDEX IF NOT EXISTS idx_obs_created ON observations(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_obs_topic ON observations(subject, topic, created_at DESC);
+
+-- 统一批注：PDF / 文本 / 代码 / 图片共用一套记录（见 app/anno.py）
+-- anchor 用 JSON 存各文档类型的定位信息；quote/prefix/suffix 是漂移后的兜底定位。
+CREATE TABLE IF NOT EXISTS annotations (
+  id          TEXT PRIMARY KEY,
+  doc_key     TEXT NOT NULL DEFAULT '',        -- 沙箱内相对路径（统一主键的一部分）
+  doc_type    TEXT NOT NULL DEFAULT '',        -- pdf | md | tex | code | docx | pptx | image
+  kind        TEXT NOT NULL DEFAULT 'note',    -- highlight | note | excerpt | qa
+  anchor      TEXT NOT NULL DEFAULT '{}',
+  quote       TEXT NOT NULL DEFAULT '',
+  prefix      TEXT NOT NULL DEFAULT '',
+  suffix      TEXT NOT NULL DEFAULT '',
+  color       TEXT NOT NULL DEFAULT 'yellow',
+  tags        TEXT NOT NULL DEFAULT '[]',
+  comment     TEXT NOT NULL DEFAULT '',
+  question    TEXT NOT NULL DEFAULT '',
+  answer      TEXT NOT NULL DEFAULT '',
+  source      TEXT NOT NULL DEFAULT 'user',    -- user | ai
+  citation    TEXT NOT NULL DEFAULT '{}',
+  created_at  REAL NOT NULL,
+  updated_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_anno_doc ON annotations(doc_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_anno_kind ON annotations(kind, created_at DESC);
+
+-- 文献条目（学术场景）：一篇 PDF / 稿件一条，元数据可编辑
+CREATE TABLE IF NOT EXISTS documents (
+  doc_key     TEXT PRIMARY KEY,
+  title       TEXT NOT NULL DEFAULT '',
+  authors     TEXT NOT NULL DEFAULT '',        -- JSON 数组
+  year        INTEGER NOT NULL DEFAULT 0,
+  venue       TEXT NOT NULL DEFAULT '',
+  doi         TEXT NOT NULL DEFAULT '',
+  abstract    TEXT NOT NULL DEFAULT '',
+  tags        TEXT NOT NULL DEFAULT '[]',
+  status      TEXT NOT NULL DEFAULT 'unread',  -- unread | reading | read
+  extra       TEXT NOT NULL DEFAULT '{}',
+  created_at  REAL NOT NULL,
+  updated_at  REAL NOT NULL
+);
 """
 
 
@@ -202,14 +273,37 @@ def _ensure_memory_columns(conn):
 
 
 def _ensure_task_columns(conn):
-    """给旧库补任务字段（优先级 / 标签）。"""
+    """给旧库补任务字段（优先级 / 标签 / 截止 / 父子 / 依赖 / 重复 / 排序）。"""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    added = False
     for name, ddl in (
         ("priority", "INTEGER NOT NULL DEFAULT 0"),
         ("tags", "TEXT NOT NULL DEFAULT ''"),
+        ("due_at", "REAL NOT NULL DEFAULT 0"),
+        ("parent_id", "TEXT NOT NULL DEFAULT ''"),
+        ("depends_on", "TEXT NOT NULL DEFAULT ''"),
+        ("repeat_rule", "TEXT NOT NULL DEFAULT ''"),
+        ("estimate_min", "INTEGER NOT NULL DEFAULT 0"),
+        ("sort_order", "REAL NOT NULL DEFAULT 0"),
     ):
         if name not in cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN %s %s" % (name, ddl))
+            added = True
+    if added:
+        # 老任务：截止时间原来只存在 meta 里，排序值用 updated_at 兜底
+        rows = conn.execute("SELECT id, meta, updated_at, due_at, sort_order FROM tasks").fetchall()
+        for r in rows:
+            due = float(r["due_at"] or 0)
+            if not due:
+                try:
+                    due = float((json.loads(r["meta"] or "{}") or {}).get("due_at") or 0)
+                except (ValueError, TypeError):
+                    due = 0
+            order = float(r["sort_order"] or 0) or float(r["updated_at"] or 0)
+            conn.execute("UPDATE tasks SET due_at=?, sort_order=? WHERE id=?",
+                         (due, order, r["id"]))
+    # 索引必须等列补齐后再建：老库执行 SCHEMA 时还没有 due_at
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status, due_at)")
 
 
 def init_db():

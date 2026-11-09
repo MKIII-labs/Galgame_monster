@@ -320,7 +320,7 @@ async function deleteGroup(group) {
       op: 'delete', key: group.key, ids: group.rows.map((s) => s.id),
     });
     if (!r || !r.ok) throw new Error((r && r.error) || '删除失败');
-    applySessionsPayload(r.sessions);
+    applySessionsPayload(r.sessions, { keepCurrent: false });
     renderSessions();
     toast('已删除分组「' + label + '」', 'ok');
   } catch (e) { toastErr('删除分组', e); }
@@ -735,11 +735,11 @@ async function exportSession(sid) {
   }
 }
 
-/* 最后一条用户气泡上的文档标签（附件解析进度往它上面写） */
-function lastUserDocChip() {
+/* 最后一条用户气泡上的文档标签（附件解析进度往它上面写；多附件按顺序返回） */
+function lastUserDocChips() {
   const users = document.querySelectorAll('#chat .msg.user');
   const lastU = users[users.length - 1];
-  return lastU ? lastU.querySelector('.msg-doc') : null;
+  return lastU ? Array.prototype.slice.call(lastU.querySelectorAll('.msg-doc')) : [];
 }
 
 /* ============================================================
@@ -950,7 +950,12 @@ function remindContext(ctx, remainPct) {
 }
 
 async function compressContextManually() {
-  if (state.streaming) { toast('正在生成回复，请稍后再试'); return; }
+  // 只拦「本轮真的还在产流」：本地流最近 15 秒还有事件（后端每 5 秒一个 tick）。
+  // 不用 state.streaming —— 断线 / 刷新后它可能一直是 true，导致中断的轮次永远压不了。
+  const _st = (state.streams || {})[String(state.sessions.current || '')];
+  if (_st && Date.now() - (_st.lastEvent || 0) < 15000) {
+    toast('正在生成回复，请稍后再试'); return;
+  }
   if (!confirm('把较早的对话历史压缩成摘要？\n摘要会替换那部分原文（本地原文仍保留，可在「明细 / 恢复」里撤销）。')) return;
   const btn = $('#btn-ctx-ring');
   if (btn) { btn.disabled = true; btn.classList.add('busy'); }
@@ -1199,7 +1204,7 @@ async function selectSession(id) {
     // 服务端返回的是精简数据：新选中的会话只带最近 80 条（msg_total / msg_start）
     const r = await api('/api/session/select', { id });
     if (seq !== _selectSeq) return;       // 更晚的一次点击已经接管
-    if (r && r.sessions) applySessionsPayload(r.sessions);
+    if (r && r.sessions) applySessionsPayload(r.sessions, { keepCurrent: false });
     renderSessions();
     renderMessages();
     // 这个会话可能还在后台生成：把它的 live DOM 重新挂到末尾
@@ -1228,7 +1233,7 @@ async function deleteSession(id) {
   if (!confirm('删除会话「' + label + '」？\n它的全部对话与存档都会一并删除，且不可恢复。')) return;
   try {
     const r = await api('/api/session/delete', { id });
-    applySessionsPayload(r.sessions);
+    applySessionsPayload(r.sessions, { keepCurrent: false });
     if (typeof dropQueuedForSession === 'function') dropQueuedForSession(id);
     renderSessions();
     renderMessages();
@@ -1252,7 +1257,7 @@ async function newSession() {
       gal_use_kb: !!mem.kb,
       gal_use_rules: !!mem.rules,
     } : {});
-    applySessionsPayload(r.sessions);
+    applySessionsPayload(r.sessions, { keepCurrent: false });
     renderSessions();
     renderMessages();
     if (typeof renderSendQueue === 'function') renderSendQueue();   // 新会话队列为空
@@ -1441,6 +1446,10 @@ function buildActions(row, getText, index, role) {
   if (role === 'user') {
     mk('history', '撤回', () => withdrawUserMessage(index));
     mk('pencil', '修改', () => editUserMessage(index));
+    // 提问标记：命名后出现在 Solo 右侧悬浮按钮，便于反复回看关键提问
+    const pin = mk('pin', '标记提问', () => qmarkEdit(index));
+    pin.dataset.qmark = '1';
+    if (typeof qmarkOf === 'function' && qmarkOf(index)) pin.classList.add('act-on');
     mk('trash', '删除', () => deleteMessage(index)).classList.add('act-danger');
   } else {
     row._selBtn = mk('select', '选择文本', () => toggleRawView(row));
@@ -1449,6 +1458,9 @@ function buildActions(row, getText, index, role) {
       .addEventListener('mousedown', (e) => e.preventDefault());
     if (typeof index === 'number') mk('branch', '创建分支', () => forkFromMessage(index));
     if (typeof index === 'number') mk('refresh', '重新发言', () => regenerateReply(index));
+    if (typeof index === 'number') mk('external', '分享', () => shareMessage(index));
+    // 回退到此：删掉这条及其后的消息，并把其中的文件改动一起还原
+    if (typeof index === 'number') mk('reset', '回退到此（含文件改动）', () => rollbackMessage(index));
     // 「继续输出」：仅当该条是最后一条、被中断过、且非 GAL 模式时提供
     const cs = curSession();
     const cms = (cs && typeof index === 'number') ? (cs.messages || [])[index] : null;
@@ -1456,12 +1468,14 @@ function buildActions(row, getText, index, role) {
                       index === (cs.messages || []).length - 1;
     const _remoteRunning = !!(cs && state.streamingSids && state.streamingSids[String(cs.id)]);
     // 刷新 / 重开窗口时，最后一条可能只是「任务仍在运行」的进度快照。
-    // 这时显示「后台运行中」而不是「继续输出」，避免看起来像输出停了。
+    // 这时给一个「回到流式输出」按钮：把 attach 流接回来，实时重建输出。
     if (isLastMsg && cms && cms._progress && _remoteRunning) {
-      const chip = document.createElement('span');
-      chip.className = 'msg-run-chip';
-      chip.textContent = '后台运行中…';
-      chip.title = '任务仍在后台运行，完成后会自动刷新';
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'msg-run-chip msg-run-resume';
+      chip.textContent = '回到流式输出';
+      chip.title = '任务仍在后台运行：点击把实时输出接回这个会话';
+      chip.onclick = () => resumeLiveOutput(cs.id);
       bar.appendChild(chip);
     }
     // 步骤时间线：步级撤销 / 重做（整轮回滚之外更细的一层）
@@ -1558,6 +1572,17 @@ async function openStepsPanel() {
       back.textContent = '回到这里';
       back.onclick = async () => {
         back.disabled = true;
+        // 先列出「这一步及之后」会撤销哪些文件，再让用户确认
+        const todo = steps.filter((x) => (x.ts || 0) >= (s.ts || 0) && !x.undone);
+        const pv = await fetchRollbackPreview({
+          session_id: sid, tokens: todo.map((x) => x.token),
+        });
+        if (!(await rollbackConfirm({
+          title: '确定要回到第 ' + (i + 1) + ' 步吗？',
+          sub: '这一步和之后的 ' + todo.length + ' 次写操作会被撤销。',
+          files: pv ? pv.files : [],
+          empty: '这一步之后没有可撤销的文件改动。',
+        }))) { back.disabled = false; return; }
         try {
           const r = await fetch('/api/agent/checkpoint', {
             method: 'POST',
@@ -1855,7 +1880,7 @@ function imgZoomCancel() {
 
 /* ---------------- 文档附件预览 ----------------
    发送前用 base64 直接预览；发送后消息里只留落盘名（doc.file），走 /api/attach/get 取回。 */
-const DOC_PV_TEXT = ['txt', 'md', 'markdown', 'csv', 'json', 'log', 'xml', 'yaml', 'yml',
+const DOC_PV_TEXT = ['txt', 'md', 'markdown', 'tex', 'csv', 'json', 'log', 'xml', 'yaml', 'yml',
   'html', 'htm', 'css', 'js', 'ts', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'ini', 'toml'];
 let docPv = null;
 
@@ -1885,7 +1910,7 @@ function docPvBuild() {
   return z;
 }
 
-function docPreviewOpen(blob, name, mime) {
+function docPreviewOpen(blob, name, mime, opts) {
   if (!blob) { toast('无法读取附件'); return; }
   const z = docPv || docPvBuild();
   const ext = String(name || '').split('.').pop().toLowerCase();
@@ -1895,7 +1920,22 @@ function docPreviewOpen(blob, name, mime) {
   z.dl.href = z.url;
   z.dl.download = name || 'attachment';
   z.body.innerHTML = '';
-  if (DOC_PV_TEXT.indexOf(ext) >= 0 || String(mime || '').indexOf('text/') === 0) {
+  if (opts && typeof opts.text === 'string') {
+    // 后端已抽好的文本（Office 文件）：版式不可还原，但至少能直接看内容
+    if (opts.note) {
+      const tip = document.createElement('p');
+      tip.className = 'doc-pv-tip';
+      tip.textContent = opts.note;
+      z.body.appendChild(tip);
+    }
+    const pre = document.createElement('pre');
+    pre.className = 'doc-pv-text';
+    const LIMIT = 300000;
+    pre.textContent = opts.text.length > LIMIT
+      ? opts.text.slice(0, LIMIT) + '\n\n…（超过 300KB，已截断；可点「下载」看全文）'
+      : (opts.text || '（空文件）');
+    z.body.appendChild(pre);
+  } else if (DOC_PV_TEXT.indexOf(ext) >= 0 || String(mime || '').indexOf('text/') === 0) {
     const pre = document.createElement('pre');
     pre.className = 'doc-pv-text';
     pre.textContent = '读取中…';
@@ -1932,7 +1972,7 @@ function docPreviewClose() {
   if (z.url) { URL.revokeObjectURL(z.url); z.url = ''; }
 }
 
-/* 待发送的文档：state.pendingDoc 里带 base64，直接转 Blob */
+/* 待发送的文档：附件对象里带 base64，直接转 Blob */
 function docPreviewPending(doc) {
   if (!doc || !doc.b64) { toast('无法读取附件'); return; }
   try {
@@ -1946,11 +1986,58 @@ function docPreviewPending(doc) {
   }
 }
 
+/* 刚发出的附件：消息里还没拿到落盘名，先把 base64 留在内存里，
+   这样发完立刻点标签也能预览（刷新后自动失效，改走落盘文件）。 */
+const SENT_DOC_CACHE_MAX = 8;
+const sentDocCache = new Map();
+
+function sentDocKey(name, size) {
+  return String(name || '') + '|' + (Number(size) || 0);
+}
+
+function rememberSentDoc(d) {
+  if (!d || !d.b64) return;
+  const k = sentDocKey(d.name, d.size);
+  sentDocCache.delete(k);
+  sentDocCache.set(k, { b64: d.b64, mime: d.mime || '' });
+  while (sentDocCache.size > SENT_DOC_CACHE_MAX) {
+    sentDocCache.delete(sentDocCache.keys().next().value);
+  }
+}
+
+function recallSentDoc(dc) {
+  if (!dc) return null;
+  return sentDocCache.get(sentDocKey(dc.name, dc.size)) || null;
+}
+
+/* 落盘附件按扩展名兜底 MIME：旧消息可能没存 mime，PDF 缺了类型 iframe 会变成下载 */
+function docMimeOf(dc) {
+  const mime = String((dc && dc.mime) || '');
+  if (mime && mime !== 'application/octet-stream') return mime;
+  const ext = String((dc && dc.name) || '').split('.').pop().toLowerCase();
+  const map = {
+    pdf: 'application/pdf',
+    txt: 'text/plain',
+    md: 'text/plain',
+    markdown: 'text/plain',
+    csv: 'text/csv',
+    json: 'application/json',
+    xml: 'application/xml',
+    html: 'text/html',
+    htm: 'text/html',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  };
+  return map[ext] || mime;
+}
+
 /* 已发送的文档：消息里只留了落盘名，按它去后端取字节 */
 async function docPreviewStored(dc, sid) {
   if (!dc) return;
   const file = dc.file || dc.name;
   if (!file) { toast('找不到附件文件'); return; }
+  const ext = String(dc.name || file).split('.').pop().toLowerCase();
   try {
     const res = await fetch('/api/attach/get', {
       method: 'POST',
@@ -1958,9 +2045,97 @@ async function docPreviewStored(dc, sid) {
       body: JSON.stringify({ session_id: sid, name: file }),
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    docPreviewOpen(await res.blob(), dc.name || file, dc.mime);
+    const blob = await res.blob();
+    const mime = docMimeOf(dc) || blob.type || 'application/octet-stream';
+    // Office 文件不能直接在浏览器里渲染：取后端抽好的纯文本做「文本预览」，
+    // 版式与图表仍以右上角「下载」为准。
+    if (OFFICE_PV_EXT.indexOf(ext) >= 0) {
+      try {
+        const r = await api('/api/attach/text', { session_id: sid, name: file });
+        if (r && r.ok) {
+          const note = ['文本预览（版式与图表请下载原文件）']
+            .concat(r.truncated ? ['内容较长，已截断'] : [])
+            .concat(r.warn ? [String(r.warn)] : [])
+            .join(' · ');
+          docPreviewOpen(new Blob([blob], { type: mime }), dc.name || file, mime,
+                         { text: r.text || '（空文件）', note: note });
+        } else {
+          docPreviewOpen(new Blob([blob], { type: mime }), dc.name || file, mime,
+                         { text: '（无法提取文本：' + ((r && r.error) || '未知原因') + '）',
+                           note: '可点右上角「下载」用本机应用打开' });
+        }
+        return;
+      } catch (e) {
+        // 提取文本失败就退回原来的「不支持预览」提示
+      }
+    }
+    // 重新包一层：服务端 Content-Type 与消息里记录的 mime 不一致时，以消息为准
+    docPreviewOpen(new Blob([blob], { type: mime }), dc.name || file, mime);
   } catch (e) {
     toast('附件已不存在或读取失败');
+  }
+}
+
+/* Office 附件：后端抽取纯文本做应用内预览 */
+const OFFICE_PV_EXT = ['docx', 'xlsx', 'xlsm', 'pptx'];
+
+/* 重画一个文档标签（解析状态 / 字数 / 失败原因变化时复用） */
+function paintDocChip(chip, dc, msgIndex, docIndex) {
+  if (!chip) return;
+  dc = dc || {};
+  const name = dc.name || chip.dataset.name || '附件';
+  chip.dataset.name = name;
+  if (Number.isFinite(msgIndex)) chip.dataset.msgIndex = String(msgIndex);
+  if (Number.isFinite(docIndex)) chip.dataset.docIndex = String(docIndex);
+  const err = !!dc.error;
+  chip.className = 'msg-doc' + (err ? ' err' : (dc.warn ? ' warn' : ''));
+  chip.innerHTML = icon('attach') + ' ' + escapeHtml(name)
+    + (err ? '（解析失败）' : docChipSuffix(dc));
+  chip.title = err
+    ? ('解析失败：' + String(dc.error || '未知原因') + ' · 点击重试')
+    : (dc.warn ? String(dc.warn) + ' · 点击预览' : '点击预览');
+}
+
+/* 解析失败后重试：重新读落盘文件、重跑 docparse，并回写消息里的字数 / 原因 */
+async function docReparse(msgIndex, docIndex, chip) {
+  if (!chip || !Number.isFinite(msgIndex) || chip.dataset.busy === '1') return;
+  chip.dataset.busy = '1';
+  const name = chip.dataset.name || '附件';
+  chip.className = 'msg-doc parsing';
+  chip.innerHTML = icon('attach') + ' ' + escapeHtml(name) + '（重新解析…）';
+  chip.title = '正在重新解析…';
+  const s = curSession();
+  const m = s && s.messages ? s.messages[msgIndex] : null;
+  let dc = null;
+  if (m) dc = (Array.isArray(m.docs) && m.docs.length) ? m.docs[docIndex] : m.doc;
+  try {
+    const r = await api('/api/attach/reparse', {
+      session_id: state.sessions.current,
+      index: msgIndex,
+      doc_index: Number.isFinite(docIndex) ? docIndex : 0,
+    });
+    if (r && r.ok) {
+      if (dc) {
+        dc.chars = r.chars || 0;
+        delete dc.error;
+        if (r.warn) dc.warn = r.warn; else delete dc.warn;
+      }
+      paintDocChip(chip, dc || { name: name, chars: r.chars || 0, warn: r.warn },
+                   msgIndex, docIndex);
+      toast('已重新解析：' + (r.chars || 0) + ' 字');
+    } else {
+      const err = (r && r.error) || '未知原因';
+      if (dc) dc.error = err;
+      paintDocChip(chip, dc || { name: name, error: err }, msgIndex, docIndex);
+      toast('重新解析失败：' + err, 'error');
+    }
+  } catch (e) {
+    const err = (e && e.message) ? e.message : String(e);
+    if (dc) dc.error = err;
+    paintDocChip(chip, dc || { name: name, error: err }, msgIndex, docIndex);
+    toastErr('重新解析', e);
+  } finally {
+    chip.dataset.busy = '0';
   }
 }
 
@@ -1993,26 +2168,54 @@ function buildUserRow(text, index, msg) {
       } else if (im.name) {
         attachBlobUrl(state.sessions.current, im.name)
           .then((u) => { el.src = u; })
-          .catch(() => { box.remove(); });
+          .catch(() => {
+            // 文件已不在 data/uploads（历史清理 / 测试误删）：不要静默消失，给个明确占位
+            box.classList.add('missing');
+            box.title = '附件文件已不在 data/uploads 中（消息里的记录还在）';
+            box.textContent = '图片已丢失';
+            box.onclick = null;
+          });
       }
       gallery.appendChild(box);
     });
     if (gallery.children.length) wrap.appendChild(gallery);
   }
 
-  // 文档附件：气泡上方显示一个文件名标签（解析结果稍后由 SSE 补上字数 / 失败原因）
-  const dc = (msg && msg.doc) || null;
-  if (dc && dc.name) {
-    const chip = document.createElement('div');
-    chip.className = 'msg-doc' + (dc.error ? ' err' : (dc.warn ? ' warn' : ''));
-    chip.style.marginTop = '0';
-    chip.innerHTML = icon('attach') + ' ' + escapeHtml(dc.name) + (dc.error ? '（解析失败）' : docChipSuffix(dc));
-    chip.title = dc.error ? String(dc.error)
-      : (dc.warn ? String(dc.warn) + ' · 点击预览' : '点击预览');
-    chip.style.cursor = 'pointer';
-    chip.onclick = () => docPreviewStored(dc, state.sessions.current);
-    wrap.appendChild(chip);
+  // 文档附件：气泡上方显示文件名标签（解析结果稍后由 SSE 补上字数 / 失败原因）
+  // 多附件时逐个渲染；旧会话只有 doc 字段，同样走这里
+  const docs = (msg && Array.isArray(msg.docs) && msg.docs.length)
+    ? msg.docs
+    : ((msg && msg.doc) ? [msg.doc] : []);
+  if (docs.length) {
+    const dbox = document.createElement('div');
+    dbox.className = 'msg-docs';
+    docs.forEach((dc, di) => {
+      if (!dc || !dc.name) return;
+      const chip = document.createElement('div');
+      chip.className = 'msg-doc';
+      const rowIndex = (typeof index === 'number') ? index : NaN;
+      paintDocChip(chip, dc, rowIndex, di);
+      chip.onclick = () => {
+        // 解析失败的标签：点一下先重试解析；其余情况打开预览
+        const mi = Number(chip.dataset.msgIndex);
+        const dj = Number(chip.dataset.docIndex);
+        if (chip.classList.contains('err') && Number.isFinite(mi)) {
+          docReparse(mi, dj, chip);
+          return;
+        }
+        // 刚发出的附件还在内存里，直接用 base64 预览；刷新后走落盘文件
+        const hit = recallSentDoc(dc);
+        if (hit) docPreviewPending({ name: dc.name, mime: dc.mime || hit.mime, b64: hit.b64 });
+        else docPreviewStored(dc, state.sessions.current);
+      };
+      dbox.appendChild(chip);
+    });
+    if (dbox.children.length) wrap.appendChild(dbox);
   }
+
+  // `#` 菜单的显式引用：新消息与刷新后的历史都显示在气泡上方
+  const refsBox = buildUserRefs(msg && msg.refs);
+  if (refsBox) wrap.appendChild(refsBox);
 
   const b = document.createElement('div');
   b.className = 'bubble';
@@ -2203,6 +2406,129 @@ function buildSourcesBlock(items, open) {
   box._body.textContent = '';
   box._body.appendChild(sourceItemRows(items));
   return box;
+}
+
+/* 代码 / 文件引用：回答底部列出「路径:行号」，点击直接在 IDE 里打开 */
+async function openReference(it) {
+  if (!it || !it.path) return;
+  if (typeof setUiMode !== 'function' || typeof openIdeFile !== 'function') return;
+  try {
+    if (state.uiMode !== 'ide') await setUiMode('ide');
+    await openIdeFile(it.path);
+    if (it.start && typeof ideRevealLine === 'function') {
+      ideRevealLine(it.path, it.start);
+    }
+  } catch (e) {
+    toast('打开引用失败：' + (e && e.message ? e.message : e), 'error');
+  }
+}
+
+function referenceText(it) {
+  let loc = it.path || '';
+  if (it.start) loc += ':' + it.start + (it.end && it.end !== it.start ? '-' + it.end : '');
+  if (it.page) loc += ' · 第 ' + it.page + ' 页';
+  return loc;
+}
+
+/* ---------- 用户消息里的显式引用（# 菜单 chip） ----------
+   发送时先在气泡上方显示一份「预置」chip，done 事件再用服务端解析出的
+   显式引用（references 里 auto=false 的条目）校正一次，保证刷新前后一致。 */
+const USER_REF_ICONS = {
+  file: 'note', folder: 'folder', code: 'code', terminal: 'terminal',
+  git: 'branch', doc: 'book', memory: 'brain', chat: 'chat',
+  problems: 'alert', rule: 'check-square', workspace: 'search',
+};
+const USER_REF_LABELS = {
+  terminal: '终端输出', git: '未提交改动', problems: 'IDE 问题',
+  rule: '项目规则', workspace: '全仓检索',
+};
+
+function userRefIcon(it) {
+  if (it && it.type && USER_REF_ICONS[it.type]) return USER_REF_ICONS[it.type];
+  return (it && it.start) ? 'code' : 'note';
+}
+
+function userRefLabel(it) {
+  if (!it) return '';
+  if (it.path) return referenceText(it);
+  if (it.title) return String(it.title);
+  if (it.type && USER_REF_LABELS[it.type]) return USER_REF_LABELS[it.type];
+  return '引用';
+}
+
+function buildUserRefs(items) {
+  // workspace 只是「全仓检索」开关，不产生引用正文；历史里不显示，避免刷新后消失
+  const list = (items || []).filter((it) => it && !it.auto
+    && it.type !== 'workspace'
+    && (it.path || it.title || it.type));
+  if (!list.length) return null;
+  const box = document.createElement('div');
+  box.className = 'msg-refs';
+  list.forEach((it) => {
+    const chip = document.createElement('span');
+    chip.className = 'msg-ref';
+    const clickable = !it.virtual && it.path
+      && (!it.type || it.type === 'file' || it.type === 'code');
+    const label = userRefLabel(it);
+    if (clickable) {
+      chip.classList.add('link');
+      chip.title = label + '（点击在 IDE 中打开）';
+      chip.onclick = () => openReference(it);
+    } else {
+      chip.classList.add('virtual');
+      chip.title = label + '（注入的上下文，不对应沙箱文件）';
+    }
+    chip.innerHTML = icon(userRefIcon(it)) +
+      '<span class="msg-ref-label">' + escapeHtml(label) + '</span>';
+    box.appendChild(chip);
+  });
+  return box;
+}
+
+/* 用服务端解析后的显式引用替换用户气泡上的临时 chip */
+function setUserRefs(userRow, items) {
+  if (!userRow || !userRow._wrap) return;
+  const wrap = userRow._wrap;
+  const old = wrap.querySelector('.msg-refs');
+  if (old) old.remove();
+  const box = buildUserRefs(items);
+  if (!box) return;
+  const bubble = wrap.querySelector('.bubble');
+  if (bubble) wrap.insertBefore(box, bubble);
+  else wrap.appendChild(box);
+}
+
+function buildReferencesBlock(items, open) {
+  const box = buildThinkBlock('', !!open);
+  box.classList.add('refs');
+  const codeLike = (items || []).some((it) => it && it.start);
+  box._label.innerHTML = icon(codeLike ? 'code' : 'book') + ' 引用 · ' + items.length;
+  box._body.textContent = '';
+  (items || []).forEach((it) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'ref-item';
+    row.appendChild(spanHtml('span', 'ref-path', referenceText(it)));
+    if (it.symbol) row.appendChild(spanHtml('span', 'ref-meta', it.symbol));
+    else if (it.auto) row.appendChild(spanHtml('span', 'ref-meta', '自动检索'));
+    else if (it.virtual) row.appendChild(spanHtml('span', 'ref-meta', '上下文'));
+    if (it.virtual) {
+      row.classList.add('virtual');
+      row.title = '这是注入的上下文，不对应沙箱文件';
+    } else {
+      row.onclick = () => openReference(it);
+    }
+    box._body.appendChild(row);
+  });
+  return box;
+}
+
+/* 小工具：创建带文本的 span（避免逐个 createElement/textContent 的重复代码） */
+function spanHtml(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  el.textContent = text == null ? '' : String(text);
+  return el;
 }
 
 /* 联网搜索过程块：上面是步骤列表（边搜边追加），完成后下面接来源列表 */
@@ -2504,6 +2830,8 @@ function buildPlanCard(plan, collapsed) {
   const head = card.querySelector('.plan-head');
   const toggle = () => {
     card.classList.toggle('collapsed');
+    // 记住这是「用户自己折的」：之后新计划到达时不再自动展开，尊重用户操作
+    card._userCollapsed = card.classList.contains('collapsed');
     head.setAttribute('aria-expanded', card.classList.contains('collapsed') ? 'false' : 'true');
   };
   head.addEventListener('click', toggle);
@@ -2689,10 +3017,90 @@ function planRender(row, plan, note) {
     row._planCard = card;
     row._planNote = note || '';
   }
+  if (full && full.carried) planMarkCarried(card);
   planFill(card, full);
   row._planSteps = steps;
   row._plan = full;
   state.lastPlan = steps;          // 输入框上方的审阅提示栏要展开「任务项」
+  // 同一会话只留一张「活卡」：续跑接管后旧块的卡自动折叠，避免两张展开的卡同时存在
+  planMarkLive(card);
+  // 续跑后步骤重新变回未完成：把系统折叠的卡展开，别让用户以为计划卡「不会继续了」
+  if (steps.some((s) => (s && s.status) !== 'done')) planAutoExpand(card);
+}
+
+/* 继承卡标记：接管 / 续跑新起的行里，计划是从上一轮继承来的，标题旁挂一个「续」徽标 */
+function planMarkCarried(card) {
+  if (!card || card._carried) return;
+  card._carried = true;
+  card.classList.add('plan-carried');
+  const head = card.querySelector('.plan-head');
+  const title = card.querySelector('.plan-title');
+  if (!head || !title) return;
+  const badge = document.createElement('span');
+  badge.className = 'plan-carried-badge';
+  badge.textContent = '续';
+  badge.title = '从上一轮继承的计划';
+  head.insertBefore(badge, title.nextSibling);
+}
+
+/* 旧卡：折叠 + 标注「已续至最新输出」；历史仍在，点开可看 */
+function planSupersede(card) {
+  if (!card || card.classList.contains('plan-superseded')) return;
+  card.classList.add('plan-superseded', 'collapsed');
+  const head = card.querySelector('.plan-head');
+  if (head) head.setAttribute('aria-expanded', 'false');
+  if (head && !card.querySelector('.plan-superseded-note')) {
+    const note = document.createElement('span');
+    note.className = 'plan-superseded-note';
+    note.textContent = '已续至最新输出';
+    head.insertBefore(note, card.querySelector('.tool-caret') || null);
+  }
+}
+
+/* 当前会话只允许一张展开的活卡：新事件指向哪张，其它卡就收起来 */
+function planMarkLive(card) {
+  if (!card || !card.parentNode) return;
+  const chat = $('#chat');
+  if (!chat) return;
+  chat.querySelectorAll('.plan-card').forEach((other) => {
+    if (other !== card) planSupersede(other);
+  });
+}
+
+// 系统自动折叠（收尾 / supersede）的卡，遇到又「没做完」的计划时自动展开
+function planAutoExpand(card) {
+  if (!card || card._userCollapsed || !card.classList.contains('collapsed')) return;
+  card.classList.remove('collapsed');
+  const head = card.querySelector('.plan-head');
+  if (head) head.setAttribute('aria-expanded', 'true');
+}
+
+/* 渲染完历史：只有最新那条计划保持展开，更早的卡收成「已续至最新输出」。
+   与实时一致的规则，避免刷新后满屏都是展开的计划卡。 */
+function planSweepHistory() {
+  const chat = $('#chat');
+  if (!chat) return;
+  const cards = Array.prototype.slice.call(chat.querySelectorAll('.plan-card'));
+  if (cards.length < 2) return;
+  const live = cards[cards.length - 1];
+  cards.forEach((c) => { if (c !== live) planSupersede(c); });
+}
+
+/* 接管 / 续跑新建一行时，先把当前计划「继承」过来：
+   不让新块空着等模型下一次 update_plan，进度从这里就能继续看。 */
+function planSeedFromSession(row) {
+  if (!row || row._planCard) return false;
+  const s = (typeof curSession === 'function') ? curSession() : null;
+  const msgs = (s && s.messages) || [];
+  let plan = null;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const p = msgs[i] && msgs[i].plan;
+    if (p && Array.isArray(p.steps) && p.steps.length) { plan = p; break; }
+  }
+  if (!plan && (state.lastPlan || []).length) plan = { steps: state.lastPlan };
+  if (!plan) return false;
+  planRender(row, Object.assign({}, plan, { carried: true }));
+  return true;
 }
 
 /* 切会话 / 刷新后恢复「任务」面板：取当前会话最后一条带 plan 的消息。
@@ -3014,7 +3422,13 @@ function workflowRender(row, wf) {
 async function turnUndo() {
   const s = curSession();
   if (!s) return;
-  if (!window.confirm('回滚本轮所有写操作？\n文件会恢复到本轮开始前的状态（对话不会回退）。')) return;
+  const pv = await fetchRollbackPreview({ session_id: s.id, scope: 'turn' });
+  if (!(await rollbackConfirm({
+    title: '回滚本轮所有写操作？',
+    sub: '文件会恢复到本轮开始前的状态（对话不会回退）。',
+    files: pv ? pv.files : [],
+    empty: '本轮没有可回滚的文件改动。',
+  }))) return;
   try {
     const r = await api('/api/agent/turn_undo', { session_id: s.id });
     if (!r || !r.ok) { toast((r && r.error) || '回滚失败'); return; }
@@ -3395,10 +3809,66 @@ function toolGroupTitle(g) {
   t.textContent = s;
 }
 
+/* 提问卡的工具函数：选项规范化 / 富文本 / 草稿持久化 */
+function askOption(o) {
+  if (o && typeof o === 'object') {
+    return {
+      label: String(o.label || o.text || ''),
+      desc: String(o.desc || o.detail || ''),
+      recommended: !!o.recommended,
+    };
+  }
+  return { label: String(o == null ? '' : o), desc: '', recommended: false };
+}
+
+/* 题面 / 选项里的 Markdown（模型可能给方案说明、代码片段）；失败回落纯文本 */
+function askRich(text) {
+  const s = String(text == null ? '' : text);
+  return typeof safeRenderMarkdown === 'function' ? safeRenderMarkdown(s) : escapeHtml(s);
+}
+
+const ASK_DRAFT_KEY = 'ask_drafts_v1';
+
+function askDraftLoad(qid, count) {
+  if (!qid || !count) return null;
+  try {
+    const all = JSON.parse(localStorage.getItem(ASK_DRAFT_KEY) || '{}') || {};
+    const one = all[qid];
+    if (!one || !Array.isArray(one.drafts) || one.drafts.length !== count) return null;
+    const chosen = Array.isArray(one.chosen) ? one.chosen : [];
+    return {
+      drafts: one.drafts.map((x) => String(x || '')),
+      chosen: Array.from({ length: count },
+        (_v, i) => (Array.isArray(chosen[i]) ? chosen[i].map((x) => String(x)) : [])),
+      cur: Math.max(0, Math.min(count - 1, Number(one.cur) || 0)),
+    };
+  } catch (e) { return null; }
+}
+
+function askDraftSave(qid, drafts, chosen, cur) {
+  if (!qid) return;
+  try {
+    const all = JSON.parse(localStorage.getItem(ASK_DRAFT_KEY) || '{}') || {};
+    all[qid] = { drafts: drafts.slice(), chosen: chosen.map((x) => x.slice()), cur: cur };
+    const keys = Object.keys(all);
+    if (keys.length > 20) keys.slice(0, keys.length - 20).forEach((k) => { delete all[k]; });
+    localStorage.setItem(ASK_DRAFT_KEY, JSON.stringify(all));
+  } catch (e) { /* 存不了就算了，不影响答题 */ }
+}
+
+function askDraftDrop(qid) {
+  if (!qid) return;
+  try {
+    const all = JSON.parse(localStorage.getItem(ASK_DRAFT_KEY) || '{}') || {};
+    delete all[qid];
+    localStorage.setItem(ASK_DRAFT_KEY, JSON.stringify(all));
+  } catch (e) { /* 忽略 */ }
+}
+
 /* 「等待用户操作」卡：这一步只能由用户在本机亲手完成（登录 / 扫码 / 装依赖 /
    点系统弹窗 / 插设备）。卡片只给「我已完成」「无法完成」两个出口，
    agent 在后台阻塞等待提交结果，点完再继续往下做。 */
-function buildActionCard(list, qid) {
+function buildActionCard(list, qid, meta) {
   const card = document.createElement('div');
   card.className = 'ask-card act-card';
   const head = (txt) => '<div class="ask-head"><span class="ask-q">' +
@@ -3427,32 +3897,68 @@ function buildActionCard(list, qid) {
       '<button type="button" class="act-done primary">我已完成，继续</button>' +
       '<button type="button" class="act-fail">无法完成</button>' +
     '</div>' +
-    '<div class="ask-wait">⏳ 正在等你在本机完成这一步…</div>';
+    '<div class="ask-wait">⏳ 正在等你在本机完成这一步…<span class="ask-timer"></span></div>';
 
-  const submit = async (answer) => {
+  const timerEl = card.querySelector('.ask-timer');
+  const expiresAt = Number((meta && meta.expiresAt) || 0);
+  let timer = 0;
+  const stopTimer = () => { if (timer) { clearInterval(timer); timer = 0; } };
+  const markExpired = () => {
     if (card.dataset.done) return;
     card.dataset.done = '1';
+    stopTimer();
+    card.classList.add('timed-out');
+    card.querySelectorAll('.act-actions button').forEach((b) => { b.disabled = true; });
+    const w = card.querySelector('.ask-wait');
+    if (w) w.textContent = '已超时：AI 已按「未完成」继续，可以重新向它提问。';
+  };
+  const submit = async (answer) => {
+    if (card.dataset.done) return;
     const arr = list.map((q) => ({ question: q.question, answer: answer }));
+    if (qid) {
+      try {
+        await api('/api/agent/answer', { qid: qid, answers: arr.map((x) => x.answer) });
+      } catch (e) {
+        // 超时 / qid 失效：切成「已超时」；其它错误保持可点，允许重试
+        if (/超时|取消/.test(String(e.message || ''))) markExpired();
+        else toast('提交失败：' + e.message, 'error');
+        return;
+      }
+    }
+    card.dataset.done = '1';
+    stopTimer();
     card.classList.add('done');
     card.innerHTML = head('需要你操作') + summary(arr);
-    if (qid) {
-      try { await api('/api/agent/answer', { qid: qid, answers: arr.map((x) => x.answer) }); }
-      catch (e) { /* 忽略：流已结束时提交失败不影响本地展示 */ }
-    }
     scrollToBottom(true);
   };
+  if (qid && expiresAt > 0) {
+    const tick = () => {
+      const left = expiresAt - Date.now();
+      if (left <= 0) { markExpired(); return; }
+      const s = Math.ceil(left / 1000);
+      if (timerEl) {
+        timerEl.textContent = ' · 剩 ' + Math.floor(s / 60) + ':'
+          + String(s % 60).padStart(2, '0');
+      }
+    };
+    tick();
+    timer = setInterval(tick, 1000);
+  }
   card.querySelector('.act-done').onclick = () => submit('已完成');
   card.querySelector('.act-fail').onclick = () => submit('无法完成');
   return card;
 }
 
 /* 提问卡：一组问题（可翻页预览、自由来回、最后统一提交）
-   qs : [{question, options[], answer?}]  —— 有 answer 表示已作答（历史回显）
-   qid: 后端提问 id（历史回显时为 null，此时不提交） */
-function buildAskGroup(qs, qid) {
+   qs : [{question, options[{label,desc,recommended}|string], multiple, answer?}]
+        answer 非空 = 已作答（历史回显）
+   qid: 后端提问 id（历史回显时为 null，此时不提交）
+   meta: { expiresAt } 等待截止时间（毫秒）；没有则不显示倒计时 */
+function buildAskGroup(qs, qid, meta) {
+  meta = meta || {};
   const list = (qs || []).map((q) => ({
     question: String((q && q.question) || ''),
-    options: ((q && q.options) || []).map((o) => String(o)).filter((o) => o.trim()),
+    options: ((q && q.options) || []).map(askOption).filter((o) => o.label.trim()),
     multiple: !!(q && q.multiple),
     answer: (q && q.answer != null) ? String(q.answer) : null,
     action: !!(q && q.action),
@@ -3460,7 +3966,7 @@ function buildAskGroup(qs, qid) {
     items: ((q && q.items) || []).map((x) => String(x)).filter((x) => x.trim()),
   }));
   // 整组都是「等我操作」就换成操作卡（它不是选择题，没有选项与翻页）
-  if (list.length && list.every((q) => q.action)) return buildActionCard(list, qid);
+  if (list.length && list.every((q) => q.action)) return buildActionCard(list, qid, meta);
   const multi = list.length > 1;
   // Solo 模式：底部按钮逐题推进（下一个问题），到最后一题才变回「提交全部」。
   // 其他模式保持原来的「随时提交全部」。
@@ -3472,28 +3978,58 @@ function buildAskGroup(qs, qid) {
   const doneHtml = (arr) =>
     '<div class="ask-q">' + icon('question') + ' 提问' + (multi ? '（' + arr.length + ' 个）' : '') + '</div>' +
     '<div class="ask-chosen-list">' + arr.map((q) =>
-      '<div class="ask-chosen-item"><div class="ask-chosen-q">' + escapeHtml(q.question) + '</div>' +
+      '<div class="ask-chosen-item"><div class="ask-chosen-q">' + askRich(q.question) + '</div>' +
       '<div class="ask-chosen-a">' + escapeHtml(q.answer == null ? '（未回答）' : q.answer) + '</div></div>').join('') +
     '</div>';
+
+  // 超时 / 未回答的历史卡：给一个「重新提问」出口（只填进输入框，不自动发送）
+  function addRetryLink() {
+    if (card.querySelector('.ask-retry')) return;
+    const pending = list.filter((q) => q.answer == null
+      || q.answer === '（未回答）' || q.answer === '（由 AI 自行决定）');
+    if (!pending.length) return;
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'ask-link ask-retry';
+    link.textContent = '重新提问';
+    link.onclick = () => {
+      const text = '刚才这些问题没有回答，请重新用提问卡问我：\n'
+        + pending.map((q, i) => (i + 1) + '. ' + q.question).join('\n');
+      const input = $('#input');
+      if (!input) return;
+      input.value = text;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      if (typeof autoGrow === 'function') autoGrow();
+      input.focus();
+      toast('已填入输入框，确认后发送');
+    };
+    card.appendChild(link);
+  }
 
   if (list.length && list.every((q) => q.answer != null)) {
     card.classList.add('done');
     card.innerHTML = doneHtml(list);
+    addRetryLink();
     return card;
   }
 
   card.innerHTML =
     '<div class="ask-head"><span class="ask-q">' + icon('question') + ' 提问' + (multi ? '（' + list.length + ' 个）' : '') + '</span>' +
-      '<span class="ask-pager">' +
-        '<button type="button" class="ask-nav ask-prev" title="上一个">‹</button>' +
-        '<span class="ask-idx">1 / ' + (list.length || 1) + '</span>' +
-        '<button type="button" class="ask-nav ask-next" title="下一个">›</button>' +
+      '<span class="ask-head-right">' +
+        '<span class="ask-timer"></span>' +
+        '<span class="ask-pager">' +
+          '<button type="button" class="ask-nav ask-prev" title="上一个">‹</button>' +
+          '<span class="ask-idx">1 / ' + (list.length || 1) + '</span>' +
+          '<button type="button" class="ask-nav ask-next" title="下一个">›</button>' +
+        '</span>' +
       '</span></div>' +
     '<div class="ask-q-text"></div>' +
     '<div class="ask-opts"></div>' +
     '<div class="ask-input-row"><input class="ask-input field-input" placeholder="也可以自己输入回答…">' +
       '<button type="button" class="ask-send primary">提交</button></div>' +
-    '<div class="ask-wait">⏳ 正在等待你的回复…（可用下方输入框或语音）</div>' +
+    '<div class="ask-wait-row"><span class="ask-wait">⏳ 正在等待你的回复…（可用下方输入框或语音）</span>' +
+      (qid ? '<button type="button" class="ask-link ask-dismiss" title="不等了，让 AI 按最稳妥的方案继续">让 AI 自己决定</button>' : '') +
+    '</div>' +
     '<div class="ask-foot">' +
       '<button type="button" class="ask-prev-step" disabled>上一个问题</button>' +
       '<span class="ask-progress"></span>' +
@@ -3510,6 +4046,7 @@ function buildAskGroup(qs, qid) {
   const progress = card.querySelector('.ask-progress');
   const submitAll = card.querySelector('.ask-submit');
   const prevStep = card.querySelector('.ask-prev-step');
+  const timerEl = card.querySelector('.ask-timer');
   if (!multi) {                                   // 单问：隐藏翻页与「提交全部」，回到原来的轻量样式
     card.querySelector('.ask-pager').style.display = 'none';
     card.querySelector('.ask-foot').style.display = 'none';
@@ -3521,10 +4058,16 @@ function buildAskGroup(qs, qid) {
 
   // 选项答案与手写答案分开存：选选项不再把文字塞进输入框，
   // 翻到下一题时输入框只显示该题自己的手写内容，不会残留上一题的选项。
-  // chosen 统一用数组：多选存多个，单选最多一个。
-  const drafts = list.map(() => '');
-  const chosen = list.map(() => []);
-  let cur = 0;
+  // chosen 统一用数组：多选存多个，单选最多一个。刷新后从 localStorage 恢复。
+  const restored = askDraftLoad(qid, list.length);
+  const drafts = restored ? restored.drafts : list.map(() => '');
+  const chosen = restored ? restored.chosen : list.map(() => []);
+  let cur = restored ? restored.cur : 0;
+  let expired = false;
+  let timer = 0;
+
+  const persist = () => askDraftSave(qid, drafts, chosen, cur);
+  const stopTimer = () => { if (timer) { clearInterval(timer); timer = 0; } };
   // 选项与手写内容可以并存：两边都有时一起提交（「选项A、选项B；手写补充」）。
   const answerOf = (i) => {
     const picked = chosen[i].join('、');
@@ -3536,30 +4079,36 @@ function buildAskGroup(qs, qid) {
 
   function render() {
     const q = list[cur] || { question: '', options: [] };
-    qText.textContent = q.question;
+    qText.innerHTML = askRich(q.question);
     optsBox.innerHTML = '';
     const picked = chosen[cur];
     q.options.forEach((o) => {
       const b = document.createElement('button');
       b.type = 'button';
-      b.className = 'ask-opt' + (picked.indexOf(o) >= 0 ? ' sel' : '');
-      b.textContent = o;
+      b.className = 'ask-opt' + (picked.indexOf(o.label) >= 0 ? ' sel' : '')
+        + (o.desc ? ' with-desc' : '') + (o.recommended ? ' rec' : '');
+      b.innerHTML = '<span class="ask-opt-label">' + askRich(o.label) + '</span>' +
+        (o.recommended ? '<span class="ask-opt-badge">推荐</span>' : '') +
+        (o.desc ? '<span class="ask-opt-desc">' + askRich(o.desc) + '</span>' : '');
+      b.title = o.label;
       b.onclick = () => {
-        if (card.dataset.done) return;
+        if (card.dataset.done || expired) return;
         // 保留手写内容：选中气泡与输入框文字可以并存，提交时一起带上。
         const arr = chosen[cur];
         if (q.multiple) {
           // 多选：点气泡只切换选中，选完由「提交」统一定稿
-          const at = arr.indexOf(o);
+          const at = arr.indexOf(o.label);
           if (at >= 0) arr.splice(at, 1);
-          else arr.push(o);
+          else arr.push(o.label);
+          persist();
           render();
           return;
         }
         // 单选也支持「再点一次取消」：不再点一下就直接提交，
         // 统一由「提交」按钮 / Enter 定稿，否则没有第二次点击的机会。
-        const at = chosen[cur].indexOf(o);
-        chosen[cur] = at >= 0 ? [] : [o];
+        const at = chosen[cur].indexOf(o.label);
+        chosen[cur] = at >= 0 ? [] : [o.label];
+        persist();
         render();
       };
       optsBox.appendChild(b);
@@ -3578,32 +4127,91 @@ function buildAskGroup(qs, qid) {
     }
   }
 
+  // 后端已经不等了：把卡片锁成「已超时」，别再让用户以为还能提交
+  function markExpired() {
+    if (expired) return;
+    expired = true;
+    stopTimer();
+    card.dataset.done = '1';
+    card.classList.add('timed-out');
+    [prev, next, send, submitAll, input].forEach((el) => { if (el) el.disabled = true; });
+    if (prevStep) prevStep.disabled = true;
+    optsBox.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    const dismiss = card.querySelector('.ask-dismiss');
+    if (dismiss) dismiss.remove();
+    const waitEl = card.querySelector('.ask-wait');
+    if (waitEl) {
+      waitEl.textContent = '已超时：AI 已按「未回答」继续。需要的话可以让它重新提问。';
+    }
+    if (timerEl) { timerEl.textContent = '已超时'; timerEl.classList.add('urgent'); }
+    addRetryLink();
+    askDraftDrop(qid);
+  }
+
   async function submit(answers) {
     if (card.dataset.done) return;
-    card.dataset.done = '1';
+    if (expired) { toast('这条提问已超时，请让 AI 重新提问', 'error'); return; }
     const answers2 = list.map((q, i) => ({ question: q.question,
       answer: ((answers[i] || '').trim() || '（未回答）') }));
+    if (qid) {
+      try {
+        // 先提交再改 UI：失败时卡片保持可操作，允许重试
+        await api('/api/agent/answer', { qid: qid, answers: answers });
+      } catch (e) {
+        if (/超时|取消/.test(String(e.message || ''))) markExpired();
+        else toast('回答提交失败：' + e.message, 'error');
+        return;
+      }
+    }
+    card.dataset.done = '1';
+    stopTimer();
+    askDraftDrop(qid);
     card.classList.add('done');
     card.innerHTML = doneHtml(answers2);          // 换成只读汇总
     // 提问期间底部输入框可能被同步填过内容 → 提交后清掉，避免残留
     const mainInput = $('#input');
     if (mainInput && mainInput.value) { mainInput.value = ''; autoGrow(); hideSttChip(); }
-    if (qid) { try { await api('/api/agent/answer', { qid: qid, answers: answers }); } catch (e) { /* 忽略 */ } }
     scrollToBottom(true);
   }
 
   const saveDraft = () => {
-    if (!multi) return;
     drafts[cur] = input.value.trim();   // 手写内容与已选项并存，不再互相清除
+    persist();
   };
   const resetSync = () => { if (typeof card._askSyncReset === 'function') card._askSyncReset(); };
   const step = (d) => {
     saveDraft();
     cur = Math.max(0, Math.min(list.length - 1, cur + d));
+    persist();
     render();
     resetSync();
     scrollToBottom();
   };
+
+  // 「让 AI 自己决定」：唤醒后端等待线程，按最稳妥的方案继续
+  const dismissBtn = card.querySelector('.ask-dismiss');
+  if (dismissBtn) {
+    dismissBtn.onclick = async () => {
+      if (card.dataset.done || expired) return;
+      dismissBtn.disabled = true;
+      try {
+        await api('/api/agent/ask/dismiss', { qid: qid });
+      } catch (e) {
+        dismissBtn.disabled = false;
+        if (/超时|取消/.test(String(e.message || ''))) markExpired();
+        else toast('操作失败：' + e.message, 'error');
+        return;
+      }
+      const arr = list.map((q) => ({ question: q.question, answer: '（由 AI 自行决定）' }));
+      card.dataset.done = '1';
+      stopTimer();
+      askDraftDrop(qid);
+      card.classList.add('done');
+      card.innerHTML = doneHtml(arr);
+      toast('已交给 AI 决定', 'success');
+      scrollToBottom(true);
+    };
+  }
 
   prev.onclick = () => step(-1);
   next.onclick = () => step(1);
@@ -3615,7 +4223,7 @@ function buildAskGroup(qs, qid) {
       return;
     }
     saveDraft();
-    if (cur < list.length - 1) { cur += 1; render(); resetSync(); scrollToBottom(); }
+    if (cur < list.length - 1) { cur += 1; persist(); render(); resetSync(); scrollToBottom(); }
   };
   input.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || isImeComposing(e)) return;
@@ -3626,6 +4234,7 @@ function buildAskGroup(qs, qid) {
     // 手写内容与已选气泡并存；drafts 在所有模式下都要记录，
     // 否则单问多选点气泡触发 render() 时会把刚输入的文字回填丢掉。
     drafts[cur] = input.value.trim();
+    persist();
     if (!multi) return;
     progress.textContent = '已答 ' + answered() + '/' + list.length;
   });
@@ -3633,6 +4242,7 @@ function buildAskGroup(qs, qid) {
     saveDraft();
     if (solo && multi && cur < list.length - 1) {   // Solo：先逐题往下走
       cur += 1;
+      persist();
       render();
       resetSync();
       scrollToBottom();
@@ -3640,6 +4250,23 @@ function buildAskGroup(qs, qid) {
     }
     submit(list.map((_q, i) => answerOf(i)));
   };
+
+  // 等待倒计时：只在「后端还在等回答」的卡片上出现
+  const expiresAt = Number(meta.expiresAt || 0);
+  if (qid && expiresAt > 0) {
+    const tick = () => {
+      const left = expiresAt - Date.now();
+      if (left <= 0) { markExpired(); return; }
+      const s = Math.ceil(left / 1000);
+      if (timerEl) {
+        timerEl.textContent = '剩 ' + Math.floor(s / 60) + ':'
+          + String(s % 60).padStart(2, '0');
+        timerEl.classList.toggle('urgent', left <= 60000);
+      }
+    };
+    tick();
+    timer = setInterval(tick, 1000);
+  }
 
   render();
   return card;
@@ -3700,7 +4327,67 @@ function renderToolLog(wrap, tools) {
   }
   wrap.appendChild(box);
   appendExploreBatchCards(wrap, tools);
+  appendDiagramCards(wrap, tools);
 }
+
+/* ---------------- archify 图卡（对话内嵌可交互 HTML） ----------------
+   非 Agent 模式也能画图：后端把产物写到 data/archify/<sid>/，经 /archify/ 路由
+   以 iframe 内嵌（免 X-Auth-Token，仅本机可访问）；高度由注入脚本 postMessage 上报。 */
+const DIAGRAM_TITLES = {
+  architecture: '架构图', workflow: '流程图', sequence: '时序图', dataflow: '数据流',
+  lifecycle: '状态图', erd: 'ERD', tree: '树状图', class: '类图',
+  timeline: '时间线', waterfall: '瀑布图', explainer: '一页式解释',
+};
+
+function buildDiagramCard(item) {
+  const box = document.createElement('div');
+  box.className = 'diagram-card';
+  box.innerHTML = '<div class="diagram-head">'
+    + '<span class="diagram-title"></span>'
+    + '<span class="diagram-sub">可交互</span>'
+    + '<button type="button" class="diagram-open">新窗口打开</button>'
+    + '</div>'
+    + '<div class="diagram-body"><iframe class="diagram-frame" loading="lazy"'
+    + ' sandbox="allow-scripts allow-popups allow-forms"></iframe></div>';
+  const kind = String((item && item.type) || '');
+  box.querySelector('.diagram-title').textContent = DIAGRAM_TITLES[kind] || '图';
+  const frame = box.querySelector('.diagram-frame');
+  frame.title = (DIAGRAM_TITLES[kind] || '图') + '预览';
+  if (item && item.url) frame.src = item.url;
+  box.querySelector('.diagram-open').onclick = () => {
+    if (item && item.url) window.open(item.url, '_blank');
+  };
+  return box;
+}
+
+/* 历史回显：把 tool_log 里带 diagram 的步骤还原成图卡 */
+function appendDiagramCards(wrap, tools) {
+  if (!wrap) return;
+  (tools || []).forEach((t) => {
+    const d = t && t.diagram;
+    if (!d || !d.url) return;
+    let dup = false;
+    wrap.querySelectorAll('.diagram-card').forEach((n) => {
+      if (n.dataset.url === d.url) dup = true;
+    });
+    if (dup) return;
+    const card = buildDiagramCard(d);
+    card.dataset.url = d.url;
+    wrap.appendChild(card);
+  });
+}
+
+// 子页面（我们自己的 /archify/ 路由）上报自身高度 → 调整 iframe 高度
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__gmDiagram !== 1) return;
+  const h = Math.max(240, Math.min(1400, Number(d.height) || 0));
+  document.querySelectorAll('.diagram-frame').forEach((f) => {
+    try {
+      if (f.contentWindow === e.source) f.style.height = h + 'px';
+    } catch (err) { /* 拿不到 contentWindow：忽略 */ }
+  });
+});
 
 /* ---------------- 后台探索批次（explore background=true） ----------------
    后台线程在回合结束后仍会继续跑，但那时 SSE 已经关闭，事件到不了前端；
@@ -3916,7 +4603,7 @@ function buildBlocksView(blocks, timing, endKind, opts) {
       if (!t) return;
       if (t.tool === 'ask_user') {
         finalizeGroup();                       // 提问前后各成一组，卡片夹在中间
-        if (t.asks && t.asks.length) parts.push(buildAskGroup(t.asks, null));
+        if (t.asks && t.asks.length) parts.push(buildAskGroup(t.asks, t.qid || null));
         return;
       }
       if (isBgExploreTool(t)) return;          // 后台批次不放进过程折叠，稍后单独成卡
@@ -3987,6 +4674,7 @@ function buildAiRowFromBlocks(m, index) {
     secs.push(d);
   }
   appendExploreBatchCards(wrap, m.tools);   // 后台探索批次：常驻卡，不进折叠
+  appendDiagramCards(wrap, m.tools);        // archify 图卡：内嵌可交互 HTML
   const c = secs[secs.length - 1];
 
   row.appendChild(av);
@@ -4000,7 +4688,9 @@ function buildAiRowFromBlocks(m, index) {
   row._plan = planCard ? m.plan : null;
   row._planSteps = planCard ? m.plan.steps : [];
   if (m.memory) wrap.appendChild(buildMemoryChip(m.memory, index));
-  if (m.content) wrap.appendChild(buildActions(row, () => row._raw, index, 'ai'));
+  // 空内容也建操作条：中断 / 报错的轮次没有正文，但「继续输出 / 重新发言 /
+  // 上下文压缩」仍要能操作（圆环只挂在 .msg-actions 上）。
+  wrap.appendChild(buildActions(row, () => row._raw, index, 'ai'));
   if (m.usage || m.done_at) {
     const u = document.createElement('div');
     u.className = 'usage-line';
@@ -4009,6 +4699,48 @@ function buildAiRowFromBlocks(m, index) {
     wrap.appendChild(u);
     row._usageEl = u;
   }
+  return row;
+}
+
+/* 按实时数据重建「正在生成的那条」。
+   切会话 / 刷新后本地没有 live DOM 时用它，与历史行共用 buildBlocksView，
+   所以外观和收尾后的正式消息完全一致，不会出现两种排版。 */
+function buildLiveRow(sid, live) {
+  const row = document.createElement('div');
+  row.className = 'msg ai stream-live';
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  av.textContent = '✦';
+  const wrap = document.createElement('div');
+  wrap.className = 'content-wrap';
+  let planCard = null;
+  if (live.plan && live.plan.steps && live.plan.steps.length) {
+    planCard = buildPlanCard(live.plan, planAllDone(live.plan));
+    wrap.appendChild(planCard);
+  }
+  const view = buildBlocksView(live.blocks, live.timing, '',
+                               { tools: live.tools || [], open: true });
+  if (view.fold) {
+    wrap.appendChild(view.fold);
+    if (window.enhanceRichMedia) window.enhanceRichMedia(view.fold);
+  }
+  const secs = [];
+  const asks = [];
+  view.parts.forEach((p) => {
+    wrap.appendChild(p);
+    if (p.classList.contains('ask-card')) asks.push(p);
+    else secs.push(p);
+  });
+  row.appendChild(av);
+  row.appendChild(wrap);
+  row._content = secs[secs.length - 1] || null;
+  row._secs = secs;
+  row._asks = asks;
+  row._wrap = wrap;
+  row._raw = live.text || '';
+  row._planCard = planCard;
+  row._plan = live.plan || null;
+  row._planSteps = planCard ? live.plan.steps : [];
   return row;
 }
 
@@ -4080,6 +4812,11 @@ function rowForMsg(msgs, idx) {
     ? buildAiRowFromBlocks(m, idx)
     : buildAiRow(safeRenderMarkdown(m.content), m.content, idx, m.reasoning,
                  m.sources, m.usage, m.memory, m.tools, m.plan);
+  // 显式引用已经显示在用户气泡上，这里只保留自动检索的条目，避免重复
+  const autoRefs = (m.references || []).filter((r) => r && r.auto);
+  if (autoRefs.length) {
+    row._wrap.appendChild(buildReferencesBlock(autoRefs));
+  }
   // 旧路径（buildAiRow）拿不到 timing，统一在这里补「N 次调用累计」的口径。
   if (row._usageEl && m.usage) {
     setUsage(row._usageEl, m.usage, m.done_at, usageCalls(m), m.timing);
@@ -4311,9 +5048,10 @@ async function loadOlderMessages(before, limit, silent) {
   }
 }
 
-function renderMessages(fromIndex, forceWindow) {
+function renderMessages(fromIndex, forceWindow, opts) {
   const chat = $('#chat');
   const expanding = typeof fromIndex === 'number';
+  const keepScroll = !!(opts && opts.keepScroll);   // 后台事件刷新：保持用户当前阅读位置
   const oldHeight = chat.scrollHeight;
   const oldTop = chat.scrollTop;
   const s = curSession();
@@ -4327,6 +5065,7 @@ function renderMessages(fromIndex, forceWindow) {
     placeCtxRing();
     if (typeof turnDotsSync === 'function') turnDotsSync();
     if (typeof ideReviewTipRefresh === 'function') ideReviewTipRefresh();
+    if (!keepScroll && typeof replayEnter === 'function') replayEnter(chat, 'chat-fade');
     return;
   }
 
@@ -4385,6 +5124,29 @@ function renderMessages(fromIndex, forceWindow) {
   }
 
   const start = expanding ? Math.max(loadedFrom, fromIndex) : Math.max(loadedFrom, total - RENDER_PAGE);
+  // 正在生成的这一条由实时数据承担：历史只画到它之前，末尾再挂 live 投影。
+  // 这是「一条回答只有一条投影」的唯一判定点——切会话、刷新、重连都走这里，
+  // 不再需要在每条路径上单独删除「进度快照行」。
+  const _sid = String(state.sessions.current || '');
+  const _st = (typeof streamOf === 'function') ? streamOf(_sid) : null;
+  const _live = (typeof liveOf === 'function') ? liveOf(_sid, true) : null;
+  const _liveData = !!(_live && _live.blocks && _live.blocks.length);
+  const _lastMsg = msgs[total - 1];
+  // 实时行承担的是「哪一条」：有 data-idx 就精确跳过它；新行（还没有 idx）
+  // 一律承担最后一条 assistant。**不再依赖 `_progress` 标记** —— 那个标记在后端
+  // 收尾窗口里可能已经被清掉，靠它判断就会出现「快照行 + 实时行」两份。
+  let _skipIdx = -1;
+  const _liveRow = (_st && _st.row) ? _st.row : null;
+  if (_liveRow) {
+    _skipIdx = (_liveRow.dataset && _liveRow.dataset.idx !== undefined)
+      ? Number(_liveRow.dataset.idx)
+      : ((_lastMsg && _lastMsg.role === 'assistant') ? total - 1 : -1);
+  } else if (_liveData) {
+    _skipIdx = (_lastMsg && _lastMsg.role === 'assistant') ? total - 1 : -1;
+  }
+  // 实时 host 先摘下来再放回：innerHTML 会连它一起清掉，重挂时内容会闪一下
+  const _keepHost = (_st && _st.host) || null;
+  if (_keepHost && _keepHost.parentNode) _keepHost.parentNode.removeChild(_keepHost);
   if (window.disposeRichMedia) window.disposeRichMedia();   // 清掉旧图表实例，避免内存泄漏
   chat.innerHTML = '';
   findState.hits = [];
@@ -4394,12 +5156,17 @@ function renderMessages(fromIndex, forceWindow) {
   const frag = document.createDocumentFragment();
   if (start > 0) frag.appendChild(makeMoreBtn(start));
   for (let idx = start; idx < total; idx++) {
-    if (!msgs[idx]) continue;          // 还没加载的旧消息：等「加载更早」补
+    if (!msgs[idx] || idx === _skipIdx) continue;   // 还没加载的旧消息 / 由实时行承担的那条
     addMarks(frag, idx);
     frag.appendChild(rowForMsgSafe(msgs, idx));
   }
   addMarks(frag, total);
   chat.appendChild(frag);
+  if (_keepHost) {
+    chat.appendChild(_keepHost);       // 本地流还活着：复用它的 DOM，内容不闪
+  } else if (_liveData && state.uiMode !== 'gal') {
+    chat.appendChild(buildLiveRow(_sid, _live));   // 只有数据没有 DOM：按数据重建
+  }
   chat.dataset.start = String(start);
   // 压缩点落在本次渲染窗口之前（那段还没加载 / 已被折叠）时上面不会画到：
   // 兜底补一条，位置仍按真实压缩点算，不能因为没命中就丢掉或贴到底部。
@@ -4409,10 +5176,17 @@ function renderMessages(fromIndex, forceWindow) {
   }
   if (window.enhanceRichMedia) window.enhanceRichMedia(chat);
   // 展开更早时保持视觉位置不动，否则滚到底部
-  chat.scrollTop = expanding ? oldTop + (chat.scrollHeight - oldHeight) : chat.scrollHeight;
+  chat.scrollTop = expanding ? oldTop + (chat.scrollHeight - oldHeight)
+                             : (keepScroll ? oldTop : chat.scrollHeight);
   placeCtxRing();
   if (typeof turnDotsSync === 'function') turnDotsSync();
   if (typeof ideReviewTipRefresh === 'function') ideReviewTipRefresh();
+  // 历史里可能有多张计划卡：只留最新一张展开，其余收成「已续至最新输出」
+  if (typeof planSweepHistory === 'function') planSweepHistory();
+  // 切会话时整块换内容，给一帧淡入，避免「闪白 → 突然满屏文字」
+  if (!expanding && !keepScroll && typeof replayEnter === 'function') {
+    replayEnter(chat, 'chat-fade');
+  }
 }
 
 function bindChips() {

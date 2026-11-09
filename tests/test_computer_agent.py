@@ -60,3 +60,28 @@ def test_dispatch_when_disabled(monkeypatch):
     monkeypatch.setattr(computer, "enabled", lambda: False)
     text = computer.dispatch("computer_see", {})
     assert "未开启" in text
+
+
+def test_build_agent_prompt_includes_computer_routing():
+    sess = {"agent_enabled": False}
+    on = agent.build_agent_prompt(sess, search_ready=False, native_tools=False,
+                                  computer_on=True)
+    off = agent.build_agent_prompt(sess, search_ready=False, native_tools=False,
+                                   computer_on=False)
+    assert "Computer Use" in on and "操作网页" in on
+    assert "Computer Use" not in off
+
+
+def test_decision_prompt_routes_web_tasks_to_computer():
+    on = agent._tool_decision_prompt(computer_on=True)
+    off = agent._tool_decision_prompt(computer_on=False)
+    assert "操作网页" in on
+    assert "ask_user(action=true)" in on
+    assert "别用搜索抓取代替" in on
+    assert "操作网页" not in off
+
+
+def test_computer_prompt_has_login_takeover_loop():
+    assert "ask_user" in agent._COMPUTER_PROMPT
+    assert "完成登录" in agent._COMPUTER_PROMPT
+    assert "默认直接用 computer_open 尝试" in agent._COMPUTER_PROMPT

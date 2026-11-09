@@ -28,6 +28,28 @@ function ideTermHint(msg) {
   el.classList.remove('hidden');
 }
 
+/* 终端最近输出快照（供对话 #terminal 引用）；没有任何内容时返回空串。
+   只读 xterm 缓冲区，不触发后端；最多取最后 160 行，再按字符数截断。 */
+function ideTermRecentText(maxChars) {
+  const st = ideTermState;
+  if (!st || !st.term) return '';
+  let buf = null;
+  try { buf = st.term.buffer.active; } catch (e) { return ''; }
+  if (!buf) return '';
+  const end = Math.min(buf.length - 1, buf.baseY + buf.cursorY);
+  const start = Math.max(0, end - 159);
+  const lines = [];
+  for (let i = start; i <= end; i++) {
+    const line = buf.getLine(i);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (text.trim()) lines.push(text);
+  }
+  const out = lines.join('\n');
+  const cap = Math.max(200, Number(maxChars) || 8000);
+  return out.length > cap ? out.slice(out.length - cap) : out;
+}
+
 function ideTermColors() {
   const panel = $('#ide-panel');
   const c = panel ? getComputedStyle(panel) : getComputedStyle(document.documentElement);

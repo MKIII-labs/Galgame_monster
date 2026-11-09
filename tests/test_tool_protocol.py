@@ -58,6 +58,14 @@ def test_unknown_tool_is_coded(tmp_path):
     assert "未知工具" in text
 
 
+def test_search_zero_hit_is_not_an_error(tmp_path):
+    """零命中是正常结果：文案不能带「未找到」/「沙箱」，否则会被升级成错误码。"""
+    (tmp_path / "a.html").write_text("hello\n", encoding="utf-8")
+    text, _u, _w = agent.run_tool(str(tmp_path), "search_files", {"pattern": "zzz_nomatch"})
+    assert not tp.is_error(text)
+    assert "沙箱" not in text and "未找到" not in text
+
+
 # ---------------------------------------------------------------- 写前读
 def test_overwrite_existing_requires_read(tmp_path):
     p = tmp_path / "a.txt"

@@ -88,3 +88,71 @@ def test_split_commit_validates_groups(tmp_path):
         {"message": "a", "paths": ["x.py"]},
         {"message": "b", "paths": ["x.py"]}]})
     assert "多个分组" in text2
+
+
+def test_preview_undo_maps_actions_and_relative_paths(tmp_path):
+    """预览：改成 modify、AI 新建的删掉、目录新建。"""
+    a = tmp_path / "app" / "a.py"
+    a.parent.mkdir()
+    a.write_text("after", encoding="utf-8")
+    b = tmp_path / "notes" / "probe.md"
+    b.parent.mkdir()
+    b.write_text("x", encoding="utf-8")
+    ops = [_op(a, b"before", True), _op(b, b"", False),
+           {"kind": "mkdir", "path": str(tmp_path / "docs")}]
+    token = agent.register_undo("t-preview", ops, "write_file")
+    try:
+        data = agent.preview_undo("t-preview", tokens=[token], root=str(tmp_path))
+        got = {f["path"]: f["action"] for f in data["files"]}
+        assert got == {"app/a.py": "modify", "notes/probe.md": "delete",
+                       "docs": "create"}
+        assert data["total"] == 1 and data["skipped"] == 0
+    finally:
+        agent.accept(token)
+        _cleanup("t-preview")
+
+
+def test_preview_undo_last_write_wins(tmp_path):
+    """同一文件被写了两次：预览只出现一次，状态以最后一次撤销为准。"""
+    p = tmp_path / "c.txt"
+    p.write_text("v2", encoding="utf-8")
+    t1 = agent.register_undo("t-preview2", [_op(p, b"v0", True)], "write_file")
+    t2 = agent.register_undo("t-preview2", [_op(p, b"v1", True)], "edit_file")
+    try:
+        data = agent.preview_undo("t-preview2", tokens=[t1, t2], root=str(tmp_path))
+        assert [(f["path"], f["action"]) for f in data["files"]] == [("c.txt", "modify")]
+    finally:
+        agent.accept(t1)
+        agent.accept(t2)
+        _cleanup("t-preview2")
+
+
+def test_preview_undo_skips_undone_tokens(tmp_path):
+    """已经撤销过的步骤不会再动文件，预览里要跳过。"""
+    p = tmp_path / "d.txt"
+    p.write_text("after", encoding="utf-8")
+    token = agent.register_undo("t-preview3", [_op(p, b"before", True)], "edit_file")
+    try:
+        agent.undo(token)
+        data = agent.preview_undo("t-preview3", tokens=[token], root=str(tmp_path))
+        assert data["files"] == []
+        assert data["skipped"] == 1
+    finally:
+        agent.accept(token)
+        _cleanup("t-preview3")
+
+
+def test_preview_undo_move_back(tmp_path):
+    """move_back：目标会被删、源会被重建。"""
+    src = tmp_path / "old.py"
+    dst = tmp_path / "new.py"
+    dst.write_text("x", encoding="utf-8")
+    token = agent.register_undo("t-preview4", [{
+        "kind": "move_back", "src": str(src), "dst": str(dst)}], "move_file")
+    try:
+        data = agent.preview_undo("t-preview4", tokens=[token], root=str(tmp_path))
+        got = {f["path"]: f["action"] for f in data["files"]}
+        assert got == {"new.py": "delete", "old.py": "create"}
+    finally:
+        agent.accept(token)
+        _cleanup("t-preview4")

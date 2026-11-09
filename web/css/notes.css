@@ -76,3 +76,70 @@
   border-bottom: 1px dashed var(--accent);
 }
 .content a.wikilink.missing { color: var(--warn); border-bottom-style: dotted; }
+
+/* ---------- 批注 ---------- */
+.ntab-count { margin-left: 4px; font-size: 10px; padding: 0 5px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+.ntab-count:empty { display: none; }
+.notes-annos { flex: 1 1 auto; overflow: auto; padding: 10px; }
+.nt-anno-item { padding: 8px 10px; border-bottom: 1px dashed var(--border); cursor: pointer; border-radius: 6px; }
+.nt-anno-item:hover { background: var(--bg-hover); }
+.nt-anno-item .q { font-size: 12px; color: var(--text-dim); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.nt-anno-item .c { margin-top: 4px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+mark.nt-anno { background: rgba(255, 206, 84, .45); border-bottom: 1px solid rgba(224, 168, 0, .8); border-radius: 2px; cursor: pointer; padding: 0 1px; color: inherit; }
+mark.nt-anno:hover { background: rgba(255, 206, 84, .7); }
+mark.nt-anno.flash { animation: nt-anno-flash 1s ease; }
+@keyframes nt-anno-flash { 0%, 100% { background: rgba(255, 206, 84, .45); } 50% { background: var(--accent-soft); outline: 1px solid var(--accent); } }
+/* 选区工具条已迁到 selkit.css，这里只保留批注 / 问答弹层 */
+.nt-anno-pop { position: fixed; z-index: 10001; width: 340px; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); box-shadow: var(--shadow-lg); }
+.nt-anno-pop.hidden { display: none; }
+.nt-anno-quote { font-size: 12px; color: var(--text-dim); line-height: 1.5; max-height: 3em; overflow: hidden; padding-bottom: 8px; border-bottom: 1px dashed var(--border); }
+.nt-anno-text { width: 100%; min-height: 76px; margin-top: 8px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-input); color: var(--text); font: inherit; font-size: 13px; resize: vertical; outline: none; }
+.nt-anno-text:focus { border-color: var(--accent); }
+.nt-anno-acts { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.nt-anno-gap { flex: 1; }
+/* ---------- Markdown 语法纠错（笔记侧） ---------- */
+.nt-lint { display: inline-flex; align-items: center; gap: 5px; }
+.nt-lint-sw {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--border-strong); transition: background var(--t-fast), box-shadow var(--t-fast);
+}
+.nt-lint.on .nt-lint-sw { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.nt-lint-n { font-size: 11px; font-weight: 600; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.nt-lint.on .nt-lint-n:not(:empty) { color: var(--accent); }
+
+.nt-lint-box {
+  flex: 0 0 auto; max-height: 34%;
+  display: flex; flex-direction: column;
+  border-top: 1px solid var(--border); background: var(--bg-side);
+}
+.nt-lint-box.hidden { display: none; }
+.nt-lint-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; font-size: 12px; color: var(--text-dim);
+  border-bottom: 1px dashed var(--border);
+}
+.nt-lint-head b { color: var(--warn); font-variant-numeric: tabular-nums; }
+.nt-lint-head button {
+  border: 1px solid var(--border); background: var(--bg); color: var(--text-dim);
+  border-radius: 6px; padding: 1px 8px; font-size: 11.5px; cursor: pointer;
+}
+.nt-lint-head button:hover { background: var(--bg-hover); color: var(--text); }
+.nt-lint-head .nt-lint-fix { margin-left: auto; color: var(--accent); border-color: var(--accent); }
+.nt-lint-list { overflow: auto; padding: 4px 6px 8px; }
+.nt-lint-row {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 4px 6px; border-radius: 6px; cursor: pointer;
+  font-size: 12.5px; line-height: 1.5;
+}
+.nt-lint-row:hover { background: var(--bg-hover); }
+.nt-lint-ico { flex: none; width: 14px; text-align: center; }
+.nt-lint-row.error .nt-lint-ico { color: var(--danger); }
+.nt-lint-row.warning .nt-lint-ico { color: var(--warn); }
+.nt-lint-row.info .nt-lint-ico { color: var(--text-dim); }
+.nt-lint-msg { flex: 1; min-width: 0; }
+.nt-lint-line { flex: none; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.nt-lint-fix-one {
+  flex: none; border: 1px solid var(--border); background: var(--bg); color: var(--accent);
+  border-radius: 6px; padding: 0 6px; font-size: 11px; line-height: 18px; cursor: pointer;
+}
+.nt-lint-fix-one:hover { background: var(--accent-soft); }

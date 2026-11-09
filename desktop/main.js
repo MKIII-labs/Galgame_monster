@@ -129,6 +129,13 @@ function createWindow() {
   win.on('maximize', () => pushMax(true));
   win.on('unmaximize', () => pushMax(false));
 
+  // 系统全屏状态回推：用户按系统快捷键 / 阅读器点 ⤢ 都走这里同步 UI
+  const pushFull = (v) => {
+    if (win) win.webContents.send('win:fullscreen', !!v);
+  };
+  win.on('enter-full-screen', () => pushFull(true));
+  win.on('leave-full-screen', () => pushFull(false));
+
   // 外链交给系统浏览器；页面内 window.open 的 blob:/data:（图片预览）仍开在应用里
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) {
@@ -191,6 +198,13 @@ function bindKeys(wc) {
 
 // 顶栏按钮（页面 → 壳）
 ipcMain.on('win:minimize', () => { if (win) win.minimize(); });
+ipcMain.on('win:set-fullscreen', (_e, v) => {
+  try {
+    if (win) win.setFullScreen(!!v);
+  } catch (e) {
+    dlog('fullscreen failed: ' + (e && e.message));
+  }
+});
 ipcMain.on('win:toggle-maximize', () => {
   if (!win) return;
   if (win.isMaximized()) win.unmaximize();
@@ -227,15 +241,42 @@ ipcMain.on('notify:show', (_e, payload) => {
     });
     liveNotifs.add(n);
     n.on('close', () => liveNotifs.delete(n));
+    let fired = false;                 // 同一条通知只处理一次 click（避免重复 IPC）
     n.on('click', () => {
+      if (fired) return;
+      fired = true;
       dlog('notify click ' + String(p.id || ''));
       focusWindow();
       try { if (win) win.webContents.send('notify:click', { id: p.id || '', target: p.target || null }); } catch (e) { /* 页面不在也先把窗口拉起来 */ }
       liveNotifs.delete(n);
     });
+    dlog('notify show ' + String(p.id || '') + ' target=' +
+         JSON.stringify(p.target || null));   // 用来核对 show / click 是否成对
     n.show();
   } catch (e) {
     dlog('notify failed: ' + (e && e.message));
+  }
+});
+
+// 从 IDE 文件树拖出真实文件 / 目录到系统（桌面 / 资源管理器 / 其他应用）。
+// 页面在 dragstart 里先 preventDefault，再发这条 IPC：此时系统级拖拽会话还没结束，
+// 主进程调用 webContents.startDrag 把「磁盘上的这个条目」交给系统，
+// 目标应用拿到的就是文件本体（Windows 上是 CF_HDROP），而不是一串路径文字。
+ipcMain.on('file:start-drag', (_e, payload) => {
+  const p = payload || {};
+  const target = String(p.file || '');
+  if (!win || !target) return;
+  let st = null;
+  try { st = fs.statSync(target); } catch (e) {
+    dlog('start-drag skipped (missing): ' + target);
+    return;
+  }
+  try {
+    // icon 在 Windows 上必须是 .ico；app.ico 是多尺寸帧，系统会挑合适的一帧
+    win.webContents.startDrag({ file: target, icon: ICON });
+    dlog('start-drag ' + (st.isDirectory() ? 'dir ' : 'file ') + target);
+  } catch (e) {
+    dlog('start-drag failed: ' + (e && e.message));
   }
 });
 
@@ -318,3 +359,6 @@ ipcMain.handle('file:save-url', async (_e, payload) => {
     }
   });
 });
+
+// 阅读器「译文 PDF」已改为服务端重排（app/reader_export.py），通过 file:save-url
+// 直接下载矢量 PDF；这里不再需要「HTML → printToPDF」的隐藏窗口通路。

@@ -37,6 +37,7 @@
 <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 <link rel="stylesheet" href="/static/css/polish.css">
 <link rel="stylesheet" href="/static/css/gal.css">
+<link rel="stylesheet" href="/static/css/reader.css">
 <link rel="stylesheet" href="/static/css/search.css">
 <link rel="stylesheet" href="/static/css/remind.css">
 <link rel="stylesheet" href="/static/css/skills.css">
@@ -48,6 +49,8 @@
 <link rel="stylesheet" href="/static/css/hall-plugins.css">
 <link rel="stylesheet" href="/static/css/work.css">
 <link rel="stylesheet" href="/static/css/trajectory.css">
+<link rel="stylesheet" href="/static/css/selkit.css">
+<link rel="stylesheet" href="/static/css/askkit.css">
 <link rel="stylesheet" href="/static/css/turndots.css">
 <!-- 复古像素主题用的点阵字体：只有 pixel 主题会引用这个字体族，因此 woff2 实际是「用到才下载」；
      非阻塞加载，失败即移除并回退到系统宋体 / 等宽（保证离线可用） -->
@@ -181,7 +184,6 @@
   <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/></symbol>
   <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></symbol>
   <symbol id="i-check-square" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M7.5 12.2l3.1 3.1 6-6.2"/></symbol>
-  <symbol id="i-box" viewBox="0 0 24 24"><path d="M3.5 7.5L12 3l8.5 4.5v9L12 21l-8.5-4.5z"/><path d="M3.5 7.5L12 12l8.5-4.5M12 12v9"/></symbol>
   <!-- 自绘标题栏的窗口按钮（Electron 壳） -->
   <symbol id="i-win-min" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
   <symbol id="i-win-max" viewBox="0 0 24 24"><rect x="5.5" y="5.5" width="13" height="13" rx="1.6"/></symbol>
@@ -247,6 +249,7 @@
       <button id="btn-saves" class="ghost wide" title="会话存档 / 倒带：回退到旧存档点，或从旧点分叉出新线"><svg class="ic"><use href="#i-history"/></svg>存档</button>
       <button id="btn-kb" class="ghost wide" title="知识库 / 记忆图谱"><svg class="ic"><use href="#i-brain"/></svg>知识库</button>
       <button id="btn-notes" class="ghost wide" title="内置笔记库（Markdown + 双链 + 关系图谱）"><svg class="ic"><use href="#i-note"/></svg>笔记</button>
+      <button id="btn-reload" class="ghost wide" title="刷新页面（重新加载界面，等同 Ctrl+R）"><svg class="ic"><use href="#i-refresh"/></svg>刷新页面</button>
       <button id="btn-theme" class="ghost" title="切换主题"><svg class="ic"><use href="#i-theme"/></svg>主题</button>
       <button id="btn-settings" class="ghost" title="设置"><svg class="ic"><use href="#i-gear"/></svg>设置</button>
     </div>
@@ -280,6 +283,13 @@
           <span id="ide-git-badge" class="act-badge hidden">0</span>
         </button>
         <button class="act-btn" data-act="debug" title="运行和调试"><svg class="ic"><use href="#i-debug"/></svg></button>
+        <button class="act-btn" data-act="annos" title="批注">
+          <svg class="ic"><use href="#i-pin"/></svg>
+          <span id="ide-anno-badge" class="act-badge hidden">0</span>
+        </button>
+        <button class="act-btn" data-act="docs" title="文献库">
+          <svg class="ic"><use href="#i-note"/></svg>
+        </button>
         <button class="act-btn" id="ide-term-act" title="终端（Ctrl+`）"><svg class="ic"><use href="#i-terminal"/></svg></button>
         <span class="act-spacer"></span>
         <button class="act-btn" id="ide-open-vscode" title="在 VS Code 中打开当前沙箱"><svg class="ic"><use href="#i-code"/></svg></button>
@@ -376,11 +386,45 @@
         </div>
       </div>
 
+      <!-- 侧边栏：批注（当前文件的统一批注） -->
+      <div class="ide-side hidden" id="ide-side-annos">
+        <div class="ide-side-head">
+          <span class="ide-side-title">批注</span>
+          <span class="ide-side-actions">
+            <button id="ide-anno-add" class="ico-btn" title="为选中行添加批注（Ctrl+Alt+M）"><svg class="ic"><use href="#i-note"/></svg></button>
+            <button id="ide-anno-refresh" class="ico-btn" title="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
+          </span>
+        </div>
+        <div id="ide-anno-file" class="ide-anno-file"></div>
+        <div id="ide-anno-list" class="ide-anno-list">
+          <div class="ide-empty">打开一个文件查看批注</div>
+        </div>
+      </div>
+
+      <!-- 侧边栏：文献库（当前沙箱里的文献条目） -->
+      <div class="ide-side hidden" id="ide-side-docs">
+        <div class="ide-side-head">
+          <span class="ide-side-title">文献库</span>
+          <span class="ide-side-actions">
+            <button id="ide-doc-refresh" class="ico-btn" title="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
+          </span>
+        </div>
+        <div class="ide-doc-search">
+          <input id="ide-doc-q" class="field-input" placeholder="搜索标题 / 作者 / 出处">
+        </div>
+        <div id="ide-doc-list" class="ide-doc-list">
+          <div class="ide-empty">打开 PDF 后会自动生成文献条目</div>
+        </div>
+      </div>
+
       <!-- 侧边栏：源代码管理（Git） -->
       <div class="ide-side hidden" id="ide-side-git">
         <div class="ide-side-head">
           <span class="ide-side-title">源代码管理</span>
           <span class="ide-side-actions">
+            <button id="ide-git-fetch" class="ico-btn" title="获取远端更新（fetch）" disabled><svg class="ic"><use href="#i-refresh"/></svg></button>
+            <button id="ide-git-pull" class="ico-btn" title="拉取并合并（pull）" disabled><svg class="ic"><use href="#i-download"/></svg></button>
+            <button id="ide-git-push" class="ico-btn" title="推送（push）" disabled><svg class="ic"><use href="#i-upload"/></svg></button>
             <button id="ide-git-refresh" class="ico-btn" title="刷新状态"><svg class="ic"><use href="#i-refresh"/></svg></button>
           </span>
         </div>
@@ -403,11 +447,19 @@
               </label>
               <div class="ide-git-actions">
                 <button id="ide-git-stage-all" class="ico-btn" title="全部暂存">＋</button>
+                <button id="ide-git-review-btn" class="ide-git-link" type="button"
+                        title="AI 审查未提交的改动">AI 审查</button>
+                <button id="ide-git-ai-msg" class="ide-git-link" type="button"
+                        title="根据改动生成提交信息">AI 生成</button>
                 <button id="ide-git-commit-btn" class="review-btn primary" type="button">提交</button>
               </div>
             </div>
           </div>
           <div class="ide-git-pane hidden" id="ide-git-pane-history">
+            <div class="ide-git-histbar">
+              <label><input type="checkbox" id="ide-git-graph-toggle"> 分支图</label>
+              <span id="ide-git-histhint" class="ide-git-histhint"></span>
+            </div>
             <div id="ide-git-history" class="ide-git-files"></div>
           </div>
           <div class="ide-git-pane hidden" id="ide-git-pane-ops">
@@ -444,10 +496,25 @@
               <input id="ide-preview-url" class="field-input"
                      placeholder="http://localhost:5173 或沙箱内的 index.html">
               <button id="ide-preview-open" class="ide-btn" type="button">打开</button>
+              <button id="ide-preview-pick" class="ico-btn" type="button" disabled
+                      title="选择元素并发送到对话"><svg class="ic"><use href="#i-box"/></svg></button>
+              <button id="ide-preview-console-btn" class="ico-btn" type="button" disabled
+                      title="控制台"><svg class="ic"><use href="#i-terminal"/></svg><span
+                      id="ide-preview-console-badge" class="ide-preview-badge hidden">0</span></button>
               <button id="ide-preview-reload" class="ico-btn" title="刷新">↻</button>
               <button id="ide-preview-close" class="ico-btn" title="关闭">✕</button>
             </div>
             <iframe id="ide-preview-frame" class="ide-preview-frame" title="网页预览"></iframe>
+            <div id="ide-preview-console" class="ide-preview-console hidden">
+              <div class="ide-preview-console-head">
+                <span class="ide-preview-console-title">控制台</span>
+                <span id="ide-preview-console-count" class="ide-preview-console-count">0 条</span>
+                <button id="ide-preview-console-clear" class="ide-btn" type="button">清空</button>
+                <button id="ide-preview-console-send" class="ide-btn" type="button">全部发送</button>
+                <button id="ide-preview-console-close" class="ico-btn" type="button" title="收起">✕</button>
+              </div>
+              <div id="ide-preview-console-list" class="ide-preview-console-list"></div>
+            </div>
           </div>
           <!-- Markdown 预览：右半边分屏，复用聊天那套渲染（含 KaTeX 公式） -->
           <div id="ide-md" class="ide-md hidden">
@@ -466,6 +533,8 @@
               </div>
               <div class="review-actions">
                 <span id="ide-review-idx" class="review-idx"></span>
+                <button id="ide-review-ai-btn" class="review-btn ghost" type="button"
+                        title="让 AI 总结这批改动（摘要 + 风险 + 流程图）">AI 摘要</button>
                 <button id="ide-review-prev" class="ico-btn" title="上一个文件">‹</button>
                 <button id="ide-review-next" class="ico-btn" title="下一个文件">›</button>
                 <button id="ide-review-undo" class="review-btn ghost" type="button">撤销 <kbd>Ctrl</kbd><kbd>Backspace</kbd></button>
@@ -473,6 +542,7 @@
               </div>
             </div>
             <div id="ide-hunk-bar" class="hunk-bar hidden"></div>
+            <div id="ide-review-ai" class="ide-review-ai hidden"></div>
             <div id="ide-diff-editor" class="review-editor"></div>
           </div>
           <!-- Git 改动对比（只读）：点源代码管理里的文件时打开 -->
@@ -488,6 +558,20 @@
               </div>
             </div>
             <div id="ide-git-diff-editor" class="review-editor"></div>
+          </div>
+          <!-- AI 审查（Git 范围）：未提交改动 / 单个提交 / 分支差异 -->
+          <div id="ide-git-review" class="ide-diff hidden">
+            <div class="review-bar">
+              <div class="review-info">
+                <span class="review-title">AI 审查</span>
+                <span id="ide-git-review-scope" class="review-file"></span>
+              </div>
+              <div class="review-actions">
+                <button id="ide-git-review-refresh" class="review-btn ghost" type="button">重新生成</button>
+                <button id="ide-git-review-close" class="ico-btn" title="关闭（Esc）">✕</button>
+              </div>
+            </div>
+            <div id="ide-git-review-body" class="ide-git-review-body"></div>
           </div>
           <!-- 没有打开文件时的欢迎页（最近打开 + 常用快捷键） -->
           <div id="ide-welcome" class="ide-welcome">
@@ -587,15 +671,23 @@
       <div id="plugins-body" class="plugins-body"></div>
     </section>
 
-    <!-- 工作台：个人日程 / 任务执行 / 产物（前端逻辑见 web/work.js） -->
+    <!-- 工作台：个人日程 / 任务执行 / 产物（前端逻辑见 web/work/） -->
     <section id="work-panel" class="work-panel hidden">
       <div class="work-head">
         <div class="work-titles">
           <div class="work-title">工作台</div>
           <div class="work-sub" id="work-sub">日程 · 任务执行 · 产物</div>
         </div>
+        <div class="work-views-tabs" id="work-views-tabs" role="tablist" aria-label="工作台视图">
+          <button type="button" data-wview="today" class="on" role="tab" aria-selected="true">今天</button>
+          <button type="button" data-wview="week" role="tab" aria-selected="false">周</button>
+          <button type="button" data-wview="month" role="tab" aria-selected="false">月</button>
+          <button type="button" data-wview="board" role="tab" aria-selected="false">看板</button>
+          <button type="button" data-wview="stats" role="tab" aria-selected="false">统计</button>
+        </div>
         <div class="work-head-right">
           <select id="work-scene" class="work-select" title="场景包：办公 / 学习 / 生活"></select>
+          <button id="work-focus" class="work-btn ghost" title="专注计时：开启一段专注，结束后记入统计">专注</button>
           <button id="work-workflows" class="work-btn ghost" title="工作流：触发器 → 动作">工作流</button>
           <button id="work-new-image" class="work-btn ghost" title="用本地 ComfyUI 生成图片">图片</button>
           <button id="work-memory" class="work-btn ghost" title="统一记忆：检索与手动记录">记忆</button>
@@ -625,6 +717,7 @@
             <span>任务</span>
             <div class="work-col-tools">
               <span class="work-count" id="work-task-count"></span>
+              <button id="work-templates" class="work-btn small ghost" title="任务模板：一键套用常用流程">模板</button>
               <button id="work-new-task" class="work-btn small" title="新建任务" aria-label="新建任务">＋</button>
             </div>
           </div>
@@ -652,19 +745,11 @@
           <div class="work-col-body" id="work-artifact-body"></div>
         </section>
       </div>
-      <div id="work-modal" class="work-modal hidden">
-        <div class="work-dialog" role="dialog" aria-modal="true">
-          <div class="work-dialog-head">
-            <span id="work-dialog-title">新建</span>
-            <button id="work-dialog-close" class="work-icon-btn" title="关闭">✕</button>
-          </div>
-          <div class="work-dialog-body" id="work-dialog-body"></div>
-          <div class="work-dialog-foot">
-            <button id="work-dialog-cancel" class="work-btn ghost">取消</button>
-            <button id="work-dialog-ok" class="work-btn primary">保存</button>
-          </div>
-        </div>
-      </div>
+      <!-- 周 / 月 / 看板 / 统计：独立视图容器，今天视图仍用上面的三栏 -->
+      <div id="work-view-week" class="work-view hidden"></div>
+      <div id="work-view-month" class="work-view hidden"></div>
+      <div id="work-view-board" class="work-view hidden"></div>
+      <div id="work-view-stats" class="work-view hidden"></div>
     </section>
 
     <div class="chat-col">
@@ -972,6 +1057,9 @@
       </div>
     </div>
 
+    <!-- 提问标记：Solo 模式下右侧悬浮按钮，点一下跳回被标记的关键提问 -->
+    <div id="qmarks" class="qmarks hidden" aria-label="提问标记"></div>
+
     <!-- 自动化看板：回合跑在服务端，这里显示实时阶段 / 工具 / 验收进度 -->
     <div id="ap-live" class="ap-live hidden" aria-label="自动化运行看板">
       <div class="ap-live-bar">
@@ -987,6 +1075,12 @@
         <button id="ap-live-x" class="ap-live-x" type="button" title="收起看板">✕</button>
       </div>
       <div id="ap-live-body" class="ap-live-body hidden"></div>
+    </div>
+    <!-- 后台任务仍在跑（刷新 / 重开 / 断线后本地没有流）：一键把实时输出接回这个会话 -->
+    <div id="resume-bar" class="resume-bar hidden" role="status" aria-live="polite">
+      <span class="resume-dot" aria-hidden="true"></span>
+      <span class="resume-text">任务仍在后台运行</span>
+      <button id="btn-resume" class="resume-btn" type="button">回到实时输出</button>
     </div>
     <div class="composer">
       <button id="composer-handle" class="composer-toggle tip" type="button"
@@ -1004,10 +1098,12 @@
           <button id="queue-cancel" class="queue-cancel hidden" type="button" title="清空本会话的排队消息">全部取消</button>
         </div>
       </div>
+      <div id="ref-bar" class="quote-bar ref-bar hidden"></div>
       <div id="quote-bar" class="quote-bar hidden"></div>
       <div id="attach-bar" class="attach-bar hidden">
         <div id="attach-thumbs" class="attach-thumbs hidden"></div>
-        <span id="attach-doc" class="attach-doc hidden"></span>
+        <div id="attach-pastes" class="attach-pastes hidden"></div>
+        <div id="attach-docs" class="attach-docs hidden"></div>
         <span id="attach-text" class="attach-text">已附带图片 · 可继续输入文字后一起发送</span>
         <button id="attach-remove" class="attach-remove" title="移除附件">✕</button>
       </div>
@@ -1031,7 +1127,7 @@
       </div>
       <div class="composer-box">
         <div id="composer-pop" class="composer-pop hidden" role="listbox" aria-label="输入建议"></div>
-        <textarea id="input" rows="1" placeholder="给 AI 发送消息…（/plan 先出计划）"
+        <textarea id="input" rows="1" placeholder="给 AI 发送消息…（# 引用上下文，/plan 先出计划）"
                   role="combobox" aria-expanded="false" aria-autocomplete="list"
                   aria-controls="composer-pop" aria-label="给 AI 发送消息"></textarea>
         <button id="btn-clear-input" class="composer-clear hidden" type="button" title="清空输入" aria-label="清空输入">✕</button>
@@ -1181,6 +1277,21 @@
       <button id="ss-close" class="ss-close" type="button" title="关闭" aria-label="关闭搜索">✕</button>
     </div>
     <div id="ss-results" class="ss-results"></div>
+  </div>
+</div>
+
+<!-- 工作台通用弹窗：放在 #work-panel 之外，设置里的「备份与恢复」在别的模式也能打开 -->
+<div id="work-modal" class="work-modal hidden">
+  <div class="work-dialog" role="dialog" aria-modal="true">
+    <div class="work-dialog-head">
+      <span id="work-dialog-title">新建</span>
+      <button id="work-dialog-close" class="work-icon-btn" title="关闭">✕</button>
+    </div>
+    <div class="work-dialog-body" id="work-dialog-body"></div>
+    <div class="work-dialog-foot">
+      <button id="work-dialog-cancel" class="work-btn ghost">取消</button>
+      <button id="work-dialog-ok" class="work-btn primary">保存</button>
+    </div>
   </div>
 </div>
 
@@ -1733,76 +1844,14 @@
         </section>
       <section class="pane hidden" data-pane="keys">
           <h4 class="set-group">改键</h4>
-          <p class="hint">点条目右侧「<b>改键</b>」→ 按下新键即可（<code>Esc</code> 取消）。改动<b>即时生效并保存在本机</b>；与<b>同一分组内</b>已有键冲突会被拒绝，与<b>其它分组</b>撞键则允许并提示 —— 按「用户自定义优先」，你改过的那条会压过对方的默认键。灰显表示当前模式下不可用；每行可单独「重置」，底部可「全部恢复默认」。面板内的导航键（<code>↑↓</code> / <code>Tab</code> / <code>Enter</code> / <code>Esc</code>）属于控件标准交互，不开放修改。</p>
-          <input id="set-hk-search" class="field-input" type="text" placeholder="搜索功能名或按键…">
+          <p class="hint">点条目右侧「<b>改键</b>」→ 按下新键即可（<code>Esc</code> 取消）。改动<b>即时生效并保存在本机</b>；与<b>同一分组内</b>已有键冲突会被拒绝，与<b>其它分组</b>撞键则允许并提示 —— 按「用户自定义优先」，你改过的那条会压过对方的默认键。可以用「<b>解除</b>」取消某条绑定，用「<b>重置</b>」恢复单条默认，分组标题右侧可「恢复本组」，底部可「全部恢复默认」。灰显表示当前模式下不可用；面板内的导航键（<code>↑↓</code> / <code>Tab</code> / <code>Enter</code> / <code>Esc</code>）属于控件标准交互，不开放修改。</p>
+          <input id="set-hk-search" class="field-input" type="text" placeholder="搜索功能名、生效条件或按键…">
           <div id="set-hk-groups" class="hk-groups"></div>
           <div class="hk-foot"><button id="set-hk-reset-all" class="ghost" type="button">全部恢复默认</button></div>
 
           <h4 class="set-group">完整说明</h4>
-          <p class="hint">下列快捷键与实际行为一一对应（含不可改的面板内导航键）。标了「生效条件」的，只在满足条件时才生效。</p>
-
-          <h4 class="set-group">全局</h4>
-          <table class="key-table">
-            <tr><th>按键</th><th>作用</th><th>生效条件</th></tr>
-            <tr><td><kbd>Esc</kbd></td><td>依次关闭 GAL 的浮层：抽屉菜单 → 快速克隆 → 剧本面板 → 回顾面板</td><td>有对应浮层打开时（不限模式）</td></tr>
-          </table>
-
-          <h4 class="set-group">GAL 演出</h4>
-          <table class="key-table">
-            <tr><th>按键</th><th>作用</th><th>生效条件</th></tr>
-            <tr><td><kbd>空格</kbd> / <kbd>Enter</kbd></td><td>推进一句；正在逐字显示时先立即补全</td><td rowspan="4">GAL 模式、焦点不在输入框、角色编辑器未打开</td></tr>
-            <tr><td>按住 <kbd>Ctrl</kbd></td><td>快进（逐字显示速度 ×6）</td></tr>
-            <tr><td><kbd>A</kbd></td><td>切换自动播放</td></tr>
-            <tr><td><kbd>↑</kbd></td><td>打开「回顾对话」（回顾面板已打开时不重复开）</td></tr>
-            <tr><td>点击舞台任意处</td><td>等同「推进」</td><td>不点在按钮 / 面板上</td></tr>
-            <tr><td><kbd>Esc</kbd></td><td>关闭 GAL 角色面板（焦点在角色搜索框时）</td><td>角色列表面板打开时</td></tr>
-          </table>
-
-          <h4 class="set-group">编辑器 IDE</h4>
-          <table class="key-table">
-            <tr><th>按键</th><th>作用</th><th>生效条件</th></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>保存当前文件</td><td rowspan="3">IDE 模式</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>P</kbd></td><td>打开文件快速跳转</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd></td><td>打开命令面板</td></tr>
-            <tr><td><kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>在命令面板 / 文件面板内选择、执行、关闭</td><td>对应面板打开时</td></tr>
-            <tr><td><kbd>Enter</kbd></td><td>执行沙箱内搜索</td><td>焦点在搜索框时</td></tr>
-          </table>
-
-          <h4 class="set-group">编辑器（VS Code）</h4>
-          <p class="hint">这些动作由内置的 <b>Monaco</b>（VS Code 的编辑器本体）自己实现，<b>默认就与 VS Code 完全一致</b>（多光标、只读、查找框开着等边界场景都由它自己管）；只有你在上面改过键，才会把新键绑到同一个动作上。
-            含 <kbd>Ctrl</kbd>+<kbd>F</kbd> / <kbd>Ctrl</kbd>+<kbd>/</kbd> 这种「同一个组合键在编辑器里与在聊天区含义不同」的情况 —— 编辑器聚焦时归编辑器，否则归聊天区（这也是 VS Code 的语义）。</p>
-          <table class="key-table">
-            <tr><th>按键</th><th>作用</th></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>L</kbd></td><td>选中整行（连按可继续扩展）</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>Z</kbd></td><td>撤销</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd>（或 <kbd>Ctrl</kbd> + <kbd>Y</kbd>）</td><td>重做</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>/</kbd></td><td>切换行注释</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>K</kbd></td><td>删除当前行</td></tr>
-            <tr><td><kbd>Alt</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd></td><td>向上 / 向下移动行</td></tr>
-            <tr><td><kbd>Shift</kbd> + <kbd>Alt</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd></td><td>向上 / 向下复制行</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>Enter</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd></td><td>在下方 / 上方插入行</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>[</kbd> / <kbd>Ctrl</kbd> + <kbd>]</kbd></td><td>减少 / 增加缩进</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>D</kbd></td><td>选中下一个相同词（多光标）</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>F</kbd> / <kbd>Ctrl</kbd> + <kbd>H</kbd></td><td>编辑器内查找 / 替换</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>G</kbd></td><td>跳转到行…</td></tr>
-          </table>
-
-          <h4 class="set-group">输入框</h4>
-          <table class="key-table">
-            <tr><th>按键</th><th>作用</th></tr>
-            <tr><td><kbd>Enter</kbd></td><td>发送消息</td></tr>
-            <tr><td><kbd>Shift</kbd> + <kbd>Enter</kbd></td><td>换行（不发送）</td></tr>
-            <tr><td><kbd>Enter</kbd></td><td>提交 Agent 提问卡的回答</td></tr>
-          </table>
-
-          <h4 class="set-group">设置面板（本页）</h4>
-          <table class="key-table">
-            <tr><th>按键</th><th>作用</th><th>生效条件</th></tr>
-            <tr><td><kbd>Esc</kbd></td><td>关闭设置；搜索框有内容时先清空搜索</td><td rowspan="2">设置面板打开时</td></tr>
-            <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>保存并关闭</td></tr>
-            <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>切换左侧分类（到头不循环）</td><td>焦点不在输入框 / 下拉 / 文本域时</td></tr>
-            <tr><td><kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>搜索结果：选择 / 跳转 / 清空</td><td>焦点在搜索框时</td></tr>
-          </table>
+          <p class="hint">按键与实际判定同源：标「可改键」的条目会跟随上方改动实时更新；其余是固定键或控件标准交互。上方搜索框同时过滤改键列表和这张清单。</p>
+          <div id="set-hk-doc" class="hk-doc"></div>
         </section>
       <section class="pane hidden" data-pane="data">
         <h4 class="set-group" data-search="版本 关于 应用信息 数据目录 环境 python">应用信息</h4>
@@ -1859,12 +1908,13 @@
 
         <h4 class="set-group">模型接入</h4>
 
-        <details class="help-sec" data-search="图像识别 视觉 api 聊天模型 协议 dashscope openai">
-          <summary>图像识别：独立视觉 API vs 聊天模型</summary>
+        <details class="help-sec" data-search="图像识别 视觉 api 聊天模型 协议 dashscope openai 多模态 直发">
+          <summary>图像识别：聊天模型直发 vs 独立视觉 API</summary>
           <div class="help-body">
             <ul>
-              <li>默认用「模型接入 → 视觉接口」里配置的视觉 API。</li>
-              <li>开启「<strong>使用聊天模型识别图片</strong>」后，改由「模型接入 → 聊天接口」的模型与密钥识图（要求聊天模型自带视觉能力，如 GPT-4o / deepseek-flash / 通义兼容模式）。</li>
+              <li><strong>默认由聊天模型直接看图</strong>：图片作为多模态内容随消息直发，少一次单独调用（要求聊天模型自带视觉能力，如 GPT-4o / qwen-vl / deepseek-flash）。</li>
+              <li>勾选「模型接入 → 视觉接口 → 使用方式 → <strong>优先使用视觉 API</strong>」后，改由下面这套独立视觉服务识图。本地轻量模型是纯文本模型，这时也会自动走视觉 API。</li>
+              <li>两条通道都配了密钥时，截图回灌、PDF 扫描页等场景在某条通道<strong>实际失败</strong>后会自动换另一条再试。</li>
               <li>两种视觉协议的区别：<br>
                 · <strong>DashScope 原生</strong>：图片放 <code>input.messages[].content</code> 的 <code>{"image": ...}</code>，结果取 <code>output.choices[0].message.content</code>（qwen-vl-plus / max）。<br>
                 · <strong>OpenAI 兼容</strong>：图片放 <code>messages[].content</code> 的 <code>{"type":"image_url"}</code>，结果取 <code>choices[0].message.content</code>（GPT-4o、vLLM / Ollama、deepseek-flash）。</li>
@@ -1915,7 +1965,7 @@
             <p>估算当前会话离模型上下文上限还有多远，避免"聊到一半突然报错"。相关设置项在「上下文与压缩」。</p>
             <ul>
               <li><strong>两个数字是什么</strong>：<strong>模型上下文窗口</strong>是模型一次能装的 token 总量（输入 + 输出都算）；<strong>留给 AI 回答</strong>是从窗口里先划给本次回答的空间，聊天历史最多用到「窗口 − 预留」。预留不是 <code>max_tokens</code>，不会硬性截断回答，只会让压缩更早发生。</li>
-              <li><strong>窗口填 0 = 不限</strong>：不猜模型窗口、不显示圆环、不按窗口触发压缩，也不按窗口夹输出上限；只有请求体字符上限（默认 50 万字符）兜底。</li>
+              <li><strong>窗口填 0 = 不限</strong>：不猜模型窗口、不显示圆环、不按窗口触发压缩，也不按窗口夹输出上限；只保留请求体大小的实现层兜底。</li>
               <li><strong>怎么看</strong>：最新一条回复的右下角有一个小圆环，右侧是占用百分比，环的颜色随剩余量转黄 / 红。</li>
               <li><strong>点圆环</strong>：直接执行「压缩历史」——把较早的对话总结成摘要，确认后才会执行；原文不会被删除。</li>
               <li><strong>点百分比</strong>：打开「上下文与压缩」详情，可看各分项占用与摘要全文，或「恢复原文」撤销压缩。</li>
@@ -1926,9 +1976,25 @@
               <li><strong>预压缩（可用提示词预算）</strong>：已用达到 min(窗口的 80%，窗口 − 输出上限 − 8192) 时，后台开始把较早的对话总结成摘要；本轮请求不等待，下一轮自动生效。</li>
               <li><strong>兜底压缩（已用 + 预留超窗口）</strong>：发送前「已用 + 预留」仍超窗口时，会同步再压一次；若压缩失败，本轮只临时省略较早消息再发送，本地原文不会被删除。</li>
               <li><strong>保留哪些</strong>：默认保留最近约 16% 输入窗口（窗口 − 输出上限）的原文（至少 8 条，最多 60 条），更早的进入摘要；新摘要会合并旧摘要，保留未完成事项与用户明确指令。</li>
+              <li><strong>常态控制（省费模式）</strong>：开启省费模式后，每轮还会按「历史原文预算」（默认 40000 tokens）压一次回合起点，超出部分进结构化摘要；<strong>当前回合的原文永远保留</strong>（切点不会越过最后一条真正的用户消息）。窗口阈值（80%）是超限救火，这一层是每轮生效的常态控制，详见下一条。</li>
               <li><strong>摘要用哪个模型</strong>：走「轻量模型」（设置 → 聊天 API 里的小模型配置）；未配置时自动沿用主模型。</li>
               <li><strong>压缩前写记忆</strong>：生成摘要时会附带最多 6 条「记忆要点」，写入本会话记忆，避免摘要失真后彻底失忆。</li>
-              <li>窗口 / 预留可在「上下文与压缩」里按所用模型填写（默认 128000 / 16384，同步压缩硬上限约 111600 tokens）。填写框下方会实时算出可用提示词预算与压缩触发点；估算为近似值，仅供参考。</li>
+              <li>窗口 / 预留可在「上下文与压缩」里按所用模型填写。出厂默认 <code>100000000</code> / <code>16384</code>，即等效「足够大」，不会按窗口比例触发压缩；想启用按比例的预压缩，就把它改成模型的真实窗口（例如 128000）。填写框下方会实时算出可用提示词预算与压缩触发点；估算为近似值，仅供参考。</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="help-sec" data-search="省费模式 token 引用 句柄 工作集 历史原文预算 单回合预算 附图 缓存 prefix cache anthropic">
+          <summary>省费模式：历史预算 / 引用句柄 / 提示缓存</summary>
+          <div class="help-body">
+            <p>设置 →「上下文与压缩 → 省费模式」。它只改变<strong>发给模型的历史</strong>，本地原文一条都不删。</p>
+            <ul>
+              <li><strong>省费模式</strong>（默认开启）：@文件 / @目录 的正文只在当轮内联；更早轮次只留「路径:行号」句柄，需要时模型用 <code>read_file</code> 按需取回。界面状态、意图、自动化目标改贴到请求末尾，避免整段历史每轮失去前缀缓存。关闭后回到旧行为（<code>quality</code>，装配结果与旧版一致）。</li>
+              <li><strong>历史原文预算</strong>（默认 40000 tokens）：每轮最多重发多少历史原文，超出部分压进结构化摘要；<strong>当前回合始终保留原文</strong>。调大更保守也更费钱；调小更省，但更依赖模型按需重读文件。</li>
+              <li><strong>单回合输入预算</strong>（默认 3000 万 tokens）：一个回合累计输入超过它就先收尾，并保留「继续任务」，只拦病态长跑。</li>
+              <li><strong>历史附图保留条数</strong>（默认 2）：把最近几条带图消息重新作为图片附上（每条最多 2 张）。设为 0 时历史里只留「可回看附件」一行，模型可能要求你重新发图。</li>
+              <li><strong>Anthropic 提示缓存</strong>（默认开启）：在稳定段与历史前缀各打一个 <code>cache_control</code> 断点，命中约按 0.1 倍计费、写入约 1.25 倍；OpenAI 兼容通道不受影响。</li>
+              <li><strong>怎么看效果</strong>：上下文弹窗的「token 明细」里有「单次调用 P50」与「前缀复用」两张卡；前缀复用越低，说明 system / 历史越不稳定，缓存越容易失效。</li>
             </ul>
           </div>
         </details>
@@ -1938,9 +2004,9 @@
           <div class="help-body">
             <p>输入框的「联网搜索」开关开启后，会把这个能力交给模型：<strong>模型自己判断这一轮要不要查</strong>——需要时它给出关键词式检索式，程序并行搜索、抓取正文、把资料回灌给它，然后它再据此作答（回答上方会出现可折叠的「参考来源」列表）。<strong>不需要时它就不查</strong>，不会无谓地多搜一轮。</p>
             <ul>
-              <li><strong>服务商 / 密钥</strong>：在「联网与数据源 → 联网搜索」里选服务商（内置博查 / 豆包搜索 / Tavily）并填密钥；接口地址留空则用该服务商的默认地址。</li>
+              <li><strong>服务商 / 密钥</strong>：默认「自动（免注册引擎链）」——Firecrawl → Keenable → You.com 依次尝试，都不需要注册或密钥，额度耗尽的引擎会冷却一段时间后自动跳过；也可改选博查 / 豆包搜索 / Tavily 并填密钥。接口地址留空则用该服务商的默认地址。顶部的「启用 modsearch」是总开关，关掉后不调用任何免注册引擎、也不会把网页发给 Firecrawl 云端抓取。</li>
               <li><strong>谁来改写检索式</strong>：由模型在调用搜索时自己给 1–3 个关键词（口语化的「它 / 这个」它会自己补成具体名字），不再额外单独判断一次。</li>
-              <li><strong>抓取正文</strong>：对命中的网页取正文（而不是只有摘要），信息密度更高；可设抓取条数。抓取优先走 Jina Reader（免密钥），失败回落直连抓取，再失败则保留摘要。</li>
+              <li><strong>抓取正文</strong>：对命中的网页取正文（而不是只有摘要），信息密度更高；可设抓取条数。默认先用云端浏览器（Firecrawl，能读 JS 渲染的页面），失败回落 Jina Reader（免密钥）→ 直连抓取，再失败则保留摘要。云端抓取会把目标 URL 发给 Firecrawl，私网地址始终走本地。</li>
               <li><strong>结果条数</strong>：每个检索式各取多少条。</li>
               <li><strong>注入不入库</strong>：抓到的正文只用于本轮提示，不会写进会话文件。</li>
             </ul>
@@ -2026,7 +2092,7 @@
           <summary>GAL 演出：主题 / 打字机 / 特效 / 立绘</summary>
           <div class="help-body">
             <ul>
-              <li><strong>演出主题</strong>：三套配色（樱粉 / 夜蓝 / 和风纸），作用于对白框、说话人名牌与选项按钮。</li>
+              <li><strong>演出主题</strong>：六套配色（樱粉 / 夜蓝 / 和风纸 / 极简黑白 / 霓虹夜景 / 像素复古），作用于对白框、说话人名牌与选项按钮。</li>
               <li><strong>对白框最大高度</strong>：占舞台高度的百分比（30–70）；对白框是浮在立绘之上的半透明层，立绘会自动避让。</li>
               <li><strong>打字机</strong>：「逐字显示对白」开关 + 速度（8–120 字/秒，线性生效）。关闭即整句直接出现。</li>
               <li><strong>关键词特效</strong>：在台词里写 <code>*关键词*</code> 或 <code>【关键词】</code> 触发（不会被朗读）。可自定义关键词、CSS 效果与音效——编辑 <code>data/gal/effects/effects.json</code>，音效放 <code>data/gal/effects/</code>；<code>mode</code> 支持 before / after / loop / stop（loop、stop 用于循环音效）。</li>
@@ -2305,17 +2371,13 @@
 
         <h4 class="set-group">其它</h4>
 
-        <details class="help-sec" data-search="快捷键 按键 esc ctrl 操作">
+        <details class="help-sec" data-search="快捷键 按键 esc ctrl 操作 模式切换 补全 审阅">
           <summary>快捷键总览</summary>
           <div class="help-body">
-            <p>完整清单（全局 / GAL 演出 / 编辑器 IDE / 输入框 / 设置面板）见左侧「<strong>快捷键</strong>」分类。</p>
-            <ul>
-              <li><strong>输入框</strong>：<code>Enter</code> 发送、<code>Shift+Enter</code> 换行。</li>
-              <li><strong>GAL</strong>：<code>空格</code> / <code>Enter</code> 推进、按住 <code>Ctrl</code> 快进、<code>A</code> 自动播放、<code>↑</code> 打开回顾、<code>Esc</code> 关面板。</li>
-              <li><strong>设置</strong>：<code>Esc</code> 关闭、<code>Ctrl+S</code> 保存、<code>←</code> / <code>→</code> 切分类；左上角搜索框可直接搜「快捷键」跳过来。</li>
-              <li><strong>IDE</strong>：<code>Ctrl+S</code> 保存、<code>Ctrl+P</code> 打开文件、<code>Ctrl+Shift+P</code> 命令面板。</li>
-              <li><strong>两个「?」别混</strong>：键盘按 <code>?</code>（<code>Shift+/</code>）打开<strong>快捷键清单</strong>（可改键）；界面右下角的 <code>?</code> 按钮打开的是<strong>本页「功能说明」</strong>。</li>
-            </ul>
+            <p>完整清单与改键在左侧「<strong>快捷键</strong>」：标「可改键」的条目与改键列表同源，改完立刻同步。下面按分组列出每组的代表键：</p>
+            <ul id="help-key-summary"><li class="hint">加载中…</li></ul>
+            <p class="help-tip"><strong>两个「?」别混</strong>：键盘按 <code>?</code>（<code>Shift+/</code>）打开<strong>快捷键清单</strong>（可改键）；界面右下角的 <code>?</code> 按钮打开的是<strong>本页「功能说明」</strong>。</p>
+            <p class="help-tip">面板内的导航键（<code>↑↓</code> / <code>Tab</code> / <code>Enter</code> / <code>Esc</code>）属于控件标准交互，不开放改键。</p>
           </div>
         </details>
 
@@ -2361,6 +2423,8 @@
       </div>
       <div class="review-actions">
         <span id="review-idx" class="review-idx"></span>
+        <button id="review-ai-btn" class="review-btn ghost" type="button"
+                title="让 AI 总结这批改动（摘要 + 风险 + 流程图）">AI 摘要</button>
         <button id="review-prev" class="ico-btn" title="上一个文件" type="button">‹</button>
         <button id="review-next" class="ico-btn" title="下一个文件" type="button">›</button>
         <button id="review-undo" class="review-btn ghost" type="button">撤销 <kbd>Ctrl</kbd><kbd>Backspace</kbd></button>
@@ -2370,6 +2434,7 @@
     </div>
     <div class="review-body">
       <div id="review-hunk-bar" class="hunk-bar hidden"></div>
+      <div id="review-ai" class="ide-review-ai hidden"></div>
       <div id="review-diff" class="review-editor"></div>
     </div>
   </div>
@@ -2678,6 +2743,8 @@
         <div class="notes-editor-head">
           <span id="nt-path" class="notes-path">未打开笔记</span>
           <div class="notes-actions">
+            <button id="nt-lint" class="ghost nt-lint" title="Markdown 语法纠错：只在编辑区下方提示问题，可一键修正安全项"
+                    aria-pressed="true"><span class="nt-lint-sw"></span>纠错<b id="nt-lint-n" class="nt-lint-n"></b></button>
             <button id="nt-edit" class="ghost">编辑</button>
             <button id="nt-preview" class="ghost">预览</button>
             <button id="nt-rename" class="ghost">重命名</button>
@@ -2686,6 +2753,7 @@
         </div>
         <textarea id="nt-textarea" class="notes-textarea hidden"
                   placeholder="# 标题&#10;&#10;正文…用 [[笔记名]] 建立双链，左侧图谱会自动连起来。"></textarea>
+        <div id="nt-lint-box" class="nt-lint-box hidden"></div>
         <div id="nt-preview-box" class="notes-preview content hidden"></div>
         <div id="nt-empty" class="hint notes-empty">从左侧选择一篇笔记，或点「笔记」按钮新建。</div>
       </section>
@@ -2694,9 +2762,11 @@
         <div class="notes-tabs">
           <button class="ntab active" data-ntab="graph">关系图谱</button>
           <button class="ntab" data-ntab="backlinks">反向链接</button>
+          <button class="ntab" data-ntab="annos">批注<span id="nt-anno-count" class="ntab-count"></span></button>
         </div>
         <div id="nt-graph" class="notes-graph"></div>
         <div id="nt-backlinks" class="notes-backlinks hidden"></div>
+        <div id="nt-annos" class="notes-annos hidden"></div>
       </aside>
     </div>
   </div>
@@ -2716,6 +2786,25 @@
     <div class="modal-foot">
       <button id="input-cancel" class="ghost" type="button">取消</button>
       <button id="input-ok" class="primary" type="button">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 回滚前预览：列出这次回滚会修改 / 删除 / 新建哪些文件 -->
+<div id="rollback-modal" class="modal hidden">
+  <div class="modal-card rb-card">
+    <div class="modal-head">
+      <div class="modal-head-title">回滚确认</div>
+      <button id="rb-close" class="modal-close" type="button" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="rb-lead" class="rb-lead">确定要回滚到此步骤并重新开始吗？</div>
+      <div id="rb-sub" class="rb-sub"></div>
+      <ul id="rb-files" class="rb-files"></ul>
+    </div>
+    <div class="modal-foot">
+      <button id="rb-cancel" class="ghost" type="button">取消</button>
+      <button id="rb-ok" class="primary" type="button">确认</button>
     </div>
   </div>
 </div>
@@ -2844,11 +2933,10 @@
 </div>
 
 <!-- 右下角 ? 按钮：点开「设置 → 功能说明」 -->
-<div id="hk-hud" class="hk-hud collapsed">
+<div id="hk-hud" class="hk-hud">
   <button id="hk-hud-toggle" class="hk-hud-toggle" type="button" title="打开功能说明" aria-label="打开功能说明">
     <svg class="ic"><use href="#i-question"/></svg>
   </button>
-  <div id="hk-hud-list" class="hk-hud-list"></div>
 </div>
 
 <!-- 快捷键清单（按 ? 或 Ctrl+/ 打开；可逐项改键） -->
@@ -2859,20 +2947,21 @@
       <button id="hk-panel-close" class="modal-close" title="关闭">✕</button>
     </div>
     <div class="modal-body">
-      <input id="hk-search" class="field-input" type="text" placeholder="搜索功能名或按键…">
+      <input id="hk-search" class="field-input" type="text" placeholder="搜索功能名、生效条件或按键…">
       <div id="hk-groups" class="hk-groups"></div>
-      <p class="hint">改键即时生效，存在本机浏览器里；与同组已有键冲突会被拒绝并提示。灰显项表示当前模式下不可用。</p>
+      <p class="hint">改键即时生效，存在本机浏览器里；与同组已有键冲突会被拒绝并提示。顶部可按分组筛选或只看已改；灰显项表示当前模式下不可用。</p>
     </div>
     <div class="modal-foot">
+      <button id="hk-open-doc" class="ghost">完整说明…</button>
       <button id="hk-reset-all" class="ghost">全部恢复默认</button>
     </div>
   </div>
 </div>
 
-<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<div id="toast-stack" class="toast-stack" role="status" aria-live="polite"></div>
 <input type="file" id="file-input" accept="image/*" hidden>
-<input type="file" id="doc-input" hidden
-       accept=".txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.log,.yaml,.yml,.py,.js,.ts,.html,.css,.xml,.docx,.xlsx,.pdf">
+<input type="file" id="doc-input" multiple hidden
+       accept=".txt,.md,.markdown,.tex,.csv,.tsv,.json,.jsonl,.log,.yaml,.yml,.py,.js,.ts,.html,.css,.xml,.docx,.pptx,.xlsx,.pdf">
 
 <script>window.__TOKEN__ = "%%TOKEN%%";</script>
 <!-- 以下三方库全部异步加载：不阻塞首屏，加载完成后由 app.js 补齐渲染 -->
@@ -2934,9 +3023,13 @@
 <!-- 前端逻辑按功能拆分，按顺序加载（普通脚本，共享全局作用域；最后一个负责启动 init） -->
 <script src="/static/core.js"></script>
 <script src="/static/markdown.js"></script>
+<script src="/static/mdlint.js"></script>
 <script src="/static/rich-media.js"></script>
 <script src="/static/chat.js"></script>
 <script src="/static/stream.js"></script>
+<script src="/static/selkit.js"></script>
+<script src="/static/askkit.js"></script>
+<script src="/static/aside.js"></script>
 <script src="/static/settings.js"></script>
 <script src="/static/observe.js"></script>
 <script src="/static/skills.js"></script>
@@ -2953,6 +3046,8 @@
 <script src="/static/gal/gal-voice.js"></script>
 <script src="/static/gal/gal-editor.js"></script>
 <script src="/static/gal/gal-ide.js"></script>
+<script src="/static/transpage.js"></script>
+<script src="/static/reader.js"></script>
 <script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
 <script src="/static/ide-term.js"></script>
@@ -2963,6 +3058,7 @@
 <script src="/static/auto.js"></script>
 <script src="/static/composer.js"></script>
 <script src="/static/hk-core.js"></script>
+<script src="/static/hk-doc.js"></script>
 <script src="/static/hotkeys.js"></script>
 <script src="/static/hall.js"></script>
 <script src="/static/hall-geo.js"></script>
@@ -2975,7 +3071,17 @@
 <script src="/static/hall-observe.js"></script>
 <script src="/static/hall-interview.js"></script>
 <script src="/static/hall-plugins.js"></script>
-<script src="/static/work.js"></script>
+<script src="/static/work/core.js"></script>
+<script src="/static/work/events.js"></script>
+<script src="/static/work/tasks.js"></script>
+<script src="/static/work/artifacts.js"></script>
+<script src="/static/work/workflows.js"></script>
+<script src="/static/work/backup.js"></script>
+<script src="/static/work/views.js"></script>
+<script src="/static/work/stats.js"></script>
+<script src="/static/work/focus.js"></script>
+<script src="/static/work/templates.js"></script>
+<script src="/static/work/misc.js"></script>
 <script src="/static/init.js"></script>
 </body>
 </html>

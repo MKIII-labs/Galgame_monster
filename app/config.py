@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """接口配置：服务商默认值、配置读写（带缓存）、地址补全与思考参数"""
 import copy
+import re
 
 from app.store import CONFIG_FILE, read_json, write_json
 
@@ -30,11 +31,38 @@ DEFAULT_CONFIG = {
     # 分级模型调度：轻量任务（摘要 / 记忆挑选 / GAL 判定 / 语音矫正）可选用的「小模型」。
     # 三项都留空 = 沿用主 chat 模型（默认，行为与从前一致）。
     "light_url": "", "light_api_key": "", "light_model": "",
+    # 模型分级策略：off = 纯 API（忽略本地 light，也不启用增量压缩）；
+    # on = 轻量任务走 light（可以是本地 Ollama），并按 hybrid_* 预算提前压缩历史；
+    # light = 主对话也只走 light（不限定本地还是云端）。
+    # 一键关闭即可回到原来的纯 API 行为，不需要改其它配置。
+    "hybrid_mode": "off",
+    "hybrid_context_limit": 64000,      # 开启时替代 chat_context_limit 的窗口预算
+    "hybrid_keep_ratio": 0.45,          # 压缩时保留最近多少比例的原文
+    "hybrid_summary_tokens": 8192,      # 摘要输出上限
+    "hybrid_quality_gate": 0.55,        # 本地摘要必须保住的原文字符锚点加权召回率
+    "hybrid_fallback_api": True,        # 本地摘要不合格 / 失败时回退主模型
+    "hybrid_light_chunk_tokens": 3500,  # 本地摘要单次输入上限（8k 上下文留余量）
+    "hybrid_local_max_range_tokens": 12000,  # 超过这个区间就改用主模型一次压完（控延迟）
+    "hybrid_ide_complete": False,       # 默认不让本地模型接 IDE 内联补全（延迟敏感）
+    # 仅轻量模型（hybrid_mode=light）：主对话也走 light。
+    # light 是本地服务（Ollama）时上下文只有 8–16k，装不下工具 schema，
+    # 此时自动按「无工具闲聊/问答」运行；云端 light 不受这条限制。
+    "local_context_limit": 12000,
+    "local_reserve_output": 2048,
+    "local_keep_ratio": 0.35,
+    "local_summary_tokens": 2048,
+    "local_max_range_tokens": 10000,
     "chat_think_mode": "", "chat_think_enabled": False, "chat_think_level": "high",
     "chat_native_tools": True,       # 优先用模型原生 function calling；不支持时自动回退文本协议
-    # 0 = 不限：不按窗口触发压缩（只有请求体字符硬上限兜底）；
-    # 填具体值（tokens）才启用「占用到阈值就压缩」。
-    "chat_context_limit": 0, "chat_reserve_output": 16384,
+    # Solo 旁注提问：选中一段文本就地提问，走独立请求，不写会话 / 不调工具。
+    "aside_enabled": True,
+    "aside_model": "",               # 留空 = 跟随主聊天模型
+    "aside_max_tokens": 800,
+    # 提问时自动从沙箱代码索引召回相关片段（只读）；没有索引会先后台建一次
+    "chat_auto_context": True,
+    # 默认 1 亿 token：等效于“足够大”的窗口，同时保留窗口语义（0 = 完全不限，
+    # 既不显示占用比例，也不会触发任何按窗口比例的逻辑）。
+    "chat_context_limit": 100_000_000, "chat_reserve_output": 16384,
     # 上下文压缩：占用达到 ratio 时后台预压缩；保留最近 keep_ratio 的原文；
     # 摘要输出 token 上限。比例按 0–1 存储，设置页用百分数。
     # keep_ratio 的口径对齐 dsh：按 (窗口 - 输出上限) 的比例算，而不是整个窗口。
@@ -46,6 +74,31 @@ DEFAULT_CONFIG = {
     # 0 = 关闭（整段保留）。
     "history_process_keep_turns": 2,
     "history_process_digest": 240,
+    # 省费模式（token_profile）：
+    #   balanced = 引用正文只在最后一条用户消息内联、历史轮次只留句柄；
+    #              界面上下文 / 意图提示 / 自动化目标贴到请求末尾，不破坏 system 前缀。
+    #   quality  = 与旧行为逐字节一致（一键回滚，不需要改代码）。
+    "token_profile": "balanced",
+    # 省费模式的核心：跨回合历史「原文」预算（tokens）。0 = 关闭（回到按窗口压缩）。
+    # 只要历史原文超过它，就在后台把更早的部分压进结构化摘要；当前回合永远保留原文。
+    # 这不是窗口：模型仍可 read_file / read_tool_result 取回任何细节。
+    "history_working_set_tokens": 40000,
+    # 超过工作集的多少倍时改为「发送前同步压缩」，避免一上来就发个 20 万 token 的请求。
+    "history_working_set_sync_ratio": 1.5,
+    # 单回合累计输入预算（tokens）：0 = 不限。默认 3000 万，只拦病态长跑
+    # （实测最大单回合 4.65 亿、P99 约 1340 万），正常任务不会触发。
+    "agent_turn_token_budget": 30_000_000,
+    # 历史附图：把最近几条「带图片的用户消息」重新作为多模态内容附上。
+    # 0 = 关闭（历史里只留一行「可回看附件」，模型可能要求用户重新发图）。
+    # 每张图约 1600 token；默认 2 条消息 × 最多 2 张。
+    "image_history_keep": 2,
+    # Anthropic 通道的提示缓存（cache_control）：命中约 0.1x、写入约 1.25x。
+    # 只作用于主对话流式请求；轻量任务不缓存（太短，写不划算）。
+    "anthropic_cache": True,
+    # 发给前端的「当前会话消息窗口」条数（0 = 全部）。
+    # 前端已支持分页（msg_total / msg_start + /api/session/messages），
+    # 调小可显著缩小 done 事件体积：80 条约 780KB，24 条约 190KB，16 条约 127KB。
+    "chat_payload_msg_window": 24,
     # 本会话记忆的自整理：
     # soft_limit：超过这么多条时提示先整理（0 = 不限）；
     # organize_every：每多少个工具轮提醒一次整理（0 = 关）；
@@ -98,12 +151,6 @@ DEFAULT_CONFIG = {
     # subprocess 一律拒绝；打开后写入仍只能落在沙箱内。只在可信任务里开。
     "code_mode_allow_write": False,
     "code_mode_allow_cmd": False,
-    # 应用窗口关闭后，若还有任务在生成，服务继续保活的分钟数（期间重开窗口可接回）；
-    # 0 = 立即退出（旧行为）。chat_window_keep_alive 为 True 时忽略这个上限。
-    "chat_window_grace_min": 10,
-    # 窗口关闭后是否等正在生成的任务彻底结束再退出（对齐 dsh：任务与 UI 解耦）。
-    # False 时退回 chat_window_grace_min 的分钟数。
-    "chat_window_keep_alive": True,
     # 思考是否落库：开着时刷新会话仍能回看思考；关掉只存正文 / 工具的顺序。
     # 思考只写本地 sessions.json，不会上传。
     "chat_persist_reasoning": True,
@@ -114,8 +161,14 @@ DEFAULT_CONFIG = {
     "vision_use_chat": False, "vision_balance_url": "",
     # 默认：聊天模型支持识图就用聊天模型；勾选此项则优先使用独立的视觉 API
     "vision_prefer_api": False,
-    "search_enabled": False, "search_provider": "bocha", "search_api_key": "",
+    "search_enabled": False, "search_provider": "auto", "search_api_key": "",
     "search_url": "", "search_count": 8,
+    # 自动模式的免注册引擎：各自的 Key（留空即用共享免注册额度）与是否参与链
+    "search_engine_keys": {}, "search_engine_enabled": {},
+    # modsearch 总开关：关闭后不调用免注册引擎链，也不再把网页发给 Firecrawl 云端抓取
+    "search_modsearch_enabled": True,
+    # 抓正文时先用云端浏览器（Firecrawl，能渲染 JS 页面），失败再回落本地抓取
+    "search_fetch_cloud": True,
     # 默认：聊天模型自带搜索（目前是 DeepSeek Search API，复用聊天密钥）优先；
     # 勾选此项则始终使用下面配置的服务商（博查 / 豆包 / Tavily）
     "search_prefer_api": False,
@@ -380,6 +433,15 @@ DEFAULT_CONFIG = {
     "autopilot_verify": True,        # 没有机检命令时，用独立评审员判定 rubric
     # 遇到提问卡 / 正文决策问句时的策略：auto（一律自决）/ smart（可逆自决、不可逆问人）/ ask（一律问）
     "autonomy_question_policy": "smart",
+    # 上面这档策略的生效范围：autopilot（仅自动化，默认）/ all（所有对话）
+    "question_policy_scope": "autopilot",
+    # 任务 / 提问的通知：横幅、声音、按事件开关、音量（0-100）
+    "notify_banner": True,
+    "notify_sound": True,
+    "notify_done": True,
+    "notify_ask": True,
+    "notify_error": True,
+    "notify_volume": 60,
     # 插件：加载 data/plugins/*.py（每个文件提供 register()）。默认关闭 —— 插件是任意 Python 代码。
     "plugins_enabled": False,
     # 单个插件的停用名单（目录包 / 单文件插件的 id）；启停后需重启进程
@@ -426,7 +488,10 @@ DEFAULT_CONFIG = {
     # ---- Computer Use（受控浏览器）----
     # 默认关闭：开启后模型多出 5 个浏览器工具，并且会真的弹出一个 Edge 窗口。
     "computer_enabled": False,
-    # 无限制：不再要求站点白名单（内置金融 / 邮箱 / 密码管理器等禁区仍拒绝）
+    # 注意：computer_site_mode 不写默认值。load_config 会自动补默认键，一旦补成 "ask"
+    # 就再也走不到「旧键 computer_browser_unrestricted=true → allow」的兼容分支。
+    # 新装用户没有这个键 → site_mode() 回退 ask；用户保存设置后才会显式写入。
+    # 旧键：兼容旧配置与旧客户端；true 等价于 computer_site_mode=allow
     "computer_browser_unrestricted": False,
     # 允许操作的站点（host 或 *.host）。留空 = 每个新站点都先问你。
     "computer_sites": [],
@@ -493,9 +558,33 @@ _OBSOLETE_KEYS = {
 }
 
 
+_LIST_KEYS = ("computer_sites", "computer_apps", "computer_extra_block")
+
+
+def _list_value(value):
+    """列表型配置统一成数组：兼容旧客户端传来的换行 / 逗号分隔字符串。"""
+    if isinstance(value, str):
+        parts = re.split(r"[\s,;，；]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        parts = []
+        for item in value:
+            if isinstance(item, str):
+                parts.extend(re.split(r"[\s,;，；]+", item))
+            elif item:
+                parts.append(str(item))
+    else:
+        return []
+    return [p for p in (str(x).strip() for x in parts) if p]
+
+
 def save_config(config):
     if isinstance(config, dict) and any(k in config for k in _OBSOLETE_KEYS):
         config = {k: v for k, v in config.items() if k not in _OBSOLETE_KEYS}
+    if isinstance(config, dict):
+        config = dict(config)
+        for key in _LIST_KEYS:
+            if key in config:
+                config[key] = _list_value(config[key])
     write_json(CONFIG_FILE, config)
 
 
@@ -530,16 +619,57 @@ def get_api_kind(provider="chat", cfg=None):
     """协议族：openai（OpenAI 兼容）/ anthropic（原生 Messages）。
 
     显式配置优先；否则按接口地址判断——这样用户只换 URL 也能自动走对协议。
+    仅轻量模型模式下 chat 实际用的是 light 的地址，协议也按它判断。
     """
     from app import providers
     cfg = cfg or load_config()
+    if provider == "chat" and light_chat_mode(cfg):
+        url = (cfg.get("light_url") or "").strip()
+        return providers.kind_of(url, cfg.get("light_kind") or "")
     url = cfg.get(f"{provider}_url", "").strip() \
         or API_PROVIDERS.get(provider, {}).get("url_default", "")
     return providers.kind_of(url, cfg.get(f"{provider}_kind") or "")
 
 
+def is_local_url(url):
+    """本地推理服务（Ollama / LM Studio 之类）：用地址里的端口 / 关键字判断。"""
+    u = str(url or "").lower()
+    return bool(u) and ("11434" in u or "ollama" in u)
+
+
+def hybrid_on(cfg=None):
+    """混合 / 仅轻量模型：都会启用轻量模型与更积极的压缩。"""
+    cfg = cfg or load_config()
+    return str(cfg.get("hybrid_mode") or "off").strip().lower() in ("on", "light")
+
+
+def light_chat_mode(cfg=None):
+    """仅轻量模型：主对话也走 light（不限本地 / 云端）。"""
+    cfg = cfg or load_config()
+    return str(cfg.get("hybrid_mode") or "off").strip().lower() == "light"
+
+
+def light_chat_is_local(cfg=None):
+    """仅轻量模型 + light 指向本地服务：上下文只有 8–16k，需要关掉工具。"""
+    cfg = cfg or load_config()
+    return light_chat_mode(cfg) and is_local_url(cfg.get("light_url"))
+
+
 def get_api_conf(provider, cfg=None):
     cfg = cfg or load_config()
+    # 仅轻量模型：主对话复用 light；缺地址 / 模型时返回空，
+    # 让上层给出「请先配置」的明确错误，而不是悄悄回落到主 API。
+    if provider == "chat" and light_chat_mode(cfg):
+        lu = (cfg.get("light_url") or "").strip()
+        lm = (cfg.get("light_model") or "").strip()
+        if not (lu and lm):
+            return "", "", ""
+        lk = (cfg.get("light_api_key") or "").strip()
+        if not lk and is_local_url(lu):
+            lk = "ollama"      # 本地服务不校验 key，但请求头需要占位
+        if get_api_kind("light", cfg) == "openai":
+            lu = resolve_endpoint(lu)
+        return lk, lu, lm
     p = API_PROVIDERS[provider]
     key = cfg.get(f"{provider}_api_key", "").strip()
     url = cfg.get(f"{provider}_url", "").strip() or p["url_default"]
@@ -574,6 +704,10 @@ def provider_chain(cfg=None):
     """
     from app import providers
     cfg = cfg or load_config()
+    if light_chat_mode(cfg):
+        # 只挂 light 一条：失败就是失败，避免悄悄回落到主 API
+        key, url, model = get_api_conf("chat", cfg)
+        return [("main", get_api_kind("chat", cfg), key, url, model)]
     out = []
     key, url, model = get_api_conf("chat", cfg)
     out.append(("main", get_api_kind("chat", cfg), key, url, model))
@@ -595,10 +729,13 @@ def provider_chain(cfg=None):
 
 
 def effective_think_mode(url):
-    """思考参数模式：off / openai / deepseek；配置为空时按接口地址自动判断"""
+    """思考参数模式：off / openai / deepseek / ollama；配置为空时按接口地址自动判断"""
     mode = (load_config().get("chat_think_mode") or "").strip()
     if mode in ("off", "openai", "deepseek"):
         return mode
+    if is_local_url(url):
+        # Ollama 的 OpenAI 兼容端点默认思考；关闭时必须显式发 reasoning_effort=none
+        return "ollama"
     return "deepseek" if "deepseek" in (url or "").lower() else "openai"
 
 def thinking_payload(mode, enabled, level):
@@ -607,10 +744,13 @@ def thinking_payload(mode, enabled, level):
     - off      : 不发送任何思考参数
     - openai   : 开启时发 reasoning_effort，关闭时不发（无法表达"禁用"）
     - deepseek : 始终发 thinking.type；开启时附带 reasoning_effort
+    - ollama   : 开启时发 reasoning_effort，关闭时发 reasoning_effort=none
     """
     level = (level or "high").strip() or "high"
     if mode == "off":
         return {}
+    if mode == "ollama":
+        return {"reasoning_effort": level if enabled else "none"}
     if mode == "openai":
         return {"reasoning_effort": level} if enabled else {}
     out = {"thinking": {"type": "enabled" if enabled else "disabled"}}
@@ -623,9 +763,12 @@ def use_chat_for_vision():
     """识图走哪条通道。
 
     默认用聊天模型识图（图片直发多模态，少一次单独调用）；只有用户勾选
-    「优先使用视觉 API」时才改走视觉 API。
+    「优先使用视觉 API」时才改走视觉 API。本地轻量模型是纯文本模型，
+    这时不再把图片发给它，改走独立的视觉 API。
     """
     cfg = load_config()
+    if light_chat_is_local(cfg):
+        return False
     if bool(cfg.get("vision_prefer_api")):
         return False
     return bool(get_api_conf("chat", cfg)[0])

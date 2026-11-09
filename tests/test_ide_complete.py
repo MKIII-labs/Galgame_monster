@@ -28,6 +28,38 @@ def test_clean_completion_empty():
     assert ic.clean_completion("") == ""
 
 
+def test_parse_candidates_splits_and_dedupes():
+    raw = "foo()\n---CANDIDATE---\nbar()\n---CANDIDATE---\nfoo()\n---CANDIDATE---\nbaz()"
+    assert ic.parse_candidates(raw, limit=2) == ["foo()", "bar()"]
+    assert ic.parse_candidates(raw, limit=9) == ["foo()", "bar()", "baz()"]
+    assert ic.parse_candidates("```python\nfoo()\n```", limit=2) == ["foo()"]
+    assert ic.parse_candidates("  \n---CANDIDATE---\n  ", limit=2) == []
+
+
+def test_parse_candidates_keeps_first_recommended():
+    raw = "return a\n---CANDIDATE---\nreturn b"
+    out = ic.parse_candidates(raw, suffix="\nnext()", limit=2)
+    assert out[0] == "return a"
+
+
+def test_clean_completion_keeps_text_without_overlap():
+    """后文没有重叠时不能误裁：短补全很容易被裁成空串。"""
+    assert ic.clean_completion("print(x)", suffix="\n    return y\n") == "print(x)"
+    assert ic.clean_completion("self.foo = bar",
+                               suffix="\n    return y\n") == "self.foo = bar"
+
+
+def test_complete_candidates_returns_list(monkeypatch):
+    monkeypatch.setattr(ic, "load_config", lambda: {"light_model": "m"})
+    monkeypatch.setattr(ic, "get_api_conf", lambda kind: ("k", "u", "m"))
+    monkeypatch.setattr(ic, "_quick_chat",
+                        lambda *a, **kw: "a = 1\n---CANDIDATE---\nb = 2")
+    texts, why = ic.complete_candidates("x.py", "python", "x = 0\n", "")
+    assert why == "" and texts == ["a = 1", "b = 2"]
+    # 兼容入口仍然只返回第一个候选
+    assert ic.complete("x.py", "python", "x = 0\n", "") == ("a = 1", "")
+
+
 def test_build_messages_trims_context():
     msgs = ic.build_messages("a.py", "python", "x" * 10000, "y" * 10000)
     assert msgs[0]["role"] == "system" and msgs[1]["role"] == "user"
@@ -67,3 +99,4 @@ def test_complete_refuses_when_switched_off(monkeypatch):
 def test_route_registered():
     from app.api import sandbox  # noqa: F401  导入时自注册路由
     assert ("POST", "/api/ide/complete") in snapshot()
+    assert ("POST", "/api/ide/review") in snapshot()

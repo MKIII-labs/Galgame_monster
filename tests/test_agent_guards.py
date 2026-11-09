@@ -281,9 +281,12 @@ def test_unrestricted_git_commit_ignores_setting():
     assert agent.judge_git_commit("ask", unrestricted=True)[0] == "allow"
 
 
-def test_unrestricted_computer_skips_allowlist_but_keeps_blocks():
+def test_unrestricted_computer_skips_allowlist_but_keeps_blocks(monkeypatch):
     """完全放权不再要求站点白名单，但金融 / 密码类内置禁区不可解除。"""
     from app.computer import policy
+    # 不读真实 data/config.json：本机若把站点档位设成 allow，首个断言会失真
+    monkeypatch.setattr(policy, "_cfg", lambda: {})
+    policy._session_granted.clear()
     assert policy.check("https://example.com/a")[0] == "ask"
     assert policy.check("https://example.com/a", skip_allowlist=True)[0] == "allow"
     assert policy.check("https://www.paypal.com/", skip_allowlist=True)[0] == "deny"
@@ -383,6 +386,18 @@ def test_visual_prompt_follows_tool_availability(tmp_path):
     # 开了 Agent 且有沙箱：允许提位图生成
     p3 = agent.build_agent_prompt({"agent_enabled": True, "sandbox": str(tmp_path)})
     assert "用 run_command 生成" in p3
+
+
+def test_visual_prompt_layers_archify_by_agent_mode():
+    # Agent + 沙箱：告诉模型「复杂的用 archify，没挂载就 tool_search 解锁」
+    ready = agent._visual_prompt(True)
+    assert "archify" in ready
+    assert 'tool_search("diagram")' in ready
+    # 普通聊天：archify 也能直接用（落 data/archify/<sid>/，不需要 Agent / 沙箱）
+    off = agent._visual_prompt(False)
+    assert "archify" in off
+    assert "不需要开启 Agent" in off
+    assert "tool_search" in off
 
 
 def test_capability_boundary_is_injected():

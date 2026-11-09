@@ -8,6 +8,7 @@
 | Monaco Editor | `monaco/` | MIT | https://github.com/microsoft/monaco-editor |
 | vis-network | `vis-network/` | MIT | https://github.com/visjs/vis-network |
 | xterm.js | `xterm/` | MIT | https://github.com/xtermjs/xterm.js |
+| PDF.js | `pdfjs/` | Apache-2.0（已随包附带 `LICENSE`） | https://github.com/mozilla/pdf.js |
 
 上表未随包附带许可证文件的库，如需完整版权声明，请以对应上游仓库的 `LICENSE` 为准。
 

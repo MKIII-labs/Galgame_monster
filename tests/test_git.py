@@ -125,6 +125,91 @@ def test_show_commit(repo):
         git.show_commit(str(repo), "HEAD --upload-pack=evil")
 
 
+def test_diff_text_work_includes_untracked(repo):
+    (repo / "a.txt").write_text("one\ntwo changed\n", encoding="utf-8")
+    (repo / "new.txt").write_text("hello\n", encoding="utf-8")
+    d = git.diff_text(str(repo), "work")
+    assert d["ok"] is True and d["scope"] == "work"
+    assert "-two" in d["text"] and "+two changed" in d["text"]
+    assert "new.txt" in d["files"] and "+hello" in d["text"]
+
+
+def test_diff_text_commit_and_branch(repo):
+    head = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    d = git.diff_text(str(repo), "commit", rev=head)
+    assert d["ok"] is True and "a.txt" in d["text"]
+
+    cur = git.branches(str(repo))["current"]
+    git.branch_create(str(repo), "feat")
+    git.checkout(str(repo), "feat")
+    (repo / "a.txt").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "--", "a.txt")
+    _git(repo, "commit", "-q", "-m", "feat")
+    # 切回主分支后比较：base 用分支名，避免把仓库状态搞乱
+    assert git.checkout(str(repo), cur)["ok"] is True
+    b = git.diff_text(str(repo), "branch", base=cur, head="feat")
+    assert b["ok"] is True and "feature" in b["text"]
+    assert b["label"] == "%s...feat" % cur
+
+
+def test_diff_text_rejects_bad_rev(repo):
+    with pytest.raises(git.GitError):
+        git.diff_text(str(repo), "commit", rev="HEAD --upload-pack=evil")
+    with pytest.raises(git.GitError):
+        git.diff_text(str(repo), "branch", base="--upload-pack=evil")
+
+
+def test_commit_patch_prefers_staged(repo):
+    (repo / "a.txt").write_text("one\ntwo staged\n", encoding="utf-8")
+    git.stage(str(repo), ["a.txt"])
+    d = git.commit_patch(str(repo))
+    assert d["ok"] is True and d["staged"] is True
+    assert "+two staged" in d["text"]
+    assert d["truncated"] is False
+
+
+def test_sync_push_fetch_pull_and_upstream(repo, tmp_path_factory):
+    bare = tmp_path_factory.mktemp("remote") / "origin.git"
+    _git(repo, "init", "--bare", "-q", str(bare))
+    _git(repo, "remote", "add", "origin", str(bare))
+    cur = git.branches(str(repo))["current"]
+
+    # 第一次 push 没有上游：sync 会自动补 -u
+    assert git.sync(str(repo), "push")["ok"] is True
+    assert git.status(str(repo))["upstream"] == "origin/" + cur
+    assert git.sync(str(repo), "fetch")["ok"] is True
+    assert git.sync(str(repo), "pull")["ok"] is True
+    assert git.status(str(repo))["remotes"] == ["origin"]
+
+
+def test_sync_rejects_unknown_action(repo):
+    with pytest.raises(git.GitError):
+        git.sync(str(repo), "delete")
+
+
+def test_tags_create_list_delete(repo):
+    assert git.tag_create(str(repo), "v1")["ok"] is True
+    items = git.tags(str(repo))["items"]
+    assert [t["name"] for t in items] == ["v1"]
+    assert git.tag_delete(str(repo), "v1")["ok"] is True
+    assert git.tags(str(repo))["items"] == []
+    with pytest.raises(git.GitError):
+        git.tag_create(str(repo), "--upload-pack=evil")
+
+
+def test_graph_log_has_graph_column(repo):
+    (repo / "a.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "--", "a.txt")
+    _git(repo, "commit", "-q", "-m", "second")
+    r = git.graph_log(str(repo), 10)
+    assert r["ok"] is True and len(r["items"]) >= 2
+    assert r["items"][0]["subject"] == "second"
+    assert all("graph" in it for it in r["items"])
+    assert "*" in "".join(it["graph"] for it in r["items"])
+
+
+
 # ---------------------------------------------------------------- 前端管理操作
 
 def test_discard_tracked_and_untracked(repo):
@@ -256,7 +341,9 @@ def test_api_routes_registered_and_status(repo):
 
     routes = snapshot()
     for path in ("/api/git/status", "/api/git/diff", "/api/git/stage",
-                 "/api/git/unstage", "/api/git/commit", "/api/git/log"):
+                 "/api/git/unstage", "/api/git/commit", "/api/git/log",
+                 "/api/git/message", "/api/git/sync", "/api/git/tag",
+                 "/api/git/graph"):
         assert ("POST", path) in routes
 
     (repo / "a.txt").write_text("one\ntwo api\n", encoding="utf-8")
@@ -264,4 +351,21 @@ def test_api_routes_registered_and_status(repo):
     out = git_api._api_git_status(h)
     assert out["ok"] is True
     assert [f["path"] for f in out["files"]] == ["a.txt"]
+
+
+def test_api_ide_review_git_scope(repo, monkeypatch):
+    """Git 范围审查走同一条 /api/ide/review，只回摘要不写文件。"""
+    import app.api.sandbox as sb_api
+    from app import ide_review
+
+    monkeypatch.setattr(ide_review, "get_api_conf", lambda kind: ("k", "u", "m"))
+    monkeypatch.setattr(ide_review, "_quick_chat",
+                        lambda *a, **kw: '{"summary": "改了 a.txt", "risks": [], "flow": ""}')
+    (repo / "a.txt").write_text("one\ntwo changed\n", encoding="utf-8")
+    h = _FakeHandler({"session_id": "s1", "scope": "git", "mode": "work"}, str(repo))
+    out = sb_api._api_ide_review(h)
+    assert out["ok"] is True and out["summary"] == "改了 a.txt"
+    assert "a.txt" in out["files"]
+    assert (repo / "a.txt").read_text(encoding="utf-8").replace("\r\n", "\n") == \
+        "one\ntwo changed\n"
 
