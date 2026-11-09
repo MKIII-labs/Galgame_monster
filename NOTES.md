@@ -3496,4 +3496,4 @@
   - `scripts/_inspect_fixture.py`、`_mk_preview_fixture.py`、`_mk_stock_fixture.py`、`_scan_globals.py`
   - `web/_stock_fixture.js`、`web/_stock_preview.html`、`tests/fixtures/stock_ui.json`
   - `scripts/check_stock_refactor.py`、`scripts/check_stock_ui.py`、`scripts/transpage_test.js` 属检查脚本，建议入库。
-- 备注：本次只做检查，**未执行 `git add` / `git commit` / `git push`**。
+- 提交：`638886c`（main），191 个文件，+37480 / −4364；已推送 `origin/main`，远端与本地 HEAD 一致，工作区干净。
