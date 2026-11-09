@@ -504,6 +504,31 @@ function buildContextPane() {
     hintHtml('把最近几条带图消息重新作为图片附上（每条最多 2 张）。默认 2。'
              + '设为 0 时历史里只留「可回看附件」一行，模型可能要求你重新发图。',
              '历史 图片 附图 多模态 回看 附件') +
+    labelHtml('自动召回内联预算（字符，0 = 不限）', '自动 召回 代码 上下文 预算 省费') +
+    '<input id="auto-context-budget" class="field-input" type="number" min="0" step="1000">' +
+    hintHtml('按问题自动检索代码时，只有相关度最高的前几段内联正文，其余只给「路径:行号」，'
+             + '模型需要时自己 read_file。默认 8000 字符（约 2~3k token）。',
+             '自动 召回 代码 上下文 预算 省费') +
+    labelHtml('自动召回内联条数（0 = 不内联）', '自动 召回 代码 上下文 条数') +
+    '<input id="auto-context-inline-max" class="field-input" type="number" min="0" step="1">' +
+    checkRowHtml('agent-read-dedupe',
+      '同回合重复读去重（文件没变就只回一行）',
+      '重复 读 去重 read_file 省费') +
+    hintHtml('同一回合里再次读同一个「版本未变」的文件时，不再重发全文，只回一行提示；'
+             + '带 start / limit / raw 或文件已改动时照常读。默认开启。',
+             '重复 读 去重 read_file 省费') +
+    checkRowHtml('read-outline-mode',
+      '大文件默认给符号大纲（需再按行号精读）',
+      'read_file 大纲 符号 按需 省费') +
+    hintHtml('对 600 行以上的 .py / .js / .ts，未指定 start / limit 时先返回符号表而不是全文。'
+             + '会改变 read_file 的返回形态，默认关闭，建议先用评测确认模型适应。',
+             'read_file 大纲 符号 按需 省费') +
+    checkRowHtml('repo-summary-inject',
+      '会话首次提问注入仓库结构',
+      '仓库结构 目录 repomap 省费') +
+    hintHtml('只在该会话第一次提问时注入一眼目录结构（约 1.2k 字符），减少盲目 list_dir。'
+             + '默认关闭：会多一次目录遍历。',
+             '仓库结构 目录 repomap 省费') +
     checkRowHtml('anthropic-cache',
       'Anthropic 通道启用提示缓存（cache_control）',
       'anthropic cache_control 缓存 省费') +
@@ -561,6 +586,13 @@ function buildContextPane() {
     ? cfg.agent_turn_token_budget : 30000000;
   q('image-history-keep').value = cfg.image_history_keep != null
     ? cfg.image_history_keep : 2;
+  q('auto-context-budget').value = cfg.auto_context_budget_chars != null
+    ? cfg.auto_context_budget_chars : 8000;
+  q('auto-context-inline-max').value = cfg.auto_context_inline_max != null
+    ? cfg.auto_context_inline_max : 2;
+  q('agent-read-dedupe').checked = cfg.agent_read_dedupe !== false;
+  q('read-outline-mode').checked = cfg.read_outline_mode === true;
+  q('repo-summary-inject').checked = cfg.repo_summary_inject === true;
   q('anthropic-cache').checked = cfg.anthropic_cache !== false;
   q('chat-auto-context').checked = cfg.chat_auto_context !== false;
   q('memory-soft-limit').value = cfg.memory_soft_limit != null ? cfg.memory_soft_limit : 60;
@@ -628,6 +660,12 @@ function buildContextPane() {
     agent_turn_token_budget: Math.max(0,
       intOr(q('agent-turn-token-budget').value, 30000000)),
     image_history_keep: Math.max(0, Math.min(6, intOr(q('image-history-keep').value, 2))),
+    auto_context_budget_chars: Math.max(0, intOr(q('auto-context-budget').value, 8000)),
+    auto_context_inline_max: Math.max(0,
+      Math.min(8, intOr(q('auto-context-inline-max').value, 2))),
+    agent_read_dedupe: !!q('agent-read-dedupe').checked,
+    read_outline_mode: !!q('read-outline-mode').checked,
+    repo_summary_inject: !!q('repo-summary-inject').checked,
     anthropic_cache: q('anthropic-cache').checked,
     compress_keep_ratio: Math.max(0.05, Math.min(0.6,
       intOr(q('compress-keep-pct').value, 25) / 100)),
@@ -1792,6 +1830,14 @@ function renderUsage(data) {
   // 批 1 观测：单次调用分布 + 前缀复用（旧后端没有这两块时优雅降级）
   const cs = data.call_stats || {};
   const os = data.obs_stats || {};
+  // 未命中构成（批 1 补测）：旧后端没有这个字段时整体降级为「—」
+  const mp = os.miss_parts || {};
+  const missTotal = Number(mp.total) || 0;
+  const missNew = Number(mp.new) || 0;
+  const missCold = Number(mp.cold) || 0;
+  const missRebuild = Number(mp.rebuild) || 0;
+  const missDrift = Number(mp.drift) || 0;
+  const missTurns = Number(mp.turns) || 0;
   const hasCall = Number(cs.count) > 0;
   const pct1 = (v) => (v == null ? '—' : Math.round(Number(v) * 1000) / 10 + '%');
   const peak = d.peak || null;
@@ -1821,6 +1867,12 @@ function renderUsage(data) {
       os.warm ? ('system 变更 ' + fmtNum(os.sys_changed) + '/' + fmtNum(os.warm) +
                  ' 轮 · 折叠 ' + fmtNum(os.fold) + ' 次')
               : '旧记录没有前缀采样'],
+    // 未命中构成：未命中单价约为命中价的 50 倍，钱主要花在这里
+    ['未命中构成', missTotal ? pct1(missNew / missTotal) + ' 是新增' : '—',
+      missTotal ? ('首请求 ' + pct1(missCold / missTotal) + ' · 新增 ' + pct1(missNew / missTotal) +
+                   ' · 折叠重建 ' + pct1(missRebuild / missTotal) + ' · 漂移 ' + pct1(missDrift / missTotal) +
+                   '（' + fmtNum(missTurns) + ' 个回合）')
+                : '旧记录没有拆解数据'],
     ['峰值' + unit, peak ? fmtNum(peak.total) : '—', peak ? peak.bucket : '该区间无记录'],
     ['活跃' + unit, fmtNum(d.active), '区间共 ' + fmtNum((data.labels || []).length) + ' ' + unit],
   ];

@@ -25,6 +25,23 @@ def test_schema_without_example_and_bad_type():
     assert archify.schema_text("nope").startswith("❌")
 
 
+def test_archify_not_offered_without_agent():
+    """流程图工具只在 Agent 模式下下发 schema。"""
+    names = [t["function"]["name"] for t in agent.native_tool_schemas(agent_on=False)]
+    assert "archify" not in names
+    names = [t["function"]["name"] for t in agent.native_tool_schemas(agent_on=True)]
+    assert "archify" in names
+
+
+def test_archify_rejected_when_not_agent():
+    """即使模型硬调，非 Agent 会话也在执行前被拦下。"""
+    text, _undo, _write = agent.run_tool(
+        ".", "archify", {"action": "schema", "type": "workflow"},
+        caps={"sid": "pytest_archify", "agent_on": False})
+    assert "只在 Agent 模式" in text
+    assert "mermaid" in text
+
+
 def test_schema_text_tells_model_to_use_chinese():
     text = archify.schema_text("workflow", with_example=False)
     assert "默认用中文" in text and "不要照抄" in text
@@ -141,8 +158,8 @@ def test_tool_schema_action(tmp_path):
     assert undo is None and is_write is False
 
 
-def test_archify_does_not_need_sandbox():
-    """非 Agent 模式也能调用：不依赖沙箱，但仍受工具分层控制。"""
+def test_archify_requires_agent_mode():
+    """流程图工具只在 Agent 模式下下发；needs_sandbox 仍为 False（脚本 / 工作流可直接调用）。"""
     assert agent.needs_sandbox("archify") is False
     assert agent.needs_sandbox("tool_search") is False
 
@@ -150,8 +167,10 @@ def test_archify_does_not_need_sandbox():
         return [t["function"]["name"] for t in
                 agent.native_tool_schemas(agent_on=agent_on, allow_groups=groups)]
 
-    assert "archify" in names({"diagram"})
-    assert "archify" not in names(set())
+    # 非 Agent：即使意图命中 diagram 域也不下发
+    assert "archify" not in names({"diagram"})
+    # Agent 但没命中意图域 / 没解锁：被工具分层摘掉
+    assert "archify" not in names(set(), agent_on=True)
     assert "archify" in names({"diagram"}, agent_on=True)
 
 

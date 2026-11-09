@@ -318,6 +318,31 @@ _PROTO_NAME_RE = re.compile(r"tool|parameter|invoke|function_calls|thinking|antm
 _TAG_RE = re.compile(
     r"<\s*(/?)\s*([A-Za-z][\w:.\-\u4e00-\u9fff]*)((?:\s[^<>]*?)?)\s*(/?)\s*>")
 
+# 「动作式」伪调用：模型在原生通道失效时会照着系统提示里的 run(action=exec) 自创 XML。
+# 只用于检测并提醒模型（见 chat.py 的 _MSG_PSEUDO_CALL），不参与执行、不改正文。
+_ACTION_TAG_RE = re.compile(
+    r"<\s*/?\s*(?:run|read|edit|code|git|plan|agent|web|history|acceptance|finish)"
+    r"\b[^<>]{0,80}?\baction\s*=", re.I)
+# DeepSeek 原生 DSML：全角竖线 U+FF5C（单/双/无前导）或代理转码后的 ASCII 变体。
+_DSML_RE = re.compile(
+    r"(?:｜\s*){0,2}DSML(?:\s*｜){1,2}"      # 完整标记（含无前导竖线）
+    r"|\|\s*DSML\s*\|"                       # 代理转码后的 ASCII 变体
+    r"|<\s*/?\s*｜{1,2}\s*DS",               # 流式截断残片，如 `</｜｜DS`
+    re.I)
+_FENCE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+
+
+def pseudo_call_tagged(text):
+    """正文里是否出现「看起来像工具调用、但运行时不会执行」的写法。
+
+    覆盖三类：`<tool>` / `<invoke>` 家族、`<run action=…>` 动作式 XML、DeepSeek DSML。
+    先剔掉代码围栏，避免模型在解释协议时被误判。
+    """
+    s = _FENCE_BLOCK_RE.sub("", str(text or ""))
+    if not s:
+        return False
+    return bool(_PSEUDO_TOOL_RE.search(s) or _ACTION_TAG_RE.search(s) or _DSML_RE.search(s))
+
 # 「协议标签 + 配对闭合」时，内容短于这个长度就整块删；超过则只删标签。
 # 模型偶尔会把整篇答案包进标签里，不能连正文一起删掉。
 _PROTO_PAIR_MAX = 2000
@@ -1360,6 +1385,8 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
             "native_tools": bool(native_parsed),
             "native_fallback": native_fell_back,
             "pseudo_tool_tag": pseudo_tool_tag,
+            # 文本形式的伪调用（<run action=…> / DSML）：供上层提醒模型改用原生调用
+            "pseudo_call": pseudo_call_tagged(raw_visible),
             "failed": bool(_failed_stream),
             "reasoning": _reason_final, "usage": usage_info,
             "finish_reason": finish_reason,

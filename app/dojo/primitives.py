@@ -98,7 +98,7 @@ def _judge_order(unit, answer):
 
 
 def _judge_pair(unit, answer):
-    payload, expert = unit["payload"], unit["expert"]
+    expert = unit["expert"]
     want = {str(k): str(v) for k, v in (expert.get("pairs") or {}).items()}
     if not want:
         raise JudgeError("题目的配对答案配置有误")

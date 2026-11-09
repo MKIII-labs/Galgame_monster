@@ -187,3 +187,31 @@ def test_aggregate_call_stats_empty(usage_file):
     assert data["call_stats"]["count"] == 0
     assert data["obs_stats"]["turns"] == 0
     assert data["obs_stats"]["avg_prefix_ratio"] is None
+    assert data["obs_stats"]["miss_parts"] == {
+        "cold": 0, "new": 0, "rebuild": 0, "drift": 0, "total": 0, "turns": 0}
+
+
+def test_aggregate_miss_parts(usage_file):
+    """未命中构成：多条回合累加；没有 miss 字段的旧记录只影响 turns，不污染拆解"""
+    now = time.time()
+    usage.record_usage({
+        "ts": now, "source": "chat", "prompt": 200, "completion": 1, "total": 201,
+        "cached": 0,
+        "timing": {"obs": {"miss": {"cold": 100, "new": 50, "rebuild": 20,
+                                    "drift": 30, "total": 200, "rounds": 3}}},
+    })
+    usage.record_usage({
+        "ts": now, "source": "chat", "prompt": 15, "completion": 1, "total": 16,
+        "cached": 0,
+        "timing": {"obs": {"miss": {"cold": 10, "new": 5, "rebuild": 0,
+                                    "drift": 0, "total": 15, "rounds": 1}}},
+    })
+    usage.record_usage({
+        "ts": now, "source": "chat", "prompt": 9, "completion": 1, "total": 10,
+        "cached": 0, "timing": {"obs": {"fold": 1}},
+    })
+    mp = usage.aggregate_usage("day", 30)["obs_stats"]["miss_parts"]
+    assert mp["turns"] == 2                    # 只有带拆解的回合
+    assert (mp["cold"], mp["new"], mp["rebuild"], mp["drift"], mp["total"]) == (
+        110, 55, 20, 30, 215)
+    assert mp["cold"] + mp["new"] + mp["rebuild"] + mp["drift"] == mp["total"]

@@ -60,6 +60,14 @@ DEFAULT_CONFIG = {
     "aside_max_tokens": 800,
     # 提问时自动从沙箱代码索引召回相关片段（只读）；没有索引会先后台建一次
     "chat_auto_context": True,
+    # 自动召回的注入预算：高置信的前 N 段内联正文，其余只给 path:行号按需读。
+    # 0 = 不设预算（旧行为：最多 5 段全部内联）。
+    "auto_context_budget_chars": 8000,
+    "auto_context_inline_max": 2,
+    "auto_context_items": 5,
+    # 会话第一次提问时注入一眼仓库结构（默认关：会多一次目录遍历；
+    # 放在引用里而不是 system，避免文件变化打断前缀缓存）。
+    "repo_summary_inject": False,
     # 默认 1 亿 token：等效于“足够大”的窗口，同时保留窗口语义（0 = 完全不限，
     # 既不显示占用比例，也不会触发任何按窗口比例的逻辑）。
     "chat_context_limit": 100_000_000, "chat_reserve_output": 16384,
@@ -282,6 +290,13 @@ DEFAULT_CONFIG = {
     # 写前读：覆盖已有文件前必须先在会话里读过；读后文件被外部改动（mtime / size 变化）
     # 会要求重读，避免模型拿过期内容整体覆盖。新建文件不受影响。
     "agent_require_read": True,
+    # 同回合重复读去重：同一回合里再读同一个「版本没变」的文件时，只回一行
+    # （文件名 / 大小 / 已读过），不再把全文重发一遍。带 start / limit / raw 时照常读。
+    "agent_read_dedupe": True,
+    # 大文件默认给符号大纲：只对 .py / .js / .ts 且行数达到阈值、且没带 start / limit 时生效。
+    # 默认关——它会改变 read_file 的返回形态，需要先用 eval 确认模型适应。
+    "read_outline_mode": False,
+    "read_outline_min_lines": 600,
     # 验收：不再「开工前强制定义机检项」——标准会随产物漂移，而且容易为了过闸凑一条。
     # 现在只在多步任务没定义时软提醒一次；收尾由验收子代理按实际产物核对。
     # ---- 验收子代理（可信保真闸门）----
@@ -310,9 +325,10 @@ DEFAULT_CONFIG = {
     # 是否把「功能大厅（模拟股市 / B 站）」的说明与界面数据注入系统提示。
     # 日历 / 日程始终注入，不受这个开关影响。
     "agent_hall_prompt": True,
-    # 工具结果超过这个字符数就落盘：只回头尾 + locator，模型可用 read_tool_result 跨轮取回。
-    # 0 = 关闭落盘（退回「头尾截断 + 请求内句柄」）；keep / mb 控制 data/spills 的保留上限。
-    "tool_spill_max": 50000,
+    # 工具结果超过这个字符数就落盘：只回头部 + 关键行 + 尾部 + locator，
+    # 模型可用 read_tool_result 跨轮取回。0 = 关闭落盘（退回「头尾截断 + 请求内句柄」）。
+    # 12000 ≈ 3~4k token：再往上就会在后续每一轮里重发，收益远低于一次按需读取。
+    "tool_spill_max": 12000,
     "tool_spill_keep": 400,
     "tool_spill_mb": 256,
     # 单条工具结果回灌预算：超 max 时回灌「头 head + 尾 tail」，中间省略。

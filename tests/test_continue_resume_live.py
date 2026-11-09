@@ -418,12 +418,16 @@ def test_turn_writes_token_obs(monkeypatch):
         rec = RECORDS[-1]
         obs = (rec.get("timing") or {}).get("obs")
         assert isinstance(obs, dict) and obs, "timing.obs 缺失：%r" % (rec.get("timing"),)
-        for key in ("fold", "fold_removed", "compress", "overflow", "prefix", "budget"):
+        for key in ("fold", "fold_removed", "compress", "overflow", "prefix", "budget", "miss"):
             assert key in obs, "obs 缺字段 %s：%r" % (key, obs)
         assert obs["budget"]["prompt_cap"] > 0, obs["budget"]
         assert obs["budget"]["level"] in (0, 1, 2, 3), obs["budget"]
         assert obs["prefix"]["cold"] is True, "本会话第一次请求应当是 cold"
         assert obs["prefix"]["cur_msgs"] >= 2, obs["prefix"]
+        # 未命中构成：四类之和必须等于真实 miss，否则这份统计不可信
+        mp = obs["miss"]
+        assert (mp["cold"] + mp["new"] + mp["rebuild"] + mp["drift"]) == mp["total"]
+        assert mp["total"] == (int(rec.get("prompt") or 0) - int(rec.get("cached") or 0))
         assert rec.get("turn_id"), "turn_id 缺失"
     finally:
         close()

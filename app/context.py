@@ -256,9 +256,9 @@ def _msg_text(m, refs_handle=False):
                 r.get("path") or "", r.get("start"), r.get("end") or "", sym)
         else:
             head = "【引用文件：%s%s】" % (r.get("path") or "", page)
-        if refs_handle:
-            # 省费模式：正文不内联，只给「在哪、怎么取回」。信息没有丢，
-            # 只是从「每轮重发」改成「按需读取」。
+        if refs_handle or r.get("slim"):
+            # 省费模式 / 低置信自动召回：正文不内联，只给「在哪、怎么取回」。
+            # 信息没有丢，只是从「每轮重发」改成「按需读取」。
             line = head + "（正文未内联；需要时用 read_file 按上面的路径与行号取回）"
             text = (text + "\n\n" + line) if text else line
             continue

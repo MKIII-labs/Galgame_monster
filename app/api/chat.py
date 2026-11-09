@@ -145,6 +145,16 @@ _MSG_ASK_CARD = (
     "如果用户刚才是反问而不是回答，先正面回答，再重新用卡片确认原问题，不要自行假设。"
     "如果这事不需要用户决定，就直接自己做，不要问。")
 
+# 伪工具调用：模型把调用写成了纯文本（<run action=…> / DSML），运行时不会执行。
+# 只做「点明 + 要求改用原生调用」，每回合最多提醒 2 次，不做额外刹车。
+_MSG_PSEUDO_CALL = (
+    "（系统）你刚才把**工具调用写成了纯文本**（例如 `<run action=\"exec\">…</run>`、"
+    "`<read action=\"file\">…</read>` 或 DeepSeek 的 DSML 标签）。"
+    "这些内容只是正文，**不会被当作工具执行**，所以你拿不到任何结果。"
+    "请改用原生工具调用（function calling / tools）重新发起；不要在正文里描述调用，"
+    "也不要自创 XML / DSML 写法。如果当前确实没有可用工具，直接说明缺哪个工具，"
+    "不要假装已经执行，也不要把结论写成「需要用户手动执行」。")
+
 # 用户对提问卡的反问：回答完必须把原问题重新摆出来，不能当成默认同意。
 _MSG_ASK_BACK = (
     "（系统）用户刚才是在**反问**，不是回答你之前的问题。你已经回答了他的问题，"
@@ -2770,7 +2780,24 @@ def _auto_code_refs(s, query, explicit=None, force=False):
         res = codeindex.search_items(sandbox, q, limit=8)
         items = res.get("items") or []
         explicit_paths = {str((r or {}).get("path") or "") for r in (explicit or [])}
-        out = []
+        # 注入预算（对齐 Cursor 的「只带相关片段」）：高置信的前几段内联，
+        # 其余只给 path:行号让模型按需读取。没有预算的话，5 段 × 34 行会
+        # 在每条用户消息上凭空多出几千 token，而且后续每轮都要重发。
+        try:
+            _budget = int(cfg.get("auto_context_budget_chars", 8000) or 0)
+        except (TypeError, ValueError):
+            _budget = 8000
+        try:
+            _inline_max = int(cfg.get("auto_context_inline_max", 2) or 0)
+        except (TypeError, ValueError):
+            _inline_max = 2
+        try:
+            _max_items = int(cfg.get("auto_context_items", 5) or 0)
+        except (TypeError, ValueError):
+            _max_items = 5
+        items = sorted(items, key=lambda x: float((x or {}).get("score") or 0),
+                       reverse=True)
+        out, _used, _inlined = [], 0, 0
         for it in items:
             path = str(it.get("path") or "")
             if not path or path in explicit_paths:
@@ -2780,13 +2807,20 @@ def _auto_code_refs(s, query, explicit=None, force=False):
             start = int(it.get("start") or 0)
             end = int(it.get("end") or 0)
             symbol = str(it.get("symbol") or "")
-            ref = {"path": path, "start": start, "end": end,
-                   "symbol": symbol, "auto": True,
-                   "text": "--- %s:%d-%d%s\n%s" % (
-                       path, start, end, ("  " + symbol) if symbol else "",
-                       str(it.get("snippet") or ""))}
-            out.append(ref)
-            if len(out) >= 5:
+            body = "--- %s:%d-%d%s\n%s" % (
+                path, start, end, ("  " + symbol) if symbol else "",
+                str(it.get("snippet") or ""))
+            # 预算内且未超过内联条数 → 全文；否则只留定位，正文按需读
+            _inline = (_inlined < _inline_max and
+                       (_budget <= 0 or _used + len(body) <= _budget))
+            if _inline:
+                _used += len(body)
+                _inlined += 1
+            out.append({"path": path, "start": start, "end": end,
+                        "symbol": symbol, "auto": True,
+                        "slim": (not _inline),
+                        "text": body if _inline else ""})
+            if _max_items > 0 and len(out) >= _max_items:
                 break
         return out
     except Exception:                        # noqa: BLE001  检索失败不阻断提问
@@ -3091,6 +3125,23 @@ def _api_chat(h):
                     if _auto:
                         _text_refs = list(_text_refs or []) + _auto
                 except Exception:            # noqa: BLE001
+                    pass
+                # 仓库结构（默认关）：只在该会话第一次提问时注入一眼目录，
+                # 减少「先 list_dir 再 search_files」的盲目探索。放在引用里
+                # 而不是 system：文件一变它就变，进 system 会打断前缀缓存。
+                try:
+                    if (load_config().get("repo_summary_inject") is True
+                            and s.get("sandbox") and not gal_mode):
+                        _uman = sum(1 for _m in (s.get("messages") or [])
+                                    if isinstance(_m, dict) and _m.get("role") == "user")
+                        if _uman <= 1:
+                            from app import repomap as _repomap
+                            _summ = str(_repomap.build(s.get("sandbox"), "", 60) or "")
+                            if _summ:
+                                _text_refs = list(_text_refs or []) + [{
+                                    "path": "仓库结构（自动注入）", "virtual": True,
+                                    "text": _summ[:1200]}]
+                except Exception:            # noqa: BLE001  摘要失败不阻断发送
                     pass
             _refs = (list(_special or []) + list(_text_refs or [])
                      + list(_chip_refs or []))
@@ -3536,6 +3587,8 @@ def _api_chat(h):
         # 前缀复用情况在第一次请求前由 prefixtrace 采样。
         _obs_counts = {"fold": 0, "fold_removed": 0, "compress": 0, "overflow": 0}
         _obs_prefix = None
+        # 未命中构成（批 1 补测）：逐轮攒最小字段，不受 rounds_detail 的 120 轮上限影响。
+        _miss_rounds = []
         # 省费模式：跨回合历史原文超过「工作集」→ 后台压到工作集以内。
         # 这是日常成本的主开关；超过 sync_ratio 倍时本轮发送前同步压一次，
         # 避免「刚打开一个很大的旧会话」就发一个巨大请求。
@@ -4034,11 +4087,11 @@ def _api_chat(h):
         _tool_store_seq = 0
         # 超过这个字符数就落盘（跨轮有效）；0 = 关闭落盘，退回「头尾截断 + 请求内句柄」
         try:
-            _spill_max = int(_cfg.get("tool_spill_max", 50000) or 0)
+            _spill_max = int(_cfg.get("tool_spill_max", 12000) or 0)
             _spill_keep = int(_cfg.get("tool_spill_keep", 400) or 0)
             _spill_mb = int(_cfg.get("tool_spill_mb", 256) or 0)
         except (TypeError, ValueError):
-            _spill_max, _spill_keep, _spill_mb = 50000, 400, 256
+            _spill_max, _spill_keep, _spill_mb = 12000, 400, 256
         usage_total = {"prompt": 0, "completion": 0, "total": 0, "cached": 0,
                        "reasoning": 0, "model": api_model}
         rounds = 0
@@ -4154,6 +4207,7 @@ def _api_chat(h):
         auto_continues = 0          # 已自动续跑几次（模型想收尾但任务没做完）
         break_continues = 0         # 异常中断后自动「继续输出」的次数（每回合最多 1 次）
         auto_idle = 0               # 连续「续跑但一个新工具都没执行」的次数（只用于加强提示）
+        pseudo_nudges = 0           # 「伪调用」纠正提示已给过几次（每回合最多 2 次）
         auto_seen_tools = 0         # 上次续跑时的 tool_log 长度
         plan_stale = 0              # 连续「续跑但计划一个字没变」的次数
         plan_sig_seen = None        # 上次续跑时的计划快照
@@ -4173,6 +4227,12 @@ def _api_chat(h):
         # 循环里用局部变量，避免用户中途改设置导致同一次请求前后判定不一致
         caps = agent.limits(_cfg)
         caps["sid"] = sid          # list_steps / undo_step / redo_step 用它定位撤销栈
+        # 本回合标识：工具层用它判断「同一回合内是否已经把这个文件读过了」，
+        # 避免模型重复 read_file 时把同一份全文再付一次费。
+        caps["turn_key"] = "%s#%d" % (sid, int(time.time() * 1000))
+        # 本会话是否 Agent 模式：archify（流程图 / 架构图）只在 Agent 下可用，
+        # 工具层据此在执行前拦一道（schema 不再下发是第二道）。
+        caps["agent_on"] = bool(agent_on)
         caps["emit"] = sse
         caps["stop_event"] = ev
         # 沙箱外只读授权：Code Mode / 脚本化工作流的护栏按它决定能否读沙箱外
@@ -5066,6 +5126,17 @@ def _api_chat(h):
             if sys_dyn:
                 _ibd["user"] = max(0, _ibd.get("user", 0) - len(sys_dyn))
             _ibd_chars = sum(_ibd.values())
+            # 未命中构成（批 1 补测）：发送前快照「本轮估算体量」和「折叠/压缩计数」。
+            # 拿到 usage 后用它把 prompt-cached 拆成「新增 / 折叠重建 / 其他漂移」。
+            # 只读，任何异常都降级为 0，不影响请求本身。
+            _est_send = 0
+            _rewrite_before = 0
+            try:
+                _est_send = int(estimate_messages_tokens(messages))
+                _rewrite_before = (int(_obs_counts.get("fold") or 0)
+                                   + int(_obs_counts.get("compress") or 0))
+            except Exception:            # noqa: BLE001
+                _est_send, _rewrite_before = 0, 0
             # 故障转移 + 单轮重试：主服务商在「一个字都没输出」时失败，先按链切备用；
             # 整条链都没产出时，再重发同一份 messages（不追加内容，不会重复输出）。
             _traj_step = rounds + 1
@@ -5305,18 +5376,37 @@ def _api_chat(h):
                 c = int(u.get("completion_tokens") or 0)
                 _round_prompt, _round_comp = p, c
                 d = u.get("prompt_tokens_details") or {}
+                _round_cached = int(u.get("prompt_cache_hit_tokens")
+                                    or d.get("cached_tokens") or 0)
                 usage_total["prompt"] += p
                 usage_total["completion"] += c
                 usage_total["total"] += int(u.get("total_tokens") or (p + c))
-                usage_total["cached"] += int(u.get("prompt_cache_hit_tokens")
-                                             or d.get("cached_tokens") or 0)
+                usage_total["cached"] += _round_cached
                 d2 = u.get("completion_tokens_details") or {}
                 usage_total["reasoning"] += int(d2.get("reasoning_tokens") or 0)
+                # 未命中构成（批 1 补测）：逐轮留最小字段。首轮的「新增量」要靠
+                # prefixtrace 的公共前缀判断（同会话上一回合的请求可比）；
+                # 第 2 轮起用相邻两轮的估算增量。全部只读。
+                if p > 0:
+                    _mr = {"n": rounds + 1, "prompt": p, "cached": _round_cached,
+                           "est": _est_send,
+                           "fold": (int(_obs_counts.get("fold") or 0)
+                                    + int(_obs_counts.get("compress") or 0)) > _rewrite_before}
+                    if not _miss_rounds and isinstance(_obs_prefix, dict):
+                        _mr["cold"] = bool(_obs_prefix.get("cold"))
+                        _mr["prefix_tokens"] = int(_obs_prefix.get("prefix_tokens") or 0)
+                        _mr["cur_tokens"] = int(_obs_prefix.get("cur_tokens") or 0)
+                    _miss_rounds.append(_mr)
             # 每轮埋点：没有 usage 也记一条（失败轮同样要能看出「卡在第几轮」）
             if len(_rounds_detail) < 120:
                 _diag = rr.get("diag") or {}
-                _rd = {"n": rounds + 1, "prompt": int((u or {}).get("prompt_tokens") or 0),
-                       "completion": int((u or {}).get("completion_tokens") or 0),
+                _u0 = u or {}
+                _rd = {"n": rounds + 1, "prompt": int(_u0.get("prompt_tokens") or 0),
+                       # 逐轮缓存命中：只靠回合累计看不到「哪一轮开始断链」
+                       "cached": int(_u0.get("prompt_cache_hit_tokens")
+                                     or (_u0.get("prompt_tokens_details") or {})
+                                     .get("cached_tokens") or 0),
+                       "completion": int(_u0.get("completion_tokens") or 0),
                        "req_chars": _req_chars,
                        "hdr_ms": _diag.get("headers_ms"),
                        "ttft_ms": rr.get("first_ms"),
@@ -5582,6 +5672,12 @@ def _api_chat(h):
                     if rr["visible"]:
                         messages.append({"role": "assistant", "content": rr["visible"]})
                     _acu_msg = _acu["msg"]
+                    # 伪调用纠正：模型把调用写成纯文本时不执行，先明确点出来
+                    # （每回合最多 2 次，不做额外刹车）。
+                    if (rr.get("pseudo_call") and not calls
+                            and pseudo_nudges < 2):
+                        pseudo_nudges += 1
+                        _acu_msg = _MSG_PSEUDO_CALL + "\n\n" + _acu_msg
                     if auto_idle >= 1:
                         # 上一次续跑只说不做：这一轮优先直接上手。
                         # 但不能写成「必须调用工具」——模型确实无工具可调时，
@@ -5605,6 +5701,15 @@ def _api_chat(h):
                         "content": "【自动续跑 %d/%s】%s"
                                    % (auto_continues, _lim_txt, _acu_msg),
                     })
+                    continue
+                # 伪调用纠正（没有可续跑理由时的兜底）：模型把调用写成纯文本 →
+                # 追加一条明确提示再给一轮；最多 2 次，之后只告警，不硬停。
+                if (not gal_mode and not rr["stopped"] and not calls
+                        and rr.get("pseudo_call") and pseudo_nudges < 2):
+                    pseudo_nudges += 1
+                    if rr["visible"]:
+                        messages.append({"role": "assistant", "content": rr["visible"]})
+                    messages.append({"role": "user", "content": _MSG_PSEUDO_CALL})
                     continue
                 # 格式提醒已经给过一次仍然解析不出来：明确告诉用户本轮没执行，
                 # 不要静默结束（否则看起来就是「AI 说着要调用工具，然后没了」）。
@@ -7013,12 +7118,20 @@ def _api_chat(h):
                                       keep=_spill_keep, max_mb=_spill_mb)
                     if _loc:
                         _spilled = True
-                        _rtext = (_dedup_text[:2000]
+                        # 预览 = 头部 + 关键行（报错/失败/警告）+ 尾部。
+                        # 只给头尾会让模型为了看结论重新跑一遍命令；关键行往往是
+                        # 它真正需要的那几十个 token。
+                        try:
+                            _keys = spill.key_lines(_dedup_text, limit=20)
+                        except Exception:        # noqa: BLE001
+                            _keys = []
+                        _rtext = (_dedup_text[:1200]
+                                  + ("\n…（关键行）\n" + "\n".join(_keys) if _keys else "")
                                   + "\n…（结果共 %d 字，已落盘：%s。用 "
-                                    "read_tool_result(handle=\"%s\", start=0, end=12000) "
-                                    "分片取回，跨轮有效）\n"
+                                    "read_tool_result(handle=\"%s\", start=0, end=12000, "
+                                    "query=\"关键词\") 分片取回，跨轮有效）\n"
                                   % (len(_dedup_text), _loc, _loc)
-                                  + _dedup_text[-500:])
+                                  + _dedup_text[-400:])
                 if not _spilled and _tool_max > 0 and len(_rtext) > _tool_max:
                     # 不再硬截断：前 _tool_head 字回灌，其余存成句柄，
                     # 模型需要细节时用 read_tool_result(handle, start, end) 精读。
@@ -7833,6 +7946,13 @@ def _api_chat(h):
         except Exception:                # noqa: BLE001  观测失败不能拦住收尾
             _budget_snapshot = {}
 
+        # 未命中构成：只统计，不参与装配。异常降级为空，不影响收尾。
+        try:
+            from app.missplit import split as _split_miss
+            _miss_parts = _split_miss(_miss_rounds)
+        except Exception:                # noqa: BLE001
+            _miss_parts = {}
+
         # 请求链路埋点：分段耗时（前端 console 可见；并入 token_usage.jsonl 便于事后分析）
         _timing = {
             "load_ms": _dt_ms(_t0, _marks.get("load")),
@@ -7851,8 +7971,10 @@ def _api_chat(h):
             # 每轮明细：定位「卡在第几轮」和「慢在首包还是工具」只差这一列
             "rounds_detail": _rounds_detail,
             # 观测（批 1）：前缀复用 / 折叠与压缩事件 / 预算快照。旧代码不读这些字段。
+            # miss = 未命中构成（cold/new/rebuild/drift），回答「贵的那些 token 花在哪」。
             "obs": dict(_obs_counts, prefix=(_obs_prefix or {}),
-                        budget=_budget_snapshot),
+                        budget=_budget_snapshot,
+                        miss=_miss_parts),
         }
         sse({"type": "timing", "timing": _timing})
         try:

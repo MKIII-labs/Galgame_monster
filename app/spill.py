@@ -146,6 +146,36 @@ def find_offsets(text, query, regex=False, ignore_case=False, context=2, max_hit
     return total, hits
 
 
+_KEY_RE = re.compile(
+    r"(?i)\b(error|exception|traceback|failed|failure|fatal|panic|"
+    r"assertionerror|errno|warning|cannot|denied|not found|超时|失败|错误)\b")
+
+
+def key_lines(text, limit=20, max_chars=200):
+    """挑出「结论最可能在的那几行」（报错 / 失败 / 警告），给落盘预览用。
+
+    为什么需要：长结果的头部通常是命令回显、进度条，结论在中间或尾部。
+    只给头尾会让模型重新跑一遍命令；给几条关键行往往就够了。
+    只做行级正则筛选，不解释内容，也不改变原文。
+    """
+    try:
+        cap = max(1, min(int(limit or 20), 60))
+    except (TypeError, ValueError):
+        cap = 20
+    out, seen = [], set()
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line or line in seen:
+            continue
+        if not _KEY_RE.search(line):
+            continue
+        seen.add(line)
+        out.append(line[:max_chars])
+        if len(out) >= cap:
+            break
+    return out
+
+
 def _gc(data_dir, keep, max_mb):
     """按最旧优先清理：文件数超过 keep 或总量超过 max_mb 时删掉最老的。"""
     if keep <= 0 and max_mb <= 0:

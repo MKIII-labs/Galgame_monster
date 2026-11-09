@@ -393,11 +393,12 @@ def test_visual_prompt_layers_archify_by_agent_mode():
     ready = agent._visual_prompt(True)
     assert "archify" in ready
     assert 'tool_search("diagram")' in ready
-    # 普通聊天：archify 也能直接用（落 data/archify/<sid>/，不需要 Agent / 沙箱）
+    # 普通聊天：archify 不可用，只能内联围栏；要可交互页面就提示用户开 Agent
     off = agent._visual_prompt(False)
-    assert "archify" in off
-    assert "不需要开启 Agent" in off
-    assert "tool_search" in off
+    assert "非 Agent 模式下不可用" in off
+    assert "开启 Agent 模式" in off
+    assert "tool_search" not in off
+    assert "不需要开启 Agent" not in off
 
 
 def test_capability_boundary_is_injected():

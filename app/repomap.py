@@ -84,6 +84,26 @@ def _symbols(path):
     return sorted(out, key=lambda x: x[0])
 
 
+def outline(path, max_items=80):
+    """单文件的符号大纲：行号 + 类型 + 名字。非代码 / 解析失败返回空串。
+
+    给 read_file 的「大文件默认大纲」用：模型先看结构，再指定行区间精读，
+    避免一上来就把整文件塞进上下文（并从此每轮重发）。
+    """
+    try:
+        syms = _symbols(path)
+    except Exception:                     # noqa: BLE001  大纲失败就退回普通读取
+        return ""
+    if not syms:
+        return ""
+    rows = ["%5d  %-6s %s" % (ln, kind.strip(), name)
+            for ln, kind, name in syms[:max_items]]
+    if len(syms) > max_items:
+        rows.append("…（还有 %d 个符号，可加 start / limit 分段读）"
+                    % (len(syms) - max_items))
+    return "\n".join(rows)
+
+
 def _collect(root, sub=""):
     """收集代码文件（相对路径）。sub 为空时遍历全仓。"""
     files = []

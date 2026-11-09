@@ -37,7 +37,10 @@ def test_limits_reads_config():
                    "code_max_calls": 2000, "code_parallel": 16,
                    "code_allow_write": False, "code_allow_cmd": False,
                    # 写前读默认开启（dsh 的 fs-policy 行为）
-                   "require_read": True}
+                   "require_read": True,
+                   # 按需加载：同回合重复读去重默认开；大纲默认关
+                   "read_dedupe": True, "read_outline": False,
+                   "read_outline_min": 600}
 
 
 def test_limits_clamps_out_of_range():
@@ -59,7 +62,9 @@ def test_limits_zero_means_unlimited():
                    "shell_mode": "strict", "formatter": "off",
                    "code_max_calls": 2000, "code_parallel": 16,
                    "code_allow_write": False, "code_allow_cmd": False,
-                   "require_read": True}
+                   "require_read": True,
+                   "read_dedupe": True, "read_outline": False,
+                   "read_outline_min": 600}
 
 
 def test_limits_negative_falls_back_to_default():

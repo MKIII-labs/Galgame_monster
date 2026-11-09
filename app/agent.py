@@ -330,6 +330,11 @@ _asks_lock = threading.Lock()
 # 避免模型拿过期内容整体覆盖。
 _READ_STATE = {}                 # (沙箱根, 绝对路径) -> (mtime_ns, size)
 _READ_STATE_MAX = 4096           # 进程内最多记多少条，长跑进程不会无限涨
+# 「本回合已经把这个文件的全文给了模型」：同会话 + 同回合 + 版本未变时不再回灌。
+# 与 _READ_STATE 分开：那个是「写前必须读过」的守卫，进程级；这个只用于省 token，
+# 必须按会话/回合隔离，否则新会话会误以为模型已经看过内容。
+_READ_SEEN = {}                  # (sid, 沙箱根, 绝对路径) -> (版本戳, turn_key)
+_READ_SEEN_MAX = 2048
 _read_lock = threading.Lock()
 # 只有「覆盖已有内容」才需要先读；新建文件、建目录、删除都不拦（与 dsh 一致）
 _READ_BEFORE_WRITE = ("write_file", "edit_file")
@@ -1159,44 +1164,47 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                                                     "description": "这一组包含的文件（相对路径）"}},
                                       "required": ["message", "paths"]}}},
                 ["groups"]))
-    # archify 不依赖沙箱（没有 Agent 时落 data/archify/<sid>/），所以放在 agent_on 之外。
+    # archify（流程图 / 架构图 / 时序图…）只在 Agent 模式下提供：
+    # 它要跑 validate / 浏览器检查，还要有可写的工作目录；非 Agent 会话没有沙箱，
+    # 产物也没地方放。非 Agent 需要配图时走内联围栏（svg / mermaid / chart）。
     # 仍然受工具分层约束：allow_groups 不含 diagram 时由 hidden_tools 摘掉，
     # 命中「流程图 / 架构图…」或 tool_search 解锁后才会出现。
-    out.append(_fn_tool(
-        "archify",
-        "先把系统 / 流程 / 计划 / 代码库画成可验证的交互式 HTML：架构、工作流、时序、"
-        "数据流、状态、ERD、类图、树、时间线、瀑布图，或『一页式解释页』。"
-        "图内文字（标题 / 节点 / 标签 / 说明）默认用中文；Viewer 界面也会自动用中文。"
-        "先用 action=schema 取对应 schema + 示例；写候选（大候选先 write_file，"
-        "再传 candidate_path）；action=finalize 会跑 validate → 原子写入 → "
-        "严格检查 → 真实浏览器检查，全过才交付，产物会直接显示在对话里；"
-        "action=doctor 检查环境。",
-        {"action": {"type": "string",
-                    "enum": ["finalize", "schema", "doctor"],
-                    "description": "默认 finalize"},
-         "type": {"type": "string",
-                  "enum": ["architecture", "workflow", "sequence", "dataflow",
-                           "lifecycle", "erd", "tree", "class", "timeline",
-                           "waterfall", "explainer"],
-                  "description": "图型；explainer 的候选是 Markdown，其余是 JSON"},
-         "candidate": {"type": "string",
-                       "description": "候选内容（JSON；explainer 为 Markdown）。"
-                                      "大候选请改用 candidate_path"},
-         "candidate_path": {"type": "string",
-                            "description": "工作目录内的候选文件；优先用这个"
-                                           "（Agent 模式下是沙箱相对路径）"},
-         "output": {"type": "string",
-                    "description": "HTML 输出路径；省略则写 "
-                                   ".archify/<type>-<时间>/<type>.html"},
-         "quality": {"type": "string", "enum": ["showcase", "standard"],
-                     "description": "默认 showcase"},
-         "repo_root": {"type": "string",
-                       "description": "可选：代码库根目录（画『从代码得图』时用）"},
-         "timeout": {"type": "integer",
-                     "description": "超时秒数，默认 180，最大 600"},
-         "example": {"type": "boolean",
-                     "description": "schema 时是否附一份官方示例，默认 true"}},
-        ["action"]))
+    if agent_on:
+        out.append(_fn_tool(
+            "archify",
+            "先把系统 / 流程 / 计划 / 代码库画成可验证的交互式 HTML：架构、工作流、时序、"
+            "数据流、状态、ERD、类图、树、时间线、瀑布图，或『一页式解释页』。"
+            "图内文字（标题 / 节点 / 标签 / 说明）默认用中文；Viewer 界面也会自动用中文。"
+            "先用 action=schema 取对应 schema + 示例；写候选（大候选先 write_file，"
+            "再传 candidate_path）；action=finalize 会跑 validate → 原子写入 → "
+            "严格检查 → 真实浏览器检查，全过才交付，产物会直接显示在对话里；"
+            "action=doctor 检查环境。",
+            {"action": {"type": "string",
+                        "enum": ["finalize", "schema", "doctor"],
+                        "description": "默认 finalize"},
+             "type": {"type": "string",
+                      "enum": ["architecture", "workflow", "sequence", "dataflow",
+                               "lifecycle", "erd", "tree", "class", "timeline",
+                               "waterfall", "explainer"],
+                      "description": "图型；explainer 的候选是 Markdown，其余是 JSON"},
+             "candidate": {"type": "string",
+                           "description": "候选内容（JSON；explainer 为 Markdown）。"
+                                          "大候选请改用 candidate_path"},
+             "candidate_path": {"type": "string",
+                                "description": "工作目录内的候选文件；优先用这个"
+                                               "（Agent 模式下是沙箱相对路径）"},
+             "output": {"type": "string",
+                        "description": "HTML 输出路径；省略则写 "
+                                       ".archify/<type>-<时间>/<type>.html"},
+             "quality": {"type": "string", "enum": ["showcase", "standard"],
+                         "description": "默认 showcase"},
+             "repo_root": {"type": "string",
+                           "description": "可选：代码库根目录（画『从代码得图』时用）"},
+             "timeout": {"type": "integer",
+                         "description": "超时秒数，默认 180，最大 600"},
+             "example": {"type": "boolean",
+                         "description": "schema 时是否附一份官方示例，默认 true"}},
+            ["action"]))
     if search_ready:
         out.append(_fn_tool(
             "web_search",
@@ -2217,6 +2225,21 @@ def _t_read_file(root, args, allow_outside=False):
         limit = 0
     chunk = lines[start - 1:start - 1 + limit] if limit > 0 else lines[start - 1:]
     raw = bool(args.get("raw"))
+    # 大文件默认给大纲（read_outline_mode，默认关）：模型先看结构再指定区间，
+    # 避免一上来就把整文件塞进上下文、并在后续每一轮里重发。
+    if (args.get("_outline") and not limit and start == 1 and not raw
+            and len(lines) >= int(args.get("_outline_min") or 0)):
+        try:
+            from app import repomap
+            _ext = os.path.splitext(p)[1].lower()
+            if _ext in repomap.PY_EXT or _ext in repomap.JS_EXT:
+                _ol = repomap.outline(p)
+                if _ol:
+                    return ("文件大纲：%s（共 %d 行，%s）。下面是符号与起始行号；"
+                            "看某一节请用 read_file(path=..., start=行号, limit=行数)。\n%s"
+                            % (_relp, len(lines), _fmt_size(size), _ol)), None
+        except Exception:                 # noqa: BLE001  大纲失败就退回普通读取
+            pass
     head = "文件：%s（共 %d 行，%s%s，编码 %s），下面是第 %d 行起%s：" % (
         _rel(root, p), len(lines), _fmt_size(size),
         "，已截断" if truncated else "", enc, start,
@@ -4072,6 +4095,66 @@ def _remember_read(sandbox, p):
             _READ_STATE.pop(next(iter(_READ_STATE)))
 
 
+def _turn_key(caps):
+    """本回合的标识：同一回合内重复读同一文件才允许省略正文。"""
+    return str((caps or {}).get("turn_key") or "")
+
+
+def _seen_key(sandbox, p, caps):
+    return (str((caps or {}).get("sid") or ""), _real(sandbox), p)
+
+
+def _note_seen(sandbox, p, caps):
+    """记下「这个文件的全文已经给过模型了（本回合内有效）」。"""
+    tk = _turn_key(caps)
+    if not tk:
+        return
+    ver = _file_ver(p)
+    if ver is None:
+        return
+    key = _seen_key(sandbox, p, caps)
+    with _read_lock:
+        _READ_SEEN.pop(key, None)
+        _READ_SEEN[key] = (ver, tk)
+        while len(_READ_SEEN) > _READ_SEEN_MAX:
+            _READ_SEEN.pop(next(iter(_READ_SEEN)))
+
+
+def _repeat_read_stub(sandbox, args, caps, allow_outside=False):
+    """同会话同回合、文件版本没变、且上次给过全文 → 只回一行，不再回灌全文。
+
+    只要模型显式带了 start / limit / raw，就当作「要别的区间」，照常执行。
+    返回空串表示照常读取。
+    """
+    try:
+        if not (caps or {}).get("read_dedupe", True):
+            return ""
+        if args.get("start") or args.get("limit") or args.get("raw"):
+            return ""
+        tk = _turn_key(caps)
+        if not tk:
+            return ""
+        p = resolve_path(sandbox, args.get("path"), allow_outside, for_read=True)
+        if not os.path.isfile(p):
+            return ""
+        ver = _file_ver(p)
+        if ver is None:
+            return ""
+        key = _seen_key(sandbox, p, caps)
+        with _read_lock:
+            known = _READ_SEEN.get(key)
+            if known != (ver, tk):
+                return ""
+            _READ_SEEN.pop(key, None)       # 刷新 LRU
+            _READ_SEEN[key] = known
+        _remember_read(sandbox, p)           # 顺带刷新「写前读」守卫的 LRU
+        return ("文件未变化：%s（%s，本回合已读过，正文仍在上下文里）。"
+                "要看别的区间请带 start / limit；要无行号原文请加 raw=true。"
+                % (_rel(sandbox, p), _fmt_size(ver[1])))
+    except (SandboxError, OSError, TypeError, ValueError):
+        return ""
+
+
 def _check_read_before_write(sandbox, name, args):
     """覆盖已有文件前必须读过；读过但文件变了则要求重读。返回错误文本或空串。"""
     if name not in _READ_BEFORE_WRITE:
@@ -4277,6 +4360,25 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
         blocked = _check_read_before_write(sandbox, name, args)
         if blocked:
             return blocked, None, False
+    # archify（流程图 / 架构图）只在 Agent 模式可用：非 Agent 没有沙箱，也不该生成
+    # 可交互产物。只有调用方显式传了 agent_on=False 才拦（脚本 / 子代理不传，保持兼容）。
+    if name == "archify" and (caps or {}).get("agent_on") is False:
+        return tool_protocol.error(
+            tool_protocol.PERMISSION,
+            "archify（流程图 / 架构图 / 时序图）只在 Agent 模式下可用。"
+            "当前会话不是 Agent：请改用内联 svg / mermaid / chart，"
+            "或告诉用户「开启 Agent 模式后可以生成可交互页面」。",
+            name=name, args=args), None, False
+    # 同一回合内重复读同一个没变的文件：只回一行，不再把全文重发一遍。
+    # 判断在真正读盘之前，所以连 IO 都省了。
+    if name == "read_file":
+        _stub = _repeat_read_stub(sandbox, args, caps, allow_outside)
+        if _stub:
+            return _stub, None, False
+        if (caps or {}).get("read_outline"):
+            # 大文件先给符号大纲（默认关闭，由 read_outline_mode 控制）
+            args = dict(args, _outline=1,
+                        _outline_min=int((caps or {}).get("read_outline_min") or 600))
     if name == "run_command" and not args.get("timeout"):
         _raw = (caps or {}).get("cmd_timeout")
         if _raw is not None:
@@ -4365,8 +4467,12 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
         _remember_read(sandbox, target)
     elif name == "read_file" and not tool_protocol.is_error(text):
         try:
-            _remember_read(sandbox, resolve_path(sandbox, args.get("path"),
-                                                 allow_outside))
+            _rp = resolve_path(sandbox, args.get("path"), allow_outside)
+            _remember_read(sandbox, _rp)
+            # 只有「整篇正文给过」才算 seen；分段读和大纲都不算
+            if (not (args.get("start") or args.get("limit") or args.get("raw"))
+                    and not str(text).startswith("文件大纲：")):
+                _note_seen(sandbox, _rp, caps)
         except SandboxError:
             pass
     elif name == "read_files" and not tool_protocol.is_error(text):
@@ -4882,6 +4988,14 @@ def limits(cfg=None):
     out["code_allow_cmd"] = cfg.get("code_mode_allow_cmd") is True
     # 写前读：覆盖已有文件前必须先在会话里读过（dsh 的 fs-policy 默认行为）
     out["require_read"] = cfg.get("agent_require_read") is not False
+    # 同回合重复读去重：文件没变就只回一行，不再重发全文
+    out["read_dedupe"] = cfg.get("agent_read_dedupe") is not False
+    # 大文件默认给符号大纲（默认关闭：会改变 read_file 的返回形态，需先跑 bench）
+    out["read_outline"] = cfg.get("read_outline_mode") is True
+    try:
+        out["read_outline_min"] = max(0, int(cfg.get("read_outline_min_lines") or 600))
+    except (TypeError, ValueError):
+        out["read_outline_min"] = 600
     return out
 
 
@@ -7254,10 +7368,10 @@ _VISUAL_DIAGRAM_READY = [
 ]
 
 _VISUAL_DIAGRAM_OFF = [
-    "分层选择：一张图能讲清就直接内联。结构大、要分步讲或需要可交互页面时，"
-    "用 archify 工具（**不需要开启 Agent，也不需要沙箱**：产物写到本会话的图目录，"
-    "完成后会直接显示在对话里，可交互）；先 action=schema 取 schema 与示例，"
-    "再 action=finalize。如果工具表里没有它，先调 tool_search(\"diagram\") 解锁。",
+    "分层选择：一张图能讲清就直接内联（svg / chart / mermaid）。"
+    "需要可交互页面（多模块架构 / 跨服务数据流 / ERD / 类图 / 时间线）时，"
+    "**archify 在非 Agent 模式下不可用**——如实告诉用户「开启 Agent 模式后可以用它生成"
+    "可交互页面」，不要假装已经生成，也不要编一个 HTML 产物路径。",
 ]
 
 _VISUAL_TAIL = [

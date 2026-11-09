@@ -3497,3 +3497,328 @@
   - `web/_stock_fixture.js`、`web/_stock_preview.html`、`tests/fixtures/stock_ui.json`
   - `scripts/check_stock_refactor.py`、`scripts/check_stock_ui.py`、`scripts/transpage_test.js` 属检查脚本，建议入库。
 - 提交：`638886c`（main），191 个文件，+37480 / −4364；已推送 `origin/main`，远端与本地 HEAD 一致，工作区干净。
+
+## [2026-11-09] 调研：Merlin's Whisper（黑盒说服式提示压输出）对本项目是否值得落地
+
+- 论文：*Merlin's Whisper: Enabling Efficient Reasoning in LLMs via Black-box Persuasive Prompting*，arXiv 2510.10528（v3，ACL 2026 长文），代码 `github.com/hemingkx/Whisper`。
+- 方法：把「少想但不掉准确率」当成黑盒提示搜索问题。用 GPT-4o 从 4 类视角（情绪诉求 / 威胁 / 证据式说服 / 角色扮演+详细指令）每轮各生成 10 个「提示后缀」，拼在原指令后跑 dev set；先按准确率阈值 τ 淘汰掉分的候选，再按平均输出长度排序，取 top-5 作为下一轮范例，共 3 轮，最后选「准确率可接受且最短」的后缀。不训练模型、不需要权重。
+- 论文数字：Qwen3 系简单题（GSM8K）输出长度约 3× 压缩且准确率不降；四个 benchmark 平均 token -40%；Claude-3.7 MATH-500 -46%、Gemini-2.5 -50%；三轮迭代贡献明显（Qwen3-14B 从 -32% 到 -37%）；简单题收益远大于难题（AIME 只到 76%）；跨模型/跨域可迁移。
+- 本项目实测（只读 `data/token_usage.jsonl`，6849 条）：completion 合计 20,335,394 / prompt 合计 3,871,390,716 = **0.5253%**；completion P50 **84**、P90 3,556、P99 54,956、max 369,995、mean 2,969；其中带 `reasoning` 字段的 1,055 条合计 **10,419,372**（约占输出一半，全部来自 `deepseek-flash`）；模型只有 `deepseek-flash` 与本地 `qwen35-9b:iq4nl`。`docs/TOKEN_OPTIMIZATION_DESIGN.md` §3.1 的口径（192:1）与本次复算一致，§13 已明确「优化输出侧：不做」。
+- 结论：**不建议照搬落地**。论文优化的是「长思考链输出」；按 token 算输出只占 0.53%，但**按官方单价折算占账单 11%~14%**（见同日「修正：按官方单价重算」条目——本条的旧说法「影响只有 0.2%，四舍五入误差」已作废）。真正的大头仍是输入端（约 86%），已由 `token_profile=balanced` + 工作集 40k + 工具结果折叠治理。
+- 唯一值得考虑的理由是**间接效应**：assistant 正文占输入字符 62.6%，输出短 → 后续每轮重发的 reply 变短；但工作集 40k 已经把这条链截断在 4 万以内，收益会被部分吸收，量级预计个位数百分比，且代码/报告类输出必须豁免。
+- 如果将来真要试（例如切到推理模型、或延迟成为瓶颈）：① 后缀只能贴在**请求末尾**（复用 `_attach_dyn_tail`），绝不能塞进 S0/S1 稳定段，否则前缀哈希变化、缓存命中率反升成本；② 只保留「证据式 / 角色 / 详细指令」三类视角，威胁与情绪类论文自己都列为不适合产品化；③ 质量门禁用现有 `app/bench.py` + `resources/eval/bench_tasks.json`（通过数不降、平均轮数增幅 ≤10%、重复读取率 ≤+20%）；④ 先做「固定后缀 A/B」而不是跑候选搜索——本项目 dev set 是 agent 多轮任务，一次完整搜索的调用成本远超它可能省下的输出 token。
+
+## [2026-11-09] 调研：HarnessMM（复用已决断动作、跳过推理回调）对本项目是否值得落地
+
+- 论文：*HarnessMM: Recursive Self-Improvement for Harness Token Efficiency*，arXiv 2610.32813v1，清华 + MSRA，2026-10-23。
+- 核心洞察：harness 在每次工具反馈后都要重新调一次推理，即使「下一步动作」在上一次推理里就已经定死了。于是把「已决断的动作」存成 **EDG（可执行决策图）**：`(原生动作, 完整字面参数, 前置节点, 公开执行守卫)`；工具回执只用来判断守卫是否成立，不重新生成参数。**GDR** 跨工具边界保留这张图并按守卫激活；**CCS** 用原生接口执行并把「被跳过的那个推理回调」记成证书（graph hash / 决策 id / 前驱回执 / 精确参数 / 工具回执 / 被绕过回调 id）。新语义决策、证据不足、选择器弃权 → 回落到原始 actor。actor 权重全程不变。
+- 关键概念 **Substitution Paradox**：只有当 `C_removed > C_introduced`（作者成本 + 选择 + 额外上下文 + 回退 + 恢复）时才有收益。短输出、快速路径命中率高都**不能**证明回调真的被消除。
+- 论文数字（complete-task 口径，含输入+输出、失败调用、图作者成本）：
+  - HumanEval n=98：Codex 90.82% 不变，66.72k → 47.02k（-29.54%）；DeepSeek Harness 71.43%→85.71%，96.28k → 11.62k（-87.93%）。
+  - MBPP-sanitized n=257：DeepSeek 90.27%→91.83%，53.98k → 10.61k（-80.35%）。
+  - MBPP 消融：持久化复用比单次图省 26.91%；跳过回调比保留回调省 19.52%；完全禁用 EDG 反而 95.33%（比 full 高 1.56 分）但贵 18.62%。
+  - ALFWorld 2133 题：66.20% / 31.12k（No Skill 42.29% / 34.05k，SkillOpt 63.29% / 101.33k）。
+  - SearchQA 3395 题：69.81% → **76.76% EM / 0.99k**（成本 -19.08%）；GAIA2 480 场景 43.96% / 639.64k（-12.41%）。
+  - **反例**：AIME 560 题 87.14% / **5.90k，比 No Skill 的 4.59k 还贵 28.34%**（作者成本压过了省的调用）；Terminal-Bench 2.0（DeepSeek-flash，n=18）成功率 **77.78% → 50.00%**，成本 3426.78k → 1144.32k——**质量掉 27.8 分**。
+- 对照本项目：
+  - 方向比 Merlin's Whisper 对得多：它砍的不是输出，而是「整轮输入重发 + 该轮推理」，正对本项目 reply+user 占输入 80.4%、单次 P50 108,615 的结构。
+  - 但**缓存会大幅打折，且折扣随回合长度变化**：按官方单价（命中 ¥0.02 / 未命中 ¥1 / 输出 ¥2 每百万）实算，普通回合（命中 90.7%）跳一轮只省该轮成本的 **14%**；而真正烧钱的长回合（命中 99.3%）命中重放占该轮成本 **70.9%**，跳一轮就能省七成。旧说法「只值约 -30% 输入」是按 30 天平均命中率 95.4% 算的，对长回合显著低估（详见同日「修正：按官方单价重算」条目）。
+  - 任务性质不匹配：论文大赢的是流程化任务（写→编译→测试→lint，下一步在编译前就已确定）；本项目是开放式 galgame 工作台 + 通用编码 agent，下一步几乎总要读工具输出才知道，更接近 Terminal-Bench / AIME 那两栏（掉质量或成本反升）。
+- 结论：**不立项**。不是思路错，而是（a）本项目的任务分布落在论文的反例区间；（b）95.6% 缓存命中把「省一轮」的账价打了三折；（c）实现成本高——要让模型在正常动作之外额外输出未来动作图（多一份输出成本），还要在 `app/api/chat.py` 的 agent 主循环里加守卫执行器和证书审计，远超既有「每批改动 ≤3 个落点」的约束，且新增「守卫判错 → 执行过期动作」的失败模式。
+- 若要取它的 20% 而不付 80% 的代价：不做 EDG/GDR，只在**确定性链**上用本地规则直接执行（例如 `write_file` 成功后自动跑配置好的 format/lint，`run_command` 构建成功后自动跑测试），相当于「无作者成本的 CCS」；仍要过 `app/bench.py` 质量门禁。
+- 资料：PDF 全文已抽到 `%TEMP%\harnessmm.txt`（37 页 / 172k 字符），`pypdf` 可复现。
+
+## [2026-11-09] 修正：按官方单价重算 token 账单（推翻上面两条调研里的「钱」结论）
+
+- 触发：用户指出「你对钱的判断有问题，看最近的输出也就是实际测试再下结论」。复核后确认两处结论作废。
+- 单价来源：DeepSeek 官方「模型 & 价格」页（2026-11 查）。`data/config.json` 里 `chat_url=https://api.deepseek.com/v1/chat/completions`、`chat_model=deepseek-flash`（官方对应 deepseek-v4-flash）：**输入命中 ¥0.02 / 输入未命中 ¥1 / 输出 ¥2（每百万 tokens）**，比例 **1 : 50 : 100**。**结论只依赖这个比例，不依赖具体数值**；项目本身不记录计费，以下金额全部是「tokens × 官方单价」的折算。
+- 实算（只读 `data/token_usage.jsonl`，6851 条）：
+
+| 窗口 | 命中率 | 命中 ¥ | 未命中 ¥ | 输出 ¥ | 合计 ¥ | 输出占账单 |
+|---|---|---|---|---|---|---|
+| 全部 | 95.43% | 74.11（25.3%） | 177.64（60.7%） | 40.97 | 292.72 | **14.0%** |
+| 近 7 天 | 95.69% | 13.66 | 30.78 | 5.99 | 50.43 | 11.9% |
+| 近 24h chat | 97.00% | 12.36（35.0%） | 19.13（54.2%） | 3.82 | 35.31 | 10.8% |
+| 近 24h chat 去掉最大回合 | 90.73% | 3.12（14.0%） | 15.93（71.5%） | 3.24 | 22.28 | 14.5% |
+| 最大回合（465M / 362 轮） | 99.31% | 9.25（**70.9%**） | 3.21 | 0.58 | 13.03 | 4.4% |
+
+- 作废的说法：
+  1. **「输出只占 0.5%，优化输出毫无意义」**——token 是 0.53%，但**账单占 11~14%**（输出单价 = 100× 命中价、2× 未命中价）。其中 thinking 占输出一半（10.42M / 20.34M），折合约账单 **7%**。
+  2. **「跳过一轮只省约 30% 输入」**——那是按 30 天平均命中率 95.4% 算出来的；真正的长回合命中率 99.3%，命中重放占该轮成本 **70.9%**。普通回合才是 14%。**结论随回合长度翻转，不是一个常数。**
+  3. 旧设计文档「未命中占输入成本约 70%」只对短回合成立；长回合反过来是命中重放占七成。
+- 最近实测暴露的真问题（比这两篇论文都重要）：最大回合 465,460,768 token / 362 轮。`rounds_detail` 前 120 轮每轮 5.0~5.8 万（第 98 轮 106,050），据此后 242 轮平均 ≈**1.88M/轮**——**回合内上下文在 100+ 轮之后失控**。工作集（`history_working_set_tokens=40000`）管的是跨回合历史，管不到回合内增长。这一个回合就占当天账单 73%（¥13.03 / ¥35.67）。
+- 修正后的优先级：① **回合内增长护栏**（`agent_turn_token_budget=30M` 只能事后收尾，拦不住单轮膨胀；需要「单轮上下文上限 / 回合内工具结果密度」）；② 工作集（砍的正是长回合里占七成的命中重放，仍是最值钱的一项）；③ 输出侧（11~14%，thinking 占一半，Merlin's Whisper 类手段最优情况也就 2~3%）；④ HarnessMM 式跳轮（任务上跳不掉，普通回合只值 14%）。
+- 复算脚本：`%TEMP%\_cost_real.py`、`%TEMP%\_usage_recent.py`（均只读）。
+
+## [2026-11-09] 调研：TokenPilot / CTXAgent（上下文管理两篇）与本项目的差距
+
+- **TokenPilot**（arXiv 2606.17016，EMNLP 2026 Findings）：双层上下文管理。① 全局 **Ingestion-Aware Compaction**：把易变字段（agent id、工作目录、时间戳、工具 schema）换成静态占位符来稳住前缀，并在「入库口」就压掉工具的原始噪声（HTML/日志），压缩后的内容按 **内容哈希** 存进 artifact registry，留一个恢复工具按需取回；同一哈希被反复取用超过阈值 τ 就停止压缩。② 局部 **Lifecycle-Aware Eviction**：上下文段分 `active / completed / evictable` 三态，用轻量模型（Qwen3.5-35B-A3B）每 B 轮批量估一次「残余效用」，只有效用归零才一次性清除，**不做逐轮小改**。B=3 是实测最优（B=1 太频繁，切一次丢一次缓存）。
+  - 数字：PinchBench 连续模式成本 $7.24 → $2.79（-61%），Claw-Eval $81.52 → $10.58（-87%），分数 79.2 → 81.3。
+  - 组件拆解（PinchBench 连续）：只做前缀稳定 $7.24 → $6.39；加归约 $4.22；再加驱逐 $2.79。隔离模式：前缀稳定单独就 $8.31 → $4.35（-48%），整条链路 $2.87。缓存命中率 38.7% → 79.2%。
+  - 关掉恢复工具后：分数 80.9 → 77.1，成本反涨到 $4.03（模型开始补偿性重试）。说明「可寻址」比「压得狠」重要。
+- **CTXAgent**（arXiv 2610.34425，2026-10-25）：不给脚手架，只给模型两个工具 + 一段说明，让它自己管上下文。`compact_context(summary, keep_from, keep_ids)` 把 system 之后到 `keep_from` 的整段归档，**摘要由模型自己写，不额外调摘要模型**，所以压缩本身不额外花钱；`curate_context(drop=[{id,note}])` 把已经用过的工具结果换成模型自己写的一行备注。护栏是把阈值压缩保留为兜底。
+  - 数字（35–212 轮的混合会话）：7 个前沿模型里只有 **Claude Opus 5.5 / GPT-6.1 Sol 稳定获益**（混合会话 -43% / -48%，困难会话 -58%）；Haiku 5.5、Muse Wonder 根本不用压缩工具；Sonnet 5.5 三次里只压了一次；Sol 的摘要啰嗦到输出 token 涨 5 倍。
+  - harness 对比：同一个 Opus 5.5，CTXAgent（1M、自管）比 Claude Code 200k 省 34%、比默认省 49%，分数持平；而 Claude Code 默认窗口**根本没触发压缩**，涨到 277k。CTXAgent 全程没超过 80k。
+  - 引用的旁证：CliffCompaction 测到「缓存读取约占未压缩账单的 78%」——与本项目实测（长回合命中重放占该轮成本 70.9%）吻合。
+- 对照本项目：
+  - **TokenPilot 最大的一块我们已经吃到**：它的收益大头来自「前缀稳定把缓存命中率从 38.7% 抬到 79.2%」，而本项目整体命中 **95.4%**（短回合 90.7%、长回合 99.3%）。批 2 的 S0/S1 分段 + `_attach_dyn_tail` 做的就是这件事。
+  - 我们**没有**的是它第三层：**「内容哈希 + 取用频率门」**——同一份工具输出被反复取回时不再压缩。我们只有 `spill` 落盘 + `read_tool_result` 取回 + 按字符数截断，没有反向门。
+  - 我们**做了一半**的是归约：`tool_result_max=30000` 字 → head 4096 + tail 1024，>50000 落盘。TokenPilot 的证据是「彻底删恢复工具会掉分并涨价」，所以我们现有的可寻址设计方向是对的，不用改。
+  - **两篇的共同点、也是本项目最该记的一条**：**每次改写上下文，都会从改写点开始丢掉缓存**。折叠越早的内容代价越大。我们现在的 `trim_tool_results` 是按阈值逐步折叠旧结果（位置靠前），属于「频繁小改」，可能一直在制造整段 miss；TokenPilot 的做法是攒到任务边界一次性切。这条机制解释了本项目长回合 99.3% 命中下仍有 3.2M 未命中的来源，但**尚未逐轮验证**。
+  - CTXAgent 的价值在「摘要由模型自己写、不额外调模型」，我们 `maybe_compact_working_set` 是后台另起摘要调用。但它的结论强依赖模型：deepseek-flash 是否愿意自我管理，**没有任何证据**；要抄必须先做小实验。
+- 结论：两篇都不必照搬，但要吸收两条设计原则：① **压缩少而整**（在任务边界一次性切，别每轮小改）；② **可寻址优先**（压掉的内容必须能取回，否则模型补偿性重试会更贵）。TokenPilot 的「哈希 + 取用频率门」是缺的那一小块，成本低、可先做；CTXAgent 的「模型自己压」要先验证 deepseek-flash 的能力再谈。
+- 顺带验证并**未成立**的假设：怀疑 `system_clock_text()` 把精确到分钟的时间放在 system 末尾，导致跨分钟就整段丢缓存。用最近相邻回合（同会话、间隔分组）对比，跨 5–15 分钟仍有 82.9% 命中、跨 15–60 分钟 91.8%，**证据不支持**。注意回合级 `cached` 会被长回合的多轮稀释，单轮回合样本只有 1 个，所以这条只能算「没找到证据」，不算「已排除」。
+- 资料：`%TEMP%\tokenpilot.txt`（16 页）、`%TEMP%\ctxagent.txt`（26 页），`%TEMP%\_clock_effect.py` 为只读验证脚本。
+
+## [2026-11-09] 综合四篇论文（Whisper / HarnessMM / TokenPilot / CTXAgent）的 token 优化结论
+
+- 统一记账口径（官方单价 1 : 50 : 100，即命中 ¥0.02、未命中 ¥1、输出 ¥2 每百万）：**一个未命中 token = 50 个命中 token 的钱，一个输出 token = 100 个命中 token 的钱**。所以「省了多少 token」这句话没有意义，必须问「省的是哪一类」。
+- 30 天实测账单构成（¥292.72）：命中 ¥74.1（25.3%）、未命中 ¥177.6（60.7%）、输出 ¥41.0（14.0%）。
+  - 但「token 命中率 95.4%」是误导性指标——它在钱上只值 25%。**该盯的 KPI 是「未命中 tokens / 回合」和「输出 tokens / 回合」**，不是命中率。
+  - 普通回合（去掉最大回合）反过来：命中只占 14.0%，未命中 71.5%，输出 14.5%。即**短回合的痛点是「每次重付全额」，长回合的痛点才是「空转重放」**。
+- 四篇各打哪一段（这是四篇最有用的一张图）：
+
+| 论文 | 打的是 | 对应账单项 | 在本项目的实测上限 |
+|---|---|---|---|
+| HarnessMM | 减少轮数（跳过已决断的推理回调） | 每轮的命中+未命中+输出全砍 | 任务上跳不掉，普通回合跳一轮只省 14% |
+| TokenPilot | 前缀稳定 + 入库归约 + 生命周期驱逐 | 命中（已吃满）、未命中（新增量） | 命中 95.4% 已超过它论文最好水平；归约那层还有空间 |
+| CTXAgent | 压缩时机与内容（模型自管） | 未命中（重建量） | 依赖模型，deepseek-flash 能力未知 |
+| Merlin's Whisper | 输出/思考长度 | 输出（14.0%） | thinking 占输出一半，最好情况省 2~3% |
+
+- 从四篇里能提炼的四条共识（都比它们的具体算法更值钱）：
+  1. **缓存连续性 > 文本压缩**。TokenPilot 用 38.7%→79.2% 的命中率换来 -48% 成本；CTXAgent 引用 CliffCompaction「缓存读取占未压缩账单 78%」，与本项目长回合 70.9% 吻合。任何改写上下文的动作，都在从改写点开始丢缓存。
+  2. **可寻址 > 不可逆删除**。TokenPilot 关掉恢复工具：分数 80.9→77.1、成本反涨到 $4.03（补偿性重试）。与我们 `spill` + `read_tool_result` 的方向一致，不能砍。
+  3. **少而整 > 频繁小改**。TokenPilot 的驱逐按 B=3 轮批量执行，B=1 太频繁反而更贵；CTXAgent 的说明里明确写「每改写一次就丢一次缓存，别每一步都改」。我们现在的 `trim_tool_results` 是按阈值逐步折叠旧结果（位置靠前），方向相反。
+  4. **压缩点要落在任务边界**。CTXAgent 让模型在「一段工作结束」时压，而不是按 token 阈值。
+- 我们已经吃掉的：前缀稳定/缓存命中（批 2）、工作集 40k（批 3）、可寻址工具结果（spill + read_tool_result）、回合累计预算 30M。
+- 还空着的，按钱的预期排序：
+  1. **未命中构成未测量**（¥177.6 / 60.7% 不知道花在哪）。设计文档 M6 提过 `miss_parts`（新增内容 / 前缀漂移 / 压缩重建），**没有实现**。没有这个数，下面三条都无法验收。
+  2. **回合内无上限**：实测单回合 4.65 亿、后 242 轮平均 1.88M/轮；30M 的回合预算只能事后收尾。
+  3. **折叠方式方向错了**：逐步折叠旧结果（位置靠前）= 每轮制造整段 miss。应改为「攒到边界一次性切」。
+  4. **入库口归约 + 哈希取用频率门**（TokenPilot 唯一我们还没抄的一小块）。
+  5. 输出侧（14%，其中 thinking 7%）——最后再谈。
+- 一句话结论：**四篇里只有 TokenPilot 的「缓存连续性」和「少而整」对我们的账单有直接作用，但它最大的那块我们已经吃完了；真正剩下的钱在「未命中」上，而我们现在连它由什么构成都还没测。先补观测，再改机制。**
+
+## [2026-11-09] 实施：补「未命中构成」观测（miss_parts）
+
+- 目标：回答「占账单 60.7% 的未命中，是新增内容、折叠重建，还是缓存没接上」。只加观测，不改装配、不改预算、不改请求。
+- 新增 `app/missplit.py`（纯函数，可单测）：`split(rounds)` 把每一轮的 `prompt - cached` 拆成四类：
+  - `cold`：本回合第一轮且该会话此前无请求（没有可比前缀）。
+  - `new`：缓存正常命中时必然要付的部分。首轮用 `prefixtrace` 的公共前缀（`cur_tokens - prefix_tokens`），第 2 轮起用相邻两轮的本地估算增量，并用本轮 `prompt/est` 比例校准估算偏差（比例 <0.2 或 >8 时放弃校准）。
+  - `rebuild`：超出 `new` 的部分，且本轮发送前发生过工具结果折叠或历史压缩。
+  - `drift`：剩下的部分——本地解释不了，即缓存没按预期命中。
+- `app/api/chat.py`：
+  - 每轮发送前快照 `_est_send = estimate_messages_tokens(messages)` 与折叠/压缩计数。
+  - 每轮拿到 usage 后把 `{n,prompt,cached,est,fold}` 追加进 `_miss_rounds`（**不受 `rounds_detail` 的 120 轮上限影响**）；首轮附带 `cold/prefix_tokens/cur_tokens`。
+  - `rounds_detail` 每轮新增 `cached` 字段（原来只有回合累计，看不到「哪一轮开始断链」）。
+  - 回合收尾写 `timing.obs.miss = {cold,new,rebuild,drift,total,rounds}`。
+- `app/usage.py`：`_obs_stats` 新增 `miss_parts` 求和（只统计带 `miss` 的记录，`turns` 表示覆盖了多少回合；旧记录自动跳过）。
+- `web/settings.js`：token 明细新增「未命中构成」卡片，显示四类占比与覆盖回合数；旧后端数据自动降级为「—」。
+- 验证：
+  - `tests/test_missplit.py` 13 条（空输入/缺字段/冷启动/温暖首轮/增量/漂移/折叠重建/估算偏差/比例越界/首轮缺用量/守恒）。
+  - `tests/test_usage.py` 新增 2 条（累加、旧记录不污染）。
+  - `tests/test_continue_resume_live.py` 的 `test_turn_writes_token_obs` 增加断言：四类之和 == `total` == 真实 `prompt - cached`。`GM_LIVE_UI=1` 跑 **5 passed**。
+  - 定向回归（context / prompt_assembly / chat_blocks / stream_stop / token_profile / working_set / token_budget）**132 passed**。
+  - `py scripts/dev_check.py` 全部通过；全量 `pytest tests`（排除缺 reportlab 的 reader）：**2151 passed, 9 skipped, 2 failed**——2 条 `tests/test_archify.py` 是渲染器并发/环境抖动，单跑该文件 **14 passed**，与本改动无关。
+- 已知边界：
+  - `new` 是**估算**（本地 tokenizer 与真实 tokenizer 有系统性偏差，已按本轮比例校准），不是精确归因；结论看占比趋势，不看个位数。
+  - 只有**新记录**带 `miss` 字段；历史流水没有，`miss_parts.turns` 会一直是 0 直到产生新记录。需要重启后端才生效。
+  - 运行 live 测试会把 `data/current_session.json` 写成 `{"id":"s1"}`（该会话不存在，`sessions._apply_current` 会忽略并回落到 `sessions.json` 的 `current`，下次保存自动复原）；`sessions.json` / `config.json` 内容已核对无损。
+- 下一步（等有数据后再做）：看 `miss_parts` 里 `drift` 与 `rebuild` 的占比，决定是改折叠策略（少而整）还是先管回合内膨胀。
+
+## [2026-11-09] 复核：七家 harness 的上下文管理机制（Claude Code / Codex / OpenCode / dsh / ZCode / Trae / Cursor）
+
+> 与 `docs/TOKEN_OPTIMIZATION_DESIGN.md` §2.1 的旧表对照：下表补了官方来源，旧表数字不变。
+
+| 产品 | 触发点 | 动作与保留策略 |
+|---|---|---|
+| Claude Code | 接近窗口；200k 显式窗口实测约 **168k** 才切 | 先清旧工具输出 → 再结构化摘要；有手动 `/compact`。CTXAgent 实测：默认窗口下 Opus 5.5 甚至涨到 **277k** 都没自动切 |
+| Codex CLI | 配置上限，**最多 90% 窗口**；显式 200k 实测约 **145k**，默认 170–190k | 保留最近若干条用户消息到 token 预算；托管模型走**服务端压缩端点**；append-only |
+| OpenCode | 到达配置的窗口值 | 压缩到配置窗口；可选 pruning **默认关闭**；模型可调用的 compress 工具只是第三方插件 |
+| DeepSeek Harness（dsh） | `min(W × thresholdRatio, W − maxOut − headroom)`；ratio 默认 **0.8**、headroom 默认 **65536** | compaction-basic。坑：窗口 < ~370k 时 `min()` 会选中 headroom 项，131k 窗口在 **37.5%** 就压。本项目 `request_budget()` 就是照这个公式写的 |
+| ZCode | `W − min(maxOut, 21000) − ~13000`（固定扣 ~34K）；128k→**94k(73%)**、200k→166k、1M→966k | 触发判定**含本轮工具结果的实时估算**，所以会比进度条略早压；**没有用户可调阈值**；有 `/compact` |
+| Trae | 超过上下文窗口自动触发 | 自动压缩 + 面板手动「压缩」按钮；Max 模式 1M 窗口、单任务最多 200 轮工具调用 |
+| Cursor | 不靠「压」靠「少带」 | 语义块索引 + Merkle 增量；长工具输出写文件、Agent 按需 tail/grep；MCP 懒加载（官方 A/B 总 token **-46.9%**）；摘要时用文件引用代替正文 |
+
+- 结论一：**七家全是「阈值触发 + 一次性压到预算内」**，没有一家做「每轮上下文硬上限」。所以我们跑出 1.88M/轮不奇怪——这是主流 harness 的共性缺口，TokenPilot 也正是拿这一点做文章。
+- 结论二：**触发点全部按窗口算**（`W − 输出预留 − 余量`），没有一家用固定 token 数。我们 `tool_result_trim_tokens = 100000` 是异类：它是固定值、只折工具结果、且折完不保证降到阈值以下。
+- 结论三：**压的动作是「一次压到预算内」，不是「折一条」**。Codex / ZCode / Claude Code 都是这样；这印证了第三件（少而整）。
+- 结论四：dsh 的 headroom 陷阱值得记——`min()` 在小窗口上会被常数项主导，导致实际触发比例远低于 ratio。我们的配置（1M 窗口、ratio 0.8、headroom 8192）不受影响，但换小窗口模型时要重算。
+- 来源：ZCode 官方 FAQ（触发公式与实测档位）、dsh compaction 文档（公式与默认值）、CTXAgent 论文（Claude Code / Codex / OpenCode 的实测切点）、Trae 官方文档、Cursor 为本项目此前调研（官方博客/文档，未在此轮复核）。
+
+## [2026-11-09] 方案：单轮上下文上限（批 5，未实施）+ 增加动因实测
+
+- 方案写在 `docs/TOKEN_OPTIMIZATION_DESIGN.md` §20（含上限公式、动作阶梯、配置清单、回滚、验证、风险）。
+- 核心：新增工作线 `C = clamp(W×0.2, wset+30000, 150000)`（1M 窗口 → 15 万），与安全线 `request_budget()=80 万` 分工；超线时按「折工具结果 → 压历史（每回合最多 2 次）→ 仍超则记录并继续」执行；滞回压到 70% 再收手；`turn_context_cap = 0` 一键回滚。
+- **增加动因实测**（只读 `rounds_detail[].in_parts` 的相邻轮增量，290 回合 / 1319 个增长轮）：
+  - 30 天：`tool_result 48.0%`、`user 47.8%`、`reply 2.9%`、`schema 0.7%`。
+  - 最近 3 天：`tool_result 87.7%`、`user 7.0%`、`reply 4.7%`。
+  - 结论：回合内增长的主体是工具结果，正是 `trim_tool_results` 能折的东西 → 方案有效；`reply` 可忽略，不需要「回合内 reply 折叠」；30 天口径里 user 占一半说明有粘贴型回合，那部分压不住，会体现为 `cap.stuck`。
+- 注意：探测只统计「正增量明显大于负增量」的轮次（跳过 8468 个折叠/压缩轮），是「增长轮的构成」而非全部轮次平均。
+
+## [2026-11-09] 实施：按需加载（lazy context，批 6）
+
+- 目标：把「读之前少带、读的时候按需、读完可寻址」做成默认行为。方案与配置见 `docs/TOKEN_OPTIMIZATION_DESIGN.md` §21。
+- A 自动召回预算（`app/api/chat.py::_auto_code_refs`）：结果先按 score 排序，前 `auto_context_inline_max`（默认 2）段且总正文 ≤ `auto_context_budget_chars`（默认 8000）才内联；其余打 `slim=True`、不带给正文。`context._msg_text` 遇到 `slim` 只渲染「【引用代码：path:start-end】」一行。估算与装配共用同一函数，进度条不会失真。
+- B 同回合重复读去重（`app/agent.py`）：新增 `_READ_SEEN`（键 `(sid, 沙箱根, 绝对路径)` → `(版本戳, turn_key)`），不复用进程级的 `_READ_STATE`（那是写前读守卫、跨会话共享，会让新会话误以为已读过）。三重条件命中才回一行提示；带 `start` / `limit` / `raw` 一律照常读；只记「整篇正文给过」，分段读和大纲不入表。`turn_key` 由 `chat.py` 在 `caps` 里生成。
+- C 落盘阈值 50000 → 12000（`tool_spill_max`），预览改为「头 1200 字 + `spill.key_lines` 关键行（报错/失败/警告，去重，最多 20 条）+ 尾 400 字 + locator」。`spill.key_lines` 新增，纯正则行筛选。
+- D 大文件默认大纲（`read_outline_mode`，**默认关**）：`.py/.js/.ts` 且 ≥ `read_outline_min_lines`（600）且没带 start/limit 时，`read_file` 先返回 `repomap.outline()` 的符号表。会改变工具返回形态，等 bench 再开。
+- E 会话首次提问注入仓库结构（`repo_summary_inject`，**默认关**）：`repomap.build(...)[:1200]` 作为虚拟引用，只在 `len(user messages) <= 1` 时注入；放在引用里而不是 system，避免文件变化打断前缀缓存。
+- 设置页：省费模式组新增 5 个控件（内联预算 / 内联条数 / 重复读去重 / 大纲模式 / 仓库结构）。
+- 验证：`tests/test_lazy_context.py` 14 条（关键行、大纲、去重的 5 种分支、召回预算、slim 渲染、默认值）+ `tests/test_agent_limits.py` 补 3 个新键；`scripts/dev_check.py` 全过；全量 `pytest tests` **2165 passed / 9 skipped / 2 failed**（2 条 `test_archify.py` 渲染器并发抖动，单跑该文件全过）；`GM_LIVE_UI=1` 端到端 **5 passed**。
+- 已知边界：自动召回减少内联后，模型可能多一次 `read_file`——用 `miss_parts.new` 与每任务 `read_file` 次数监控；D/E 未跑 bench。
+
+## [2026-11-09] 诊断：16:04 那轮「AI 不跑命令、要求人类执行 + 大量重复」
+
+- 定位：会话 `s_07db41e3dabc` 第 63 条消息（`done_at` = 16:04:38），usage 记录 `prompt 30,166,561 / cached 29,381,120 / completion 90,168 / rounds 71 / auto_continues 146 / end_reason=budget`。
+- **不是工具通道坏了**：该回合实际执行了 **89 次工具调用**（read_file 42、search_files 26、run_command 10、edit_file 9、read_file 批量 1、write_file 1），只有 6 次失败（`_chk.mjs` 语法错、`_u1.cjs` BOOT_FAIL、`_w4.cjs` 连续 3 次 exit 1、一次 `read_file {}` 缺 path）。
+- 真正的转折在 block 178 之后：模型开始把调用写成**纯文本** `<run action="exec">…</run>` / `<read action="file">…</read>`。运行时不解析这种标签（只认原生 tool_calls），所以从 block 191 起没有任何调用被执行；模型据此判断「通道不通」，在 block 210 起反复输出「需要你做的：cd /d … && node _u1.cjs 1200」。
+- 退化诱因（按证据强度）：① `_w4.cjs` 连续 3 次 exit 1（fillRect=0 arc=0，测试脚本自身缺陷）；② 一次空参数 `read_file`（INVALID_ARG）；③ block 184 出现损坏片段 `</｜｜DS`；④ 中途多次切成英文自言自语（"Let me actually make tool calls properly. The issue seems to be that my tool calls aren't being pars[ed]"）。**模型侧退化，不是本地解析 bug**——同一段里 block 187 的原生调用仍成功。
+- 重复的两层原因：
+  - 消息内：`agent_auto_continue = -1`（无限续跑）+ `agent_max_rounds = 0` + `agent_auto_idle_limit = 0`（代码注释明确「不再据此停轮」），只有 `agent_turn_token_budget = 30M` 能停。每次续跑模型都把整段结论重写一遍 → 45 个「工具通道…」段落、309 个 block、54,860 字符。
+  - 落库层：第 56–62 条是 7 条未收尾快照（`interrupted=True`、`end_reason=resume`），内容 1,798→5,901 字符、工具 28→89 条，只有第 63 条有 `done_at`。续跑没有原地更新，而是每条新落一条；若前端把它们都渲染出来，就会看到同一个回答重复 7 次。
+- 建议的护栏（未实施）：① 检测「本轮只有纯文本工具标签、没有原生 tool_calls」→ 回灌明确纠正 + 计入空转；② 连续 2 次空转就收尾（`agent_auto_idle_limit` 从 0 改 2）；③ `agent_auto_continue` 默认改有限（如 8）；④ 续跑落库统一走原地更新，避免快照堆积。
+
+### 技术细节补充（问题先记录，暂不修）
+
+**这个失败模式的名字：tool-call grammar leakage。** 模型把本该走结构化 `tool_calls` 的内容当纯文本写进 `content`。业界汇总（`pi-tool-repair` 的 Tool-Call Grammar Leakage Survey，2026-06）把它按语法家族分类，我们命中的是 **A 族：DeepSeek DSML**：
+
+```
+<｜｜DSML｜｜tool_calls>            # 双竖线（V4 SSE 最常见）
+<｜DSML｜tool_calls>               # 单竖线
+<DSML｜tool_calls>                 # 无前导
+< | DSML | tool_calls>            # 代理转码后的 ASCII 变体
+```
+
+`｜` 是 U+FF5C（全角竖线）。日志 block 184 里的残片 `</｜｜DS` 就是它被截断的样子。
+
+**根因（按与本项目的相关性排序）**：
+
+1. **流式分片切开起始标记**：`<｜｜DSML｜｜tool_calls>` 很长，被切在两个 SSE chunk 之间，解析器先把前半段当正文吐出去，后面就再也认不出来了。
+2. **reasoning parser 与 tool parser 的顺序**：两者同时开启时，工具解析器只在 reasoning 解析产出之后处理 `content`；模型把 DSML 写进未闭合的 `<think>` 里，标签落进 `reasoning_content`，工具解析器根本看不到。
+3. **`tool_choice=auto` + `stream=true` 是高风险路径**：`required` 与非流式明显更稳（走不同的受限解码分支）。
+4. 批量解码里的 `skip_special_tokens=True` 会把 sentinel 直接删掉；自建 vLLM/SGLang 或聚合层缺 `--tool-call-parser` 时原始标记直通。
+5. 温度越高越容易偏离严格语法。
+6. 提示词里写「不要输出 DSML」基本没用——这是 tokenizer/训练层的行为，不是指令遵循问题。
+
+**本项目的两处具体缺口**（在 `app/llm.py`）：
+
+- `_TAG_RE` 要求标签名以 `[A-Za-z]` 开头，而 `<｜｜DSML｜｜tool_calls>` 以 `｜` 开头 → **匹配不到，不会被清除**。
+- `_PROTO_NAME_RE = tool|parameter|invoke|function_calls|thinking|antml`，但模型退化后写的是 `<run action="exec">` / `<read action="file">` / `<edit action="patch">` —— `run/read/edit` 都不在名字族里 → **也不会被清除**。
+- 后果是雪球：伪标签留在 `content` → 落库进历史 → 下一轮照着抄。已有注释「落库前清掉，否则会成为下一轮的模仿样本」说的就是这个机制，只是名单没覆盖到。
+
+**Codex 的做法（源码级，第一类里唯一开源的）**：
+
+- `codex-rs/codex-api/src/sse/responses.rs:231` `process_responses_event`：`response.output_item.done` 反序列化成 `ResponseItem`；正文走 `response.output_text.delta`，两条通道互不相干。
+- `codex-rs/core/src/tools/router.rs:244` `build_tool_call`：只 match `FunctionCall` / `ToolSearchCall(client)` / `CustomToolCall`，末尾 `_ => Ok(None)` —— **没有正则、没有 XML 解析、没有"正文里找调用"**。
+- `codex-rs/core/src/stream_events_utils.rs:158`：只有拿到 `ToolCall` 才 `needs_follow_up = true` 并派发；否则当普通消息，本轮结束。
+- 唯一合法的"收文本"通道是 `ResponseItem::CustomToolCall → ToolPayload::Custom { input }`：**在 schema 里显式声明成 freeform 工具**（`apply_patch` 就是这样），而不是运行时猜。
+- Claude Code / Cursor / Trae 闭源，行为一致（泄漏时把原始标签当正文显示，Visual Studio 的 BYOK Agent 有公开 bug 报告）。
+- 结论：**第一类不修语法泄漏，把责任交给模型厂商的 API**。我们用的是被该汇总点名泄漏的 DeepSeek 官方 API，所以这条路不能照抄。
+
+**将来修复时的四条原则（来自该汇总，暂不实施）**：
+
+1. **Recover, don't just strip**：只删标签会让 agent loop 拿到 `finish_reason=stop` 且没有工具被派发——静默空操作。要把完整块还原成 `tool_calls` 并改写 `finish_reason`。
+2. **流式缓冲**：缓存一个「标记长度」的窗口再决定是不是标签（Kimi 解析器约 1KB 缓冲 / 8KB 段上限），末尾要 flush。
+3. **只恢复完整、工具名已知、参数可解析的块**；不完整的降级成文本，绝不把散文提升成执行。
+4. **代码块 / 讨论语境豁免**：出现在 ``` 代码块里的语法不能删（OpenClaw 踩过）。
+
+**参考资料**：`pi-tool-repair` 的 [Tool-Call Grammar Leakage Survey](https://raw.githubusercontent.com/monotykamary/pi-tool-repair/HEAD/docs/tool-call-grammar-leakage-survey.md)；[Codex 源码解读：Toolcalls](https://dangui.org/engineer/codex/6.toolcall/)；[Visual Studio BYOK 原始调用泄漏](https://developercommunity.visualstudio.com/t/Custom-LLM-Providers-BYOK-completely-b/11102117)。
+
+**第二次复现（21:32，会话 `s_07db41e3dabc` 第 66 条）**：
+
+- usage：`prompt 23,062,573 / rounds 55 / auto_continues 143 / end 空`；`rounds_detail` 120 条里 **65 条 `finish=stop` 且 `tools=0`**，而且 `n` 一路卡在 **56** 不再前进。
+- 消息实际执行了 **66 次工具**（read_file 25、search_files 22、edit_file 10、run_command 5、write_file 2、read_files 2），只有 1 次失败——所以「无法执行任何工具」是模型的误判。
+- 分界点：第 60 个工具 `node _w6.cjs 2400` 真失败（`BOOT_FAIL ACT_WORK is not defined`）→ 模型用 edit_file 修好（第 65 个工具成功）→ 之后再也发不出 `run`。block 151 起全是纯文本：`<run` 24 次、`<read` 49 次、DSML 碎片 3 次（`</｜｜DS`）。
+- 模型自己的说法（block 154）「只有 read 和 edit 能真正执行」与数据吻合：146/149 是真实 read/edit，之后没有任何原生 run。
+- 仍未确证：为什么只有 `run` 发不出原生调用。两种可能——① 模型认定 run 坏了，主动改成文本；② 该轮 `run_command` schema 没下发。现有数据没有「每轮工具清单」，分不出来；要分清需要加一个每轮记录工具数量/名字 hash 的埋点。
+- 这也说明「文本伪调用检测 + 空转刹车」比任何解析修复都更急：这次会在第 2 次续跑停住，而不是 143 次。
+
+**已实施（仅伪调用检测，未做空转刹车）**：
+
+- `app/llm.py` 新增 `pseudo_call_tagged(text)`：先剔掉 ``` 代码围栏，再匹配三类写法——`<tool>/<invoke>/<parameter>/<function_calls>` 家族、`<run|read|edit|code|git|plan|agent|web|history … action=…>` 动作式 XML、DeepSeek DSML（双/单/无前导竖线 + ASCII 变体 + 流式截断残片 `</｜｜DS`）。产物多一个字段 `rr["pseudo_call"]`。
+- `app/api/chat.py`：新增 `_MSG_PSEUDO_CALL`，两条注入路径——
+  1. 自动续跑分支：本轮无原生调用且 `pseudo_call` 命中 → 在续跑提示前面加一段「你写的是纯文本，不会执行，请用原生调用」；
+  2. 没有续跑理由时的兜底：追加一条该提示并 `continue`，再给一轮。
+  - 每回合最多 2 次（`pseudo_nudges`），不做额外刹车；用完仍命中就退回原来的 warn。
+- 测试：`tests/test_pseudo_call.py` 5 条（动作式 / DSML 各变体 / `<tool>` 家族 / 普通 HTML 与纯文本不误判 / 围栏内不误判）；`pytest tests/test_pseudo_call.py tests/test_chat_blocks.py tests/test_stream_stop.py` **50 passed**；`scripts/dev_check.py` 全过；`GM_LIVE_UI=1` 端到端 **5 passed**。
+- 注意：`_FENCE_RE` 在 `llm.py` 里原本就有一个（按行匹配围栏标记），新加的整块围栏正则必须叫 `_FENCE_BLOCK_RE`，否则会被后面的定义覆盖、导致围栏内误判（这次踩过）。
+
+## [2026-11-09] 变更：archify（流程图 / 架构图）只在 Agent 模式下可用
+
+- 需求：取消「流程图工具的非 Agent 可调用」。此前 `archify` 被刻意放在 `agent_on` 之外（注释写着「不依赖沙箱，没有 Agent 时落 data/archify/<sid>/」），普通聊天也能调。
+- 改动（两道闸）：
+  1. `app/agent.py::native_tool_schemas`：`archify` 的 schema 追加包进 `if agent_on:`，非 Agent 会话根本看不到它；`hidden_tools` 的分层逻辑不变（Agent 下仍需命中 diagram 意图域或 `tool_search` 解锁）。
+  2. `app/agent.py::_run_tool_impl`：新增执行前拦截——`caps["agent_on"] is False` 且 `name == "archify"` 时直接返回 PERMISSION 错误，提示改用内联 svg / mermaid / chart，或让用户开 Agent。`caps` 由 `app/api/chat.py` 在会话级注入 `caps["agent_on"] = bool(agent_on)`。
+  - 只拦显式 `agent_on=False`：脚本 / 子代理 / 测试不传该键时保持兼容（`tests/test_archify.py` 里直接 `run_tool` 的用例不受影响）。
+- 提示词同步：`_VISUAL_DIAGRAM_OFF` 从「archify 不需要开启 Agent」改为「非 Agent 模式下不可用，如实告诉用户开 Agent，不要假装生成、不要编 HTML 路径」。
+- 行为变化：普通聊天里让 AI 画流程图 → 只会走内联围栏（svg / mermaid / chart）；要可交互 HTML 页必须开 Agent。
+- 测试：`tests/test_archify.py` 新增 2 条（schema 不下发 / 执行被拦），改写原 `does_not_need_sandbox` 为 `requires_agent_mode`；`tests/test_agent_guards.py` 的视觉提示分层断言同步。`pytest tests/test_archify.py tests/test_agent_guards.py` **74 passed**；`scripts/dev_check.py` 全过。
+
+## [2026-11-09] 调研：Native Shell（NSH）是什么，能不能整合
+
+- 项目：`longbridge/nsh`，Apache-2.0，当前 **v0.4.0**（很早期）。另一个同名项目 `nativeshell/nativeshell` 是实验性 Flutter 桌面嵌入器，与 Electron 同类，更不相关。
+- 定位：**跨平台原生 UI 框架**（Rust 实现）。同一套组件/状态/逻辑，在 iOS/Android/macOS/Windows/Linux 用各自原生控件渲染，Web 输出 HTML/CSS，也能渲染到 GPUI 应用和终端字符格。写 Rust 或 TSX（SolidJS 响应式 + Tailwind），可混用。
+- 打包方式：独立 App、静态网站，或**嵌进已有原生 App**（官方有 embed-ios / embed-android 示例）；Web 侧通过 `createPlayer`(JS) 或 iframe 嵌入。
+- 特色：运行时可加载 TSX 模块（插件 / AI 生成的界面），以**签名包 + 宿主配置的能力沙箱**投递；给编码 agent 提供可读文档与 skills。
+- 与本项目的关系（结论：**不建议整合**）：
+  1. 语言/运行时完全不同：我们是 Python 后端 + 原生 JS（61 个文件）+ Electron 壳；NSH 是 Rust/SolidJS 全应用框架，不是能挂进现有页面的库。
+  2. 集成只有两条路，都不划算——整站重写（丢掉全部现有前端）或在 iframe 里跑一个 NSH 子应用（等于多引一层运行时，没有收益）。
+  3. 我们是聊天/工作台类界面，原生控件的性能优势用不上；Electron 已提供多窗口、菜单、拖拽。
+  4. v0.4.0，生态与稳定性都还早，不适合作为本地工具的地基。
+- 唯一值得借鉴的点：**插件的「签名包 + 宿主控制的能力沙箱」模型**。我们已有 `app/plugin_manager.py`，将来要开放第三方插件时，可以按这个模型设计（签名校验 + 声明式能力 + 宿主逐项授权），而不是照搬代码。
+- 来源：crates.io `nsh-i18n`（README 即项目说明）、nsh.dev、GitHub `longbridge/nsh`。未验证：Windows 目标的实际产物形态与稳定性（没有下载试用）。
+
+## [2026-11-09] 调研：Agentero 是什么
+
+- 结论：**Agentero 是 poco-ai 的开源「本地优先」科研工作台**（`github.com/poco-ai/Agentero`，MIT，官网 agentero.app，文档 agentero-docs.poco-ai.com）。不是 agent 框架、不是 harness，而是**面向 AI agent 的文献/笔记宿主应用**。
+- 注意重名：另有一家美国 insurtech 公司也叫 Agentero（独立保险代理网络，Luis Pino 创立，InsurTech100），与本次调研无关。
+- 要解决的问题：科研上下文三处割裂（Zotero 存 PDF / Obsidian 存笔记 / 网页对话框存与模型的推理），agent 只能看到碎片；且 PDF 双栏排版、跨页表格、公式对模型不友好。
+- 技术形态（由 README + 语言统计推断）：TypeScript ~8.8MB + Rust ~6.5MB，Linux 依赖 `webkit2gtk 4.1` → **Tauri v2 桌面壳 + 前端 TS**（Rust 侧是壳与系统集成）；另有 Lua（pandoc 滤镜类）、少量 Python/Shell。
+- 三项对外接口（这是它和本项目最有可比性的部分）：
+  1. **ACP（Agent Client Protocol）客户端**：把 Claude Code / OpenCode / Codex / 本地模型接进来，不绑定厂商，上下文留本地。
+  2. **内置 MCP Server**：反过来让 ChatGPT Web / Claude Desktop 读本地文献库。
+  3. **无头 CLI**：脚本化批量导入、元数据提取、写笔记（社区还给它封了 skill `agentero-cli`）。
+- 数据形态：不用私有数据库，文献（PDF）与笔记（Markdown，支持 `[[wikilinks]]`）以标准文件放本地 Vault，可被外部编辑器读取；支持 S3 兼容同步与 SSH 隧道远程访问。一键迁移 Zotero（保留标签/笔记/附件），可导出 BibTeX/BibLaTeX。
+- 其他：图表/公式抽取成结构化 Markdown+LaTeX；Cool Papers 与魔搭集成、RSS、基于本地库的 arXiv 推荐、引用关系批量入库；有 `dsh` 插件（`@poco-ai/agentero-dsh`）可把文献库塞进 DeepSeek Harness；入选 GOSIM Spotlight。
+- 与本项目的关系：架构取向高度相似——本地优先、Markdown/文件为真源、外壳 + 本地后端、对外同时提供 MCP 与 CLI。可借鉴的两点：① **把「人看的格式」和「模型吃的格式」分离**（PDF 给人、结构化 Markdown+LaTeX 给模型），我们的等价物是「原文件给人、repomap/outline/slim 引用给模型」；② **同一份本地数据同时以 MCP Server 和 CLI 两种形态暴露**，我们目前只有内置工具，没有对外 MCP/CLI 出口。不构成整合关系（它是科研文献专用宿主，与我们的编码/工作台场景不重叠）。
+- 来源：GitHub README（poco-ai/Agentero，抓取于 2026-11-09）、GitHub languages API、agentero.app、agentero-docs.poco-ai.com、GOSIM Spotlight 列表、AITNT 产品页（Product Hunt 创始人自述）。未验证：未下载安装，版本号/star 数未核实（GitHub API 限流）。
+
+## [2026-11-09] Agentero 获 GOAI 世界人工智能开源大赛「无界应用」赛道亚军
+
+- 赛事：**世界人工智能开源大赛（GOAI）**首届，杭州市开源人工智能基金会主办，之江实验室 / 阿里云 / 蚂蚁集团联合承办，AAIF 与 LF AI & Data 为全球开源合作伙伴。总奖池 500 万 RMB，全场大奖 100 万。
+- 赛程：7/16 报名 → 7/21 启动 → 2999 份初赛作品 / 91 国 1.4 万开发者 → 120 进复赛 → 9/10 公布 70 强 → 9/22–23 杭州云谷中心总决赛 + GOAI DAY。四大赛道六个竞赛单元：新智基座 Agent Infra / 无界应用 Boundless Agents / 前沿探索 AI for Research（算法赛题 + 开放探索）/ 具身未来 Embodied Future。
+- **Agentero 成绩：赛道二「无界应用 Boundless Agents」亚军**，报奖作品名「Agentero 一站式科研工作台」，成员 **樊铧纬、陈启源、陈家和**（浙大控制学院 + 计算机学院博士生，团队名 POCO，Logo 是小狗）。
+  - 同赛道：冠军「质链智能体·商业航天任务技术状态与验证证据智能体」（周华睿、张沁怡、吕弢）；季军「保险归因罗盘」（乐志明、徐青、陈泓宇）。
+  - 全场大奖：前沿探索·开放探索冠军 ExpLoop Lab《MirrorPeptidizer：DeNovo 镜像多肽设计算法》，100 万。
+- 奖金：官方奖项设置为「四大赛道亚军 **最高 30 万** RMB」（冠军最高 50 万、季军最高 10 万），与用户所说 30w 对应；**实际到手金额官方未公布**，且 11/6 公示写明「奖金为税前，个税由组委会代扣代缴，11/30 前转账」。公示表只列团队名、不含项目名，未能在表中直接对上 Agentero/POCO，故「实际发放金额 = 30 万」未获官方书面确认。
+- 旁证：杭州网 2026-09-19 报道团队背景（8 月初上线，月活破 1000，52 个版本、2685 次提交、15+ 外部贡献者），并引队长樊铧纬「对奖项看得很淡，让更多人看到比拿奖更重要」。
+- 来源：goaihz.com《总决赛暨颁奖盛典在杭州举行》(2026-09-23，内附完整获奖名单长图，我下载后切图核对)、goaihz.com《奖金发放公示》(2026-11-06)、goaihz.com 首页奖项设置、hznews.hangzhou.com.cn (2026-09-19)、hangzhou.gov.cn 四大赛道路演报道。未验证：获奖名单长图为图片，无文本版；公示表团队名与项目名无法一一对应。
+
+## [2026-11-09] 项目水平自评：实测数据 + 对标 GOAI 类项目
+
+- 实测口径（2026-11-09 在本机跑）：`app/` 214 个 py 文件 / 92,644 行；`web/` 183 个文件 / 79,180 行；`tests/` 201 个文件 / 29,396 行；`docs/` 16 篇 / 6,061 行；`scripts/` 26 个 / 3,102 行。
+- 测试：`pytest -q` 收集 **2216** 条 → **2207 passed / 9 skipped / 0 failed**（退出码 0，约 1 分半跑完）。工具定义约 80 个（`app/agent.py` 里 `_fn_tool(` 85 处，含定义）。
+- 结构风险：`app/agent.py` 8,357 行、`app/api/chat.py` 8,043 行，两个巨型文件；`ruff.toml` 只开 E4/E7/E9/F/W6（作者注明「不做风格洁癖」）；无 `.github` → **没有 CI**。
+- 版本管理：`git rev-list --count HEAD` = **8**，首提交 2026-10-10，单一作者（MKIII-labs）→ 没有可展示的协作/提交历史，也没有 release 流水线。
+- 对标 GOAI「无界应用」亚军 Agentero：代码内功（agent loop、上下文按需加载、cache miss 四分类、prefix trace、伪调用检测）**不输**；差距集中在四项非代码指标——外部用户（对方 1000+ MAU）、外部贡献者（15+）、发布节奏（3 个月 52 个版本）、对外接口（ACP + MCP Server + CLI，我们只有内置工具）。
+- 结论分档：作为「个人自研 AI 工作台」→ 接近第一梯队（完成度 + 可验证性）；作为「可参赛/可融资的开源项目」→ 第二梯队（问题价值/技术深度够，开源价值与生态协同弱）。
+- 若按 GOAI 六维评（问题价值、创新性、技术深度、完成度与可验证性、开源价值与复用、场景落地与生态协同）粗评：技术深度 A-、完成度 A、创新性 B+、问题价值 B、开源价值 C、生态协同 C-。
+- 未验证：无真实用户数据、无性能/并发压测、无第三方安全审计；未与竞品做等量 LOC 对比（语言与统计口径不同，不可比）。
+
+## [2026-11-09] 落地 CI：GitHub Actions 双 job（lint + Windows 全量测试）
+
+- 文件：`.github/workflows/ci.yml`（新增，仓库此前无 `.github`）。
+- 触发：`push` 到 main、任意 `pull_request`、`workflow_dispatch`；`concurrency` 按 ref 分组并 `cancel-in-progress`，连推不排队。
+- job 1 `lint`（ubuntu-latest / py3.13，10 分钟超时）：`pip install ruff==0.17.0` → `ruff check app scripts tests` → `compileall app scripts main.py server.py`。**ruff 固定 0.17.0**（与本地 venv 一致），避免上游新增规则把 CI 突然打红；规则集仍以 `ruff.toml` 的 E4/E7/E9/F/W6 为准。
+- job 2 `test`（**只跑 windows-latest** / py3.13，30 分钟超时）：装 `requirements.txt` + `pytest>=8` → `python scripts/dev_check.py` → `python -m pytest -q`。
+  - 只跑 Windows 的原因：`pywinpty`（ConPTY 终端）、`uiautomation`（桌面自动化）、Edge 扩展等能力是 Windows 专属，换 Linux 要先改造这些测试，本次不承诺跨平台绿。
+  - `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`：源码和输出含中文，防 cp1252 解码炸。
+  - `pytest` 不在 `requirements.txt` 里，单独装，不污染运行时依赖。
+  - 不设 `data/`：`git ls-files data` = 0，CI 是干净检出，测试自己用临时目录。
+- 顺手修的 1 处 lint 错误：`app/dojo/primitives.py::_judge_pair` 的 `payload` 赋值后未使用（F841），改成只取 `expert`。否则 lint job 一上线就红。
+- 交付前验证（本机模拟 CI 的两组命令）：
+  1. lint 等价命令：`ruff check` = All checks passed（修完 F841 后）；`compileall` 退出码 0。
+  2. test 等价命令：用 `git worktree add --detach HEAD` 造了一份**等价于 CI 干净检出**的目录（不含 `data/`、`.venv`、未提交改动），在里面跑 `pytest` → 退出码 0（2207 dots / 9 skips / 0 fail），`dev_check.py` 10s 全过（含 node 译页 18/18）。
+  3. `yaml.safe_load` 解析通过，jobs = [lint, test]。
+- 未验证 / 前置条件：**没有在 GitHub 上真实跑过**（本机无 `gh`，也没推送）；需要把 `.github/workflows/ci.yml` 和当前 19 个未提交改动一起 commit + push 才会首次触发。GitHub API 403，仓库可见性（private/public → 免费额度）未确认。

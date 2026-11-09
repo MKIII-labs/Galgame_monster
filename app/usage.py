@@ -336,6 +336,29 @@ def _percentiles(values):
             "mean": int(sum(vals) / len(vals)), "max": vals[-1]}
 
 
+def _miss_sum(rows):
+    """未命中构成汇总：cold（首请求）/ new（真新增）/ rebuild（折叠压缩重建）/ drift（其余）。
+
+    旧记录的 obs 里没有 miss 字段，直接跳过；turns 统计的是「有拆解数据的回合数」，
+    用来告诉前端这份统计覆盖了多少。
+    """
+    keys = ("cold", "new", "rebuild", "drift", "total")
+    out = {k: 0 for k in keys}
+    turns = 0
+    for r in rows:
+        m = r.get("miss") if isinstance(r, dict) else None
+        if not isinstance(m, dict):
+            continue
+        turns += 1
+        for k in keys:
+            try:
+                out[k] += int(m.get(k) or 0)
+            except (TypeError, ValueError):
+                pass
+    out["turns"] = turns
+    return out
+
+
 def _obs_stats(rows):
     """前缀复用与折叠/压缩事件汇总。
 
@@ -346,7 +369,7 @@ def _obs_stats(rows):
         return {"turns": 0, "cold": 0, "warm": 0, "sys_changed": 0,
                 "avg_prefix_ratio": None, "avg_reuse": None,
                 "fold": 0, "fold_removed": 0, "compress": 0, "overflow": 0,
-                "levels": {}}
+                "levels": {}, "miss_parts": _miss_sum([])}
     prefix = [r.get("prefix") if isinstance(r.get("prefix"), dict) else {}
               for r in turns]
     warm = [p for p in prefix if p and not p.get("cold")]
@@ -381,6 +404,8 @@ def _obs_stats(rows):
         "compress": total("compress"),
         "overflow": total("overflow"),
         "levels": levels,
+        # 未命中构成：没有拆解数据时各项为 0、turns 为 0，前端显示「—」
+        "miss_parts": _miss_sum(turns),
     }
 
 
