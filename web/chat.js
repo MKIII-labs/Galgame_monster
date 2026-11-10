@@ -915,8 +915,61 @@ function placeCtxRing() {
   r.dock.classList.remove('hidden');
 }
 
+/* 输入区的上下文预算：圆环只挂在最后一条 AI 回复上，打字时看不到还剩多少。
+   这里把「本轮已用 + 当前草稿估算」压成一行小字，常驻在提示行右侧。 */
+let _lastCtx = null;
+let _ctxMeterBound = false;
+
+function fmtTok(n) {
+  n = Math.max(0, Number(n) || 0);
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1e6) return (n / 1000).toFixed(n < 10000 ? 1 : 0).replace(/\.0$/, '') + 'k';
+  return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
+}
+
+// 草稿的 token 估算：中文按 ~0.62 token/字，其余按 4 字符/token（和服务端估算同一量级）
+function estTokens(s) {
+  const t = String(s || '');
+  if (!t) return 0;
+  let cjk = 0;
+  for (let i = 0; i < t.length; i += 1) {
+    const c = t.charCodeAt(i);
+    if (c >= 0x2e80 && c <= 0x9fff) cjk += 1;
+  }
+  return Math.round(cjk * 0.62 + (t.length - cjk) / 4);
+}
+
+function updateCtxMeter() {
+  const el = $('#ctx-meter');
+  if (!el) return;
+  if (!_ctxMeterBound) {
+    _ctxMeterBound = true;
+    const inp = $('#input');
+    if (inp) inp.addEventListener('input', () => updateCtxMeter());
+  }
+  if (!_lastCtx) { el.classList.add('hidden'); el.textContent = ''; return; }
+  if (_lastCtx.unlimited || !_lastCtx.limit) {
+    el.classList.remove('hidden', 'warn', 'danger');
+    el.textContent = '上下文不限';
+    el.title = '当前窗口上限为 0（不限），进度圆环与按窗口压缩都不会触发';
+    return;
+  }
+  const used = Math.max(0, Number(_lastCtx.used) || 0);
+  const draft = estTokens($('#input') ? $('#input').value : '');
+  const total = used + draft;
+  const pct = Math.min(100, (total / _lastCtx.limit) * 100);
+  el.classList.remove('hidden');
+  el.classList.toggle('warn', pct >= 70 && pct < 90);
+  el.classList.toggle('danger', pct >= 90);
+  el.textContent = '上下文 ' + Math.round(pct) + '% · ' + fmtTok(total) + ' / ' + fmtTok(_lastCtx.limit)
+    + (draft ? '（草稿 ' + fmtTok(draft) + '）' : '');
+  el.title = '已用 ' + total + ' tokens（其中草稿 ' + draft + '），窗口 ' + _lastCtx.limit + ' tokens';
+}
+
 function renderContextBar(ctx) {
   syncCompressMarks(ctx);      // 压缩标记跟着 context 一起同步（GAL 内部会跳过）
+  _lastCtx = ctx || null;
+  updateCtxMeter();
   const r = ctxRingEnsure();
   r.hasCtx = !!(ctx && ctx.limit);
   if (!r.hasCtx) { r.dock.classList.add('hidden'); return; }
@@ -1184,9 +1237,12 @@ async function selectSession(id) {
   // 换会话时取消「修改历史消息」状态，避免下次回来误把它当成正在编辑
   if (typeof cancelEditTarget === 'function') cancelEditTarget(false);
   const prev = state.sessions.current;
+  if (prev && prev !== id) rememberChatScroll();   // 切走前记住上一个会话读到哪
   cacheLooseMessages();                   // 切走前把已加载的消息留在内存里，切回来能秒出
   const seq = ++_selectSeq;
   state.sessions.current = id;
+  _lastCtx = null;                       // 换会话先清掉旧预算，等新的 context 到了再显示
+  if (typeof updateCtxMeter === 'function') updateCtxMeter();
   delete state.unread[id];
   renderSessions();                       // 先高亮，给出即时反馈（不等网络往返）
   if (typeof renderSendQueue === 'function') renderSendQueue();   // 队列按会话切换显示
@@ -1199,6 +1255,7 @@ async function selectSession(id) {
     target.msg_total = cached.messages.length;
     renderMessages();
     if (typeof refreshStreamingUI === 'function') refreshStreamingUI();
+    restoreChatScroll(id);              // 缓存快照：先回到上次读到的地方
   }
   try {
     // 服务端返回的是精简数据：新选中的会话只带最近 80 条（msg_total / msg_start）
@@ -1210,6 +1267,7 @@ async function selectSession(id) {
     // 这个会话可能还在后台生成：把它的 live DOM 重新挂到末尾
     if (typeof attachStreamHost === 'function') attachStreamHost(id);
     if (typeof refreshStreamingUI === 'function') refreshStreamingUI();
+    restoreChatScroll(id);              // 网络数据落屏后按记录的阅读位置还原
     resetIdeForSession();
     if (state.uiMode === 'gal' && typeof galRenderFromSession === 'function') galRenderFromSession();
     if (r) renderContextBar(r.context);
@@ -1374,6 +1432,26 @@ function scrollToBottom(force) {
   });
 }
 
+// 流式跟随：不再「每帧瞬间贴底」，而是按距离比例缓动追上去（类似 Codex / Ollama 的跟手感）。
+// 距离越远追得越快；用户一上滚（_followBottom=false）立刻停，不和用户抢滚动条。
+let _followRaf = 0;
+function followScroll() {
+  const c = $('#chat');
+  if (!c || !_followBottom) return;
+  if (_followRaf) return;
+  _followRaf = requestAnimationFrame(function tick() {
+    const box = $('#chat');
+    if (!box || !_followBottom) { _followRaf = 0; return; }
+    const target = box.scrollHeight - box.clientHeight;
+    const dist = target - box.scrollTop;
+    if (dist <= 0.6) { _followRaf = 0; return; }
+    _programmaticScroll += 1;
+    box.scrollTop = box.scrollTop + Math.max(1, dist * 0.35);
+    requestAnimationFrame(() => { _programmaticScroll = Math.max(0, _programmaticScroll - 1); });
+    _followRaf = requestAnimationFrame(tick);
+  });
+}
+
 // 内容高度突变（图片加载 / 代码高亮 / 工具卡展开 / 字体）不会产生 delta，
 // 光靠 scrollToBottom 会停在半路。跟随状态下补一次贴底。
 let _chatGrowthObserver = null;
@@ -1395,10 +1473,33 @@ function watchChatGrowth() {
     for (const r of records) {
       (r.addedNodes || []).forEach(pinImages);
     }
-    scrollToBottom();
+    followScroll();
   });
   obs.observe(box, { childList: true, subtree: true, characterData: true });
   _chatGrowthObserver = obs;
+}
+
+// 会话阅读位置：切走时记住每个会话滚到哪，切回来还原（不再一律跳到底部）。
+// 只放内存：刷新页面后回到默认的「贴底」，和以前一致。
+const _chatScrollMem = new Map();
+function rememberChatScroll() {
+  const c = $('#chat');
+  const sid = state.sessions.current;
+  if (!c || !sid) return;
+  _chatScrollMem.set(String(sid), c.scrollTop);
+}
+
+function restoreChatScroll(sid) {
+  const c = $('#chat');
+  if (!c) return;
+  const y = _chatScrollMem.get(String(sid || ''));
+  if (typeof y === 'number') {
+    c.scrollTop = y;
+    _followBottom = isAtBottom();      // 停在历史里就不要再被流式输出拽走
+  } else {
+    _followBottom = true;
+    _scrollToBottomNow(c);
+  }
 }
 
 // 「回到底部」按钮的定位：按输入区实际高度动态设置 bottom，
@@ -2342,19 +2443,47 @@ function clipText(s, n) {
   return t.length > n ? t.slice(0, Math.max(1, n - 1)) + '…' : t;
 }
 
+// 过程统计：只数真实步骤卡（不数思考块），折叠头上给出「几步 / 几步失败」。
+function processStats(flow) {
+  const cards = flow ? flow.querySelectorAll('.tool-card') : [];
+  let failed = 0;
+  cards.forEach((c) => { if (c.classList.contains('failed')) failed += 1; });
+  return { steps: cards.length, failed: failed };
+}
+
+function flowMetaText(st) {
+  const parts = [];
+  if (st.steps) parts.push(st.steps + ' 步');
+  if (st.failed) parts.push(st.failed + ' 步失败');
+  return parts.join(' · ');
+}
+
+// 流式过程中每完成一个工具就刷新一次折叠头的统计（stream.js 建头时挂了 _flowMeta）
+function updateFlowMeta(row) {
+  if (!row || !row._flowWrap) return;
+  const st = processStats(row._flow);
+  if (row._flowMeta) row._flowMeta.textContent = flowMetaText(st);
+  row._flowWrap.classList.toggle('has-fail', st.failed > 0);
+}
+
 // 过程折叠：思考 + 工具在上，最终答案在下；默认收起。
 function buildProcessFold(flow, timing, endKind, open) {
+  const st = processStats(flow);
   const wrap = document.createElement('div');
-  wrap.className = 'process-fold' + (open ? '' : ' collapsed');
+  wrap.className = 'process-fold' + (open ? '' : ' collapsed') + (st.failed ? ' has-fail' : '');
   const head = document.createElement('div');
   head.className = 'process-fold-head';
   const title = document.createElement('span');
   title.className = 'process-fold-title';
   title.textContent = processFoldLabel(timing, endKind);
+  const meta = document.createElement('span');
+  meta.className = 'process-fold-meta';
+  meta.textContent = flowMetaText(st);
   const caret = document.createElement('span');
   caret.className = 'process-fold-caret';
   caret.textContent = open ? '▾' : '▸';
   head.appendChild(title);
+  head.appendChild(meta);
   head.appendChild(caret);
   const body = document.createElement('div');
   body.className = 'process-fold-body';
@@ -3746,9 +3875,10 @@ function setToolGroupOpen(g, open, byUser) {
   if (byUser) g.userToggled = true;
 }
 
-// 本轮结束 / 历史回显：默认折成一行；用户手动展开过就不再自动收
+// 本轮结束 / 历史回显：默认折成一行；用户手动展开过就不再自动收。
+// 有失败的步骤不收：错误必须留在视线里（折叠起来用户就看不见问题了）。
 function autoCollapseToolGroup(g) {
-  if (!g || g.pending > 0 || g.userToggled) return;
+  if (!g || g.pending > 0 || g.userToggled || g.failed > 0) return;
   if (g.el.classList.contains('collapsed')) return;
   g.el.classList.add('collapsed');
   g.body.style.maxHeight = '0px';
@@ -3807,6 +3937,8 @@ function toolGroupTitle(g) {
   if (g.failed) s += ' · ' + g.failed + ' 个失败';
   g.el._titleBase = s;
   t.textContent = s;
+  // 每完成一步都刷新过程折叠头的「N 步 / N 步失败」，收起时也能看出这一轮的规模
+  if (typeof updateFlowMeta === 'function') updateFlowMeta(g.row);
 }
 
 /* 提问卡的工具函数：选项规范化 / 富文本 / 草稿持久化 */
@@ -4544,6 +4676,7 @@ function buildAiRow(contentHtml, rawText, index, reasoning, sources, usage, memo
   const c = document.createElement('div');
   c.className = 'content';
   c.innerHTML = contentHtml;
+  enhanceToc(c);
   wrap.appendChild(c);
   renderToolLog(wrap, tools);
   row.appendChild(av);
@@ -4625,6 +4758,7 @@ function buildBlocksView(blocks, timing, endKind, opts) {
       const d = document.createElement('div');
       d.className = 'content';                // 与最终答案同一套排版
       d.innerHTML = safeRenderMarkdown(text);
+      enhanceToc(d);
       parts.push(d);
     }
   });
@@ -4670,6 +4804,7 @@ function buildAiRowFromBlocks(m, index) {
     const d = document.createElement('div');
     d.className = 'content';
     d.innerHTML = safeRenderMarkdown(m.content || '');
+    enhanceToc(d);
     wrap.appendChild(d);
     secs.push(d);
   }
@@ -5048,6 +5183,37 @@ async function loadOlderMessages(before, limit, silent) {
   }
 }
 
+// 长回答的目录：单条内容里 h2/h3 ≥ 3 个时，在正文最上方插一个可折叠目录。
+// 只做「跳转」，不改 Markdown 渲染结果；历史消息与流式收尾共用。
+let _tocSeq = 0;
+function enhanceToc(root) {
+  if (!root || root.querySelector('.md-toc')) return;
+  const hs = Array.from(root.querySelectorAll('h2, h3'));
+  if (hs.length < 3) return;
+  const box = document.createElement('details');
+  box.className = 'md-toc';
+  const sum = document.createElement('summary');
+  sum.textContent = '目录 · ' + hs.length + ' 节';
+  box.appendChild(sum);
+  const list = document.createElement('div');
+  list.className = 'md-toc-list';
+  hs.forEach((h) => {
+    if (!h.id) h.id = 'mdh-' + (++_tocSeq);
+    const a = document.createElement('a');
+    a.className = 'md-toc-item' + (h.tagName === 'H3' ? ' lvl3' : '');
+    a.href = '#' + h.id;
+    a.textContent = (h.textContent || '').trim();
+    a.onclick = (e) => {
+      e.preventDefault();
+      try { h.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (err) { h.scrollIntoView(); }
+      box.open = false;
+    };
+    list.appendChild(a);
+  });
+  box.appendChild(list);
+  root.insertBefore(box, root.firstChild);
+}
+
 function renderMessages(fromIndex, forceWindow, opts) {
   const chat = $('#chat');
   const expanding = typeof fromIndex === 'number';
@@ -5187,6 +5353,8 @@ function renderMessages(fromIndex, forceWindow, opts) {
   if (!expanding && !keepScroll && typeof replayEnter === 'function') {
     replayEnter(chat, 'chat-fade');
   }
+  // 重排会把「排队中」的幽灵气泡冲掉：重建一次，保证它们始终在对话末尾
+  if (typeof renderQueueGhosts === 'function') renderQueueGhosts();
 }
 
 function bindChips() {

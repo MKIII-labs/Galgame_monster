@@ -137,6 +137,49 @@ function renderSendQueue() {
     row.appendChild(bDel);
     list.appendChild(row);
   });
+  if (typeof renderQueueGhosts === 'function') renderQueueGhosts();
+}
+
+/* 排队中的消息在对话末尾显示成「幽灵气泡」：
+   底部队列条只有贴近输入框才看得到，用户翻着历史根本不知道排了什么。
+   这里只读队列数据，不参与发送；取消复用 removeQueueItem。 */
+function renderQueueGhosts() {
+  const box = $('#chat');
+  if (!box) return;
+  const items = (typeof currentQueueItems === 'function') ? currentQueueItems() : [];
+  let host = document.getElementById('queue-ghosts');
+  if (!items.length) {
+    if (host) host.remove();
+    return;
+  }
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'queue-ghosts';
+    host.className = 'queue-ghosts';
+  }
+  host.innerHTML = '';
+  items.forEach(({ item, index }, i) => {
+    const row = document.createElement('div');
+    row.className = 'queue-ghost';
+    const meta = document.createElement('span');
+    meta.className = 'queue-ghost-meta';
+    meta.textContent = '排队 ' + (i + 1);
+    const txt = document.createElement('span');
+    txt.className = 'queue-ghost-text';
+    txt.textContent = String(item.text || '(仅附件)').replace(/\s+/g, ' ').slice(0, 120);
+    txt.title = item.text || '';
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'queue-ghost-x';
+    b.textContent = '取消';
+    b.onclick = () => removeQueueItem(index);
+    row.appendChild(meta);
+    row.appendChild(txt);
+    row.appendChild(b);
+    host.appendChild(row);
+  });
+  // 始终挂在最后（重排 / 新消息插入后都要回到末尾）
+  if (host.parentNode !== box || host.nextElementSibling) box.appendChild(host);
 }
 
 function toggleSendQueue() {
@@ -1089,6 +1132,8 @@ async function streamChat(extra, resume, attach) {
   if (state.uiMode === 'gal') typing.style.display = 'none';   // GAL 有独立状态行
   const cur = document.createElement('span');
   cur.className = 'cursor';
+  // 输出期间给正文挂一个 streaming 标记：光标呼吸 / 新块淡入都只在这段时间生效
+  if (c && c.classList) c.classList.add('streaming');
 
   if (state.uiMode === 'gal') { galSetStatus('思考中…'); galSetTyping(false); galState.skip = false; galState.streamedTurn = false; }   // 新一轮：解除上轮的「跳过朗读」
   let acc = base;
@@ -1101,6 +1146,11 @@ async function streamChat(extra, resume, attach) {
   let liveBox = null;           // .md-live：已定稿的块
   let tailBox = null;           // .md-tail：当前未完成的一段
   let liveRendered = 0;         // acc 中已推进定稿区的长度（永远落在行首）
+  // 逐帧「追赶」：acc 是「已收到」，revealPos 是「已上屏」。
+  // 网络一次可能给几百字，直接贴屏就是一块一块往外蹦；这里按 ~2-4 字/帧 稳定写入，
+  // 积压多了自动加速（上限 48 字/帧），保证观感连续又绝不落后于网络。
+  let revealPos = base.length;
+  let revealRaf = 0;
   let paintTimer = 0;
   let lastPaintAt = 0;
   // 重绘节流：短板 32ms（≈30fps，与原生流式输出同档），短尾/长尾/后台自动降频。
@@ -1181,7 +1231,9 @@ async function streamChat(extra, resume, attach) {
       flowWrap = row._flowWrap;
       flow = row._flow;
       flowWrap.classList.remove('collapsed');
+      flowWrap.classList.remove('has-fail');
       row._flowLabel.textContent = '过程 · 进行中';
+      if (row._flowMeta) row._flowMeta.textContent = '';
       row._flowCaret.textContent = '▾';
       row._flowHead.setAttribute('aria-expanded', 'true');
       flowToggled = false;
@@ -1194,10 +1246,14 @@ async function streamChat(extra, resume, attach) {
     const title = document.createElement('span');
     title.className = 'process-fold-title';
     title.textContent = '过程 · 进行中';
+    // 折叠头上的一行统计（N 步 / N 步失败）：收起时也能看出这一轮做了多少事
+    const meta = document.createElement('span');
+    meta.className = 'process-fold-meta';
     const caret = document.createElement('span');
     caret.className = 'process-fold-caret';
     caret.textContent = '▾';
     head.appendChild(title);
+    head.appendChild(meta);
     head.appendChild(caret);
     const body = document.createElement('div');
     body.className = 'chat-flow process-fold-body';
@@ -1207,6 +1263,7 @@ async function streamChat(extra, resume, attach) {
     row._flowWrap = flowWrap;
     row._flowHead = head;
     row._flowLabel = title;
+    row._flowMeta = meta;
     row._flowCaret = caret;
     const toggle = () => {
       flowToggled = true;
@@ -1248,6 +1305,7 @@ async function streamChat(extra, resume, attach) {
       row._flow = null;
       row._flowHead = null;
       row._flowLabel = null;
+      row._flowMeta = null;
       row._flowCaret = null;
       return;
     }
@@ -1258,10 +1316,24 @@ async function streamChat(extra, resume, attach) {
     } else {
       row._flowLabel.textContent = '过程 · 工作 ' + workDuration(Date.now() - streamStart);
     }
+    // 折叠头统计：做了几步、几步失败（失败标红，收起也看得见）
+    const stats = (typeof processStats === 'function')
+      ? processStats(flow) : { steps: 0, failed: 0 };
+    if (row._flowMeta) {
+      row._flowMeta.textContent = (typeof flowMetaText === 'function') ? flowMetaText(stats) : '';
+    }
+    flowWrap.classList.toggle('has-fail', stats.failed > 0);
+    // 有失败就不自动收：错误必须留在视线里，否则用户以为一切正常
+    if (stats.failed > 0) return;
     if (!flowToggled) {
-      flowWrap.classList.add('collapsed');
-      row._flowCaret.textContent = '▸';
-      if (row._flowHead) row._flowHead.setAttribute('aria-expanded', 'false');
+      // 延迟 600ms 再收：让用户看清最后一步的完成状态，而不是收尾瞬间「啪」地消失
+      const wrap = flowWrap;
+      setTimeout(() => {
+        if (!wrap || !wrap.isConnected || flowToggled) return;
+        wrap.classList.add('collapsed');
+        if (row._flowCaret) row._flowCaret.textContent = '▸';
+        if (row._flowHead) row._flowHead.setAttribute('aria-expanded', 'false');
+      }, 600);
     }
   };
 
@@ -1343,31 +1415,45 @@ async function streamChat(extra, resume, attach) {
     return tail.slice(0, cut);
   };
 
+  // 用户正在尾巴区里选字：这一帧不能重建，否则 innerHTML 会把选区清掉。
+  // 松手（选区塌陷 / 移出）后下一帧自动补上，最多晚 120ms。
+  const selectionInside = (node) => {
+    if (!node) return false;
+    try {
+      const sel = window.getSelection && window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+      const r = sel.getRangeAt(0);
+      return node.contains(r.startContainer) || node.contains(r.endContainer);
+    } catch (e) { return false; }
+  };
+
   const paintLive = () => {
     paintTimer = 0;
     if (!liveBox) return;
+    if (selectionInside(tailBox)) { paintTimer = setTimeout(paintLive, 120); return; }
     lastPaintAt = Date.now();
     // 用跟随状态而不是当前高度：这一帧内容已经长高了，再算 isAtBottom 会误判成「用户在看历史」
     const wasAtBottom = isCur() && _followBottom;
-    const { cut, fence } = scanLive(acc, liveRendered);
+    const view = acc.slice(0, revealPos);      // 只渲染「已经追上来的」部分
+    const { cut, fence } = scanLive(view, liveRendered);
     tailFence = fence;
     let next = cut;
     // 尾巴太长说明模型卡在一个超长段落 / 未闭合代码块里：
     // 围栏外就整段推进定稿区（只切到最后一行，半行留在尾巴），
     // 围栏内则退回纯文本，避免每帧高亮几千行代码。
-    if (acc.length - next > TAIL_RENDER_MAX && !fence) {
-      const nl = acc.lastIndexOf('\n');
+    if (view.length - next > TAIL_RENDER_MAX && !fence) {
+      const nl = view.lastIndexOf('\n');
       if (nl >= next) next = nl + 1;
     }
     if (next > liveRendered) {
-      const html = safeRenderMarkdown(acc.slice(liveRendered, next));
+      const html = safeRenderMarkdown(view.slice(liveRendered, next));
       if (html) {
         liveBox.insertAdjacentHTML('beforeend', html);
         if (window.enhanceRichMedia) window.enhanceRichMedia(liveBox);
       }
       liveRendered = next;
     }
-    const tail = holdBackPartialMarker(acc.slice(liveRendered));
+    const tail = holdBackPartialMarker(view.slice(liveRendered));
     if (tail.length > TAIL_RENDER_MAX) {
       tailBox.className = 'md-tail plain';
       tailBox.textContent = tail;
@@ -1382,9 +1468,12 @@ async function streamChat(extra, resume, attach) {
       tailBox.innerHTML = safeRenderMarkdown(tail);
       if (window.enhanceRichMedia) window.enhanceRichMedia(tailBox);
     }
-    // 输出阶段把「已经写了多少字」也带上，让用户看到确实在推进
-    if (phase === 'output') setLive('正在输出 · ' + acc.length + ' 字');
-    if (wasAtBottom) scrollToBottom(true);
+    // 输出阶段把「已经上屏多少字」带上，让用户看到确实在推进
+    if (phase === 'output') setLive('正在输出 · ' + revealPos + ' 字');
+    if (wasAtBottom) {
+      if (typeof followScroll === 'function') followScroll();
+      else scrollToBottom(true);
+    }
   };
 
   // 重绘间隔自适应：短尾按 30fps 追；长尾 / 未闭合代码围栏 / 后台标签页逐档降频，
@@ -1400,6 +1489,32 @@ async function streamChat(extra, resume, attach) {
     const gap = paintGapFor(Math.max(0, acc.length - liveRendered));
     const wait = Math.max(0, gap - (Date.now() - lastPaintAt));
     paintTimer = setTimeout(paintLive, wait);
+  };
+
+  // 揭示节奏：积压越多追得越快。2 字/帧 ≈ 120 字/秒 是「读起来像在写」的舒适区，
+  // 48 字/帧 ≈ 2900 字/秒 是兜底上限；两者都远低于网络到达速度时才需要追赶。
+  const REVEAL_MIN = 2;
+  const REVEAL_MAX = 48;
+  const revealTick = () => {
+    revealRaf = 0;
+    if (!liveEnabled || !liveBox) return;
+    const backlog = acc.length - revealPos;
+    if (backlog <= 0) return;
+    const step = Math.min(REVEAL_MAX, Math.max(REVEAL_MIN, Math.ceil(backlog / 8)));
+    revealPos = Math.min(acc.length, revealPos + step);
+    schedulePaint();
+    if (revealPos < acc.length) revealRaf = requestAnimationFrame(revealTick);
+  };
+  const startReveal = () => {
+    if (!liveEnabled || revealRaf) return;
+    if (revealPos >= acc.length) return;
+    revealRaf = requestAnimationFrame(revealTick);
+  };
+  // 需要「立刻全部上屏」的时刻（提问卡插入、收尾重排、停止输出）：别让动画拖住逻辑
+  const flushReveal = () => {
+    if (revealRaf) { cancelAnimationFrame(revealRaf); revealRaf = 0; }
+    if (revealPos !== acc.length) revealPos = acc.length;
+    if (liveEnabled && liveBox) paintLive();
   };
 
   // 增量写入正文（首次调用时把呼吸点换成文本节点）
@@ -1418,13 +1533,14 @@ async function streamChat(extra, resume, attach) {
     }
     ensureLive();
     schedulePaint();             // acc 已累加，这里只触发重绘
+    startReveal();               // 按帧把新到的文字「写」上屏
   };
 
   // 提问卡落在「真正被问出来」的位置：先把当前正文段收尾并上屏，卡片插在它后面，
   // 之后的内容另起一段正文 —— 否则卡片会被后续输出顶到消息最下方（历史重排也一样）。
   const splitAtAsk = (card) => {
     if (paintTimer) { clearTimeout(paintTimer); paintTimer = 0; }
-    if (liveEnabled && liveBox) paintLive();          // 尾巴先落屏，别丢字
+    flushReveal();                                    // 尾巴先落屏，别丢字
     if (!String(c.textContent || '').trim()) c.style.display = 'none';   // 空段不占位
     const anchor = typing.parentNode === row._wrap ? typing : null;
     row._wrap.insertBefore(card, anchor);
@@ -1852,6 +1968,7 @@ async function streamChat(extra, resume, attach) {
           if (!acc && bt) {
             acc = bt;
             row._raw = bt;
+            revealPos = acc.length;      // 续写起点整段直接可见，不做逐字动画
             liveText(live, bt);
             pushText(bt);
             scrollToBottom();
@@ -1884,6 +2001,7 @@ async function streamChat(extra, resume, attach) {
           const n = Math.max(0, parseInt(obj.chars, 10) || 0);
           if (n > 0 && acc) {
             acc = acc.slice(0, Math.max(0, acc.length - n));
+            revealPos = Math.min(revealPos, acc.length);
             liveTrim(live, n);
             serverFinalText = null;
             if (liveEnabled && liveBox) {
@@ -2250,6 +2368,8 @@ async function streamChat(extra, resume, attach) {
     stopWaiter();
     setSendBusy(false);              // 任何异常路径都别把发送按钮留在转圈态
     if (paintTimer) { clearTimeout(paintTimer); paintTimer = 0; }
+    flushReveal();                   // 收尾前把还没「写」出来的字一次补齐，避免结尾缺字
+    if (c && c.classList) c.classList.remove('streaming');
     const stopped = !!(stRef && stRef.stopping);
     if (state.uiMode === 'gal') { galSetTyping(false); galSetStatus(''); }
     if (typing.parentNode) typing.remove();
@@ -2327,6 +2447,7 @@ async function streamChat(extra, resume, attach) {
           row._content = c;
         } else {
           c.innerHTML = safeRenderMarkdown(shown);   // 只有过程、没有正文
+          if (typeof enhanceToc === 'function') enhanceToc(c);
           row._secs = [c];
         }
       } else {
@@ -2340,6 +2461,7 @@ async function streamChat(extra, resume, attach) {
           row._content = c;
         }
         c.innerHTML = safeRenderMarkdown(shown);
+        if (typeof enhanceToc === 'function') enhanceToc(c);
       }
       // 后台探索批次：回合结束后仍在跑，单独成卡并轮询进度（不放进过程折叠）
       if (typeof appendExploreBatchCards === 'function') {
@@ -2903,99 +3025,11 @@ async function rollbackMessage(index) {
     'success');
 }
 
-const SHARE_CSS = [
-  ':root{color-scheme:light dark;--fg:#1f2328;--dim:#6a737d;--bg:#fff;--line:#e6e8eb;--code:#f6f8fa;--accent:#3b82f6}',
-  '@media (prefers-color-scheme:dark){:root{--fg:#e6e6e6;--dim:#9aa0a6;--bg:#1b1c1f;--line:#33363b;--code:#26282c}}',
-  '*{box-sizing:border-box}',
-  'body{margin:0;padding:32px 16px;background:var(--bg);color:var(--fg);',
-  'font:15px/1.75 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}',
-  '.sh{max-width:760px;margin:0 auto}',
-  '.sh-brand{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin-bottom:18px}',
-  '.sh-q{position:relative;padding:14px 16px 14px 44px;border-radius:12px;background:var(--code);',
-  'white-space:pre-wrap;word-break:break-word;margin-bottom:20px}',
-  '.sh-q::before{content:"Q";position:absolute;left:16px;top:13px;font-weight:700;color:var(--accent)}',
-  '.sh-a h1,.sh-a h2,.sh-a h3{line-height:1.35;margin:22px 0 10px}',
-  '.sh-a h1{font-size:22px}.sh-a h2{font-size:19px}.sh-a h3{font-size:17px}',
-  '.sh-a p,.sh-a ul,.sh-a ol,.sh-a blockquote{margin:10px 0}',
-  '.sh-a ul,.sh-a ol{padding-left:22px}',
-  '.sh-a a{color:var(--accent)}',
-  '.sh-a img{max-width:100%;height:auto;border-radius:8px}',
-  '.sh-a pre{background:var(--code);border:1px solid var(--line);border-radius:8px;',
-  'padding:12px 14px;overflow:auto;font-size:13px;line-height:1.6}',
-  '.sh-a code{font-family:Consolas,Menlo,monospace;font-size:13px}',
-  '.sh-a :not(pre)>code{background:var(--code);padding:1px 5px;border-radius:4px}',
-  '.sh-a blockquote{border-left:3px solid var(--line);padding-left:12px;color:var(--dim)}',
-  '.sh-a table{border-collapse:collapse;width:100%;margin:12px 0}',
-  '.sh-a th,.sh-a td{border:1px solid var(--line);padding:6px 10px;text-align:left}',
-  '.sh-a hr{border:0;border-top:1px solid var(--line);margin:20px 0}',
-  '.sh-foot{margin-top:32px;padding-top:14px;border-top:1px solid var(--line);',
-  'font-size:12px;color:var(--dim)}',
-].join('');
-
-function buildShareHtml(qText, answerHtml, title) {
-  const day = new Date().toLocaleDateString('zh-CN');
-  return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
-    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
-    + '<title>' + escapeHtml(title) + '</title>'
-    + '<link rel="stylesheet" href="/static/vendor/katex/katex.min.css">'
-    + '<style>' + SHARE_CSS + '</style></head><body><main class="sh">'
-    + '<div class="sh-brand">Galgame Monster</div>'
-    + (qText ? '<div class="sh-q">' + escapeHtml(qText) + '</div>' : '')
-    + '<div class="sh-a">' + answerHtml + '</div>'
-    + '<div class="sh-foot">由 Galgame Monster 分享 · ' + day + '</div>'
-    + '</main></body></html>';
-}
-
-/* 分享一条问答：复用界面上已经渲染好的 HTML（公式 / 代码 / 图片与界面一致），
-   存成 data/shares/<id>.html，通过 /share/<id>.html 打开并复制链接。 */
+/* 分享一条问答：交给 web/share.js 的面板（选范围 / 脱敏 / 生成自包含文件）。
+   本地应用不做托管链接，产物是 HTML / 包 / 长图。 */
 function shareMessage(index) {
-  if (typeof index !== 'number') return;
-  const s = curSession();
-  const msgs = (s && s.messages) || [];
-  const ai = msgs[index];
-  if (!ai || ai.role === 'user') return toast('只能分享 AI 回复');
-  let qi = -1;
-  for (let i = index - 1; i >= 0; i -= 1) {
-    if (msgs[i] && msgs[i].role === 'user') { qi = i; break; }
-  }
-  const row = document.querySelector('.msg[data-idx="' + index + '"]');
-  const body = row && (row._content || row.querySelector('.content'));
-  if (!body) return toast('找不到这条消息的正文');
-  // 分块渲染的消息有多个正文段（_secs），只取 _content 会漏掉前面的段落
-  const parts = (row._secs && row._secs.length) ? row._secs : [body];
-  const box = document.createElement('div');
-  parts.forEach((p) => {
-    const d = document.createElement('div');
-    d.innerHTML = p.innerHTML;
-    while (d.firstChild) box.appendChild(d.firstChild);
-  });
-  if (!String(box.textContent || '').trim()) return toast('这条回复没有可分享的正文');
-  box.querySelectorAll('.msg-actions, .usage-line, .live-bar, .end-note, .tool-log,'
-    + ' .tool-card, .explore-batch, .mem-chip').forEach((n) => n.remove());
-  box.querySelectorAll('img[src]').forEach((img) => {
-    const src = img.getAttribute('src') || '';
-    if (src && !/^(https?:|data:|blob:)/i.test(src)) img.setAttribute('src', location.origin + src);
-  });
-  box.querySelectorAll('a[href^="/"]').forEach((a) => {
-    a.setAttribute('href', location.origin + a.getAttribute('href'));
-  });
-  const qText = qi >= 0 ? String(msgs[qi].content || '') : '';
-  const firstLine = qText.split('\n').map((x) => x.trim()).filter(Boolean)[0] || '分享一条问答';
-  const title = firstLine.slice(0, 50);
-  api('/api/share/save', { title: title, html: buildShareHtml(qText, box.innerHTML, title) })
-    .then((r) => {
-      if (!r || !r.ok) { toast((r && r.error) || '生成分享页失败', 'error'); return; }
-      const url = location.origin + r.url;
-      try { window.open(url, '_blank'); } catch (e) { /* 弹窗被拦就直接给链接 */ }
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(url).then(
-          () => toast('分享页已打开，链接已复制', 'success'),
-          () => window.prompt('分享链接：', url));
-      } else {
-        window.prompt('分享链接：', url);
-      }
-    })
-    .catch((e) => toast('生成分享页失败：' + e.message, 'error'));
+  if (typeof window.openSharePanel === 'function') return window.openSharePanel(index);
+  toast('分享面板未加载，请刷新页面', 'error');
 }
 
 // 仅删除这一条消息（不影响前后其它消息）

@@ -1,5 +1,34 @@
 # NOTES
 
+## [2026-11-10] 模拟股市 UI 重构：侧栏标签页 / K 线可读性 / 买卖标记 / 下单便捷
+
+- 问题/决策：
+  - 四个用户可见问题：①操作不便 ②信息杂乱 ③K 线不便观看 ④买卖点标记不清晰。
+  - **改动范围**：只动 `web/hall-stock.js`（3081 行）与 `web/css/hall-stock.css`（729 行），后端（`app/stock.py`、`app/stockkit/*`、`app/api/hall_stock.py`）一行未改；git 确认本轮前端改动仅这两个文件（`app/agent*` 那批是别的未提交工作，与本轮无关）。
+  - **不动的部分**：`app/stockkit/*` 后端规则、股票 API 路由、hall 其他模块、`index.html` 其他区块；「加入标的」的虚线框**保留**（虚线表示「新增占位」，与已有标的的实心卡区分，是有意设计）。
+- 解决方案/原因：
+  - **下单区**：原 `stockSubmitOrder` 只传 `qty`，后端限价单早就实现但前端一直没接。补 `limit_price` 传参 + 限价开关 + 快捷仓位（1/4、1/2、全仓按可用现金/可卖折算）+ 报告导出菜单。
+  - **信息层级**：右侧 5 张常驻卡片改三标签页（持仓/成交、对手、训练），工具栏 pill 分组；风险面板接 `/risk` 并挂进 `stockApplyFull` 与增量渲染两条链路（否则推进交易日后面板不刷新）。
+  - **K 线**：`STOCK_CHART_GEOM` 的 `h` 300→360；加十字光标 + 左右双轴价签 + 顶部日期签；日期刻度按绘图区宽度自适应（5→8 个）。
+  - **买卖标记**：引线从三角尖端连回成交价，偏移 12px→18px 起（原值太短，标签会贴住 K 线与均线）；蓝买 `#4d6bfe` / 橙卖 `#e0a33c`，与「红涨绿跌」的 K 线本体区分；同日多笔横向扇形展开而非纵向堆叠；再按价格区上下边界夹紧 `off`，避免买入标签掉进成交量区、卖出标签跑出图外。
+- 相关代码/指令（如果有）：
+  - 改动的三处关键位置：`web/hall-stock.js` 的 `STOCK_CHART_GEOM`（h:360）、`stockDrawKline` 成交标注段、`stockSubmitOrder`。
+  - 验证：`node --check web/hall-stock.js`；`python -X utf8 scripts/check_stock_ui.py`（退出码 0：模板 id 定义 84 / 引用 83、CSS 类 1222、id 无重复且引用齐全）；`render_check` 渲染 `web/_stock_preview.html`（无运行时错误、无零尺寸画布）；后端 `pytest` 5 个股票测试文件 84 passed。
+  - fixture 生成：`python -X utf8 scripts/_mk_stock_fixture.py` → `tests/fixtures/stock_ui.json`。
+
+- **踩过的坑（重要）**：
+  1. **CSS `aspect-ratio` 必须与 SVG `viewBox` 同步改**。viewBox 改 720×360 但 CSS 仍写 `aspect-ratio: 720 / 300` 时，SVG 按 `meet` 等比缩放，K 线被纵向压扁并左右留白。两处（基础规则 + 窄屏 media query）都要改。
+  2. **`ruff` 不能检查 JS**。对 `web/hall-stock.js` 跑 ruff 会逐字符扫注释报几百条 `invalid-syntax`，那是无效输出；JS 语法用 `node --check`。
+  3. **不要用 `hasattr` 兜底掩盖名字错误**。fixture 脚本写了不存在的 `stock.risk_summary`（真实名 `risk_metrics(gid, player_id)`），`hasattr` 为假导致 `risk` 静默成 `{}`，直到回归脚本报「门面缺少符号 risk_summary」才暴露——因为该脚本本身被 AST 扫进了引用面。
+  4. **`render_check` 的三类告警是已知误报**，不要照着「修」：①「被遮挡」来自透明命中层 `overlay`（`fill:none`，有意覆盖用于鼠标捕获）；②「对比度 1.1」来自检查器解析不了 `var()` 链，`--text-dim` `#a2a7ae` 在 `#0d1117` 上实测约 7:1；③「点击区过小」把按钮内文字节点当成了独立可点区。真实可改的只有确实偏小的控件（如 `<select>` 高度）。
+  5. **放大浮层几何按 `h` 比例算**（`h*0.05` / `h*0.675` 等），改小图 `h` 不需要同步改浮层。
+  6. **侧栏面板显隐的类名必须与 CSS 对齐**。CSS 是 `.stock-tabpanel { display: none }` + `.stock-tabpanel.active { display: flex }`，JS 却只切 `hidden` 类（`.hidden` 对面板没有对应规则），结果三个面板**永远不可见**。JS 改成切 `active`，并给默认面板补初始 `active`。教训：改显隐前先看 CSS 是靠哪个类生效。
+  7. **自检要先用「变异测试」证明它真的会红**。我最初把失败信息 `push` 进自己创建的 `window.__RENDER_ERRORS__` 数组，那只是存数据，不会产生运行时错误，`render_check` 照样报「运行时错误：无」——把断言故意改坏（`tabs.length === 4`）仍然全绿，才暴露这一点。必须 `throw new Error(...)`。手法值得复用：**先故坏 → 确认会红 → 再修好 → 确认转绿**，否则「自检通过」可能只是自检没生效。
+  8. **自检里的选择器要回源码核对，别凭印象**。我写了 `#stock-limit-price` / `[data-quick]`，实际是 `#stock-limit` / `#stock-quick [data-frac]`，导致误报「产品缺控件」。另外 `render_check` 同参数会返回缓存结果，**换个视口可绕过**（1440×900 与 1600×1000 结果不同即是证据）。
+
+- **全量 pytest 的既有失败（与本轮无关，勿误判）**：
+  - 本轮实测 `python -m pytest -q` → **14 failed**（212.8s），全部落在 `test_agent_presets` / `test_agent_run` / `test_hall_prompt` / `test_hybrid` / `test_ide_diff` / `test_permissions` / `test_reader` 域，**没有一个股票测试失败**。与上一轮基线（6 failed）比对，失败集合已经变了（`test_memory` / `test_native_tools` / `test_prompt_budget` 这次反而通过，新增 8 个红），说明是 `app/agent*` 那批未提交的进行中改动在变行为，**不是本轮前端改动引入**。判定依据：本轮 git 只改了两个 `web/` 文件 + 两个 fixture 脚本。
+
 ## [2026-11-06] 浏览器验收：设置 →「Agent 执行」Computer Use「新站点授权方式」
 
 - 问题/决策：
@@ -3822,3 +3851,88 @@
   2. test 等价命令：用 `git worktree add --detach HEAD` 造了一份**等价于 CI 干净检出**的目录（不含 `data/`、`.venv`、未提交改动），在里面跑 `pytest` → 退出码 0（2207 dots / 9 skips / 0 fail），`dev_check.py` 10s 全过（含 node 译页 18/18）。
   3. `yaml.safe_load` 解析通过，jobs = [lint, test]。
 - 未验证 / 前置条件：**没有在 GitHub 上真实跑过**（本机无 `gh`，也没推送）；需要把 `.github/workflows/ci.yml` 和当前 19 个未提交改动一起 commit + push 才会首次触发。GitHub API 403，仓库可见性（private/public → 免费额度）未确认。
+
+## [2026-11-10] 调研：Codex 的「本机沙箱」是怎么做的
+
+- 定性：Codex CLI / IDE 插件 / 桌面 App 在**本机**执行模型生成的命令时，不是直接 `exec`，而是把命令丢进一个**由操作系统强制**的受限环境；边界管两件事——**能写哪里**、**能不能联网**。沙箱（技术边界）与审批策略（何时问你）是两个独立维度，可组合。
+- 三种沙箱模式（`--sandbox` / `sandbox_mode`）：`read-only`（只读，改文件/跑命令要审批）、`workspace-write`（默认；可读全盘、只在工作区+临时目录写、默认断网）、`danger-full-access`（无沙箱，别名 `--yolo` / `--dangerously-bypass-approvals-and-sandbox`）。
+- 三种审批策略（`--ask-for-approval`）：`untrusted`（只自动放行已知安全读操作）、`on-request`（默认，越界才问）、`never`。另有 `approvals_reviewer = "user" | "auto_review"`——越界请求可先交给评审 agent 判风险（默认策略在 `codex-rs/core/src/guardian/policy.md`）。
+- 平台实现：
+  - **macOS**：`/usr/bin/sandbox-exec` + 运行时生成 SBPL 策略（`(deny default)` → `allow file-read*` → `allow file-write* (subpath 工作区)` → `deny file-write* .git/.codex` → `deny network*`）。网络只有「全开/全关」，无域名级过滤。
+  - **Linux / WSL2**：以 **bubblewrap** 为主（`--ro-bind / /` + `--bind 工作区` + `--ro-bind .git` + `--unshare-pid/net` + `--die-with-parent`），找不到 `bwrap` 时回退自带 helper（需非特权 user namespace）；**Codex 0.115 起 Linux 沙箱换成 bubblewrap，WSL1 因此不再支持**。系统卡另称 Linux 用 **seccomp + Landlock** 组合——两者是同一栈的不同层（bwrap 管命名空间，Landlock/seccomp 管路径与 syscall），口径差异已记录，未在源码里逐行核对。
+  - **Windows 原生**：两档，`sandbox = "elevated"`（首选，需管理员做一次性配置：专用低权限本地用户 `CodexSandboxOffline` / `CodexSandboxOnline` + write-restricted token + ACL + 防火墙规则 + 私有桌面）与 `"unelevated"`（回退：当前用户的受限令牌 + ACL + 环境变量级断网，网络防护是「建议性」的）。WSL2 里则走 Linux 那套。
+- 跨平台共同约束：`.git` / `.codex` / `.agents` 在可写根内**强制只读**（递归）；`workspace-write` 默认 `network_access = false`；开网后可叠加 `features.network_proxy`（域名 allow/deny、`deny` 优先、默认禁 loopback/私网、DNS 解析分类防 rebinding）；子进程全继承同一沙箱；启动前清洗环境变量；symlink 先解析再套策略。
+- 与本项目对比（`app/agent/sandbox.py` + `resolve_path` + `BLOCKED_SEGMENTS` + `CMD_ENV_DROP`）：
+  - 相同：`.git`/`.venv`/`node_modules`/`data/` 禁止访问；命令执行前按 key/token/secret 正则清洗环境变量；工具有统一路径解析入口。
+  - 关键差距：我们是**应用层路径校验**——只有走 `resolve_path` 的工具受约束；`run_command` / `shell` 里跑起来的任意子进程（python、npm、git hook）不受操作系统约束，一个脚本就能写到沙箱外。Codex 的边界是**进程级**的，这也是它能默认无人值守的底气。
+  - 若要对齐，最小改造不是照搬 Seatbelt，而是：① `run_command` 至少做到工作目录外写失败（Windows 可用受限令牌/ACL，或退一步用目录 ACL + 只读挂载）；② 默认断网（现在没有）；③ 子进程环境变量白名单化。优先级按「能否防住模型写坏 ~/.ssh」排序。
+- 可信度：主要事实来自官方文档（developers.openai.com「Sandboxing」「Agent approvals & security」「Windows」）与 OpenAI 工程博客《为 Windows 上的 Codex 构建安全高效的沙箱环境》(2026-05-13)；SBPL/bwrap 具体参数来自第三方逆向文章（codex.danielvaughan.com, 2026-05/11），属二手信息，未逐行核对源码。未验证：`codex-rs` 里 Landlock 与 bwrap 的当前主次关系、`sandbox.windows` 的配置键是否与官方文档一致（第三方文章写的是 `[sandbox.windows]`，官方文档只写 `sandbox = "elevated"`）。
+
+## [2026-11-10] IDE 顶部标签页对齐 VS Code 行为
+
+- 现状：`web/index.html` 里本来就有 `.ide-tabsbar > #ide-tabs`，`gal-ide.js::renderIdeTabs` 也已有图标 / 文件名 / 脏点 / +− 统计 / 关闭 / 中键关闭 / 拖拽排序。所以这次不是「新建标签栏」，而是**把交互语义补齐到 VS Code 那套**。
+- 新增能力（`web/gal/gal-ide.js`）：
+  1. **预览标签**：资源树单击 = 预览（斜体 `.ide-tab.preview`），再单击别的文件时**原地替换**；双击、点击标签本身、或开始编辑 → 固定。状态放在 `state.idePreviewTab`（会话切换时在 `resetIdeForSession` 里清空）。替换逻辑 `ideMarkTabKind`，固定 `idePinTab`，编辑即固定接在 `editor.onDidChangeModelContent` 上。
+  2. **同名消歧**：`ideTabLabel` 在 basename 冲突时逐级加父目录（`src/index.js`），仍冲突再往上加。
+  3. **关闭行为**：`ideCloseTabForce` 改为优先激活**右侧邻居**，没有才回退左侧；空编辑器状态抽成 `ideClearEditor()`，与批量关闭共用。
+  4. **右键菜单**：关闭 / 关闭其他 / 关闭右侧 / 全部关闭 / 复制路径；把 `ideCtxOpen` 里的渲染逻辑抽成 `ideMenuShow(el,x,y,items)`，文件树与标签页共用同一个 `#ide-ctxmenu`。批量关闭只在有未保存文件时弹一次确认。
+  5. **快捷键**（`ideTabsBind`，document 捕获阶段，仅 `state.uiMode === 'ide'` 生效）：Ctrl+W 关闭当前、Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+PgUp / Ctrl+PgDn 循环切换。
+  6. **溢出**：滚轮直接横向滚（原 CSS 已隐藏滚动条），活动标签 `scrollIntoView({inline:'nearest'})`。
+- CSS（`web/css/ide.css`）：活动标签改成 VS Code 的「顶边 1px 强调色 + 底色等于编辑器」；`.ide-tab:hover` 时脏点与 +− 统计让位给关闭按钮（同一位置只留一个控件）。
+- 验证：`node --check web/gal/gal-ide.js` 通过；`node scripts/transpage_test.js` 18/18。**没有做真实页面验证**——启动服务需要读写真实 `data/`（含真实会话），按约定不在真实数据上起服务；需要用户自己开 IDE 模式点一遍。
+- 已知未做：标签溢出时的「…」全部标签下拉、关闭后保留滚动位置、标签状态跨刷新持久化（VSCode 有，这里没做）。
+
+## [2026-11-10] 「无头浏览器预览 / 截图」到底是哪三条链路
+
+- 结论：项目里有三条不同的链路，只有第一条是真 headless，第二条是 IDE 面板里的 iframe（有头，肉眼可见），第三条在对话里而不在 IDE。
+- ① `render_check` / `visual_check` / `scene_assert` / `render_views`（真无头）：`app/webprobe.py` 找 Edge/Chromium（`GAL_EDGE` 或候选路径）→ 把 HTML 复制到临时目录并注入 `<base>`（相对资源指回原目录）+ 探针脚本 → CLI 跑 `--headless=new --dump-dom --window-size=W,H --virtual-time-budget` 读回 `<pre id="vqa">` 的 JSON → 再跑一次 `--screenshot=xxx.png` 出图（`_shot`）。指标在 `app/visual_qa.py`：控制台/资源错误、canvas 与 WebGL（draw calls、三角面）、FPS、亮度/对比度/清晰度、与基线截图的 SSIM；截图落 `data/visual/<sid>/shots/<时间戳>_<W>x<H>.png`，可选让视觉模型描述。**结果回给模型（文本），不进 UI**。
+- ② IDE 右侧「网页预览」面板（有头 iframe）：`app/preview.py` 在 `127.0.0.1:<随机端口>` 起只读沙箱目录的临时静态服务（`/api/ide/preview/start` 启动、`stop` 关闭）；前端 `#ide-preview` 的 iframe 加载它。服务端往 HTML 注入 `/__gm_preview_bridge.js`，桥接 console 错误 / 资源失败 / 元素拾取，用 `postMessage` 回父窗口。不用 `file://` 的原因：iframe 带不了 `X-Auth-Token`，且相对路径 css/js 解析不了。外部 dev server（如 `localhost:5173`）也能填，但桥接只能降级。
+- ③ archify 图卡（对话内 iframe，不在 IDE）：工具把产物写进沙箱或 `data/archify/<sid>/`，结果尾部附 `__ARCHIFY_ARTIFACT__ {json}`；`app/api/chat.py` 摘掉这行并 `sse({"type":"diagram"})`，前端 `web/chat.js` 渲染内嵌 iframe（`/archify/<sid>/<rel>`，免鉴权、只本机），子页 `postMessage` 上报高度。
+- 另：`computer_shot` 是 Computer Use 的真浏览器（有头），不是无头；截图只给视觉模型，不进 IDE。
+
+## [2026-11-10] Solo 输出「丝滑化」+ 过程折叠重构
+
+- 现状（改前）：流式已是「定稿区只追加 + 尾巴区节流重渲染」（`stream.js::paintLive`，32ms），所以不是重写渲染层，而是补三件事：**揭示节奏、跟随滚动、过程折叠的信息量与策略**。
+- ① 逐帧追赶（`stream.js`）：新增 `revealPos`（已上屏）与 `revealRaf`；`paintLive` 只用 `acc.slice(0, revealPos)` 渲染 —— 网络一次给几百字时也按 **2 字/帧 ≈ 120 字/秒** 匀速写出，积压越多越快（上限 **48 字/帧 ≈ 2900 字/秒**），不会落后于网络。需要立即全显的场景（提问卡插入 `splitAtAsk`、流结束 `finally`、整步重试 `rewind` 回滚）统一走 `flushReveal()`。
+- ② 跟随滚动（`chat.js::followScroll`）：流式期间不再「每帧瞬间贴底」，改成按距离 35% 的 lerp 缓动追底；`_followBottom=false`（用户上滚）立刻停。`watchChatGrowth` 的 MutationObserver 也改为走它，图片/代码块加载不再硬跳。
+- ③ 动效（`css/base.css`）：`.content.streaming .cursor` 从 `steps(2)` 硬闪改为 1.15s 柔和呼吸；`.content.streaming .md-live > *` 新块 `inkUp`（4px 上浮 + 180ms 淡入）。全局 `prefers-reduced-motion` 规则会把这些压成 0.001ms，无需另写。
+- ④ 过程折叠（`chat.js` + `stream.js`）：折叠头新增 `.process-fold-meta`（`N 步 · N 步失败`，失败转红）；`toolGroupTitle` 每完成一步就調 `updateFlowMeta` 刷新，收起状态也能看出规模。收尾自动折叠**延后 600ms**（原来瞬间收）；**有失败步骤时既不折叠 tool-group 也不折叠外层**——错误必须留在视线里；用户手动展开过（`flowToggled` / `userToggled`）仍然优先。组内步骤行距收紧（`.tool-group .tool-head` padding 5px/8px、font-size 12px）。
+- 验证：`node --check web/stream.js`、`node --check web/chat.js` 通过；`node scripts/transpage_test.js` 18/18。**未做真机浏览器验证**（起服务要读写真实 `data/`），需要人工开 Solo 模式发一条长回答、再发一条带工具的请求观察。
+- 已知取舍：rAF 在后台标签页会暂停 → 揭示会停在那儿，但收尾 `flushReveal` 会补齐；`inkUp` 的 `transform` 只在流式期间生效，避免影响历史消息的定位与打印。
+
+## [2026-11-10] Solo UX 二次优化：流式选区保护 + 长回答目录
+
+- **纠错**：我先前判断「排队消息不可见」是错的。`index.html` 已有 `#queue-bar`（`#queue-list` / `#queue-toggle` / 条数文案 / 全部取消），`stream.js::renderSendQueue` 逐条支持「修改 / 取消」，单条取消还有 toast。**没有重复实现**，这条从待办里划掉。
+- ① 流式选区保护（`stream.js::paintLive`）：新增 `selectionInside(tailBox)`；选区落在尾巴区时**本帧不重建**，`setTimeout(paintLive, 120)` 稍后重试。原因是尾巴区每帧 `innerHTML` 重写会把用户正在拖选的文字清掉，想复制刚输出的一段几乎做不到。
+- ② 长回答目录（`chat.js::enhanceToc`）：单条内容里 `h2/h3 ≥ 3` 时，在正文最上方插一个 `<details class="md-toc">`（默认收起，标题为「目录 · N 节」），条目点击 `scrollIntoView({block:'start', behavior:'smooth'})` 并自动收起。已挂到 4 个渲染入口：`buildAiRow`、`buildBlocksView` 的正文段、`buildAiRowFromBlocks` 的兜底正文、`stream.js` 两处收尾整段渲染；样式在 `base.css`。
+- 验证：`node --check web/stream.js`、`node --check web/chat.js` 通过；`node scripts/transpage_test.js` 18/18。**未做真机验证**（起服务要读写真实 `data/`）。
+- 未做（本轮未选）：失败就地重试、切会话恢复阅读位置、输入时显示上下文预算。
+
+## [2026-11-10] Solo UX 三次：排队幽灵气泡 + 会话阅读位置记忆
+
+- 关于「排队」的补充：底部队列条本来就有（列表 / 展开 / 修改 / 取消 / 全部取消），缺的是**对话区里的可见性**——翻历史时看不到自己排了什么。新增 `stream.js::renderQueueGhosts()`：把当前会话的排队项渲染成 `#queue-ghosts` 里的虚线气泡（`排队 N` + 文本摘要 + 取消），取消复用 `removeQueueItem`。`renderSendQueue()` 末尾与 `chat.js::renderMessages()` 末尾各调一次，避免 DOM 重排把它冲掉；队列清空时整个 host 移除。
+- 会话阅读位置：`chat.js` 新增 `_chatScrollMem`（内存 Map，sid → scrollTop）与 `rememberChatScroll()` / `restoreChatScroll(sid)`。`init.js` 的 `#chat` scroll 监听里记录；`selectSession()` 切走前保存上一个会话，缓存快照渲染后与网络数据渲染后各恢复一次。恢复后按 `isAtBottom()` 重设 `_followBottom` —— 停在历史里就不会被流式输出拽回底部；没有记录的会话仍默认贴底（与以前一致）。不做持久化：刷新页面后回到贴底。
+- 验证：`node --check` stream/chat/init 三个文件通过；`node scripts/transpage_test.js` 18/18。**未做真机验证**（起服务要读写真实 `data/`）。
+- 已知取舍：图片/代码高亮后加载完成会改变高度，恢复位置可能差几像素；只在内存里记，切换会话有效、刷新失效。
+
+## [2026-11-10] 输入区上下文预算条 + 默认窗口改 1M
+
+- 需求 6（打字时看得到上下文预算）：圆环只挂在「最后一条 AI 回复」的操作条上，输入时看不到剩余空间。新增：
+  - `index.html` 把 `#composer-hint` 包进 `.composer-hint-row`，右侧加 `#ctx-meter`（同一行，左提示右预算）。
+  - `chat.js`：`_lastCtx` 由 `renderContextBar(ctx)` 写入（服务端 `session_context()` 的 `used/limit/pct/unlimited`）；`estTokens()` 按「中文 0.62 token/字 + 其余 4 字符/token」估草稿；`updateCtxMeter()` 显示 `上下文 23% · 46k / 1M（草稿 320）`，≥70% 黄、≥90% 红，`limit=0` 显示「上下文不限」。输入框 `input` 事件懒绑定，切会话时先清空旧值。
+- 默认窗口：`app/config.py` 的 `chat_context_limit` 由 `100_000_000` 改为 `1_000_000`（中途试过 2M，按用户要求最终定 1M）；`data/config.json` 里本机实际值同步改为 `1000000`（用户明确要求，改的是本机配置，不是只改默认）。实测 `context.context_limits()` → `(1000000, 15616)`。
+- **重要口径**：1M 只是本地「窗口预算」，不会让模型真的支持 1M。真实窗口由服务商决定（不少仍是 128k–256k）；超窗时服务商照样报错。1M 下按比例压缩要到 0.8M 才触发，等于「基本不按窗口压缩」——想恢复按真实窗口压缩，就在设置里填模型实际窗口。
+- 验证：`node --check web/chat.js` 通过；`pytest tests/test_token_budget.py tests/test_context.py` 41 passed（没有测试写死旧默认值）；`context_limits()` 实测 1M。未做真机视觉验证。
+
+## [2026-11-10] 分享功能重构（设计 + P0/P1 实施）
+
+- 方案文档：`docs/SHARE_DESIGN.md`（含 §12.1 实施记录）。
+- 核心结论：本地应用没有公网端点，**分享必须从「托管链接」改成「产出文件」**。现有 `/share/<id>.html` 的链接对外不可达，且 HTML 里引用 `/static/vendor/katex/...` 与 `/api/sandbox/raw` 图片，发出去就是没样式 + 裂图。
+- 现状取证：`app/share.py`（50 行，只做落盘 + 按 id 读）、`app/api/share.py`（只有 `/api/share/save`）、`web/stream.js:3057 buildShareHtml`（前端拼 HTML，引用站内 CSS）、`web/chat.js:1562`（唯一入口是 AI 消息操作条）。
+- 目标形态：P0 自包含单文件 HTML（内联 KaTeX CSS/woff2、图片 base64、长回答目录）+ 生成前脱敏与预览；P1 `.gmshare` zip 包（可再导入）+ 长图 PNG + 整段会话；P2 可选局域网临时页（一次性 token / 10 分钟过期 / 只读）。
+- 后端拆分：`app/share/` 下分 `render.py` / `redact.py` / `package.py` / `lan.py`，接口从「save」扩成 preview / export / list / delete / import / lan。
+- 关键取舍：导出 HTML 不含任何 `<script>`；脱敏默认替换但可在预览逐条还原；LAN 分享默认关闭、用完即关；体积上限 8MB，超限引导用包格式。
+- 已实施（P0+P1）：`app/share.py` 升级为 `app/share/` 包（`render/redact/package/image`）；接口 `preview/export/list/delete/import`；产物落 `data/shares/exports/`，经 `/share/export/<name>` 只读访问；前端新增 `web/share.js` 面板（范围 / 内容 / 脱敏 / 格式 / 预览 / 结果卡片 / 导入包），`stream.js` 的旧 `SHARE_CSS` 与 `buildShareHtml` 已删除。
+- 关键实现点：KaTeX 只内联 woff2（20 个 @font-face → data URL，样板页 ~370KB）；脱敏按 `<...>` 切分只处理文本片段，避免改坏标签；`.gmshare` 导入校验允许的路径、解压总量与 sha256；长图先用 `--dump-dom` 量 `scrollHeight` 再 `--screenshot`，最后 Pillow 裁留白。
+- 验证：`tests/test_share.py` 9 passed；`ruff check` 全过；`scripts/dev_check.py` 全部通过；`node --check web/share.js` 通过。**未做真人点击验证**（需要真实会话与服务）。
+- 未做：P2 局域网临时页；图卡 iframe 不内联（改成文字说明）；导入包只读、不合并进会话；单图 > 3MB 不内联。

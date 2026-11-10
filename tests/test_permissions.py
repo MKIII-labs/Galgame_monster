@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """工具级权限规则：deny > ask > allow、通配、工具:参数前缀"""
 from app import agent
+from app.agent import rules as agent_rules
 
 
 def _rules(**tools):
@@ -8,7 +9,8 @@ def _rules(**tools):
 
 
 def _patch(monkeypatch, rules):
-    monkeypatch.setattr(agent, "load_effective_rules", lambda sandbox: (rules, ""))
+    # judge_tool_rule 在函数体内 from .rules import，补丁要打在定义处
+    monkeypatch.setattr(agent_rules, "load_effective_rules", lambda sandbox: (rules, ""))
 
 
 def test_deny_beats_allow(tmp_path, monkeypatch):

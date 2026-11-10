@@ -305,6 +305,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path.startswith("/static/"):
             return self._static(path[len("/static/"):])
+        if path.startswith("/share/export/"):
+            # 导出的分享产物（HTML / PNG / 包）：文件名是随机 id，链接即凭证
+            if not self._host_ok():
+                return self._send(403, "forbidden", "text/plain; charset=utf-8")
+            import re as _re
+            from app import share as _share
+            name = unquote(path[len("/share/export/"):])
+            if not _re.match(r"^sh_[a-f0-9]{8,16}\.(?:html|png|gmshare)$", name):
+                return self._send(404, "not found", "text/plain; charset=utf-8")
+            try:
+                with open(os.path.join(_share.EXPORT_DIR, name), "rb") as f:
+                    data = f.read()
+            except OSError:
+                return self._send(404, "not found", "text/plain; charset=utf-8")
+            if name.endswith(".html"):
+                ctype = "text/html; charset=utf-8"
+            elif name.endswith(".png"):
+                ctype = "image/png"
+            else:
+                ctype = "application/octet-stream"
+            return self._send(200, data, ctype)
         if path.startswith("/share/"):
             # 分享页：链接本身就是凭证（随机 id，不列目录），因此不校验 X-Auth-Token
             if not self._host_ok():

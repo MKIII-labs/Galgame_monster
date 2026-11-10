@@ -982,6 +982,7 @@ async function init() {
   $('#chat').addEventListener('scroll', () => {
     const far = !nearBottom();
     $('#btn-bottom').classList.toggle('off', !far);
+    if (typeof rememberChatScroll === 'function') rememberChatScroll();   // 记住这个会话读到哪
     // 自己滚的（流式贴底 / 点「回到底部」）不算用户操作：scroll 事件是异步派发的，
     // 等它回来时内容往往又长高了，再判一次 isAtBottom 就会把跟随关掉。
     if (_programmaticScroll > 0 || Date.now() < _smoothScrollUntil) return;

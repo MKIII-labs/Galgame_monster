@@ -88,6 +88,59 @@ function boot(fixture) {
     stockState.barsCache[sym] = b.bars || [];
     stockState.marksCache[(fixture.state.cursor_date || '') + '|' + sym] = b.marks || [];
     stockDrawChart();
+
+    /* ---------- 自检 1：侧栏三标签页存在且点击后内容真的切换 ---------- */
+    const tabs = Array.from(root.querySelectorAll('.stock-tab'));
+    const panels = Array.from(root.querySelectorAll('.stock-tabpanel'));
+    const tabNames = tabs.map((t) => t.getAttribute('data-tab'));
+    const vis = (el) => !!el && !el.classList.contains('hidden') && el.offsetHeight > 0;
+    const switched = [];
+    tabs.forEach((tab) => {
+      tab.click();
+      const name = tab.getAttribute('data-tab');
+      const mine = root.querySelector('.stock-tabpanel[data-panel="' + name + '"]');
+      const others = panels.filter((p) => p !== mine);
+      switched.push({
+        tab: name,
+        mineVisible: vis(mine),
+        othersHidden: others.every((p) => !vis(p)),
+        aria: tab.getAttribute('aria-selected'),
+      });
+    });
+    tabs[0].click();
+    const tabOk = tabs.length === 3 && panels.length === 3
+      && switched.every((s) => s.mineVisible && s.othersHidden && s.aria === 'true');
+
+    /* ---------- 自检 2：K 线十字光标与买卖标记都在 DOM 里 ---------- */
+    const svg = root.querySelector('.stock-chart');
+    const crossG = svg && svg.querySelector('g[display]');
+    const markCount = svg ? svg.querySelectorAll('.stock-mark').length : 0;
+    const chartOk = !!svg && !!crossG && markCount > 0;
+
+    /* ---------- 自检 3：限价开关与快捷仓位按钮存在 ---------- */
+    const limitBox = root.querySelector('#stock-limit');
+    const quickBtns = root.querySelectorAll('#stock-quick [data-frac]');
+    const orderOk = !!limitBox && quickBtns.length >= 3;
+
+    const results = [
+      ['侧栏三标签可切换', tabOk, 'tabs=' + tabs.length + ' panels=' + panels.length + ' ' + JSON.stringify(switched)],
+      ['K线十字光标+买卖标记', chartOk, 'svg=' + !!svg + ' crossG=' + !!crossG + ' marks=' + markCount],
+      ['限价开关+快捷仓位', orderOk, 'limitInput=' + !!limitBox + ' quick=' + quickBtns.length],
+    ];
+    const failed = results.filter((r) => !r[1]);
+    const box = document.createElement('div');
+    box.id = 'selfcheck';
+    box.style.cssText = 'font:12px/1.6 monospace;padding:6px 10px;margin:6px 0;border-radius:6px;'
+      + (failed.length ? 'background:#4a1010;color:#ffb4b4;' : 'background:#0f2d1a;color:#7ee2a8;');
+    box.textContent = results.map((r) => (r[1] ? 'PASS ' : 'FAIL ') + r[0] + ' — ' + r[2]).join('  |  ');
+    document.getElementById('preview-root').prepend(box);
+    window.__SELFCHECK__ = { tabOk: tabOk, chartOk: chartOk, orderOk: orderOk, results: results };
+    if (failed.length) {
+      const msg = '自检失败：' + failed.map((r) => r[0] + '（' + r[2] + '）').join('；');
+      window.__RENDER_ERRORS__.push(msg);
+      // 必须真的抛出：只 push 进自定义数组不会产生运行时错误，render_check 抓不到
+      throw new Error(msg);
+    }
     window.__READY__ = true;
   }, 60);
 }

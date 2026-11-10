@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """IDE「查看 AI 改动」依赖的不变量：能按 undo token 取回改动前的原文。"""
 
+from importlib import import_module
+
 import pytest
 
 from app import agent, snapstore
+
+# 包里 re-export 了同名函数 undo()，from app.agent import undo 会拿到函数而不是模块
+agent_undo = import_module("app.agent.undo")
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +79,7 @@ def test_current_turn_tokens_are_never_evicted(tmp_path, monkeypatch):
     回归：以前是全局 20 条 FIFO，第 7 个文件的 baseToken 会被后面几十次写入挤掉，
     「查看变更」就报「找不改动前的原始内容」。
     """
-    monkeypatch.setattr(agent, "undo_limit", lambda cfg=None: 5)
+    monkeypatch.setattr(agent_undo, "undo_limit", lambda cfg=None: 5)
     sid = "t-keep-turn"
     agent.turn_begin(sid)
     tokens = [agent.register_undo(sid, [_op(tmp_path)], "write_file") for _ in range(12)]
@@ -88,7 +93,7 @@ def test_current_turn_tokens_are_never_evicted(tmp_path, monkeypatch):
 
 def test_undo_cap_is_per_session(tmp_path, monkeypatch):
     """别的会话写再多次，也不该把我的快照挤掉。"""
-    monkeypatch.setattr(agent, "undo_limit", lambda cfg=None: 3)
+    monkeypatch.setattr(agent_undo, "undo_limit", lambda cfg=None: 3)
     a, b = "t-cap-a", "t-cap-b"
     agent.turn_begin(a)
     mine = [agent.register_undo(a, [_op(tmp_path)], "write_file") for _ in range(3)]
@@ -109,7 +114,7 @@ def test_undo_cap_is_per_session(tmp_path, monkeypatch):
 
 def test_undo_trim_drops_previous_turns(tmp_path, monkeypatch):
     """换成新一轮后，上一轮的快照可以淘汰；本轮的一条都不能少。"""
-    monkeypatch.setattr(agent, "undo_limit", lambda cfg=None: 4)
+    monkeypatch.setattr(agent_undo, "undo_limit", lambda cfg=None: 4)
     sid = "t-trim"
     agent.turn_begin(sid)
     old = [agent.register_undo(sid, [_op(tmp_path)], "write_file") for _ in range(4)]
@@ -126,7 +131,7 @@ def test_undo_trim_drops_previous_turns(tmp_path, monkeypatch):
 
 def test_undo_limit_zero_means_never_trim(tmp_path, monkeypatch):
     """设置里填 0 = 不限：往期快照也不淘汰。"""
-    monkeypatch.setattr(agent, "undo_limit", lambda cfg=None: 0)
+    monkeypatch.setattr(agent_undo, "undo_limit", lambda cfg=None: 0)
     sid = "t-unlimited"
     agent.turn_begin(sid)
     first = [agent.register_undo(sid, [_op(tmp_path)], "write_file") for _ in range(3)]

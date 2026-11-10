@@ -311,9 +311,15 @@
 .ide-tab:hover { background: var(--bg-hover); color: var(--ide-tab-fg); }
 .ide-tab.active {
   background: var(--bg); color: var(--ide-tab-fg);
-  box-shadow: inset 0 -2px 0 var(--accent);
+  /* VS Code 的活动标签：顶边一条强调色，底色与编辑器一致 */
+  box-shadow: inset 0 1px 0 var(--accent);
 }
+/* 预览标签（资源树单击打开、尚未固定）：斜体，对齐 VS Code 的 preview 观感 */
+.ide-tab.preview .ide-tab-name { font-style: italic; }
 .ide-tab-dot { flex: none; color: var(--accent); font-size: 10px; }
+/* 悬停时同一位置只留一个控件：脏点 / 增删统计让位给关闭按钮 */
+.ide-tab:hover .ide-tab-dot,
+.ide-tab:hover .ide-tab-stat { display: none; }
 /* 关闭按钮：VS Code 只在悬停 / 激活时显示，未激活的标签保持干净 */
 .ide-tab-x {
   flex: none; width: 16px; height: 16px; display: grid; place-items: center;

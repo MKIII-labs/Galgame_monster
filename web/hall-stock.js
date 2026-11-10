@@ -621,7 +621,7 @@ function stockRenderGame() {
     '      <button type="button" class="stock-tab" role="tab"'
       + ' aria-selected="false" data-tab="train">训练</button>',
     '    </div>',
-    '    <div class="stock-tabpanel" data-panel="pos" role="tabpanel">',
+    '    <div class="stock-tabpanel active" data-panel="pos" role="tabpanel">',
     '      <div class="stock-card">',
     '        <div class="stock-card-title">我的持仓'
       + ' <span class="stock-ov-dim">按当前标的展开</span></div>',
@@ -777,7 +777,9 @@ function stockRenderGame() {
         x.setAttribute('aria-selected', on ? 'true' : 'false');
       });
       root.querySelectorAll('.stock-tabpanel').forEach((p) => {
-        p.classList.toggle('hidden', p.dataset.panel !== key);
+        const on = p.dataset.panel === key;
+        p.classList.toggle('active', on);
+        p.classList.toggle('hidden', !on);
       });
       if (key === 'rival') stockDrawNav();
       if (key === 'train') {
@@ -1806,7 +1808,8 @@ function stockSvg(tag, attrs) {
   return el;
 }
 
-/* 小图（对局页那张）的几何：720×300 下沿用原值，保证现有小图外观稳定；
+/* 小图（对局页那张）的几何：720×360。原为 720×300，为把图拉高、压窄价格区与量区的
+   比例（priceBottom 276 后留 16 给分隔、量区 292–346）而增高 60px；
    gapRight 是后加的「绘图区右留白」—— 让最新一根 K 线不贴着右侧价格刻度 */
 const STOCK_CHART_GEOM = {
   w: 720, h: 360, left: 8, right: 62, gapRight: 14, top: 14,
@@ -2030,10 +2033,15 @@ function stockDrawKline(opt) {
         // 扇形展开：第 k 笔相对中轴偏移，越靠后的偏移越大；单笔时偏移为 0
         const fan = n > 1 ? (k - (n - 1) / 2) : 0;
         const x = cx + fan * Math.max(6, bw * 1.15) * fs;
-        const off = (12 + Math.abs(fan) * 3) * fs;
+        // 引线拉长到 18px 起（原来 12px 太短，标签会贴住 K 线与均线）；
+        // 再按价格区上下边界夹一次，避免买入标签掉进成交量区、卖出标签跑出图外
+        let off = (18 + Math.abs(fan) * 3.5) * fs;
+        off = buy
+          ? Math.min(off, Math.max(8 * fs, priceBottom - 14 * fs - py))
+          : Math.min(off, Math.max(8 * fs, py - (top + 13 * fs)));
         const apexY = buy ? py + off * 0.32 : py - off * 0.32;
         const baseY = buy ? py + off : py - off;
-        const half = Math.max(5, bw * 1.1);
+        const half = Math.max(6, bw * 1.25);
         const g = stockSvg('g', {});
         // 引线：从三角尖端连回成交价，明确「这笔标的是这个价位」
         g.appendChild(stockSvg('line', {
@@ -2046,6 +2054,7 @@ function stockDrawKline(opt) {
             + ' L' + (x - half).toFixed(2) + ' ' + baseY.toFixed(2)
             + ' L' + (x + half).toFixed(2) + ' ' + baseY.toFixed(2) + ' Z',
           fill: color, opacity: 0.95,
+          stroke: 'rgba(0,0,0,.45)', 'stroke-width': 0.6 * fs,
         });
         g.appendChild(tri);
         const label = (buy ? '买' : '卖') + stockQtyText(m.qty) + stockUnit()

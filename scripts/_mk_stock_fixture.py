@@ -87,7 +87,7 @@ def main():
     bars_out = {}
     for s in state["symbols"]:
         bars_out[s["symbol"]] = stock.bars_for(gid, s["symbol"], limit=90, with_marks=True)
-    risk = stock.risk_summary(gid) if hasattr(stock, "risk_summary") else {}
+    risk = stock.risk_metrics(gid, "you")
     report = stock.export_report(gid, fmt="markdown")
 
     out = {"state": state, "bars": bars_out, "risk": risk, "report": report}

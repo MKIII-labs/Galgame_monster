@@ -186,10 +186,14 @@ def test_ollama_reasoning_delta_is_captured():
 
 
 def test_light_mode_uses_non_agent_prompt(monkeypatch):
+    from importlib import import_module
+
     from app import agent
     s = {"agent_enabled": True, "sandbox": "D:/tmp"}
-    monkeypatch.setattr(agent, "light_chat_is_local", lambda: False)
+    # 包拆分后 build_agent_prompt 的实现搬到了 app.agent.prompt，补丁要打在消费方
+    prompt_mod = import_module("app.agent.prompt")
+    monkeypatch.setattr(prompt_mod, "light_chat_is_local", lambda: False)
     full = agent.build_agent_prompt(s)
-    monkeypatch.setattr(agent, "light_chat_is_local", lambda: True)
+    monkeypatch.setattr(prompt_mod, "light_chat_is_local", lambda: True)
     lite = agent.build_agent_prompt(s)
     assert lite == "" and len(lite) < len(full) * 0.6

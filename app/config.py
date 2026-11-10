@@ -68,9 +68,10 @@ DEFAULT_CONFIG = {
     # 会话第一次提问时注入一眼仓库结构（默认关：会多一次目录遍历；
     # 放在引用里而不是 system，避免文件变化打断前缀缓存）。
     "repo_summary_inject": False,
-    # 默认 1 亿 token：等效于“足够大”的窗口，同时保留窗口语义（0 = 完全不限，
-    # 既不显示占用比例，也不会触发任何按窗口比例的逻辑）。
-    "chat_context_limit": 100_000_000, "chat_reserve_output": 16384,
+    # 默认 1M（1,000,000）token：对齐当前主流长上下文模型（Claude / Gemini / Qwen-Long
+    # 等 1M 档）的常见窗口，同时保留窗口语义（0 = 完全不限：既不显示占用比例，
+    # 也不会触发任何按窗口比例的逻辑）。用户可在「设置 → 上下文与压缩」改成模型真实窗口。
+    "chat_context_limit": 1_000_000, "chat_reserve_output": 16384,
     # 上下文压缩：占用达到 ratio 时后台预压缩；保留最近 keep_ratio 的原文；
     # 摘要输出 token 上限。比例按 0–1 存储，设置页用百分数。
     # keep_ratio 的口径对齐 dsh：按 (窗口 - 输出上限) 的比例算，而不是整个窗口。

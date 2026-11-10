@@ -162,7 +162,10 @@ def test_full_mode_is_unrestricted(tmp_path):
                                "full")[0] == "allow"
 
 
-def test_custom_command_rules(tmp_path):
+def test_custom_command_rules(tmp_path, monkeypatch):
+    # 全局规则来自 data/agent-rules.json：指到 tmp，别让本机用户配置左右结论
+    from importlib import import_module
+    monkeypatch.setattr(import_module("app.agent.rules"), "DATA_DIR", str(tmp_path / "data"))
     gm = tmp_path / ".gm"
     gm.mkdir()
     (gm / "agent-rules.json").write_text(

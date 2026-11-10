@@ -1260,7 +1260,10 @@
         <span class="stt-chip-tag">✨ AI 已矫正</span>
         <button id="stt-revert" class="stt-revert" type="button">撤回原文</button>
       </div>
-      <div id="composer-hint" class="composer-hint" aria-live="polite"></div>
+      <div class="composer-hint-row">
+        <div id="composer-hint" class="composer-hint" aria-live="polite"></div>
+        <span id="ctx-meter" class="ctx-meter hidden" aria-live="polite"></span>
+      </div>
       </div></div><!-- /.composer-body -->
     </div>
     </div><!-- /.chat-col -->
@@ -3027,6 +3030,7 @@
 <script src="/static/rich-media.js"></script>
 <script src="/static/chat.js"></script>
 <script src="/static/stream.js"></script>
+<script src="/static/share.js"></script>
 <script src="/static/selkit.js"></script>
 <script src="/static/askkit.js"></script>
 <script src="/static/aside.js"></script>

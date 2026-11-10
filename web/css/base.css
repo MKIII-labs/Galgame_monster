@@ -1302,6 +1302,47 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* 输出期间的光标：从硬闪改为柔和呼吸（长回答里 steps 闪断很扎眼） */
+.content.streaming .cursor { animation: caretBreath 1.15s ease-in-out infinite; }
+@keyframes caretBreath {
+  0%, 100% { opacity: .95; }
+  50% { opacity: .22; }
+}
+/* 新定稿的块轻微上浮淡入：文字是「长出来」的，而不是整块闪出来 */
+@keyframes inkUp {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.content.streaming .md-live > * { animation: inkUp .18s ease-out both; }
+
+/* 长回答目录：h2/h3 ≥ 3 个时插在正文最上方，默认收起，点条目平滑跳转 */
+.md-toc {
+  margin: 4px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-hover);
+  font-size: 12.5px;
+}
+.md-toc > summary {
+  padding: 6px 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.md-toc > summary::-webkit-details-marker { display: none; }
+.md-toc[open] > summary { border-bottom: 1px solid var(--border); color: var(--text); }
+.md-toc-list { display: flex; flex-direction: column; gap: 3px; padding: 6px 10px 8px; }
+.md-toc-item {
+  color: var(--text-dim);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.md-toc-item:hover { color: var(--accent); }
+.md-toc-item.lvl3 { padding-left: 14px; font-size: 12px; }
+
 /* ---------------- Markdown ---------------- */
 .content h1, .content h2, .content h3 { margin: 18px 0 10px; line-height: 1.35; font-weight: 650; }
 .content h1 { font-size: 1.5em; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
@@ -1358,6 +1399,13 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 .process-fold-head:hover { color: var(--text); }
 .process-fold-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .process-fold-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 折叠头右侧的「N 步 · N 步失败」：收起时也能看出这一轮做了多少事 */
+.process-fold-meta {
+  flex: none; font-size: 11.5px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.process-fold.has-fail .process-fold-meta { color: var(--danger); }
+.process-fold.has-fail .process-fold-caret { color: var(--danger); }
 .process-fold-caret { font-size: 11px; transition: transform .18s; }
 .process-fold.collapsed .process-fold-caret { transform: rotate(-90deg); }
 .process-fold-body { padding: 6px 9px 8px; border-top: 1px solid var(--border); }
@@ -1808,6 +1856,25 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 .ctx-in-seg.ctx-in-schema, .ctx-in-dot.ctx-in-schema { background: #d946ef; }
 
 /* 待发送图片预览（输入框上方） */
+/* 对话末尾的「排队中」幽灵气泡：翻历史时也能看到排了什么、直接取消 */
+.queue-ghosts {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+  margin: 8px 0 12px;
+}
+.queue-ghost {
+  display: flex; align-items: center; gap: 8px; max-width: 78%;
+  padding: 6px 10px;
+  border: 1px dashed var(--border); border-radius: 10px;
+  color: var(--text-dim); font-size: 12.5px; background: transparent;
+}
+.queue-ghost-meta { flex: none; font-size: 11px; color: var(--accent); }
+.queue-ghost-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-ghost-x {
+  flex: none; border: 0; background: none; padding: 0;
+  color: var(--text-dim); font-size: 11.5px; cursor: pointer;
+}
+.queue-ghost-x:hover { color: var(--danger); }
+
 /* 生成中排队的消息（Enter 不再被直接丢弃）；可展开逐条修改 / 取消 */
 .queue-bar {
   max-width: 800px; margin: 0 auto var(--sp-2);
@@ -2299,7 +2366,8 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 .tool-group .tool-card + .tool-card {
   border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
-.tool-group .tool-head { padding: 5px 8px; }
+/* 组内步骤行更紧凑：长任务一屏能多看几步，不至于刷满整屏 */
+.tool-group .tool-head { padding: 5px 8px; gap: 6px; font-size: 12px; }
 .tool-group .tool-ico {
   position: relative; z-index: 1; flex: none;
   display: inline-flex; align-items: center; justify-content: center;
@@ -3036,6 +3104,20 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 
 /* 输入状态提示行（字符数 / 优化结果 / 撤销） */
 .composer-hint { max-width: 800px; margin: 6px auto 0; min-height: 16px; font-size: 12px; color: var(--text-dim); }
+/* 提示行：左边是按键提示，右边是「上下文预算」（打字时就该看到还能写多少） */
+.composer-hint-row {
+  max-width: 800px; margin: 6px auto 0;
+  display: flex; align-items: baseline; gap: 10px;
+}
+.composer-hint-row .composer-hint { flex: 1; min-width: 0; margin: 0; }
+.ctx-meter {
+  flex: none; max-width: 46%;
+  font-size: 11.5px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctx-meter.warn { color: #d9a441; }
+.ctx-meter.danger { color: var(--danger); }
 .composer-hint.warn { color: var(--danger); }
 .composer-hint .cmp-undo {
   margin-left: 6px; padding: 1px 8px; border-radius: 6px; cursor: pointer;
@@ -4365,3 +4447,45 @@ summary:focus-visible,
 .ui-switch input:focus-visible + .ui-switch-track {
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
+
+/* ---------------- 分享面板（产物：HTML / 包 / 长图） ---------------- */
+.share-card { width: min(980px, 94vw); max-height: 88vh; display: flex; flex-direction: column;
+  padding: 0; overflow: hidden; }
+.share-head { display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--border); }
+.share-title { font-size: 15px; font-weight: 600; }
+.share-close { border: 0; background: none; color: var(--text-dim); font-size: 14px; cursor: pointer; }
+.share-body { display: grid; grid-template-columns: 340px 1fr; min-height: 0; flex: 1; }
+.share-left { padding: 14px 16px; border-right: 1px solid var(--border); overflow: auto;
+  display: flex; flex-direction: column; gap: 12px; }
+.share-right { min-width: 0; background: var(--bg); }
+.share-preview { width: 100%; height: 100%; min-height: 420px; border: 0; background: #fff; }
+.share-row { display: flex; flex-direction: column; gap: 6px; }
+.share-label { font-size: 11.5px; color: var(--text-dim); letter-spacing: .04em; }
+.share-radios, .share-checks { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.share-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px;
+  color: var(--text); cursor: pointer; }
+.share-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.share-btn { padding: 6px 12px; border-radius: 7px; border: 1px solid var(--border);
+  background: var(--bg-hover); color: var(--text); font-size: 12.5px; cursor: pointer;
+  text-decoration: none; }
+.share-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.share-btn.ghost { background: transparent; }
+.share-btn[disabled] { opacity: .6; cursor: default; }
+.share-status { min-height: 16px; font-size: 12px; color: var(--text-dim); }
+.share-report { font-size: 12px; color: var(--text-dim); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.share-report.hidden { display: none; }
+.share-report-line { color: #d9a441; }
+.share-report-sample { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-result { border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+  display: flex; flex-direction: column; gap: 8px; }
+.share-result.hidden { display: none; }
+.share-result-title { font-size: 12.5px; font-weight: 600; }
+.share-result-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.share-result-img { max-width: 100%; max-height: 260px; object-fit: contain;
+  border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.share-result-path { font-size: 11px; color: var(--text-dim); word-break: break-all; }
+@media (max-width: 820px) { .share-body { grid-template-columns: 1fr; } .share-right { min-height: 320px; } }
+.share-head-left { display: flex; align-items: center; gap: 10px; }

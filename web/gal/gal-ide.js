@@ -176,6 +176,7 @@ function ideInitOnce() {
   ideBindWorkspace();
   ideDragBindGlobal();                // 原生拖出后没有 dragend：兜底清理拖拽源
   ideCtxBind();                       // 文件树右键菜单（容器只绑定一次）
+  ideTabsBind();                      // 顶部标签页：右键菜单 / 滚轮 / 快捷键
   ideIntelBindUI();
   const repAll = $('#ide-replace-all');
   if (repAll) repAll.onclick = () => ideReplaceAll();
@@ -415,6 +416,8 @@ function ideEnsureEditor(monaco) {
   state.ideEditor = monaco.editor.create(host, opt);
   state.ideEditor.onDidChangeModelContent(() => {
     if (state.ideOpen) ideSetDirty(state.ideOpen, true);
+    // 开始编辑 = 这个标签被固定，之后打开别的文件不再顶掉它
+    if (state.idePreviewTab && state.idePreviewTab === state.ideOpen) idePinTab(state.ideOpen);
     ideMdSchedule();                       // Markdown 预览跟着打字实时刷新（节流）
     ideMdLintSchedule();                   // Markdown 语法检查（波浪线 + 问题面板）
   });
@@ -978,6 +981,7 @@ function resetIdeForSession() {
   state.ideCache = {};
   state.ideDirtyMap = {};
   state.ideTabList = [];
+  state.idePreviewTab = '';
   state.ideOpen = '';
   state.ideDir = '';
   state.ideChanged.clear();
@@ -1321,6 +1325,11 @@ function ideCtxOpen(x, y, row) {
     { sep: true },
     { label: '刷新', run: () => loadIdeTree() },
   ];
+  ideMenuShow(el, x, y, items);
+}
+
+/* 通用右键菜单渲染：文件树与标签页共用同一个 #ide-ctxmenu 容器。 */
+function ideMenuShow(el, x, y, items) {
   el.innerHTML = items.map((it, i) => {
     if (it.sep) return '<div class="ide-ctx-sep"></div>';
     return '<button type="button" class="ide-ctx-item' + (it.disabled ? ' disabled' : '')
@@ -1532,8 +1541,10 @@ function buildIdeNodes(items, prefix, depth) {
       row.onclick = (e) => {
         if (e.ctrlKey || e.metaKey) { ideToggleSel(rel); return; }
         ideClearSel();
-        openIdeFile(rel);
+        // 单击 = 预览标签（再点别的文件会被替换），双击 = 固定
+        openIdeFile(rel, { preview: true });
       };
+      row.ondblclick = () => openIdeFile(rel, { pin: true });
     }
     // 文件与目录都能被拖走；拖动源由 state.ideDrag 记录（dataTransfer 在部分环境为空）
     row.draggable = true;
@@ -1733,17 +1744,77 @@ function ideChangeStatOf(rel) {
   return n ? { adds: adds, dels: dels } : null;
 }
 
+/* ---------------- 顶部标签页（对齐 VS Code 的行为） ----------------
+   · 预览标签：资源树单击 = 斜体预览，再单击别的文件时原地替换；双击 / 开始编辑 /
+     点击标签本身即固定。VS Code 的 tabs 默认就是这个模型。
+   · 同名文件用「上级目录/文件名」消歧，仍重名再逐级加。
+   · 关闭当前标签后优先激活右侧邻居。
+   · 右键：关闭 / 关闭其他 / 关闭右侧 / 全部关闭 / 复制路径。
+   · 快捷键：Ctrl+W 关闭，Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+PgUp / Ctrl+PgDn 切换。
+   ================================================================ */
+function ideDropTab(rel) {
+  if (state.ideModels[rel]) { try { state.ideModels[rel].dispose(); } catch (e) { /* 忽略 */ } delete state.ideModels[rel]; }
+  const cached = state.ideCache[rel];
+  if (cached && cached.image && cached.url) { try { URL.revokeObjectURL(cached.url); } catch (e) { /* 忽略 */ } }
+  delete state.ideCache[rel];
+  delete state.ideDirtyMap[rel];
+  if (state.idePreviewTab === rel) state.idePreviewTab = '';
+}
+
+function ideMarkTabKind(rel, preview) {
+  if (preview) {
+    const old = state.idePreviewTab;
+    // 旧预览标签还没被改过 → 被新预览原地替换（这是 VS Code 预览标签的核心语义）
+    if (old && old !== rel && !state.ideDirtyMap[old] && (state.ideTabList || []).includes(old)) {
+      state.ideTabList.splice(state.ideTabList.indexOf(old), 1);
+      ideDropTab(old);
+    }
+    state.idePreviewTab = rel;
+  } else if (state.idePreviewTab === rel) {
+    state.idePreviewTab = '';
+  }
+}
+
+function idePinTab(rel) {
+  if (!rel || state.idePreviewTab !== rel) return;
+  state.idePreviewTab = '';
+  renderIdeTabs();
+}
+
+function ideTabLabel(rel) {
+  const base = rel.split('/').pop();
+  const dup = (state.ideTabList || []).filter((p) => p.split('/').pop() === base);
+  if (dup.length < 2) return base;
+  const parts = rel.split('/');
+  for (let n = 2; n <= parts.length; n += 1) {
+    const cand = parts.slice(-n).join('/');
+    if (dup.filter((p) => p.split('/').slice(-n).join('/') === cand).length < 2) return cand;
+  }
+  return rel;
+}
+
+function ideCycleTab(dir) {
+  const list = state.ideTabList || [];
+  if (list.length < 2) return;
+  const i = Math.max(0, list.indexOf(state.ideOpen));
+  ideActivate(list[(i + dir + list.length) % list.length]);
+}
+
 function renderIdeTabs() {
   const box = $('#ide-tabs');
   if (!box) return;
   box.innerHTML = '';
-  (state.ideTabList || []).forEach((rel) => {
+  let activeEl = null;
+  (state.ideTabList || []).forEach((rel, idx) => {
+    const isActive = rel === state.ideOpen;
+    const isPreview = state.idePreviewTab === rel;
     const t = document.createElement('div');
-    t.className = 'ide-tab' + (rel === state.ideOpen ? ' active' : '');
-    t.title = rel;
+    t.className = 'ide-tab' + (isActive ? ' active' : '') + (isPreview ? ' preview' : '');
+    t.title = rel + (isPreview ? '\n预览标签：双击或开始编辑后固定' : '');
+    t.dataset.i = String(idx);
     const nm = document.createElement('span');
     nm.className = 'ide-tab-name';
-    nm.textContent = rel.split('/').pop();
+    nm.textContent = ideTabLabel(rel);
     t.appendChild(ideIcoEl(rel.split('/').pop(), false));
     t.appendChild(nm);
     if (state.ideDirtyMap[rel]) {
@@ -1766,7 +1837,8 @@ function renderIdeTabs() {
     x.title = '关闭';
     x.onclick = (e) => { e.stopPropagation(); ideCloseTab(rel); };
     t.appendChild(x);
-    t.onclick = () => ideActivate(rel);
+    t.onclick = () => { if (isPreview) idePinTab(rel); ideActivate(rel); };
+    t.addEventListener('dblclick', (e) => { e.preventDefault(); idePinTab(rel); });
     // 中键关闭（VS Code 的常规操作）
     t.addEventListener('auxclick', (e) => { if (e.button === 1) { e.preventDefault(); ideCloseTab(rel); } });
     t.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
@@ -1797,7 +1869,97 @@ function renderIdeTabs() {
       $$('#ide-tabs .ide-tab').forEach((el) => el.classList.remove('dragging', 'drop-target'));
     });
     box.appendChild(t);
+    if (isActive) activeEl = t;
   });
+  // 激活的标签必须可见：标签多到溢出时把它滚进视口（VS Code 同样行为）
+  if (activeEl && box.scrollWidth > box.clientWidth) {
+    try { activeEl.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* 忽略 */ }
+  }
+}
+
+/* 关闭一批标签；有未保存改动时只弹一次确认。 */
+function ideCloseTabs(pred, title) {
+  const targets = (state.ideTabList || []).filter(pred);
+  if (!targets.length) return;
+  const closeAll = () => {
+    targets.forEach((p) => {
+      const i = (state.ideTabList || []).indexOf(p);
+      if (i < 0) return;
+      state.ideTabList.splice(i, 1);
+      ideDropTab(p);
+    });
+    if ((state.ideTabList || []).includes(state.ideOpen)) { renderIdeTabs(); return; }
+    const next = state.ideTabList[0] || '';
+    if (next) ideActivate(next);
+    else ideClearEditor();
+  };
+  const dirty = targets.filter((p) => state.ideDirtyMap[p]);
+  if (dirty.length) {
+    ideConfirm('未保存的修改', '有 ' + dirty.length + ' 个文件未保存，仍要' + title + '吗？',
+      title, closeAll);
+    return;
+  }
+  closeAll();
+}
+
+function ideClearEditor() {
+  state.ideOpen = '';
+  if (state.ideEditor) state.ideEditor.setModel(null);
+  const t = $('#ide-text'); if (t) t.value = '';
+  const img = $('#ide-image-img'); if (img) img.removeAttribute('src');
+  ideShowView('editor');
+  renderIdeTabs(); ideSyncTreeActive(); ideUpdateStatus(); ideUpdateDiffBtn();
+}
+
+function ideTabCtxOpen(x, y, rel) {
+  const el = document.getElementById('ide-ctxmenu');
+  if (!el) return;
+  const list = state.ideTabList || [];
+  const i = list.indexOf(rel);
+  const items = [
+    { label: '关闭', key: 'Ctrl+W', run: () => ideCloseTab(rel) },
+    { label: '关闭其他', disabled: list.length < 2, run: () => ideCloseTabs((p) => p !== rel, '关闭其他') },
+    { label: '关闭右侧', disabled: i < 0 || i >= list.length - 1, run: () => ideCloseTabs((p) => list.indexOf(p) > i, '关闭右侧') },
+    { label: '全部关闭', disabled: !list.length, run: () => ideCloseTabs(() => true, '全部关闭') },
+    { sep: true },
+    { label: '复制路径', run: () => ideCopyPath([rel]) },
+  ];
+  ideMenuShow(el, x, y, items);
+}
+
+function ideTabsBind() {
+  const box = $('#ide-tabs');
+  if (!box || box.dataset.bound === '1') return;
+  box.dataset.bound = '1';
+  // 溢出时滚轮/触控板直接横向滚（滚动条已隐藏）
+  box.addEventListener('wheel', (e) => {
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    box.scrollLeft += e.deltaY;
+    e.preventDefault();
+  }, { passive: false });
+  box.addEventListener('contextmenu', (e) => {
+    const t = e.target && e.target.closest ? e.target.closest('.ide-tab') : null;
+    if (!t) return;
+    e.preventDefault();
+    const rel = (state.ideTabList || [])[Number(t.dataset.i)];
+    if (rel) ideTabCtxOpen(e.clientX, e.clientY, rel);
+  });
+  // 捕获阶段拦下，避免 Monaco / Electron 先吃掉这些键
+  document.addEventListener('keydown', (e) => {
+    if (state.uiMode !== 'ide') return;
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const k = (e.key || '').toLowerCase();
+    if (k === 'w' && state.ideOpen) {
+      e.preventDefault(); e.stopPropagation();
+      ideCloseTab(state.ideOpen);
+    } else if (k === 'tab') {
+      e.preventDefault(); e.stopPropagation();
+      ideCycleTab(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'PageDown' || e.key === 'PageUp') {
+      e.preventDefault(); e.stopPropagation();
+      ideCycleTab(e.key === 'PageDown' ? 1 : -1);
+    }
+  }, true);
 }
 
 function ideSetDirty(rel, on) {
@@ -3975,7 +4137,7 @@ function ideSetRowLoading(rel, on) {
   if (row) row.classList.toggle('loading', !!on);
 }
 
-async function openIdeFile(rel) {
+async function openIdeFile(rel, opts) {
   if (!rel) return;
   // PDF 不走编辑器：二进制文件没法当文本打开，交给沉浸式阅读器（左原页 + 右双语阅读流）
   if (ideIsPdf(rel)) {
@@ -3983,7 +4145,12 @@ async function openIdeFile(rel) {
     if (window.Reader && window.Reader.open) return window.Reader.open(rel);
     return toast('阅读器脚本未加载，请刷新页面', 'error');
   }
-  if (state.ideTabList.includes(rel)) { ideActivate(rel); return; }
+  if (state.ideTabList.includes(rel)) {
+    ideActivate(rel);
+    // 双击 / 明确打开同一个文件 = 把它从预览标签固定下来
+    if (opts && opts.pin) idePinTab(rel);
+    return;
+  }
   /* 请求序号：连续点 A→B 时，若 A 的响应后到，不能让它把已经打开的 B 覆盖掉。
      同时给对应行加 loading，点击后立刻有反馈，不用等磁盘。 */
   const seq = (state.ideOpenReq || 0) + 1;
@@ -4010,6 +4177,7 @@ async function openIdeFile(rel) {
       state.ideCache[rel] = { image: true, url: URL.createObjectURL(blob), size: blob.size };
       state.ideDirtyMap[rel] = false;
       state.ideTabList.push(rel);
+      ideMarkTabKind(rel, !!(opts && opts.preview));
       state.ideChanged.delete(rel);
     } else {
       let r;
@@ -4020,6 +4188,7 @@ async function openIdeFile(rel) {
       state.ideCache[rel] = { text: r.text || '', enc: r.encoding || '' };
       state.ideDirtyMap[rel] = false;
       state.ideTabList.push(rel);
+      ideMarkTabKind(rel, !!(opts && opts.preview));
       state.ideChanged.delete(rel);
       if (r.truncated) toast('文件较大，仅载入前 2MB');
     }
@@ -4100,23 +4269,12 @@ function ideCloseTabForce(rel) {
   const i = (state.ideTabList || []).indexOf(rel);
   if (i < 0) return;
   state.ideTabList.splice(i, 1);
-  if (state.ideModels[rel]) { try { state.ideModels[rel].dispose(); } catch (e) { /* 忽略 */ } delete state.ideModels[rel]; }
-  const cached = state.ideCache[rel];
-  if (cached && cached.image && cached.url) { try { URL.revokeObjectURL(cached.url); } catch (e) { /* 忽略 */ } }
-  delete state.ideCache[rel];
-  delete state.ideDirtyMap[rel];
+  ideDropTab(rel);
   if (state.ideOpen === rel) {
-    const next = state.ideTabList[Math.max(0, i - 1)] || '';
+    // VS Code：优先激活右侧邻居，没有右侧才回退到左侧
+    const next = state.ideTabList[i] || state.ideTabList[i - 1] || '';
     if (next) ideActivate(next);
-    else {
-      state.ideOpen = '';
-      if (state.ideEditor) state.ideEditor.setModel(null);
-      const t = $('#ide-text'); if (t) t.value = '';
-      const img = $('#ide-image-img'); if (img) img.removeAttribute('src');
-      ideShowView('editor');
-      renderIdeTabs(); ideSyncTreeActive(); ideUpdateStatus();
-      ideUpdateDiffBtn();
-    }
+    else ideClearEditor();
   } else {
     renderIdeTabs();
   }

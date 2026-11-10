@@ -2,10 +2,14 @@
 """全局权限规则与预设：写入 / 备份 / 合并优先级。"""
 import json
 import os
+from importlib import import_module
 
 import pytest
 
 from app import agent, agent_presets
+
+# 包拆分后全局规则读写搬到了 app.agent.rules，DATA_DIR 要在定义处打补丁
+agent_rules = import_module("app.agent.rules")
 
 
 @pytest.fixture()
@@ -13,6 +17,7 @@ def data_dir(tmp_path, monkeypatch):
     d = tmp_path / "data"
     d.mkdir()
     monkeypatch.setattr(agent, "DATA_DIR", str(d))
+    monkeypatch.setattr(agent_rules, "DATA_DIR", str(d))
     return d
 
 
