@@ -3936,3 +3936,24 @@
 - 关键实现点：KaTeX 只内联 woff2（20 个 @font-face → data URL，样板页 ~370KB）；脱敏按 `<...>` 切分只处理文本片段，避免改坏标签；`.gmshare` 导入校验允许的路径、解压总量与 sha256；长图先用 `--dump-dom` 量 `scrollHeight` 再 `--screenshot`，最后 Pillow 裁留白。
 - 验证：`tests/test_share.py` 9 passed；`ruff check` 全过；`scripts/dev_check.py` 全部通过；`node --check web/share.js` 通过。**未做真人点击验证**（需要真实会话与服务）。
 - 未做：P2 局域网临时页；图卡 iframe 不内联（改成文字说明）；导入包只读、不合并进会话；单图 > 3MB 不内联。
+
+## [2026-11-10] 前端视觉体系重构（令牌层 / 组件层 / 响应式）
+
+- 起因：全站 21 个 CSS 各自为政——硬编码色值 786 处、`rgba()` 原值 214 处、圆角 5/6/7/8/10/11/12 混用、按钮 padding 7·8·9·13·16 混用、断点 12 种（560/640/720/760/820/900/940/980/1040/1100/1160/1200）、z-index 从 1 一路写到 10001。
+- 结构：`base.css` 顶部改成两层令牌——原始值（只在主题块出现十六进制）+ 语义层（`--surface-0..3` / `--line(-subtle/-strong)` / `--text(-weak)` / `--shadow-xs..lg` / `--ring` / `--t-*` / `--fs-*` / `--z-*`）。语义层只写 `var(--primitive)` 别名，6 套主题各补 `--bg-elevated / --text-mute / --border-subtle / --overlay`，切换主题时自动解析，不用改组件。
+- 新增 `web/css/ui.css`，在 `index.html` 里**最后加载**：按钮族（`.primary/.ghost/.iv-btn/.dojo-btn/.math-btn/.work-btn`）用 `:is()` 拉齐几何（高 34 / 圆角 6 / 字号 13 / 统一 active、focus-visible、disabled），颜色皮肤仍由各模块决定；表单、弹窗四段式、卡片、列表行、页签、Toast 同样处理。
+- 机械迁移（一次性脚本，已丢弃）：语义色/压暗层/批注荧光笔/z-index 阶梯批量替换。**踩坑**：`re.escape(x) + r"\b"` 对 `rgba(...)` 这种以 `)` 结尾的字面量永远不匹配（`)` 与 `;` 之间没有词边界），第一轮 rgba 全部漏掉，重跑去掉 `\b` 才生效。
+- z-index 只换名不换序：50 弹窗 / 60 浮层 / 70 提示 / 80–85 页内覆盖 / 90–95 图片查看 / 9400–9700 阅读器 / 9800 划词条 / 9999 右键菜单 / 10000 toast / 10001 批注弹层。
+- 响应式归一为三档：≥1160 桌面、900–1159 窄桌面、<900 单列、<640 手机。≤900 侧栏改成**覆盖式抽屉**（`position:absolute` + `translateX(-100%)`，主区始终满宽）；`init.js` 只在窄屏默认收起并写 `localStorage.gm.sideMobile`，避免刷新把用户手动展开重置。≤640 弹窗全屏（用 `#modal .modal-card` 抬优先级压过 base.css 的 96vw）、设置左导航改顶部横条、`.radio-row` 允许换行（否则「高对比暗」被压成竖排单字）、按键提示单行省略。
+- 刻意不参与收敛（已加注释）：文件类型图标品牌色、Windows 标题栏关闭红、GAL 主题预览与舞台配色、股市红涨绿跌、批注荧光笔、图片查看器固定暗底、IDE 主题预设块。
+- 验证：临时实例走查（`%TEMP%\gm_before` = `git worktree` 的 HEAD，`%TEMP%\gm_after` = 工作树拷贝，各自独立 `data/`，不碰真实数据），覆盖 1440/1024/768/390 × 明暗 × 7 个场景；CDP 性能对比 FCP 124→120ms、DCL 214→199ms、load 222→208ms、DOM 节点 7212→7213；CSS 618KB→639KB（+3.3%，主要来自新 `ui.css` 9.2KB）。`pytest` 全绿、`ruff` 全过、`scripts/dev_check.py` 全过、`node --check web/init.js` 通过。
+- 遗留：阅读器正文、GAL 舞台、IDE 编辑器主题仍是各自固定色板（有意保留艺术效果）；窄屏隐藏右下角悬浮模式条，切模式走侧栏抽屉。
+
+## [2026-11-10] 拆包后 monkeypatch 打点失效 + 测试污染真实 data/agent-rules.json
+
+- 现象：`app/agent.py` 拆成包之后，除 6 条已记录失败外，又冒出 5 条（presets / custom 命令规则 / hall 提示词 / 本地轻量模式）。
+- 根因：拆包把符号搬到了 `app.agent.rules` / `undo` / `prompt`，而测试仍 `monkeypatch.setattr(agent, "DATA_DIR" / "undo_limit" / "load_effective_rules" / "light_chat_is_local", ...)`。模块级 `from X import Y` 是**早绑定**，打在包上的补丁对内部调用完全无效。
+- 更严重的副作用：`agent_presets.apply()` 走 `agent.global_rules_path()`（定义在 rules.py，读的是真实 `DATA_DIR`），于是每跑一次测试就往真实 `data/agent-rules.json` 写入「标准开发」预设并生成 `.bak`（11-09 23:28 起积累了一串备份）。
+- 解决：补丁一律打到定义处——`import_module("app.agent.rules")` 打 `load_effective_rules` / `DATA_DIR`，`import_module("app.agent.undo")` 打 `undo_limit`（注意包里 re-export 了同名函数 `undo()`，`from app.agent import undo` 拿到的是函数不是模块），`app.agent.prompt` 打 `light_chat_is_local`；`test_custom_command_rules` 额外把 `rules.DATA_DIR` 指到 tmp，避免被本机全局规则影响。
+- 同时修回一处语义：`prompt.py` 的 `agent_hall_prompt` 原先在函数体内 `from app.config import load_config`，拆包时被提升成模块级早绑定，改回延迟导入，恢复「改设置即时生效 + 测试可打补丁」。
+- 教训：拆包/搬家后，先扫一遍 `monkeypatch.setattr(<模块>, ...)`，逐个确认目标模块是不是真正的消费方；涉及落盘的测试要把目录也指到 tmp。

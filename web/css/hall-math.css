@@ -360,7 +360,7 @@
 .math-picker {
   position: fixed; inset: 0; z-index: 1200;
   display: flex; align-items: center; justify-content: center;
-  padding: 18px; background: rgba(0, 0, 0, .38);
+  padding: 18px; background: var(--scrim);
 }
 .math-picker-card {
   width: min(700px, 100%); max-height: min(84vh, 760px); overflow: auto;
@@ -405,7 +405,7 @@
 .math-modal {
   position: fixed; inset: 0; z-index: 1200;
   display: flex; align-items: center; justify-content: center;
-  padding: 18px; background: rgba(0, 0, 0, .38);
+  padding: 18px; background: var(--scrim);
 }
 .math-modal-card {
   width: min(780px, 100%); max-height: min(86vh, 820px);

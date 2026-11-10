@@ -1041,7 +1041,18 @@ async function init() {
     syncModeSwitchHome();
   }
   applyComposerCollapsed(!!(state.config && state.config.composer_collapsed));
-  applySidebarCollapsed(!!(state.config && state.config.sidebar_collapsed));
+  // 窄屏（平板竖屏 / 手机）默认收起侧栏：否则 268px 的侧栏会把主区挤成一条缝。
+  // 桌面端的偏好存在服务端配置里；窄屏单独记一份，避免「手动展开后被刷新重置」。
+  var _narrow = false;
+  try { _narrow = window.matchMedia('(max-width: 900px)').matches; } catch (e) { _narrow = false; }
+  var _sideCollapsed = !!(state.config && state.config.sidebar_collapsed);
+  if (_narrow) {
+    try {
+      var _sm = localStorage.getItem('gm.sideMobile');
+      _sideCollapsed = _sm === null ? true : _sm === '1';
+    } catch (e) { _sideCollapsed = true; }
+  }
+  applySidebarCollapsed(_sideCollapsed);
   if ($('#composer-handle')) $('#composer-handle').onclick = () => {
     const c = document.querySelector('.composer');
     const on = !(c && c.classList.contains('collapsed'));
@@ -1052,6 +1063,9 @@ async function init() {
   function toggleSidebar(force) {
     const on = (typeof force === 'boolean') ? force : !$('#app').classList.contains('side-collapsed');
     applySidebarCollapsed(on);
+    try {
+      if (window.matchMedia('(max-width: 900px)').matches) localStorage.setItem('gm.sideMobile', on ? '1' : '0');
+    } catch (e) { /* 隐私模式：不记也行 */ }
     state.config = Object.assign({}, state.config || {}, { sidebar_collapsed: on });
     api('/api/config', { sidebar_collapsed: on }).catch(() => {});
   }

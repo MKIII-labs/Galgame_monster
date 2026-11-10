@@ -31,7 +31,7 @@
 }
 .work-btn:hover { background: var(--bg-hover); }
 .work-btn.primary {
-  background: var(--accent); border-color: var(--accent); color: #fff;
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
 }
 .work-btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .work-btn.ghost { color: var(--text-dim); }
@@ -136,7 +136,7 @@
 .work-bar-fill {
   display: block; height: 100%; width: 0;
   background: var(--accent); border-radius: 999px;
-  transition: width .25s var(--ease);
+  transition: width var(--t-slow) var(--ease);
 }
 .work-task-meta {
   font-size: 11.5px; color: var(--text-dim);
@@ -149,17 +149,17 @@
   background: var(--bg-hover); color: var(--text-dim);
 }
 .work-chip.running { background: var(--accent-soft); color: var(--accent); }
-.work-chip.done { background: rgba(74, 169, 108, .14); color: var(--ok); }
-.work-chip.failed { background: rgba(241, 76, 76, .14); color: var(--danger); }
-.work-chip.blocked { background: rgba(201, 138, 18, .16); color: var(--warn); }
-.work-chip.paused { background: rgba(201, 138, 18, .12); color: var(--warn); }
+.work-chip.done { background: var(--ok-soft); color: var(--ok); }
+.work-chip.failed { background: var(--danger-soft); color: var(--danger); }
+.work-chip.blocked { background: var(--warn-soft); color: var(--warn); }
+.work-chip.paused { background: var(--warn-soft); color: var(--warn); }
 .work-pri {
   flex: none; padding: 1px 6px; border-radius: 999px;
   font-size: 10.5px; font-weight: 600;
 }
-.work-pri.p1 { background: rgba(74, 169, 108, .15); color: var(--ok); }
-.work-pri.p2 { background: rgba(201, 138, 18, .16); color: var(--warn); }
-.work-pri.p3 { background: rgba(241, 76, 76, .15); color: var(--danger); }
+.work-pri.p1 { background: var(--ok-soft); color: var(--ok); }
+.work-pri.p2 { background: var(--warn-soft); color: var(--warn); }
+.work-pri.p3 { background: var(--danger-soft); color: var(--danger); }
 
 /* ---------- 产物 ---------- */
 .work-artifact {
@@ -197,9 +197,9 @@
 
 /* ---------- 弹窗 ---------- */
 .work-modal {
-  position: fixed; inset: 0; z-index: 80;
+  position: fixed; inset: 0; z-index: var(--z-cover);
   display: flex; align-items: center; justify-content: center;
-  padding: 24px; background: rgba(8, 9, 12, .42);
+  padding: 24px; background: var(--overlay);
   backdrop-filter: blur(2px);
 }
 .work-dialog {
@@ -207,7 +207,7 @@
   display: flex; flex-direction: column;
   background: var(--bg); border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, .28);
+  box-shadow: 0 18px 50px var(--scrim-soft);
   animation: work-pop .16s var(--ease);
 }
 @keyframes work-pop {
@@ -438,7 +438,7 @@
 .work-views-tabs button:hover { color: var(--text); }
 .work-views-tabs button.on {
   background: var(--bg); color: var(--text); font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0,0,0,.08);
+  box-shadow: var(--shadow-xs);
 }
 .work-view { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px 24px; }
 .work-view.hidden { display: none; }

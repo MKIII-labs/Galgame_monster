@@ -2,11 +2,11 @@
 .traj-modal {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: var(--z-lightbox);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, .42);
+  background: var(--overlay);
   backdrop-filter: blur(2px);
 }
 .traj-modal.hidden { display: none; }
@@ -21,7 +21,7 @@ body.traj-locked { overflow: hidden; }
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, .35);
+  box-shadow: 0 24px 80px var(--scrim-soft);
   overflow: hidden;
 }
 
@@ -54,7 +54,7 @@ body.traj-locked { overflow: hidden; }
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .28);
+  box-shadow: 0 12px 32px var(--scrim-soft);
 }
 .traj-menu-pop.hidden { display: none; }
 .traj-menu-pop button {
@@ -231,7 +231,7 @@ body.traj-locked { overflow: hidden; }
   width: 10px;
   color: var(--text-dim);
   font-size: 10px;
-  transition: transform .12s ease;
+  transition: transform var(--t-fast) var(--ease);
 }
 .traj-turn-h b { font-size: 12.5px; }
 .traj-turn-meta { color: var(--text-dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -384,7 +384,7 @@ body.traj-locked { overflow: hidden; }
   padding: 0 0 0 4px;
 }
 .traj-tag button:hover { color: var(--accent); }
-.traj-err { color: var(--danger, #e8463a); }
+.traj-err { color: var(--danger, var(--danger)); }
 
 .traj-tabbar {
   display: flex;

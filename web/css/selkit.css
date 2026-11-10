@@ -3,17 +3,18 @@
    ============================================================ */
 .selbar {
   position: fixed;
-  z-index: 9800;
+  z-index: var(--z-selbar, 9800);
   display: flex;
   align-items: center;
   gap: 1px;
   max-width: calc(100vw - 16px);
   padding: 3px;
-  background: var(--bg-panel, #fff);
+  /* --bg-panel 从未定义过：以前一直落到 #fff，深色主题下浮层是白块 */
+  background: var(--bg-elevated, #fff);
   border: 1px solid var(--border, #ddd);
-  border-radius: 8px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, .16), 0 1px 3px rgba(0, 0, 0, .08);
-  font-size: 12px;
+  border-radius: var(--radius-sm, 8px);
+  box-shadow: var(--shadow-lg, 0 6px 24px rgba(0, 0, 0, .16)), var(--shadow-sm, 0 1px 3px rgba(0, 0, 0, .08));
+  font-size: var(--fs-xs, 12px);
   color: var(--text, #222);
   user-select: none;
   white-space: nowrap;
@@ -75,16 +76,16 @@
 
 .selbar-more-menu {
   position: fixed;
-  z-index: 9801;
+  z-index: var(--z-selbar-menu, 9801);
   display: flex;
   flex-direction: column;
   min-width: 132px;
   padding: 4px;
-  background: var(--bg-panel, #fff);
+  background: var(--bg-elevated, #fff);
   border: 1px solid var(--border, #ddd);
-  border-radius: 8px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .18);
-  font-size: 12px;
+  border-radius: var(--radius-sm, 8px);
+  box-shadow: var(--shadow-lg, 0 8px 28px rgba(0, 0, 0, .18));
+  font-size: var(--fs-xs, 12px);
   color: var(--text, #222);
   user-select: none;
 }

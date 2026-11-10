@@ -52,6 +52,8 @@
 <link rel="stylesheet" href="/static/css/selkit.css">
 <link rel="stylesheet" href="/static/css/askkit.css">
 <link rel="stylesheet" href="/static/css/turndots.css">
+<!-- 通用组件层：必须最后加载，用来把各页面历史写法统一的几何规格拉齐（见文件头注释） -->
+<link rel="stylesheet" href="/static/css/ui.css">
 <!-- 复古像素主题用的点阵字体：只有 pixel 主题会引用这个字体族，因此 woff2 实际是「用到才下载」；
      非阻塞加载，失败即移除并回退到系统宋体 / 等宽（保证离线可用） -->
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>

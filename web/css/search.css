@@ -3,10 +3,10 @@
    ============================================================ */
 /* 会话搜索浮层：居中胶囊 + 结果列表，背后整页变暗 */
 .ss-modal {
-  position: fixed; inset: 0; z-index: 60;
+  position: fixed; inset: 0; z-index: var(--z-pop);
   display: flex; flex-direction: column; align-items: center;
   padding: 10vh 20px 20px;
-  background: rgba(0, 0, 0, .28);
+  background: var(--scrim-soft);
   -webkit-backdrop-filter: blur(1px); backdrop-filter: blur(1px);
   animation: fade .12s ease-out;
 }
@@ -67,7 +67,7 @@
 
 /* 命中词的浮层高亮：整条消息可能有上万像素，只框外框看不见 */
 .ss-text-flash {
-  position: fixed; z-index: 70; pointer-events: none;
+  position: fixed; z-index: var(--z-tip); pointer-events: none;
   border-radius: 4px;
   background: var(--accent-soft);
   box-shadow: 0 0 0 2px var(--accent), 0 0 12px 2px var(--accent-soft);
@@ -81,7 +81,7 @@
 
 /* ---------- 文档附件预览 ---------- */
 .doc-pv {
-  position: fixed; inset: 0; z-index: 90;
+  position: fixed; inset: 0; z-index: var(--z-lightbox);
   display: flex; flex-direction: column;
   background: var(--bg);
   animation: overlayIn var(--t) var(--ease);
@@ -190,5 +190,5 @@
   background: transparent; color: var(--text-dim); border: none; border-radius: 50%;
 }
 .find-nav:hover { background: var(--bg-hover); color: var(--text); }
-mark.find-hit { background: rgba(255, 213, 79, .38); color: inherit; border-radius: 2px; padding: 0 1px; }
+mark.find-hit { background: var(--mark-bg); color: inherit; border-radius: 2px; padding: 0 1px; }
 mark.find-hit.cur { background: var(--accent); color: var(--on-accent); }

@@ -159,7 +159,7 @@
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
   width: min(360px, 92vw); padding: 10px;
   border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
-  background: var(--bg); box-shadow: 0 12px 32px rgba(0, 0, 0, .28);
+  background: var(--bg); box-shadow: 0 12px 32px var(--scrim-soft);
 }
 .geo-ai-head {
   margin-bottom: 4px; font-size: 11px; color: var(--text-dim);
@@ -189,25 +189,25 @@
 .geo-photo-box {
   flex: none; position: relative;
   border-radius: var(--radius-lg); overflow: hidden;
-  background: #0d0e11;
+  background: var(--lightbox-bg);
 }
 .geo-photo-box img {
   display: block; width: 100%; height: auto;
   max-height: 56vh;                  /* 竖构图 / 矮窗口下别让照片长到没边 */
   object-fit: contain;
-  background: #0d0e11;
+  background: var(--lightbox-bg);
 }
 .geo-photo-msg {
   min-height: 200px; display: grid; place-items: center;
   padding: 20px; text-align: center;
-  font-size: 13px; line-height: 1.7; color: #c9ccd4;
+  font-size: 13px; line-height: 1.7; color: var(--lightbox-fg);
 }
 .geo-photo-msg .geo-retry {
   margin-top: 10px; padding: 5px 12px;
-  border: 1px solid rgba(255, 255, 255, .3); border-radius: 8px;
-  background: transparent; color: #e7e9ee; font-size: 12.5px; cursor: pointer;
+  border: 1px solid var(--lightbox-line-strong); border-radius: 8px;
+  background: transparent; color: var(--lightbox-fg); font-size: 12.5px; cursor: pointer;
 }
-.geo-photo-msg .geo-retry:hover { background: rgba(255, 255, 255, .12); }
+.geo-photo-msg .geo-retry:hover { background: var(--lightbox-hover); }
 .geo-credit { font-size: 11px; color: var(--text-dim); }
 
 /* 识图辅助：玩家点按钮才请求，只列画面特征，不给地点结论 */
@@ -222,39 +222,39 @@
 .geo-assist-list { margin: 0; padding-left: 16px; font-size: 12.5px; line-height: 1.65; }
 .geo-assist-list li { margin: 2px 0; }
 .geo-assist-loading { font-size: 12.5px; line-height: 1.6; color: var(--text-dim); }
-.geo-assist-err { font-size: 12.5px; line-height: 1.6; color: #d9534f; }
+.geo-assist-err { font-size: 12.5px; line-height: 1.6; color: var(--danger); }
 
 /* ---------- 题面放大：点照片开全屏大图 ---------- */
 .geo-photo-box.can-zoom { cursor: zoom-in; }
 .geo-zoom-btn {
   position: absolute; right: 8px; top: 8px; z-index: 2;
   width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
-  border: 1px solid rgba(255, 255, 255, .3); border-radius: 8px;
-  background: rgba(0, 0, 0, .45); color: #fff; cursor: zoom-in;
+  border: 1px solid var(--lightbox-line-strong); border-radius: 8px;
+  background: var(--scrim); color: var(--on-accent); cursor: zoom-in;
   transition: background var(--t-fast) var(--ease);
 }
-.geo-zoom-btn:hover { background: rgba(0, 0, 0, .75); }
+.geo-zoom-btn:hover { background: var(--scrim-strong); }
 .geo-zoom-btn .ic { width: 16px; height: 16px; }
 
 .geo-zoom {
-  position: fixed; inset: 0; z-index: 90;      /* 高过弹窗(50)，低于 toast(100) */
+  position: fixed; inset: 0; z-index: var(--z-lightbox);      /* 高过弹窗(50)，低于 toast(100) */
   display: flex; flex-direction: column;
-  background: rgba(8, 9, 12, .95);
+  background: var(--overlay-solid);
   animation: overlayIn var(--t) var(--ease);
 }
 .geo-zoom-bar {
   flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 10px 14px; font-size: 12.5px; color: #e7e9ee;
+  padding: 10px 14px; font-size: 12.5px; color: var(--lightbox-fg);
 }
 .geo-zoom-pct {
-  min-width: 54px; color: #b9bec9; font-variant-numeric: tabular-nums;
+  min-width: 54px; color: var(--lightbox-fg-dim); font-variant-numeric: tabular-nums;
 }
 .geo-zoom-bar button {
-  padding: 5px 11px; border: 1px solid rgba(255, 255, 255, .24); border-radius: 8px;
-  background: transparent; color: #e7e9ee; font-size: 12.5px; cursor: pointer;
+  padding: 5px 11px; border: 1px solid var(--lightbox-line); border-radius: 8px;
+  background: transparent; color: var(--lightbox-fg); font-size: 12.5px; cursor: pointer;
   transition: background var(--t-fast) var(--ease);
 }
-.geo-zoom-bar button:hover { background: rgba(255, 255, 255, .16); }
+.geo-zoom-bar button:hover { background: var(--lightbox-hover); }
 .geo-zoom-spacer { flex: 1; }
 .geo-zoom-stage {
   flex: 1; min-height: 0; position: relative; overflow: hidden;
@@ -273,7 +273,7 @@
 }
 .geo-zoom-hint {
   flex: none; padding: 8px 14px 12px; text-align: center;
-  font-size: 11.5px; color: #8f949f;
+  font-size: 11.5px; color: var(--lightbox-fg-weak);
 }
 
 /* ---------- 参与者 ---------- */
@@ -362,12 +362,12 @@
   display: block; box-sizing: border-box;
   width: 22px; height: 22px; border-radius: 50%;
   background: var(--c, var(--accent));
-  border: 3px solid #fff;
-  box-shadow: 0 1px 5px rgba(0, 0, 0, .45);
+  border: 3px solid var(--on-accent);
+  box-shadow: 0 1px 5px var(--scrim);
 }
 /* 真值点靠「同色外环」区分，而不是改尺寸 —— 尺寸一致锚点才落在圆心 */
-.geo-pin.truth { box-shadow: 0 0 0 2.5px var(--c, #f14c4c), 0 1px 8px rgba(0, 0, 0, .5); }
-.geo-pin.pending { outline: 3px solid rgba(255, 255, 255, .55); outline-offset: 2px; }
+.geo-pin.truth { box-shadow: 0 0 0 2.5px var(--c, var(--danger)), 0 1px 8px var(--scrim); }
+.geo-pin.pending { outline: 3px solid var(--lightbox-line-strong); outline-offset: 2px; }
 
 /* 标点上方的名字 / 距离 / 拍摄点标签。
    做成图标根节点的绝对定位子节点：脱离文档流 + 不参与标点布局，
@@ -377,15 +377,15 @@
   position: absolute; left: 50%; bottom: 100%; margin-bottom: 4px;
   transform: translateX(-50%);
   padding: 2px 7px; border-radius: 999px;
-  background: rgba(18, 20, 26, .84); color: #fff;
+  background: var(--overlay-strong); color: var(--on-accent);
   border: 1px solid var(--c, var(--accent));
   font-size: 11px; line-height: 1.5; white-space: nowrap;
   font-variant-numeric: tabular-nums;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, .35);
+  box-shadow: 0 1px 4px var(--scrim-soft);
   pointer-events: none;                 /* 别挡住地图拖拽 / 点选 */
 }
 .geo-pin-label:empty { display: none; }
-.geo-pin-label.truth { border-color: #f14c4c; }
+.geo-pin-label.truth { border-color: var(--danger); }
 /* 真值标签挂到标点**下方**：猜得准的标点几乎和真值重合（正是最该看清的场景），
    两个标签都朝上就会互相压住 —— 一上一下才都读得到 */
 .geo-pin-label.below { bottom: auto; top: 100%; margin-bottom: 0; margin-top: 4px; }

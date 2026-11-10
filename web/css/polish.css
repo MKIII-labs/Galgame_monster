@@ -174,7 +174,7 @@
   transition: transform var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .check-row input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
-.check-row input[type="checkbox"]:checked::after { transform: translateX(13px); background: #fff; }
+.check-row input[type="checkbox"]:checked::after { transform: translateX(13px); background: var(--on-accent); }
 .check-row input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* 页内锚点条：吸顶，长页（Agent 执行等）靠它跳分区 */
@@ -224,7 +224,7 @@
 .hint-fold > summary::-webkit-details-marker { display: none; }
 .hint-fold > summary::before {
   content: '▸'; display: inline-block; margin-right: 5px;
-  transition: transform .12s var(--ease);
+  transition: transform var(--t-fast) var(--ease);
 }
 .hint-fold[open] > summary::before { transform: rotate(90deg); }
 .hint-fold-body { padding: 4px 0 0 13px; }
@@ -320,8 +320,8 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
 
 /* --- 消息操作条：删除按钮语义色 --- */
 .msg-actions button.act-danger:hover {
-  background: rgba(220, 80, 80, .16);
-  border-color: rgba(220, 80, 80, .5);
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
   color: var(--danger);
 }
 
@@ -339,8 +339,8 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
 /* --- Toast 三态：成功 ✓ / 失败 ! / 默认提示 --- */
 .toast-item.ok::before { content: '✓'; font-weight: 700; }
 .toast-item.err::before { content: '!'; font-weight: 700; }
-.toast-item.ok { background: var(--ok-strong); color: #fff; }
-.toast-item.err { background: var(--danger-strong); color: #fff; }
+.toast-item.ok { background: var(--ok-strong); color: var(--on-accent); }
+.toast-item.err { background: var(--danger-strong); color: var(--on-accent); }
 
 /* --- 加载骨架 --- */
 .skeleton { display: flex; flex-direction: column; gap: 10px; padding: 6px 0; }
@@ -370,24 +370,24 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
 
 /* --- 点击消息图片的全屏查看器：滚轮缩放 / 拖动平移 / 双击切换 --- */
 .img-zoom {
-  position: fixed; inset: 0; z-index: 90;      /* 高过弹窗(50)，低于 toast(100) */
+  position: fixed; inset: 0; z-index: var(--z-lightbox);      /* 高过弹窗(50)，低于 toast(100) */
   display: flex; flex-direction: column;
-  background: rgba(8, 9, 12, .95);
+  background: var(--overlay-solid);
   animation: overlayIn var(--t) var(--ease);
 }
 .img-zoom-bar {
   flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 10px 14px; font-size: 12.5px; color: #e7e9ee;
+  padding: 10px 14px; font-size: 12.5px; color: var(--lightbox-fg);
 }
 .img-zoom-pct {
-  min-width: 54px; color: #b9bec9; font-variant-numeric: tabular-nums;
+  min-width: 54px; color: var(--lightbox-fg-dim); font-variant-numeric: tabular-nums;
 }
 .img-zoom-bar button {
-  padding: 5px 11px; border: 1px solid rgba(255, 255, 255, .24); border-radius: 8px;
-  background: transparent; color: #e7e9ee; font-size: 12.5px; cursor: pointer;
+  padding: 5px 11px; border: 1px solid var(--lightbox-line); border-radius: 8px;
+  background: transparent; color: var(--lightbox-fg); font-size: 12.5px; cursor: pointer;
   transition: background var(--t-fast) var(--ease);
 }
-.img-zoom-bar button:hover { background: rgba(255, 255, 255, .16); }
+.img-zoom-bar button:hover { background: var(--lightbox-hover); }
 .img-zoom-spacer { flex: 1; }
 .img-zoom-stage {
   flex: 1; min-height: 0; position: relative; overflow: hidden;
@@ -406,7 +406,7 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
 }
 .img-zoom-hint {
   flex: none; padding: 8px 14px 12px; text-align: center;
-  font-size: 11.5px; color: #8f949f;
+  font-size: 11.5px; color: var(--lightbox-fg-weak);
 }
 
 /* 全局规则（设置 → 用户画像与学习）：一条规则一行，可单独启用 / 停用 */

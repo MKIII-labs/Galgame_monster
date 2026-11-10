@@ -137,10 +137,10 @@
 .iv-btn.primary:hover:not(:disabled) { background: var(--accent-hover); color: var(--on-accent); }
 .iv-btn.ghost { background: transparent; color: var(--text-dim); }
 .iv-btn.ghost:hover:not(:disabled) { background: var(--bg-hover); }
-.iv-btn.danger { border-color: transparent; background: rgba(210, 70, 70, .12); color: #c94a4a; }
-.iv-btn.danger:hover:not(:disabled) { background: rgba(210, 70, 70, .2); color: #b23a3a; }
+.iv-btn.danger { border-color: transparent; background: var(--danger-soft); color: var(--danger); }
+.iv-btn.danger:hover:not(:disabled) { background: var(--danger-line); color: var(--danger); }
 .iv-btn.small { padding: 4px 9px; font-size: 11.5px; border-radius: 7px; }
-.iv-mic-btn.recording, .iv-btn.recording { border-color: transparent; background: rgba(210, 70, 70, .14); color: #c94a4a; }
+.iv-mic-btn.recording, .iv-btn.recording { border-color: transparent; background: var(--danger-soft); color: var(--danger); }
 .iv-hintline { margin-top: 8px; font-size: 11px; line-height: 1.6; color: var(--text-dim); }
 .iv-hintline.ok { color: var(--ok); }
 .iv-hintline.warn { color: var(--warn); }
@@ -163,7 +163,7 @@
 .iv-summary { font-size: 12px; line-height: 1.7; color: var(--text-dim); }
 .iv-warnchip {
   display: inline-block; margin-top: 6px; padding: 3px 8px; border-radius: 999px;
-  background: rgba(201, 138, 18, .12); color: var(--warn); font-size: 10.5px;
+  background: var(--warn-soft); color: var(--warn); font-size: 10.5px;
 }
 .iv-dims { display: grid; gap: 9px; margin-top: 14px; }
 .iv-dim-top { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text-dim); }
@@ -183,23 +183,23 @@
   background: var(--bg-side); color: var(--text-dim);
   font-size: 11px; white-space: nowrap;
 }
-.iv-chip.ok { border-color: transparent; background: rgba(74, 169, 108, .14); color: var(--ok); }
+.iv-chip.ok { border-color: transparent; background: var(--ok-soft); color: var(--ok); }
 
 .iv-issue {
   margin-top: 8px; padding: 10px 12px;
   border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
   border-radius: 9px; background: var(--bg);
 }
-.iv-issue.sev-high { border-left-color: #c94a4a; }
+.iv-issue.sev-high { border-left-color: var(--danger); }
 .iv-issue.sev-medium { border-left-color: var(--warn); }
 .iv-issue.sev-low { border-left-color: var(--ok); }
 .iv-issue-head { display: flex; align-items: center; gap: 8px; font-size: 11px; }
 .iv-sev {
   padding: 1px 6px; border-radius: 5px; font-size: 10px;
-  background: rgba(201, 138, 18, .14); color: var(--warn);
+  background: var(--warn-soft); color: var(--warn);
 }
-.sev-high .iv-sev { background: rgba(201, 74, 74, .14); color: #c94a4a; }
-.sev-low .iv-sev { background: rgba(74, 169, 108, .14); color: var(--ok); }
+.sev-high .iv-sev { background: var(--danger-soft); color: var(--danger); }
+.sev-low .iv-sev { background: var(--ok-soft); color: var(--ok); }
 .iv-issue-sec { color: var(--text-dim); }
 .iv-issue blockquote {
   margin: 7px 0 0; padding: 5px 10px;
@@ -215,7 +215,7 @@
 .iv-polish-summary { font-size: 12px; line-height: 1.7; color: var(--text-dim); }
 .iv-warnbox {
   margin-top: 8px; padding: 8px 10px; border-radius: 8px;
-  background: rgba(201, 138, 18, .1); color: var(--warn);
+  background: var(--warn-soft); color: var(--warn);
   font-size: 11.5px; line-height: 1.65;
 }
 .iv-bullet {
@@ -264,7 +264,7 @@
 .iv-modal {
   position: fixed; inset: 0; z-index: 1200;
   display: flex; align-items: center; justify-content: center;
-  padding: 20px; background: rgba(10, 14, 24, .45); backdrop-filter: blur(2px);
+  padding: 20px; background: var(--scrim); backdrop-filter: blur(2px);
 }
 .iv-modal-card {
   display: flex; flex-direction: column;
@@ -433,9 +433,9 @@
   flex: none; padding: 2px 7px; border-radius: 999px;
   font-size: 10.5px; font-variant-numeric: tabular-nums;
 }
-.iv-pq-score.good { background: rgba(74, 169, 108, .14); color: var(--ok); }
-.iv-pq-score.mid { background: rgba(201, 138, 18, .14); color: var(--warn); }
-.iv-pq-score.bad { background: rgba(201, 74, 74, .14); color: #c94a4a; }
+.iv-pq-score.good { background: var(--ok-soft); color: var(--ok); }
+.iv-pq-score.mid { background: var(--warn-soft); color: var(--warn); }
+.iv-pq-score.bad { background: var(--danger-soft); color: var(--danger); }
 .iv-pq-comment {
   padding: 0 11px 9px; font-size: 11.5px; line-height: 1.65; color: var(--text-dim);
 }
@@ -474,9 +474,9 @@
   flex: none; padding: 2px 8px; border-radius: 999px;
   font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 600;
 }
-.iv-history-score.good { background: rgba(74, 169, 108, .14); color: var(--ok); }
-.iv-history-score.mid { background: rgba(201, 138, 18, .14); color: var(--warn); }
-.iv-history-score.bad { background: rgba(201, 74, 74, .14); color: #c94a4a; }
+.iv-history-score.good { background: var(--ok-soft); color: var(--ok); }
+.iv-history-score.mid { background: var(--warn-soft); color: var(--warn); }
+.iv-history-score.bad { background: var(--danger-soft); color: var(--danger); }
 .iv-history-open { flex: none; font-size: 10.5px; color: var(--accent); }
 .iv-history-body { padding: 0 12px 10px; }
 .iv-history-actions { display: flex; justify-content: flex-end; padding: 0 12px 8px; }
@@ -487,8 +487,8 @@
   margin-top: 12px; padding: 8px 11px; border-radius: 8px;
   background: var(--bg-side); font-size: 11.5px; line-height: 1.6; color: var(--text-dim);
 }
-.iv-set-status.ok { color: var(--ok); background: rgba(74, 169, 108, .1); }
-.iv-set-status.warn { color: var(--warn); background: rgba(201, 138, 18, .1); }
+.iv-set-status.ok { color: var(--ok); background: var(--ok-soft); }
+.iv-set-status.warn { color: var(--warn); background: var(--warn-soft); }
 .iv-set-data { margin-top: 10px; font-size: 11.5px; color: var(--text-dim); }
 .iv-check {
   display: flex; align-items: center; gap: 8px;
@@ -546,7 +546,7 @@
 .iv-ai-example:hover { border-color: var(--accent); color: var(--accent); }
 .iv-ai-hintbox {
   padding: 8px 10px; border-radius: 8px;
-  background: rgba(201, 138, 18, .1); color: var(--warn);
+  background: var(--warn-soft); color: var(--warn);
   font-size: 11.5px; line-height: 1.65;
 }
 .iv-ai-thinking {

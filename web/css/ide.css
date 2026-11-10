@@ -41,8 +41,8 @@
   /* 工作台各部件圆角为 0（.part{…border-radius:0}），按钮基础圆角也是 0（.monaco-button{border-radius:0}） */
   --radius-sm: 0;
   --radius-md: 0;
-  /* 交互时长：VS Code 工作台过渡以 100ms 为主（工作台 CSS 中多条 transition:….1s linear） */
-  --t-press: .1s; --t-fast: .1s; --t: .1s; --t-slow: .1s;
+  /* 交互时长：VS Code 工作台过渡以 100ms 为主（工作台 CSS 中多条 transition:…var(--t-press) linear） */
+  --t-press: var(--t-press); --t-fast: .1s; --t: .1s; --t-slow: .1s;
 }
 #ide-panel.hidden { display: none; }
 
@@ -61,7 +61,7 @@
      变更审阅 / diff 就完全看不见。让它最多占 30%，超出自己滚动。 */
   flex: 0 1 auto; max-height: 30%; overflow-y: auto;
   padding: 7px 12px;
-  background: rgba(77, 107, 254, .15); border-bottom: 1px solid var(--border);
+  background: var(--accent-soft); border-bottom: 1px solid var(--border);
   color: var(--text); font-size: 12.5px; line-height: 1.5;
 }
 .ide-notice.hidden { display: none; }
@@ -96,7 +96,7 @@
   width: 36px; height: 36px; display: grid; place-items: center;
   border: 0; cursor: pointer; border-radius: 8px;
   background: transparent; color: var(--ide-activity-fg-dim);
-  transition: background .12s var(--ease), color .12s var(--ease);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 #ide-panel .act-btn .ic { width: 20px; height: 20px; }
 .act-btn:hover { color: var(--ide-activity-fg); background: var(--bg-hover); }
@@ -116,7 +116,7 @@
 .ide-side-resizer {
   flex: 0 0 4px; width: 4px; margin: 0 -2px;
   cursor: col-resize; z-index: 2;
-  transition: background .1s var(--ease);
+  transition: background var(--t-press) var(--ease);
 }
 .ide-side-resizer:hover, .ide-side-resizer.dragging { background: var(--accent); }
 .ide-side-resizer.hidden { display: none; }
@@ -132,7 +132,7 @@
 /* 操作按钮平时收着，鼠标进侧栏才浮现（Trae 的头部就是这么干净的） */
 .ide-side-actions {
   flex: none; display: flex; gap: 1px;
-  opacity: 0; transition: opacity .12s var(--ease);
+  opacity: 0; transition: opacity var(--t-fast) var(--ease);
 }
 .ide-side:hover .ide-side-actions,
 .ide-side:focus-within .ide-side-actions { opacity: 1; }
@@ -153,7 +153,7 @@
 .ide-workspace:hover { background: var(--bg-hover); }
 .ide-workspace:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .ide-ws-caret { flex: none; display: inline-flex; align-items: center; height: 17px; color: var(--text-dim); }
-.ide-ws-caret .ic { width: 14px; height: 14px; transition: transform .12s var(--ease); }
+.ide-ws-caret .ic { width: 14px; height: 14px; transition: transform var(--t-fast) var(--ease); }
 .ide-workspace.collapsed .ide-ws-caret .ic { transform: rotate(-90deg); }
 .ide-ws-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .ide-ws-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
@@ -183,7 +183,7 @@
 
 /* 文件树右键菜单（VS Code 风格）：固定在视口坐标，按边缘自动翻转 */
 .ide-ctxmenu {
-  position: fixed; z-index: 9999; min-width: 200px; padding: 4px;
+  position: fixed; z-index: var(--z-menu-float); min-width: 200px; padding: 4px;
   background: var(--bg-side); color: var(--text);
   border: 1px solid var(--border-strong); border-radius: 6px;
   box-shadow: var(--shadow-lg); font-size: 12.5px; outline: none;
@@ -246,7 +246,7 @@
 .ide-preview-log:hover { background: var(--bg-hover); }
 .ide-preview-log-kind { flex: none; width: 38px; color: var(--text-dim); font-size: 10px; }
 .ide-preview-log.error .ide-preview-log-kind { color: var(--danger); }
-.ide-preview-log.warn .ide-preview-log-kind { color: #c98a00; }
+.ide-preview-log.warn .ide-preview-log-kind { color: var(--warn); }
 .ide-preview-log-text {
   flex: 1; min-width: 0; max-height: 66px; overflow: hidden;
   white-space: pre-wrap; word-break: break-word;
@@ -255,7 +255,7 @@
 .ide-preview-empty { padding: 14px 8px; text-align: center; color: var(--text-dim); font-size: 11.5px; }
 .ide-preview-badge {
   position: absolute; top: 1px; right: 1px; min-width: 13px; height: 13px; padding: 0 3px;
-  border-radius: 7px; background: var(--danger); color: #fff;
+  border-radius: 7px; background: var(--danger); color: var(--on-accent);
   font-size: 9px; line-height: 13px; text-align: center;
 }
 .ide-preview-badge.hidden { display: none; }
@@ -324,7 +324,7 @@
 .ide-tab-x {
   flex: none; width: 16px; height: 16px; display: grid; place-items: center;
   border-radius: 3px; opacity: 0; font-size: 11px;
-  transition: opacity .1s var(--ease), background .1s var(--ease);
+  transition: opacity var(--t-press) var(--ease), background var(--t-press) var(--ease);
 }
 .ide-tab:hover .ide-tab-x, .ide-tab.active .ide-tab-x { opacity: .65; }
 .ide-tab .ide-tab-x:hover { opacity: 1; background: var(--bg-hover); }
@@ -426,7 +426,7 @@
 }
 .review-btn:hover { background: var(--bg-hover); }
 .review-btn.primary {
-  background: var(--accent); border-color: var(--accent); color: #fff;
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
 }
 .review-btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .review-btn kbd {
@@ -524,7 +524,7 @@
 .rt-badge {
   position: absolute; top: -1px; right: -1px;
   min-width: 14px; height: 14px; padding: 0 3px;
-  border-radius: 7px; background: var(--accent); color: #fff;
+  border-radius: 7px; background: var(--accent); color: var(--on-accent);
   font-size: 10px; line-height: 14px; text-align: center;
 }
 .rt-badge:empty { display: none; }
@@ -550,7 +550,7 @@
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
 }
 .rt-btn:hover { background: var(--bg-hover); }
-.rt-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.rt-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .rt-btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 /* 面板往上弹：条本身贴在输入框上方，往下会压住输入区 */
 .rt-panel {
@@ -640,7 +640,7 @@
 .ide-intel-row:hover { background: var(--bg-hover); }
 .ide-intel-ico { flex: none; width: 12px; text-align: center; }
 .ide-intel-row.err .ide-intel-ico { color: var(--danger); }
-.ide-intel-row.warn .ide-intel-ico { color: var(--warn, #b7791f); }
+.ide-intel-row.warn .ide-intel-ico { color: var(--warn, var(--warn)); }
 .ide-intel-text {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -690,8 +690,8 @@
 
 /* 信息浮层（从 VS Code 导入时展示） */
 .ide-info {
-  position: absolute; inset: 0; z-index: 50; display: grid; place-items: center;
-  background: rgba(0, 0, 0, .35);
+  position: absolute; inset: 0; z-index: var(--z-modal); display: grid; place-items: center;
+  background: var(--scrim-soft);
 }
 .ide-info.hidden { display: none; }
 .ide-info-card {
@@ -724,7 +724,7 @@
   background: var(--bg-hover); color: var(--text); font-size: 12.5px;
 }
 .ide-btn:hover { background: var(--bg-active); }
-.ide-btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.ide-btn.danger { background: var(--danger); border-color: var(--danger); color: var(--on-accent); }
 .ide-btn.danger:hover { filter: brightness(1.08); }
 
 /* ============================================================
@@ -904,7 +904,7 @@ html[data-ide-theme="trae-blue"] #sidebar {
 .ide-term.hidden { display: none; }
 .ide-term-resizer {
   flex: 0 0 auto; height: 5px; cursor: row-resize;
-  background: transparent; transition: background .12s;
+  background: transparent; transition: background var(--t-fast);
 }
 .ide-term-resizer.hidden { display: none; }
 .ide-term-resizer:hover { background: color-mix(in srgb, var(--accent) 40%, transparent); }
@@ -942,7 +942,7 @@ html[data-ide-theme="trae-blue"] #sidebar {
 .act-badge {
   position: absolute; top: 2px; right: 2px;
   min-width: 15px; height: 15px; padding: 0 4px;
-  border-radius: 8px; background: var(--accent); color: #fff;
+  border-radius: 8px; background: var(--accent); color: var(--on-accent);
   font-size: 10px; line-height: 15px; text-align: center;
   pointer-events: none;
 }
@@ -970,10 +970,10 @@ html[data-ide-theme="trae-blue"] #sidebar {
   text-overflow: ellipsis; white-space: nowrap; }
 .ide-git-row .dir { color: var(--text-dim); }
 .ide-git-row .st { flex: none; width: 14px; text-align: center; font-weight: 600; }
-.ide-git-row .st.m { color: #d19a66; }
-.ide-git-row .st.a { color: #7bc47f; }
-.ide-git-row .st.d { color: #e06c75; }
-.ide-git-row .st.u { color: #7bc47f; }
+.ide-git-row .st.m { color: var(--warn); }
+.ide-git-row .st.a { color: var(--ok); }
+.ide-git-row .st.d { color: var(--danger); }
+.ide-git-row .st.u { color: var(--ok); }
 .ide-git-act {
   flex: none; width: 18px; height: 18px; padding: 0;
   border: 0; border-radius: 4px; background: transparent;
@@ -1029,7 +1029,7 @@ html[data-ide-theme="trae-blue"] #sidebar {
 .ide-git-branch-menu {
   flex: 0 0 auto; max-height: 240px; overflow: auto; margin: 0 8px 6px;
   border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
+  box-shadow: 0 6px 20px var(--shadow-lg);
 }
 .ide-git-branch-menu.hidden { display: none; }
 .ide-git-branch-row {
@@ -1162,7 +1162,7 @@ html[data-ide-theme="trae-blue"] #sidebar {
 }
 .ide-bp-glyph::before {
   content: ""; display: block; width: 10px; height: 10px; margin: 4px 0 0 4px;
-  border-radius: 50%; background: #e51400; box-shadow: 0 0 0 1px rgba(0,0,0,.25);
+  border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 1px var(--scrim-soft);
 }
 .ide-debug-line { background: rgba(255, 200, 0, .16); }
 

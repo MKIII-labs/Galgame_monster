@@ -217,7 +217,7 @@
   border: 0; background: transparent; color: var(--text-dim);
   cursor: pointer; font-size: 12px; padding: 2px 4px;
 }
-.rd-gloss-x:hover { color: var(--danger, #d33); }
+.rd-gloss-x:hover { color: var(--danger, var(--danger)); }
 .rd-gloss-empty { font-size: 12px; color: var(--text-dim); padding: 6px 0; }
 
 /* ---------- 主体 ---------- */
@@ -245,7 +245,7 @@
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, .55) 50%, transparent 70%);
+  background: linear-gradient(100deg, transparent 30%, var(--lightbox-line-strong) 50%, transparent 70%);
   background-size: 220% 100%;
   animation: rd-shimmer 1.1s linear infinite;
 }
@@ -307,7 +307,7 @@ body.rd-resizing { user-select: none; cursor: col-resize; }
 .rd-tblock[data-kind="list"] .rd-ttext { text-indent: -1em; padding-left: 1em; }
 .rd-tblock[data-role="caption"] .rd-ttext { color: #333; }
 .rd-tblock[data-role="theorem"] .rd-ttext { color: #1a1a1a; }
-.rd-tblock[data-overflow="1"] .rd-ttext { outline: 1px dashed rgba(201, 138, 0, .35); }
+.rd-tblock[data-overflow="1"] .rd-ttext { outline: 1px dashed var(--warn-line); }
 .rd-tblock[data-orig="1"] .rd-tcover,
 .rd-tblock[data-orig="1"] .rd-ttext { display: none; }
 /* 译页批注：角标贴在块内右上角（块是 overflow:hidden，不能像阅读流那样往外飘） */
@@ -437,7 +437,7 @@ body.rd-resizing { user-select: none; cursor: col-resize; }
 .rd-mode-trans .rd-table .rd-src,
 .rd-mode-trans .rd-meta .rd-src { display: block; }
 /* 数字 / 引用可能丢失的段落：左侧琥珀色标记，悬停看缺了什么 */
-.rd-block.rd-warn { border-left-color: #c98a00; }
+.rd-block.rd-warn { border-left-color: var(--warn); }
 
 /* 列表：保留原文项目符号，按 indent（0–3 级）缩进；续行悬挂对齐 */
 .rd-block.rd-list .rd-src,
@@ -535,13 +535,13 @@ body.rd-resizing { user-select: none; cursor: col-resize; }
 .rd-fig.zoom {
   position: fixed;
   inset: 0;
-  z-index: 9500;
+  z-index: var(--z-float-2);
   margin: 0;
   padding: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(8, 10, 16, .86);
+  background: var(--overlay-solid);
   border: 0;
   border-radius: 0;
   cursor: zoom-out;
@@ -590,7 +590,7 @@ mark.rd-hl.rd-hl-dot { position: relative; }
   text-align: center;
   cursor: pointer;
   user-select: none;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .25);
+  box-shadow: 0 1px 3px var(--scrim-soft);
 }
 .rd-anno-dot:hover { filter: brightness(1.08); }
 /* 原文重排 / 跨节点找不到高亮时：退到段落右上角 */
@@ -598,7 +598,7 @@ mark.rd-hl.rd-hl-dot { position: relative; }
 
 .rd-anno-pop {
   position: fixed;
-  z-index: 9600;
+  z-index: var(--z-float-3);
   max-height: 62vh;
   overflow: auto;
   padding: 10px 12px 12px;
@@ -653,7 +653,7 @@ mark.rd-hl.c-purple { background: rgba(167, 139, 250, .34); }
 
 .rd-anno-drawer {
   position: fixed;
-  z-index: 9400;
+  z-index: var(--z-float);
   top: 58px;
   right: 14px;
   bottom: 14px;
@@ -738,11 +738,11 @@ mark.rd-hl.c-purple { background: rgba(167, 139, 250, .34); }
 .rd-meta-modal {
   position: fixed;
   inset: 0;
-  z-index: 9700;
+  z-index: var(--z-float-4);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, .35);
+  background: var(--scrim-soft);
 }
 .rd-meta-modal.hidden { display: none; }
 .rd-meta-card {
@@ -779,7 +779,7 @@ mark.rd-hl.c-purple { background: rgba(167, 139, 250, .34); }
   border: 1px solid var(--border); background: var(--bg); color: var(--text);
   border-radius: 7px; padding: 5px 12px; cursor: pointer;
 }
-.rd-meta-acts button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.rd-meta-acts button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 
 /* Word / PPT 阅读流：没有原页图像，隐藏左栏与「原页」按钮 */
 .rd-root.rd-docmode .rd-left,

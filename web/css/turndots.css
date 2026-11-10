@@ -26,7 +26,7 @@
   background: var(--text-dim);
   opacity: .55;
   cursor: pointer;
-  transition: transform .12s, opacity .12s, background .12s;
+  transition: transform var(--t-fast), opacity var(--t-fast), background var(--t-fast);
 }
 .td-dot:hover,
 .td-dot.on {

@@ -7,7 +7,7 @@
 
 .askkit {
   position: fixed;
-  z-index: 9600;
+  z-index: var(--z-float-3);
   width: 400px;
   max-width: calc(100vw - 24px);
   max-height: min(64vh, 580px);
@@ -16,7 +16,7 @@
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, .24);
+  box-shadow: 0 18px 48px var(--scrim-soft);
   overflow: hidden;
   /* Electron 无边框窗口：顶栏是 -webkit-app-region: drag 的拖拽区。
      面板拖到顶部压在拖拽区时，那里的点击会被系统当成拖动窗口而吞掉，
@@ -102,13 +102,13 @@
 }
 .askkit-toolout.hidden { display: none; }
 .askkit-tool-loading { color: var(--text-dim); }
-.askkit-tool-err { color: var(--danger, #d9534f); }
+.askkit-tool-err { color: var(--danger, var(--danger)); }
 
 /* 高亮色板 */
 .askkit-colors { display: flex; flex-wrap: wrap; gap: 8px; }
 .askkit-colors button {
   width: 22px; height: 22px; border-radius: 50%;
-  border: 1px solid rgba(0, 0, 0, .12); cursor: pointer;
+  border: 1px solid var(--line); cursor: pointer;
 }
 .askkit-colors .c-yellow { background: #ffe066; }
 .askkit-colors .c-green { background: #7ee2a8; }
@@ -147,7 +147,7 @@
   font-size: 12.5px; line-height: 1.7;
   white-space: pre-wrap; word-break: break-word;
 }
-.askkit-a.err { color: #e05a5a; }
+.askkit-a.err { color: var(--danger); }
 .askkit-a p { margin: 4px 0; }
 .askkit-a ul, .askkit-a ol { margin: 4px 0; padding-left: 20px; }
 .askkit-a pre {
@@ -194,7 +194,7 @@
 .askkit-send {
   flex: 0 0 auto;
   padding: 7px 13px; border: 1px solid transparent; border-radius: 8px;
-  background: var(--accent); color: #fff;
+  background: var(--accent); color: var(--on-accent);
   font-size: 12px; font-family: var(--font); cursor: pointer;
 }
 .askkit-send:hover { filter: brightness(1.06); }

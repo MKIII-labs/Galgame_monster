@@ -30,21 +30,21 @@
   position: absolute; bottom: 0; left: auto; right: 3%;
   max-height: 66%; max-width: 28%;
   object-fit: contain; object-position: bottom center;
-  filter: drop-shadow(0 10px 30px rgba(0, 0, 0, .35));
+  filter: drop-shadow(0 10px 30px var(--scrim-soft));
   transition: opacity var(--t-slow) var(--ease), transform var(--t-slow) var(--ease),
               filter var(--t-slow) var(--ease);
   will-change: opacity, transform, filter;
 }
 /* 多立绘：由 JS 用 left% + translateX(-50%) 定位；不说话的自动变暗 */
 .gal-sprite.gal-dim {
-  filter: brightness(.5) saturate(.55) drop-shadow(0 8px 20px rgba(0, 0, 0, .3));
+  filter: brightness(.5) saturate(.55) drop-shadow(0 8px 20px var(--scrim-soft));
   opacity: .92;
 }
-.gal-sprite.gal-active { filter: drop-shadow(0 10px 30px rgba(0, 0, 0, .35)); opacity: 1; }
+.gal-sprite.gal-active { filter: drop-shadow(0 10px 30px var(--scrim-soft)); opacity: 1; }
 .gal-bar {
   position: absolute; top: 0; left: 0; right: 0; z-index: 12;
   display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-  background: linear-gradient(to bottom, rgba(0, 0, 0, .28), transparent);
+  background: linear-gradient(to bottom, var(--scrim-soft), transparent);
   opacity: .5; transition: opacity var(--t) var(--ease);
 }
 .gal-bar:hover, .gal-bar:focus-within { opacity: 1; }   /* 沉浸：默认半透，移入实显 */
@@ -115,7 +115,7 @@ html[data-gal-theme] {
   --gx-text: var(--text); --gx-text-dim: var(--text-dim);
   --gx-scroll: var(--scroll); --gx-scroll-hover: var(--scroll-hover);
   --gx-stage: var(--bg-side);
-  --gx-bar: linear-gradient(to bottom, rgba(0, 0, 0, .28), transparent);
+  --gx-bar: linear-gradient(to bottom, var(--scrim-soft), transparent);
   --gx-dialog-bg: var(--bg); --gx-dialog-border: var(--border-strong); --gx-dialog-color: var(--text);
   --gx-dialog-radius: 18px; --gx-dialog-shadow: var(--shadow);
   --gx-dialog-font: inherit; --gx-text-size: 15px; --gx-text-weight: 400; --gx-text-shadow: none;
@@ -291,7 +291,7 @@ html[data-gal-theme] {
   --kb-graph-dot: color-mix(in srgb, var(--gx-border) 75%, transparent);
   --kb-node-bg: var(--gx-bg-hover);
   --kb-node-border: color-mix(in srgb, var(--gx-text-dim) 62%, var(--gx-bg));
-  --kb-node-shadow: rgba(0, 0, 0, .28);
+  --kb-node-shadow: var(--scrim-soft);
   --kb-edge: color-mix(in srgb, var(--gx-text-dim) 85%, transparent);
   --kb-label-bg: var(--gx-bg-side);
 }
@@ -393,7 +393,7 @@ html[data-gal-theme] .gal-seg.narr { color: var(--gx-text-dim); }
   border: 1px solid var(--border-strong);
   background: color-mix(in srgb, var(--bg) 80%, transparent);
 }
-.gal-map-mark.is-self { color: #fff; background: var(--accent); border-color: var(--accent); }
+.gal-map-mark.is-self { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
 
 .gal-journal-group { margin: 0 0 14px; }
 .gal-journal-cat {
@@ -415,7 +415,7 @@ html[data-gal-theme] .gal-seg.narr { color: var(--gx-text-dim); }
 .gal-journal-empty { padding: 22px; text-align: center; font-size: 13px; color: var(--text-dim); }
 /* 档案两种视图的切换卡 */
 .gal-journal-tabs { display: flex; gap: 6px; margin: 0 0 12px; }
-.gal-journal-tabs .gal-tbtn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.gal-journal-tabs .gal-tbtn.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 /* 关系图容器（vis-network 需要明确高度） */
 .gal-journal-graph { height: 52vh; min-height: 300px; }
 html[data-gal-theme] .gal-map { background: var(--gx-bg-side); border-color: var(--gx-border); }
@@ -455,7 +455,7 @@ html[data-gal-theme] .gal-user-echo {
 
 /* ===== 背景交叉淡入 + 特效层 ===== */
 .gal-bg, #gal-bg-next { background-size: cover; background-position: center; background-repeat: no-repeat; }
-#gal-bg-next { position: absolute; inset: 0; opacity: 0; transition: opacity .45s ease; }
+#gal-bg-next { position: absolute; inset: 0; opacity: 0; transition: opacity .45s var(--ease); }
 /* 特效遮罩：铺满整个对话列（含底部输入区），所以「闪光 / 黑屏」能盖到输入框那一块。
    默认 display:none，只在 GAL 模式显示（它已不在舞台内部，需要自己把门）。 */
 #gal-fx-layer { display: none; }
@@ -500,7 +500,7 @@ html[data-gal-theme] .gal-user-echo {
 }
 /* hover：实色底 + 白字（键盘光标 .kb-sel 在文件末尾按主题统一处理，保证两种操作观感一致） */
 .gal-option:hover {
-  background: var(--accent); color: #fff;
+  background: var(--accent); color: var(--on-accent);
   border-color: var(--accent);
 }
 .gal-option:disabled:hover,
@@ -520,7 +520,7 @@ html[data-gal-theme] .gal-user-echo {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 .gal-option.has-meta:hover .gal-option-tag {
-  color: #fff; border-color: rgba(255, 255, 255, .65); background: rgba(255, 255, 255, .18);
+  color: var(--on-accent); border-color: var(--lightbox-line-strong); background: var(--lightbox-hover);
 }
 .gal-option-hint { flex-basis: 100%; font-size: 11px; opacity: .72; }
 /* 条件不满足：置灰、不可点 */
@@ -540,7 +540,7 @@ html[data-gal-theme] .gal-user-echo {
   border-radius: var(--radius-sm);
 }
 .gal-tbtn:hover { background: var(--bg-hover); }
-.gal-tbtn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.gal-tbtn.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 
 /* 右上角「⋯」抽屉：把低频操作收起来，保持舞台干净 */
 .gal-more-btn { font-weight: 700; letter-spacing: 2px; padding: 4px 11px; }
@@ -744,7 +744,7 @@ html[data-gal-theme] .gal-user-echo {
   border-radius: 6px; border: 1px solid var(--border-strong);
   background: color-mix(in srgb, var(--bg) 85%, transparent);
   color: var(--text-dim); opacity: 0;
-  transition: opacity .15s ease, color .15s ease;
+  transition: opacity var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .gal-char-edit .ic { width: 12px; height: 12px; }
 .gal-char-wrap:hover .gal-char-edit,
@@ -794,7 +794,7 @@ html[data-gal-theme] .gal-user-echo {
 .gal-intro-card {
   position: fixed; inset: 0; z-index: 45;
   display: flex; align-items: center; justify-content: center;
-  padding: 24px; background: rgba(0, 0, 0, .38);
+  padding: 24px; background: var(--scrim);
 }
 .gal-intro-card-box {
   width: min(420px, 92%); max-height: 84%; overflow: auto;

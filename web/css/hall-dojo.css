@@ -355,10 +355,10 @@
    复现包编辑器
    ============================================================ */
 .dojo-repro-editor {
-  position: fixed; inset: 0; z-index: 85;
+  position: fixed; inset: 0; z-index: var(--z-cover-2);
   display: flex; align-items: center; justify-content: center;
   padding: 24px;
-  background: rgba(0, 0, 0, .45);
+  background: var(--scrim);
 }
 .dojo-repro-editor .dojo-import-card { width: min(900px, 100%); max-height: 88vh; }
 .dre-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -428,10 +428,10 @@
    导入材料（P1）
    ============================================================ */
 .dojo-import {
-  position: fixed; inset: 0; z-index: 80;
+  position: fixed; inset: 0; z-index: var(--z-cover);
   display: flex; align-items: center; justify-content: center;
   padding: 24px;
-  background: rgba(0, 0, 0, .45);
+  background: var(--scrim);
 }
 .dojo-import-card {
   width: min(780px, 100%); max-height: 86vh;
@@ -842,7 +842,7 @@
   border: 1px solid var(--accent); background: var(--accent-soft);
   color: var(--accent); font-family: var(--font); font-size: 11px; cursor: pointer;
 }
-.dojo-paper-go:hover { background: var(--accent); color: #fff; }
+.dojo-paper-go:hover { background: var(--accent); color: var(--on-accent); }
 .dojo-paper-todo {
   flex: 0 0 auto; padding: 2px 9px; border-radius: 999px;
   border: 1px dashed var(--border); color: var(--text-dim); font-size: 11px;

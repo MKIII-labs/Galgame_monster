@@ -37,16 +37,16 @@
 }
 .mk-ver { flex: none; font-size: 11px; color: var(--text-dim); }
 .mk-badge.on { background: var(--accent-soft); color: var(--accent); }
-.mk-badge.off { background: rgba(224, 90, 90, .12); color: #e05a5a; }
-.mk-btn.danger { color: #e05a5a; border-color: currentColor; }
-.mk-btn.danger:hover { background: rgba(224, 90, 90, .1); }
+.mk-badge.off { background: var(--danger-soft); color: var(--danger); }
+.mk-btn.danger { color: var(--danger); border-color: currentColor; }
+.mk-btn.danger:hover { background: var(--danger-soft); }
 .mk-btn[disabled] { opacity: .5; cursor: default; }
 
 /* 详情弹层 */
 .mk-modal {
-  position: fixed; inset: 0; z-index: 60; padding: 24px;
+  position: fixed; inset: 0; z-index: var(--z-pop); padding: 24px;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(0, 0, 0, .35);
+  background: var(--scrim-soft);
 }
 .mk-modal.hidden { display: none; }
 .mk-modal-card {
@@ -54,7 +54,7 @@
   display: flex; flex-direction: column;
   background: var(--bg); border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .24);
+  box-shadow: 0 24px 60px var(--scrim-soft);
 }
 .mk-modal-head {
   display: flex; align-items: center; gap: 10px;
@@ -87,7 +87,7 @@
               border-color var(--t-fast) var(--ease);
 }
 .mk-btn:hover { background: var(--bg-hover); }
-.mk-btn.primary { border-color: transparent; background: var(--accent); color: #fff; }
+.mk-btn.primary { border-color: transparent; background: var(--accent); color: var(--on-accent); }
 .mk-btn.primary:hover { filter: brightness(1.06); background: var(--accent); }
 
 .mk-hint { margin: 0; line-height: 1.7; }
@@ -121,7 +121,7 @@
   padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border);
   font-size: 11px; color: var(--text-dim);
 }
-.mk-tag.warn { border-color: rgba(224, 160, 60, .55); color: #c98a2e; }
+.mk-tag.warn { border-color: var(--warn-line); color: var(--warn); }
 .mk-card-foot {
   display: flex; align-items: center; gap: 8px; margin-top: auto;
   padding-top: 6px; border-top: 1px dashed var(--border);

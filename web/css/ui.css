@@ -1,0 +1,295 @@
+/* ============================================================
+   通用组件层（ui.css）
+   ------------------------------------------------------------
+   作用：全站组件的「唯一物理规格」——高度、圆角、内边距、字号、
+   过渡、焦点态、禁用态。颜色皮肤仍由各模块自己的类决定。
+
+   为什么单独一层、且放在最后加载：
+   历史样式按功能拆成了 20 个文件，同一个按钮在聊天 / 面试 / 道场 /
+   数学 / 工作台里各写了一套 padding 和圆角（7·8·9·13·16px 混用）。
+   放在最后可以一次性把几何规格拉齐，而不必改动上百个 DOM 节点。
+
+   规则：
+   1. 本文件只允许引用 base.css 的令牌，禁止写十六进制；
+   2. 只写跨页面必须一致的性质，模块特有的配色 / 布局不要塞进来；
+   3. 新增组件先来这里找基类，不要另起一套。
+   ============================================================ */
+
+/* ── 0. 全局基础 ─────────────────────────────────────────── */
+::selection { background: var(--accent-soft); color: var(--text); }
+
+/* 焦点环统一：所有可交互元素同一套描边宽度与偏移 */
+:is(button, a, select, input, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* 输入类控件的焦点不走 outline，走边框 + 柔光环（更贴合表单语义） */
+:is(input, textarea, select).field-input:focus-visible,
+.ta:focus-visible { outline: none; }
+
+/* 禁用态统一：降不透明度 + 禁止手型，避免各写一套 */
+:is(button, .iv-btn, .dojo-btn, .math-btn, .work-btn):disabled,
+:is(button, .iv-btn, .dojo-btn, .math-btn, .work-btn)[aria-disabled="true"] {
+  opacity: .5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── 1. 按钮族 ──────────────────────────────────────────────
+   主操作 .primary · 次级 .ghost · 业务前缀的次级按钮，统一几何 */
+:is(.primary, .ghost, .iv-btn, .dojo-btn, .math-btn, .work-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  min-height: var(--ctl-h);
+  padding: 0 var(--sp-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease), transform var(--t-press) var(--ease);
+}
+/* 小号：表格行 / 卡片角标里的次要操作 */
+:is(.iv-btn, .work-btn, .dojo-btn, .math-btn).small {
+  min-height: var(--ctl-h-sm);
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  border-radius: var(--radius-sm);
+}
+/* 大号：弹窗主操作 */
+:is(.primary, .ghost).lg {
+  min-height: var(--ctl-h-lg);
+  padding: 0 var(--sp-5);
+  font-size: var(--fs-md);
+}
+/* 按下反馈：统一用 transform（走合成层，不触发重排） */
+:is(.primary, .ghost, .iv-btn, .dojo-btn, .math-btn, .work-btn, .ico-btn):not(:disabled):active {
+  transform: scale(.97);
+}
+
+/* 图标按钮：方形，尺寸跟着控件高度走 */
+.ico-btn {
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              transform var(--t-press) var(--ease);
+}
+.ico-btn:hover { background: var(--surface-hover); color: var(--text); }
+
+/* 药丸 / 徽标：只统一形状与字号，不做按钮几何 */
+:is(.chip, .dojo-pill, .iv-chip, .mem-chip) {
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+/* ── 2. 表单控件 ────────────────────────────────────────────
+   输入框 / 下拉 / 多行文本：同一高度、同一焦点反馈 */
+.field-input,
+.settings-search-input {
+  min-height: var(--ctl-h);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-md);
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease),
+              background var(--t-fast) var(--ease);
+}
+.ta { padding: var(--sp-2) var(--sp-3); }
+:is(.field-input, .settings-search-input, .ta):hover { border-color: var(--line-strong); }
+:is(.field-input, .settings-search-input, .ta):focus {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+:is(.field-input, .settings-search-input, .ta)::placeholder { color: var(--text-weak); }
+
+/* 原生勾选 / 单选统一跟随品牌色 */
+:is(input[type="checkbox"], input[type="radio"]) { accent-color: var(--accent); }
+
+/* 单选项整行排布：窄屏换行而不是把「高对比暗」压成竖排单字 */
+.radio-row { flex-wrap: wrap; row-gap: var(--sp-2); }
+.radio-row label { flex: 0 0 auto; white-space: nowrap; }
+
+/* 表单分组标题与说明文字：层级靠字重 + 颜色，不靠分割线 */
+.field-label { font-size: var(--fs-sm); font-weight: var(--fw-medium); color: var(--text); }
+.set-group {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: var(--ls-wide);
+  color: var(--text-dim);
+}
+.hint, .foot-note { font-size: var(--fs-xs); color: var(--text-dim); line-height: var(--lh); }
+
+/* ── 3. 弹窗 ────────────────────────────────────────────────
+   遮罩 / 卡片 / 头 / 体 / 脚：四段式统一，间距走令牌 */
+.modal {
+  z-index: var(--z-modal);
+  background: var(--overlay);
+  animation: ui-overlay-in var(--t) var(--ease);
+}
+.modal-card {
+  background: var(--surface-3);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  animation: ui-card-in var(--t-slow) var(--ease-out);
+}
+.modal-head {
+  padding: var(--sp-3) var(--sp-4) 0;
+  border-bottom: 1px solid var(--line-subtle);
+}
+.modal-body { padding: var(--sp-4); }
+.modal-foot {
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--line-subtle);
+  gap: var(--sp-2);
+}
+.modal-close {
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.modal-close:hover { background: var(--surface-hover); color: var(--text); }
+@keyframes ui-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ui-card-in {
+  from { opacity: 0; transform: translateY(8px) scale(.99); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ── 4. 卡片 / 面板 / 分组 ──────────────────────────────────
+   容器三件套：表面色差 + 细描边 + 轻阴影，按需要组合 */
+:is(.card, .tool-card, .plan-card, .iv-card) {
+  background: var(--surface-1);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-md);
+}
+/* 浮起来的卡片（可点 / 有内容层级）才加阴影，静态容器不加 */
+:is(.tool-card, .plan-card, .iv-card) { box-shadow: var(--shadow-xs); }
+
+/* ── 5. 列表行 ──────────────────────────────────────────────
+   行高与悬停反馈统一；选中态只靠强调底色，不叠加边框 */
+:is(.session-item, .snav-btn, .ide-row, .ide-git-row, .observe-item) {
+  border-radius: var(--radius-sm);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+:is(.session-item, .snav-btn, .ide-row, .ide-git-row, .observe-item):hover {
+  background: var(--surface-hover);
+}
+
+/* ── 6. 标签页 ──────────────────────────────────────────────
+   页签统一用「下划线强调」表达选中；不要再用整块实色 */
+:is(.tab, .itc-tab) {
+  transition: color var(--t-fast) var(--ease), border-color var(--t) var(--ease);
+}
+
+/* ── 7. 提示 ────────────────────────────────────────────────
+   Toast：深底反白，圆角与阴影统一；只动 transform / opacity */
+.toast-stack { z-index: var(--z-toast); gap: var(--sp-2); }
+.toast-item {
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  box-shadow: var(--shadow-md);
+  transition: opacity var(--t) var(--ease), transform var(--t) var(--ease-out);
+}
+
+/* 骨架屏：统一圆角与色调，避免各页自己拼渐变 */
+.sk-line { border-radius: var(--radius-sm); }
+
+/* ── 8. 响应式：统一的三档断点 ──────────────────────────────
+   ≥1160 桌面 · 900–1159 窄桌面 / 平板横屏 · <900 单列 · <640 手机
+   各页面自己的微调仍可保留，但通用组件只认这三档 */
+@media (max-width: 1160px) {
+  :root { --sidebar-w: 240px; }
+}
+
+/* 平板竖屏 / 手机：侧栏改成「覆盖式抽屉」，不再挤压主区 */
+@media (max-width: 900px) {
+  #app { position: relative; }
+  #sidebar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: var(--z-pop);
+    width: min(82vw, 300px);
+    flex: none;
+    box-shadow: var(--shadow-lg);
+    transition: transform var(--t-slow) var(--ease-out), opacity var(--t-fast) var(--ease);
+  }
+  /* 覆盖式抽屉用位移收起：保留原有宽度，避免 width 动画与内容重排互相打架 */
+  #app.side-collapsed #sidebar {
+    width: min(82vw, 300px);
+    padding: var(--sp-4) var(--sp-3);
+    padding-top: 42px;
+    transform: translateX(-100%);
+    opacity: 0;
+    pointer-events: none;
+  }
+  /* 抽屉展开时压暗主区；pointer-events:none 只做视觉，不挡操作 */
+  #app:not(.side-collapsed) #main::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: calc(var(--z-pop) - 1);
+    background: var(--overlay);
+    pointer-events: none;
+  }
+  :is(.modal-card, .modal-card.wide) { width: min(720px, 94vw); }
+  .modal-body { padding: var(--sp-3); }
+  /* 收起态的左下角悬浮件：贴底会被输入框挡住，顶到输入框上方；
+     模式切换条在窄屏一律收起（走侧栏抽屉切模式），避免压住页面标题 */
+  .sidebar-expand { top: auto; bottom: 132px; left: 10px; }
+  .mode-float { display: none; }
+}
+
+/* 手机：弹窗全屏、页边距收窄、消息气泡贴边 */
+@media (max-width: 640px) {
+  /* 用 ID 提高优先级：各弹窗自己的 width 规则（96vw 等）在 base.css 里更具体 */
+  #modal .modal-card,
+  #kb-modal .modal-card,
+  #notes-modal .notes-card {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border: 0;
+  }
+  /* 设置：左侧分类栏改成顶部横条，内容占满剩余高度 */
+  #modal .settings-body { flex-direction: column; }
+  #modal .settings-nav {
+    width: 100%;
+    flex: none;
+    max-height: 30%;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  :is(.modal-head, .modal-foot) { padding: var(--sp-3); }
+  .toast-stack { bottom: var(--sp-4); width: calc(100vw - var(--sp-8)); }
+  .toast-item { max-width: 100%; }
+  .msg { padding: 0 var(--sp-3); margin-bottom: var(--sp-4); }
+  .composer { padding: 0 var(--sp-3) var(--sp-3); }
+  /* 手机没有物理键盘，按键提示没意义；改成单行省略，别把输入区顶高 */
+  .composer-hint {
+    font-size: var(--fs-2xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .composer-hint-row { gap: var(--sp-2); }
+  .ctx-meter { max-width: 58%; font-size: var(--fs-2xs); }
+}
