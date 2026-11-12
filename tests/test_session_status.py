@@ -35,6 +35,28 @@ def test_drop_clears_everything():
     assert status.snapshot() == {}
 
 
+def test_event_carries_notice_text(monkeypatch):
+    """待处理事件要带上给系统通知看的摘要与登记时间（前端据此去重、弹窗）。"""
+    seen = []
+    monkeypatch.setattr(status.events, "publish", lambda obj: seen.append(obj))
+
+    status.mark("s1", "ask", "选哪个方案？")
+    ev = seen[-1]
+    assert ev["type"] == "session_pending"
+    assert ev["kind"] == "ask" and ev["count"] == 1
+    assert ev["text"] == "选哪个方案？" and ev["at"] > 0
+
+    # 同类再登记：计数累加，摘要换成最新那条
+    status.mark("s1", "ask", "换个问题")
+    assert seen[-1]["count"] == 2 and seen[-1]["text"] == "换个问题"
+
+    # 清到零后没有摘要：前端不会再弹通知（登记了两次，所以要清两次）
+    status.clear("s1", "ask")
+    assert seen[-1]["kind"] == "ask" and seen[-1]["text"] == "换个问题"
+    status.clear("s1", "ask")
+    assert seen[-1]["kind"] == "" and "text" not in seen[-1]
+
+
 def test_invalid_input_is_ignored():
     status.mark("", "approval")
     status.mark("s1", "nope")

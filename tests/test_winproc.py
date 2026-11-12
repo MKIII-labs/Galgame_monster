@@ -28,8 +28,11 @@ def test_run_command_passes_no_window(tmp_path, monkeypatch):
         pid = 4242
         returncode = 0
 
-        def communicate(self, timeout=None):
-            return b"ok", None
+        def __init__(self):
+            self.stdout = iter([b"ok\n"])     # 读线程按行消费
+
+        def wait(self, timeout=None):
+            return 0
 
     def fake_popen(argv, **kw):
         seen.update(kw)

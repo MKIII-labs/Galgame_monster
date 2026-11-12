@@ -635,3 +635,91 @@ def test_explore_honors_allow_outside(monkeypatch, tmp_path):
         {"sandbox": str(box), "api_key": "k", "api_url": "u", "model": "m",
          "budget": 0, "chat_fn": fake_chat, "allow_outside": True})
     assert "FOUND" in (res["results"][0]["text"] or "")
+
+
+# ---------------- 子代理的容错：重试 + 服务商降级 ----------------
+
+def _sub_ctx(**kw):
+    ctx = {"api_key": "k0", "api_url": "http://main/v1", "model": "m0",
+           "think_level": "high"}
+    ctx.update(kw)
+    return ctx
+
+
+@pytest.fixture(autouse=True)
+def _fast_sub_retry(monkeypatch):
+    """退避归零，避免用例为 1s/2s 的等待买单；think 参数打桩，不依赖配置。"""
+    monkeypatch.setattr(explore, "SUB_RETRY_BACKOFF", 0)
+    monkeypatch.setattr(explore, "thinking_payload", lambda *a, **k: None)
+    monkeypatch.setattr(explore, "effective_think_mode", lambda *a, **k: "high")
+
+
+def test_sub_chain_appends_primary_last(monkeypatch):
+    monkeypatch.setattr(explore, "provider_chain",
+                        lambda cfg=None: [("alt", "openai", "k1", "http://alt/v1", "m1")])
+    chain = explore._sub_chain(_sub_ctx())
+    assert [(x[0], x[3]) for x in chain] == [("alt", "http://alt/v1"),
+                                             ("main", "http://main/v1")]
+    # 同一 (key, url) 不重复挂（配置链里已经包含主服务商时）
+    monkeypatch.setattr(explore, "provider_chain",
+                        lambda cfg=None: [("main", "openai", "k0", "http://main/v1", "m0")])
+    chain2 = explore._sub_chain(_sub_ctx())
+    assert len(chain2) == 1 and chain2[0][0] == "main"
+
+
+def test_default_chat_retries_transient_then_succeeds(monkeypatch):
+    """断流 / 超时这类链路抖动：同一家重试一次，成功就正常返回。"""
+    from app import llm
+
+    monkeypatch.setattr(explore, "provider_chain", lambda cfg=None: [])
+    calls = []
+
+    def fake_stream(key, url, model, messages, **kw):
+        calls.append((key, url))
+        if len(calls) == 1:
+            return {"visible": "", "tool_calls": [], "stream_state": "idle"}
+        return {"visible": "结论", "tool_calls": [], "stream_state": "done"}
+
+    monkeypatch.setattr(llm, "stream_chat", fake_stream)
+    rr = explore._default_chat(_sub_ctx(), [], [], None)
+    assert rr["stream_state"] == "done" and rr["visible"] == "结论"
+    assert [x[1] for x in calls] == ["http://main/v1", "http://main/v1"]
+
+
+def test_default_chat_switches_provider_on_auth(monkeypatch):
+    """鉴权失败是「这家不行」：不重试同一家，直接换下一家。"""
+    from app import llm
+
+    monkeypatch.setattr(
+        explore, "provider_chain",
+        lambda cfg=None: [("a", "openai", "ka", "http://a/v1", "ma"),
+                          ("b", "openai", "kb", "http://b/v1", "mb")])
+    calls = []
+
+    def fake_stream(key, url, model, messages, **kw):
+        calls.append(url)
+        if "a/v1" in url:
+            return {"visible": "", "tool_calls": [], "stream_state": "auth"}
+        return {"visible": "备用成功", "tool_calls": [], "stream_state": "done"}
+
+    monkeypatch.setattr(llm, "stream_chat", fake_stream)
+    rr = explore._default_chat(_sub_ctx(), [], [], None)
+    assert rr["stream_state"] == "done" and rr["visible"] == "备用成功"
+    assert calls == ["http://a/v1", "http://b/v1"]     # 没有对 a 重试
+
+
+def test_default_chat_keeps_partial_text_instead_of_retrying(monkeypatch):
+    """已经有正文的失败不能整段重发，否则子代理会输出两遍。"""
+    from app import llm
+
+    monkeypatch.setattr(explore, "provider_chain", lambda cfg=None: [])
+    calls = []
+
+    def fake_stream(key, url, model, messages, **kw):
+        calls.append(url)
+        return {"visible": "写了半句", "tool_calls": [], "stream_state": "network"}
+
+    monkeypatch.setattr(llm, "stream_chat", fake_stream)
+    rr = explore._default_chat(_sub_ctx(), [], [], None)
+    assert rr["visible"] == "写了半句"
+    assert len(calls) == 1

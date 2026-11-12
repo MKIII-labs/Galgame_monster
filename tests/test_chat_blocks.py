@@ -3,7 +3,8 @@
 from app.api.chat import (_append_round_blocks, _empty_final_text,
                           _ensure_old_text_block,
                           _inject_prev_end_note,
-                          _is_pseudo_final, _merge_blocks, _needs_finish_nudge,
+                          _is_pseudo_final, _mark_answer_blocks, _merge_blocks,
+                          _needs_finish_nudge,
                           _needs_plan_gate,
                           _pending_plan_end_reason, _web_page_note,
                           _reasoning_cap, _retry_reasoning_block,
@@ -228,3 +229,116 @@ def test_web_page_note_wraps_and_truncates():
     # 空正文不产生消息
     assert _web_page_note("https://example.com/c", "   ") == ""
 
+
+# ---------------------------------------------------------------- 答案块标记
+def _answer_ids(blocks, tools, stopped=False):
+    out = _mark_answer_blocks(blocks, tools, stopped=stopped)
+    return [i for i, b in enumerate(out) if b.get("ans")]
+
+
+def _long(tag=""):
+    """≥120 字的交付正文（`_is_substantive_answer` 的下限）。"""
+    return (tag or "交付") + "。" + "这里是完整结论与依据。" * 12
+
+
+def test_answer_marks_delivery_before_finish():
+    """最常见形态：先写答案再调 finish；finish 后的补充留在过程里。"""
+    blocks = [{"kind": "text", "text": "过程"},
+              {"kind": "tool", "i": 0},
+              {"kind": "reasoning", "text": "想"},
+              {"kind": "text", "text": "交付"},
+              {"kind": "tool", "i": 1},
+              {"kind": "reasoning", "text": "补充"},
+              {"kind": "text", "text": "收尾补充"}]
+    tools = [{"tool": "edit_file"}, {"tool": "finish"}]
+    assert _answer_ids(blocks, tools) == [3]
+
+
+def test_answer_marks_after_finish_when_rework():
+    """验收驳回后返工：finish 后的新交付正文才是答案。"""
+    blocks = [{"kind": "text", "text": "过程"},
+              {"kind": "tool", "i": 0},
+              {"kind": "reasoning", "text": "思考"},
+              {"kind": "tool", "i": 1},
+              {"kind": "reasoning", "text": "验收返工"},
+              {"kind": "text", "text": _long("返工后的交付")},
+              {"kind": "reasoning", "text": "计划下一步"}]
+    tools = [{"tool": "edit_file"}, {"tool": "finish"}]
+    assert _answer_ids(blocks, tools) == [5]
+
+
+def test_answer_marks_after_last_real_tool_without_finish():
+    blocks = [{"kind": "text", "text": "过程"},
+              {"kind": "tool", "i": 0},
+              {"kind": "text", "text": "答案"}]
+    assert _answer_ids(blocks, [{"tool": "read_file"}]) == [2]
+
+
+def test_answer_marks_finish_alias():
+    """finish 别名（done / complete / task_done…）也要认。"""
+    blocks = [{"kind": "text", "text": "交付"}, {"kind": "tool", "i": 0}]
+    assert _answer_ids(blocks, [{"tool": "done"}]) == [0]
+
+
+def test_answer_falls_back_to_last_text():
+    """finish 前后都没有正文、正文全在工具之前时，兜底最后一段。"""
+    blocks = [{"kind": "text", "text": "只有一段"},
+              {"kind": "tool", "i": 0},
+              {"kind": "tool", "i": 1}]
+    assert _answer_ids(blocks, [{"tool": "read_file"}, {"tool": "finish"}]) == [0]
+
+
+def test_answer_marks_recomputed_after_continuation():
+    """续写合并后旧标记要清掉：答案跟着新的交付段走。"""
+    old = [{"kind": "text", "text": "旧交付", "ans": True}, {"kind": "tool", "i": 0}]
+    new = [{"kind": "reasoning", "text": "继续"}, {"kind": "text", "text": "新交付"}]
+    merged = _merge_blocks(old, new, 1)
+    out = _mark_answer_blocks(merged, [{"tool": "read_file"}])
+    assert [b["text"] for b in out if b.get("ans")] == ["新交付"]
+
+
+def test_answer_stopped_keeps_last_visible_text():
+    """停止 = 暂停：最后一段可见正文留在答案区（哪怕是半句旁白）。
+
+    现场：`提示词工程师 #55` 停止时最后的正文块是 24 字残句，
+    后面还有一段 reasoning —— 以前会被当成正式答案，或者被整个折走。
+    """
+    blocks = [{"kind": "text", "text": _long("完整报告")},
+              {"kind": "tool", "i": 0},
+              {"kind": "reasoning", "text": "继续查"},
+              {"kind": "text", "text": "取证补最后一组：下面按顺序查 8 个模式，结果按"},
+              {"kind": "reasoning", "text": "还没写完"}]
+    assert _answer_ids(blocks, [{"tool": "read_file"}], stopped=True) == [3]
+
+
+def test_answer_skips_trailing_narration_after_finish():
+    """正常收尾：finish 前后都有旁白时，答案取最近一段实质交付，而不是最后一句。"""
+    blocks = [{"kind": "tool", "i": 0},
+              {"kind": "text", "text": _long("完整交付")},
+              {"kind": "reasoning", "text": "验收复核"},
+              {"kind": "tool", "i": 1},
+              {"kind": "reasoning", "text": "还要再核一次"},
+              {"kind": "text", "text": "核对 world.html 里 logEvent 的每个调用点的实际形态。"}]
+    tools = [{"tool": "read_file"}, {"tool": "finish"}]
+    assert _answer_ids(blocks, tools) == [1]
+
+
+def test_answer_skips_short_narration_before_finish():
+    """finish 前紧挨着一句旁白、前面才是交付：不能被旁白顶掉。"""
+    blocks = [{"kind": "tool", "i": 0},
+              {"kind": "text", "text": _long("完整交付")},
+              {"kind": "reasoning", "text": "再补一项"},
+              {"kind": "text", "text": "先补最后一项事实，以免把 H 层状态写错。"},
+              {"kind": "tool", "i": 1}]
+    tools = [{"tool": "search_files"}, {"tool": "finish"}]
+    assert _answer_ids(blocks, tools) == [1]
+
+
+def test_answer_short_reply_still_marked():
+    """没有任何长篇交付时，短回答（例如「已完成。」）仍要留在答案区。"""
+    blocks = [{"kind": "tool", "i": 0},
+              {"kind": "reasoning", "text": "收尾"},
+              {"kind": "text", "text": "已完成。"},
+              {"kind": "tool", "i": 1}]
+    tools = [{"tool": "read_file"}, {"tool": "finish"}]
+    assert _answer_ids(blocks, tools) == [2]

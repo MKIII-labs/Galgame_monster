@@ -465,3 +465,85 @@ def test_parameter_tag_with_array_still_executes():
     body, block = _extract_bare_calls(text)
     assert [c["tool"] for c in agent.parse_calls(block)] == ["read_file"]
     assert "<parameter" not in body
+
+
+# ============================================================
+# 收尾 / 恢复判定：对齐 Claude Code 的转移语义（纯函数，便于断言）
+# ============================================================
+
+def test_truncation_action_splits_window_and_output_cap():
+    """窗口满和输出额度用完必须分开：前者先压缩，后者直接续写。"""
+    from app.api.chat import _truncation_action
+    base = dict(finish_reason="length", has_calls=False, stopped=False,
+                gal=False, nudged=False, window_limited=False,
+                window_compressed=False)
+    assert _truncation_action(**base) == "nudge"
+    assert _truncation_action(**dict(base, window_limited=True)) == "compress_nudge"
+    assert _truncation_action(**dict(base, window_limited=True,
+                                     window_compressed=True)) == "nudge"
+    assert _truncation_action(**dict(base, finish_reason="stop")) == "none"
+    assert _truncation_action(**dict(base, has_calls=True)) == "none"
+    assert _truncation_action(**dict(base, nudged=True)) == "none"
+    assert _truncation_action(**dict(base, gal=True)) == "none"
+
+
+def test_break_continue_action_requires_visible_and_no_calls():
+    """断点续写的前提：有正文、没有待执行工具（否则会重复副作用）。"""
+    from app.api.chat import _break_continue_action
+    base = dict(stream_state="network", visible="半句", has_calls=False,
+                stopped=False, used=0, limit=2)
+    assert _break_continue_action(**base) is True
+    assert _break_continue_action(**dict(base, used=2)) is False
+    assert _break_continue_action(**dict(base, limit=0)) is False
+    assert _break_continue_action(**dict(base, has_calls=True)) is False
+    assert _break_continue_action(**dict(base, visible="  ")) is False
+    assert _break_continue_action(**dict(base, stream_state="billing")) is False
+
+
+def test_pseudo_final_action_retries_once_then_stops():
+    """占位正文：先提醒一次，再犯就收尾，不能进自动续跑。"""
+    from app.api.chat import _pseudo_final_action
+    base = dict(is_pseudo=True, stopped=False, gal=False, nudged=False)
+    assert _pseudo_final_action(**base) == "retry"
+    assert _pseudo_final_action(**dict(base, nudged=True)) == "stop"
+    assert _pseudo_final_action(**dict(base, is_pseudo=False)) == "none"
+    assert _pseudo_final_action(**dict(base, gal=True)) == "none"
+    assert _pseudo_final_action(**dict(base, stopped=True)) == "none"
+
+
+def test_stop_hook_action_blocks_at_most_limit_times():
+    """Stop hook：能拦收尾，但每回合只能拦 MAX_STOP_HOOK_BLOCKS 次。"""
+    from app.api.chat import _stop_hook_action, MAX_STOP_HOOK_BLOCKS
+    base = dict(decision="block", used=0, limit=MAX_STOP_HOOK_BLOCKS,
+                stopped=False, gal=False)
+    assert _stop_hook_action(**base) == "block"
+    assert _stop_hook_action(**dict(base, used=MAX_STOP_HOOK_BLOCKS)) == "none"
+    assert _stop_hook_action(**dict(base, decision="")) == "none"
+    assert _stop_hook_action(**dict(base, stopped=True)) == "none"
+    assert _stop_hook_action(**dict(base, gal=True)) == "none"
+
+
+def test_stream_prefetch_runs_reads_but_not_after_write(monkeypatch):
+    """流式预取：只读工具提前跑；出现写工具后，后续的读必须等写完成。"""
+    import threading
+
+    from app.api import chat
+
+    calls = []
+
+    def fake_run_tool(sandbox, name, args, **kw):
+        calls.append(name)
+        return ("ok", None, False)
+
+    monkeypatch.setattr(chat.agent, "run_tool", fake_run_tool)
+    ev = threading.Event()
+    ready, drain = chat._stream_prefetch_sink(
+        sandbox=".", allow_outside=False, caps={}, stop_event=ev, enabled=True)
+
+    ready({"tool": "read_file", "args": {"path": "a.txt"}})
+    ready({"tool": "write_file", "args": {"path": "a.txt", "content": "x"}})
+    ready({"tool": "read_file", "args": {"path": "b.txt"}})
+    out = drain()
+
+    assert calls == ["read_file"]           # 写本身不跑；写之后的读也不再提前跑
+    assert len(out) == 1

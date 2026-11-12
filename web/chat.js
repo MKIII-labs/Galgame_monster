@@ -384,12 +384,17 @@ function sessionGroupEl(group) {
     + '<span class="sg-caret">' + icon('chevron') + '</span>';
   head.querySelector('.sg-name').textContent = group.display;
   head.onclick = () => {
-    if (prefs.collapsed[group.key]) delete prefs.collapsed[group.key];
-    else prefs.collapsed[group.key] = true;
+    const next = !prefs.collapsed[group.key];          // true = 收起
+    if (next) prefs.collapsed[group.key] = true;
+    else delete prefs.collapsed[group.key];
     try {
       localStorage.setItem(SESSION_GROUP_COLLAPSED_KEY, JSON.stringify(prefs.collapsed));
     } catch (e) { /* 隐私模式 / 配额满：只影响跨刷新记忆 */ }
-    renderSessions();
+    // 只动这一组，不整列表重绘，折叠才有过渡动画
+    foldTransition(wrap, wrap.querySelector('.session-group-body'), !next, {
+      cls: 'collapsed',
+    });
+    head.setAttribute('aria-expanded', next ? 'false' : 'true');
   };
   headWrap.appendChild(head);
 
@@ -1452,30 +1457,225 @@ function followScroll() {
   });
 }
 
+// 过程步骤跟随：新步骤出现时只把它带进视野，不强行拉到整条消息底部——
+// 答案区在过程下方，贴底会把刚出现的步骤顶出屏幕。用户上翻（_followBottom=false）
+// 立即暂停；回到底部 / 点「回到底部」后恢复。设置里可用 ui_process_follow 关闭。
+function processFollowEnabled() {
+  return !(state.config && state.config.ui_process_follow === false);
+}
+
+let _procFollowRaf = 0;
+// 每个过程折叠区自己的「是否跟随」状态，和主窗口的 _followBottom 分开。
+// 用户在过程区上翻只暂停过程跟随，不会把答案跟随一起关掉。
+const _procFollow = new WeakMap();
+// 程序滚动内层时，scroll 事件是异步派发的；用到期时间忽略自己滚出来的事件。
+const _procScrollUntil = new WeakMap();
+
+function processNearBottom(body) {
+  if (!body) return true;
+  return body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+}
+
+function procSetScroll(body, top) {
+  if (!body) return;
+  _procScrollUntil.set(body, Date.now() + 160);
+  body.scrollTop = top;
+}
+
+// 主窗口只负责「折叠区自身向下长高时别被顶出视口」：底边超出就补最小差值。
+// 不再要求把**整个**折叠区塞进视口——那会在答案区同时流式时把窗口往上拽，
+// 和 followScroll 的贴底互相打架（表现为窗口上下抽搐）；用户在读下方的答案时，
+// 也不该因为过程区里的一次更新被拽回上方。
+function ensureFoldVisible(fold, box) {
+  if (!fold || !box) return;
+  const fr = fold.getBoundingClientRect();
+  const br = box.getBoundingClientRect();
+  const pad = 24;
+  if (fr.bottom <= br.bottom - pad) return;      // 没超出底部（被答案推上去的不要管）
+  const delta = fr.bottom - (br.bottom - pad);
+  _programmaticScroll += 1;
+  box.scrollTop += delta;
+  requestAnimationFrame(() => { _programmaticScroll = Math.max(0, _programmaticScroll - 1); });
+}
+
+function followProcessStep(el) {
+  if (!el) { scrollToBottom(); return; }
+  if (!processFollowEnabled() || !_followBottom) {
+    scrollToBottom();          // 关闭跟随 / 已暂停：保持原来的贴底行为（暂停时它是空操作）
+    return;
+  }
+  if (_procFollowRaf) return;
+  _procFollowRaf = requestAnimationFrame(() => {
+    _procFollowRaf = 0;
+    const box = $('#chat');
+    if (!box || !_followBottom || !el.isConnected) return;
+    const fold = el.closest('.process-fold');
+    if (fold && fold.classList.contains('collapsed')) return;   // 收起时只看统计，不滚动
+    const body = fold ? fold.querySelector('.process-fold-body') : null;
+    if (body) {
+      // 1) 先滚过程自己的滚动条；用户在内层上翻过就暂停，回底自动恢复。
+      if (_procFollow.get(body) !== false) {
+        const br = body.getBoundingClientRect();
+        const er = el.getBoundingClientRect();
+        const pad = 16;
+        let delta = 0;
+        if (er.bottom > br.bottom - pad) delta = er.bottom - (br.bottom - pad);
+        else if (er.top < br.top + pad) delta = er.top - (br.top + pad);
+        if (delta) procSetScroll(body, body.scrollTop + delta);
+      }
+      // 2) 折叠区自身长高、底边超出视口时，主窗口才补一次最小滚动。
+      ensureFoldVisible(fold, box);
+      return;
+    }
+    // 没有过程折叠（例如探索小队卡片）：只把超出视口底部的部分带进来，不贴底，
+    // 也不往上拽——上方的旧卡片更新时把窗口拉回去，同样会跟答案跟随打架。
+    const br = box.getBoundingClientRect();
+    const er = el.getBoundingClientRect();
+    const pad = 24;
+    if (er.bottom <= br.bottom - pad) return;
+    _programmaticScroll += 1;
+    box.scrollTop += er.bottom - (br.bottom - pad);
+    requestAnimationFrame(() => { _programmaticScroll = Math.max(0, _programmaticScroll - 1); });
+  });
+}
+
+// 内层滚动：用户上翻 -> 暂停过程跟随；回底 -> 恢复。
+function watchProcessScroll() {
+  const box = $('#chat');
+  if (!box || box._procScrollBound) return;
+  box._procScrollBound = true;
+  box.addEventListener('scroll', (e) => {
+    const body = e.target;
+    if (!body || !body.classList || !body.classList.contains('process-fold-body')) return;
+    if (Date.now() < (_procScrollUntil.get(body) || 0)) return;   // 忽略程序滚动
+    _procFollow.set(body, processNearBottom(body));
+  }, true);
+}
+
+// 当前过程流里最该被看到的一步：优先正在跑的步骤，其次最后一个思考 / 工具组。
+function lastProcessAnchor(fold) {
+  const box = $('#chat');
+  if (!box) return null;
+  if (!fold) {
+    const folds = box.querySelectorAll('.process-fold:not(.collapsed)');
+    fold = folds.length ? folds[folds.length - 1] : null;
+  }
+  if (!fold || fold.classList.contains('collapsed')) return null;
+  const cur = fold.querySelectorAll('.tool-card.is-current');
+  if (cur.length) return cur[cur.length - 1];
+  const rows = fold.querySelectorAll('.chat-flow > *');
+  return rows.length ? rows[rows.length - 1] : null;
+}
+
+// 探索小队卡片不在过程折叠里，单独给它一个锚点，避免它的文字更新触发主窗口贴底。
+function lastSubagentAnchor() {
+  const box = $('#chat');
+  if (!box) return null;
+  const cards = box.querySelectorAll('.subagent-card');
+  const card = cards.length ? cards[cards.length - 1] : null;
+  if (!card) return null;
+  const rows = card.querySelectorAll('.subagent-row');
+  return rows.length ? rows[rows.length - 1] : card;
+}
+
+// 工具组展开 / 收起、字体加载这类「高度变了但没有 DOM 增删」的情况，
+// MutationObserver 看不到；用 ResizeObserver 补一次过程跟随。
+let _procResizeObs = null;
+function ensureProcResizeObserver() {
+  if (_procResizeObs || !window.ResizeObserver) return null;
+  _procResizeObs = new ResizeObserver((entries) => {
+    if (!_followBottom) return;
+    for (const e of entries) {
+      const fold = e.target;
+      if (!fold || !fold.isConnected || fold.classList.contains('collapsed')) continue;
+      if (fold._foldAnim) continue;          // 折叠动画期间高度每帧都在变，别跟着滚
+      const anchor = lastProcessAnchor(fold);
+      if (anchor) followProcessStep(anchor);
+    }
+  });
+  return _procResizeObs;
+}
+
+function observeProcessFold(fold) {
+  if (!fold || !fold.classList || !fold.classList.contains('process-fold')) return;
+  const obs = ensureProcResizeObserver();
+  if (obs) obs.observe(fold);
+}
+
 // 内容高度突变（图片加载 / 代码高亮 / 工具卡展开 / 字体）不会产生 delta，
 // 光靠 scrollToBottom 会停在半路。跟随状态下补一次贴底。
+// 过程区例外：那里由 followProcessStep 精确跟随当前步骤，粗暴贴底会把步骤顶出屏幕。
 let _chatGrowthObserver = null;
 function watchChatGrowth() {
   const box = $('#chat');
-  if (!box || _chatGrowthObserver || !window.MutationObserver) return;
+  if (!box) return;
+  watchProcessScroll();
+  if (_chatGrowthObserver || !window.MutationObserver) return;
   const pinImages = (node) => {
     if (!node || node.nodeType !== 1) return;
     const imgs = node.tagName === 'IMG' ? [node] : Array.from(node.querySelectorAll('img'));
     imgs.forEach((img) => {
       if (img.complete) return;
       img.addEventListener('load', () => {
-        if (_followBottom) scrollToBottom();
+        if (!_followBottom) return;
+        // 过程区 / 探索小队里的图：只把这张图带进视野，不要把主窗口贴底。
+        if (img.closest && (img.closest('.process-fold') || img.closest('.subagent-card'))) {
+          followProcessStep(img);
+        } else {
+          scrollToBottom();
+        }
       }, { once: true });
     });
   };
+  const processFoldOf = (node) => {
+    const el = node && (node.nodeType === 1 ? node : node.parentElement);
+    return (el && el.closest) ? el.closest('.process-fold') : null;
+  };
+  const inSubagent = (node) => {
+    const el = node && (node.nodeType === 1 ? node : node.parentElement);
+    return !!(el && el.closest && el.closest('.subagent-card'));
+  };
   const obs = new MutationObserver((records) => {
     if (!_followBottom) return;
+    let procFold = null;
+    let sub = false;
     for (const r of records) {
-      (r.addedNodes || []).forEach(pinImages);
+      const added = Array.from(r.addedNodes || []);
+      added.forEach(pinImages);
+      let fold = processFoldOf(r.target);
+      if (!fold) {
+        // 整个过程折叠区刚被插入时，mutation 的 target 是父节点；看 addedNodes。
+        for (const n of added) {
+          if (n.nodeType === 1 && n.classList && n.classList.contains('process-fold')) {
+            fold = n;
+            observeProcessFold(n);
+            break;
+          }
+        }
+      }
+      if (fold) {
+        if (processFollowEnabled()) procFold = fold;
+      } else if (inSubagent(r.target)
+                 || added.some((n) => n.nodeType === 1 && n.classList
+                   && n.classList.contains('subagent-card'))) {
+        sub = true;
+      }
+      for (const n of Array.from(r.removedNodes || [])) {
+        if (n.nodeType === 1 && n.classList && n.classList.contains('process-fold')
+            && _procResizeObs) {
+          _procResizeObs.unobserve(n);
+        }
+      }
+    }
+    if (procFold || sub) {
+      const anchor = procFold ? lastProcessAnchor(procFold) : lastSubagentAnchor();
+      if (anchor) followProcessStep(anchor);
+      return;
     }
     followScroll();
   });
   obs.observe(box, { childList: true, subtree: true, characterData: true });
+  box.querySelectorAll('.process-fold').forEach(observeProcessFold);
   _chatGrowthObserver = obs;
 }
 
@@ -2399,8 +2599,12 @@ function buildThinkBlock(text, open) {
   const body = document.createElement('div');
   body.className = 'think-body';
   body.textContent = text || '';
-  head.onclick = () => box.classList.toggle('open');
-  makeClickable(head, () => box.classList.toggle('open'), '展开 / 收起思考过程');
+  const toggleThink = () => {
+    const next = !foldIsOpen(box, 'open', true);
+    foldTransition(box, body, next, { cls: 'open', positive: true, ms: 180 });
+  };
+  head.onclick = toggleThink;
+  makeClickable(head, toggleThink, '展开 / 收起思考过程');
   box.appendChild(head);
   box.appendChild(body);
   box._body = body;
@@ -2466,6 +2670,22 @@ function updateFlowMeta(row) {
   row._flowWrap.classList.toggle('has-fail', st.failed > 0);
 }
 
+// 当前步骤高亮：并行的多个工具会同时高亮，完成一个灭一个。
+// 只影响样式，不改变过程流的排布 / 折叠状态。
+function markProcessStep(card) {
+  if (!card || !card.classList) return;
+  card.classList.add('is-current');
+  const g = card.closest ? card.closest('.tool-group') : null;
+  if (g) g.classList.add('current');
+}
+
+function unmarkProcessStep(card) {
+  if (!card || !card.classList) return;
+  card.classList.remove('is-current');
+  const g = card.closest ? card.closest('.tool-group') : null;
+  if (g && !g.querySelector('.tool-card.is-current')) g.classList.remove('current');
+}
+
 // 过程折叠：思考 + 工具在上，最终答案在下；默认收起。
 function buildProcessFold(flow, timing, endKind, open) {
   const st = processStats(flow);
@@ -2491,14 +2711,15 @@ function buildProcessFold(flow, timing, endKind, open) {
   wrap.appendChild(head);
   wrap.appendChild(body);
   const toggle = () => {
-    const expanded = wrap.classList.contains('collapsed');
-    wrap.classList.toggle('collapsed', !expanded);
-    caret.textContent = expanded ? '▾' : '▸';
-    head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    const next = !foldIsOpen(wrap, 'collapsed');
+    foldTransition(wrap, body, next, { cls: 'collapsed' });
+    caret.textContent = next ? '▾' : '▸';
+    head.setAttribute('aria-expanded', next ? 'true' : 'false');
   };
   head.onclick = toggle;
   makeClickable(head, toggle, '展开 / 收起过程');
   head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  observeProcessFold(wrap);
   return wrap;
 }
 
@@ -2957,11 +3178,13 @@ function buildPlanCard(plan, collapsed) {
     '</div>' +
     '<div class="plan-body"></div>';
   const head = card.querySelector('.plan-head');
+  const body = card.querySelector('.plan-body');
   const toggle = () => {
-    card.classList.toggle('collapsed');
+    const next = !foldIsOpen(card, 'collapsed');
+    foldTransition(card, body, next, { cls: 'collapsed' });
     // 记住这是「用户自己折的」：之后新计划到达时不再自动展开，尊重用户操作
-    card._userCollapsed = card.classList.contains('collapsed');
-    head.setAttribute('aria-expanded', card.classList.contains('collapsed') ? 'false' : 'true');
+    card._userCollapsed = !next;
+    head.setAttribute('aria-expanded', next ? 'true' : 'false');
   };
   head.addEventListener('click', toggle);
   makeClickable(head, toggle, '展开 / 收起执行计划');
@@ -3175,7 +3398,8 @@ function planMarkCarried(card) {
 /* 旧卡：折叠 + 标注「已续至最新输出」；历史仍在，点开可看 */
 function planSupersede(card) {
   if (!card || card.classList.contains('plan-superseded')) return;
-  card.classList.add('plan-superseded', 'collapsed');
+  foldTransition(card, card.querySelector('.plan-body'), false, { cls: 'collapsed' });
+  card.classList.add('plan-superseded');
   const head = card.querySelector('.plan-head');
   if (head) head.setAttribute('aria-expanded', 'false');
   if (head && !card.querySelector('.plan-superseded-note')) {
@@ -3199,7 +3423,7 @@ function planMarkLive(card) {
 // 系统自动折叠（收尾 / supersede）的卡，遇到又「没做完」的计划时自动展开
 function planAutoExpand(card) {
   if (!card || card._userCollapsed || !card.classList.contains('collapsed')) return;
-  card.classList.remove('collapsed');
+  foldTransition(card, card.querySelector('.plan-body'), true, { cls: 'collapsed' });
   const head = card.querySelector('.plan-head');
   if (head) head.setAttribute('aria-expanded', 'true');
 }
@@ -3254,7 +3478,7 @@ function planAutoCollapse(row) {
   const card = row && row._planCard;
   const steps = (row && row._planSteps) || [];
   if (!card || !steps.length || !steps.every((s) => s.status === 'done')) return;
-  card.classList.add('collapsed');
+  foldTransition(card, card.querySelector('.plan-body'), false, { cls: 'collapsed' });
   const head = card.querySelector('.plan-head');
   if (head) head.setAttribute('aria-expanded', 'false');
 }
@@ -3278,13 +3502,15 @@ function planReviewRender(row, obj) {
     + '<span class="plan-review-state"></span>'
     + '<span class="plan-review-caret">' + icon('chevron') + '</span>';
   const toggle = () => {
-    card.classList.toggle('collapsed');
-    head.setAttribute('aria-expanded',
-      card.classList.contains('collapsed') ? 'false' : 'true');
+    const next = !foldIsOpen(card, 'collapsed');
+    foldTransition(card, card.querySelector('.plan-review-body'), next, { cls: 'collapsed' });
+    head.setAttribute('aria-expanded', next ? 'true' : 'false');
   };
   head.onclick = toggle;
   makeClickable(head, toggle, '展开 / 收起计划审批');
   card.appendChild(head);
+  const body = document.createElement('div');
+  body.className = 'plan-review-body';
 
   const list = document.createElement('div');
   list.className = 'plan-review-list';
@@ -3306,13 +3532,13 @@ function planReviewRender(row, obj) {
     item.appendChild(ta);
     list.appendChild(item);
   });
-  card.appendChild(list);
 
   const comment = document.createElement('textarea');
   comment.className = 'plan-review-comment';
   comment.rows = 2;
   comment.placeholder = '写一句意见让模型重排计划（留空 = 只批准）';
-  card.appendChild(comment);
+  body.appendChild(list);
+  body.appendChild(comment);
 
   const acts = document.createElement('div');
   acts.className = 'plan-review-actions';
@@ -3326,7 +3552,8 @@ function planReviewRender(row, obj) {
   re.textContent = '按意见重排';
   acts.appendChild(ok);
   acts.appendChild(re);
-  card.appendChild(acts);
+  body.appendChild(acts);
+  card.appendChild(body);
 
   const fit = () => {
     list.querySelectorAll('.plan-review-text').forEach((t) => {
@@ -3351,7 +3578,7 @@ function planReviewRender(row, obj) {
   const settle = (text, cls) => {
     card.classList.add(cls || 'settled');
     // 交互完就收起：卡片留在原地当记录，但不再占一屏
-    card.classList.add('collapsed');
+    foldTransition(card, body, false, { cls: 'collapsed' });
     head.setAttribute('aria-expanded', 'false');
     const state = card.querySelector('.plan-review-state');
     if (state) state.textContent = text;
@@ -3711,6 +3938,9 @@ function buildToolCard(name, args, collapse) {
     + (gi ? ' git-op' : '')
     + (gi && gi.risk ? ' git-risk' : '')
     + (collapse === false ? ' always-open' : '');
+  // 完成事件（tool_done）不带 args，这里记一份，收尾时算 +/− 行数要用
+  card._toolName = name;
+  card._toolArgs = args;
   card.innerHTML =
     '<div class="tool-head">' +
       '<span class="tool-ico">' + icon(info[0]) + '</span>' +
@@ -3719,6 +3949,7 @@ function buildToolCard(name, args, collapse) {
       '<span class="tool-arg">' + toolArgHtml(name, args) + '</span>' +
       '<span class="tool-meta"></span>' +
       '<span class="tool-state">执行中…</span>' +
+      '<span class="tool-stat"></span>' +
       '<span class="tool-caret">' + icon('chevron') + '</span>' +
     '</div>' +
     '<pre class="tool-result"></pre>' +
@@ -3747,7 +3978,13 @@ function buildToolCard(name, args, collapse) {
     }
   }
   const toolHead = card.querySelector('.tool-head');
-  const toolToggle = () => { if (card.classList.contains('has-result')) card.classList.toggle('open'); };
+  const toolToggle = () => {
+    if (!card.classList.contains('has-result')) return;
+    const next = !foldIsOpen(card, 'open', true);
+    foldTransition(card, card.querySelector('.tool-result'), next, {
+      cls: 'open', positive: true, ms: 180,
+    });
+  };
   toolHead.addEventListener('click', toolToggle);
   makeClickable(toolHead, toolToggle, '展开 / 收起工具结果');
   // 路径可点击：切到 IDE 模式并在应用内打开（stopPropagation 避免触发上面的折叠）
@@ -3804,9 +4041,31 @@ function addWriteActions(card, obj) {
   btns.push(b);
 }
 
+/* ---------- 命令执行中的增量输出 ----------
+   只保留最后 200 行，避免长日志把 DOM 撑爆；完整输出仍由工具完成时的
+   result 覆盖（finishToolCard 会去掉 streaming 并把 pre 换成最终结果）。 */
+const TOOL_OUTPUT_MAX_LINES = 200;
+
+function appendToolOutput(card, text) {
+  if (!card || !text) return;
+  const pre = card.querySelector('.tool-result');
+  if (!pre) return;
+  const wasEmpty = !pre.textContent;
+  // 用户往上翻看时不要强行拉回底部
+  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  card.classList.add('streaming');
+  const lines = (pre.textContent + String(text)).split('\n');
+  const kept = lines.length > TOOL_OUTPUT_MAX_LINES
+    ? lines.slice(lines.length - TOOL_OUTPUT_MAX_LINES) : lines;
+  pre.textContent = kept.join('\n');
+  if (wasEmpty || atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
 function finishToolCard(card, obj) {
   obj = obj || {};
   card.classList.remove('running');
+  card.classList.remove('streaming');
+  unmarkProcessStep(card);                   // 当前步骤高亮：完成 / 失败即熄灭
   const ok = obj.ok !== false;                 // 旧记录没有 ok 字段 → 视为成功
   card.classList.add(ok ? 'ok' : 'failed');
   const st = card.querySelector('.tool-state');
@@ -3817,6 +4076,19 @@ function finishToolCard(card, obj) {
     if (obj.ms != null) bits.push(fmtToolMs(obj.ms));
     if (parseInt(obj.lines, 10) > 1) bits.push(obj.lines + ' 行');
     meta.textContent = bits.join(' · ');
+  }
+  // 写文件的工具卡：右侧补上和「文件改动卡」一致的 +adds −dels（口径同 ideReviewCounts）
+  const stat = card.querySelector('.tool-stat');
+  if (stat) {
+    // tool_done 事件不带 args：用建卡时记下的参数算增删行数
+    const a = obj.args || card._toolArgs;
+    const n = String(obj.name || card._toolName || '');
+    const c = (obj.write && ok && a && typeof ideReviewCounts === 'function')
+      ? ideReviewCounts(n, a) : null;
+    if (c && (c.adds || c.dels)) {
+      stat.innerHTML = '<b class="add">+' + c.adds + '</b> '
+        + '<b class="del">−' + c.dels + '</b>';
+    }
   }
   const pre = card.querySelector('.tool-result');
   if (pre && obj.result) {
@@ -3880,6 +4152,9 @@ function setToolGroupOpen(g, open, byUser) {
 function autoCollapseToolGroup(g) {
   if (!g || g.pending > 0 || g.userToggled || g.failed > 0) return;
   if (g.el.classList.contains('collapsed')) return;
+  // 先落到实测高度再收：直接从 auto 跳到 0 没有过渡起点，看起来就是「啪」地消失
+  g.body.style.maxHeight = g.body.scrollHeight + 'px';
+  void g.body.offsetHeight;
   g.el.classList.add('collapsed');
   g.body.style.maxHeight = '0px';
   const head = g.el.querySelector('.tool-group-head');
@@ -4700,10 +4975,25 @@ function buildAiRow(contentHtml, rawText, index, reasoning, sources, usage, memo
   return row;
 }
 
+/* 收尾工具：模型写完最终答案后用它声明完成。判断「正文是不是过场旁白」时必须跳过，
+   否则答案会被折进过程区。别名与后端 groups.py 的归一化保持一致。 */
+const FINISH_TOOL_NAMES = new Set(['finish', 'done', 'complete', 'finished',
+                                   'task_done', 'task_complete', 'finish_task']);
+
+/* 「实质交付」判定（与后端 app/api/chat.py::_is_substantive_answer 同一口径）：
+   长度 ≥ 120 字，或带 Markdown 结构（标题 / 代码块 / 表格）。
+   用来区分「最终交付」和「先查一下 / 现在运行脚本」这类过程旁白 —— 只按
+   「谁在后面」判定会把最后一句旁白当成答案（实测 670 条消息里有 128 条）。 */
+const ANSWER_MIN_CHARS = 120;
+function isSubstantiveAnswer(text) {
+  const t = String(text || '').trim();
+  if (t.length >= ANSWER_MIN_CHARS) return true;
+  return /(^|\n)[ \t]{0,3}(#{1,6}\s|```|\|)/.test(t);
+}
+
 /* 把 blocks 还原成一条消息的结构：
-   - 折叠区（process-fold）：只放思考 + 工具组，这一块才是「过程」；
-   - 正文段（content）：每段正文单独成段，按落库顺序排列 —— 正文就是正文，
-     不进灰底折叠区，也不用「最后一段才算答案」去猜；
+   - 折叠区（process-fold）：思考 + 工具组，以及**夹在工具之间的过场旁白**；
+   - 正文段（content）：按落库的 `ans` 标记（旧消息走同一套「实质交付」启发式）；
    - 提问卡：落在它被问出来的位置，而不是一律堆到消息末尾。
    返回 { fold, parts }，parts 是可以直接追加进 .content-wrap 的节点序列。 */
 function buildBlocksView(blocks, timing, endKind, opts) {
@@ -4718,8 +5008,78 @@ function buildBlocksView(blocks, timing, endKind, opts) {
     autoCollapseToolGroup(ctx._toolGroup);
     ctx._toolGroup = null;
   };
+  // 最后一次收尾工具（finish / done …）的位置：旧消息的启发式要用它分「交付前 / 交付后」。
+  let finishAt = -1;
+  list.forEach((b, i) => {
+    if (!b || typeof b !== 'object' || b.kind !== 'tool') return;
+    const t = (options.tools || [])[b.i];
+    if (t && FINISH_TOOL_NAMES.has(String(t.tool || ''))) finishAt = i;
+  });
+  // 答案块：服务端落库时会打 `ans` 标记；旧会话没有标记，用同一套「实质交付」启发式。
+  // 旧数据里也可能有「把一句旁白标成答案」的历史标记（新规则之前的落库），
+  // 所以只有标记本身是实质交付（或这一轮被停止）时才信它，否则按启发式重算。
+  const partialEnd = endKind === 'stopped' || endKind === 'billing' || endKind === 'budget';
+  const ansIds = [];
+  list.forEach((b, i) => {
+    if (b && b.kind === 'text' && b.ans === true) ansIds.push(i);
+  });
+  const marked = ansIds.length > 0
+    && (partialEnd || ansIds.some((i) => isSubstantiveAnswer(list[i].text)));
+  const answerIds = new Set();
+  if (marked) {
+    // 多个标记（旧数据）：取最后一个实质交付；都没有就取最后一个标记。
+    let pick = -1;
+    ansIds.forEach((i) => {
+      if (isSubstantiveAnswer(list[i].text)) pick = i;
+    });
+    if (pick < 0) pick = ansIds[ansIds.length - 1];
+    answerIds.add(pick);
+  } else if (partialEnd) {
+    // 暂停语义（对齐 Trae：停止只是暂停，已输出内容保留）：
+    // 最后一段可见正文留在答案区，由 end_note「你手动停止了本轮」标注为未完成。
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const b = list[i];
+      if (b && b.kind === 'text' && String(b.text || '').trim()) {
+        answerIds.add(i);
+        break;
+      }
+    }
+  } else {
+    const textIds = [];
+    list.forEach((b, i) => {
+      if (b && b.kind === 'text' && String(b.text || '').trim()) textIds.push(i);
+    });
+    const substantive = (i) => isSubstantiveAnswer(list[i].text);
+    const lastSub = (ids) => {
+      for (let k = ids.length - 1; k >= 0; k -= 1) {
+        if (substantive(ids[k])) return ids[k];
+      }
+      return -1;
+    };
+    let pick = -1;
+    if (finishAt < 0) {
+      pick = lastSub(textIds);
+      if (pick < 0 && textIds.length) pick = textIds[textIds.length - 1];
+    } else {
+      const before = textIds.filter((i) => i < finishAt);
+      const after = textIds.filter((i) => i > finishAt);
+      // 紧邻 finish 的正文 = 最常见形态；只有它太短（旁白）时才往后 / 往前找。
+      let adj = -1;
+      const b = finishAt > 0 ? list[finishAt - 1] : null;
+      if (b && b.kind === 'text' && String(b.text || '').trim()) adj = finishAt - 1;
+      const post = lastSub(after);
+      const prev = lastSub(before);
+      if (adj >= 0 && substantive(adj)) pick = adj;
+      else if (adj >= 0) pick = post >= 0 ? post : (prev >= 0 ? prev : adj);
+      else if (post >= 0) pick = post;         // finish 前没有交付：取 finish 后的新交付
+      else if (prev >= 0) pick = prev;
+      else if (before.length) pick = before[before.length - 1];
+      else if (after.length) pick = after[after.length - 1];
+    }
+    if (pick >= 0) answerIds.add(pick);
+  }
   const parts = [];
-  list.forEach((b) => {
+  list.forEach((b, bi) => {
     if (!b || typeof b !== 'object') return;
     if (b.kind === 'reasoning' && b.text) {
       finalizeGroup();
@@ -4759,7 +5119,13 @@ function buildBlocksView(blocks, timing, endKind, opts) {
       d.className = 'content';                // 与最终答案同一套排版
       d.innerHTML = safeRenderMarkdown(text);
       enhanceToc(d);
-      parts.push(d);
+      // 答案块按 `ans` 标记 / 顺序启发式判定；其余正文收进过程折叠当旁白。
+      if (answerIds.has(bi)) {
+        parts.push(d);
+      } else {
+        d.classList.add('narration');
+        flow.appendChild(d);
+      }
     }
   });
   finalizeGroup();
@@ -4800,11 +5166,17 @@ function buildAiRowFromBlocks(m, index) {
     if (p.classList.contains('ask-card')) asks.push(p);
     else secs.push(p);
   });
-  if (!secs.length) {                 // 只有思考 / 工具的消息：正文退回落库文本
+  if (!secs.length) {
+    // 正文全是过场旁白时，它们已经在过程折叠里了：答案区留空，别把全文再贴回来。
+    // 只有真的没有任何正文块，才退回落库文本兜底。
+    const hadText = (m.blocks || []).some((b) => b && b.kind === 'text'
+      && String(b.text || '').trim());
     const d = document.createElement('div');
     d.className = 'content';
-    d.innerHTML = safeRenderMarkdown(m.content || '');
-    enhanceToc(d);
+    if (!hadText) {
+      d.innerHTML = safeRenderMarkdown(m.content || '');
+      enhanceToc(d);
+    }
     wrap.appendChild(d);
     secs.push(d);
   }
@@ -4961,6 +5333,17 @@ function rowForMsg(msgs, idx) {
       row._wrap.appendChild(buildEndNote(m.end_reason, idx));
     } catch (e) {
       /* 提示渲染失败不能让整条消息消失 */
+    }
+  }
+  // 文件改动卡：流式时由 tool_done 事件建在内存里，刷新 / 切会话后这里用落库的
+  // tools 重建一份，否则回复末尾的「N 个文件已更改」会整个消失。
+  // 只给「已完成的回合」重建：没有 done_at 的多半是进度快照（tools 是累计的），
+  // 每条都建卡会把同一批文件重复几十次。
+  if (m.done_at && row._wrap && typeof ideChangedHistoryAttach === 'function') {
+    try {
+      ideChangedHistoryAttach(row._wrap, m.tools);
+    } catch (e) {
+      /* 卡片失败不影响消息本身 */
     }
   }
   return row;

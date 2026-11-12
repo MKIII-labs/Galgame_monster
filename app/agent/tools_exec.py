@@ -1,14 +1,32 @@
 # -*- coding: utf-8 -*-
 
+import codecs
 import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from app import winproc
 from app.config import load_config
+
+
+# 命令增量输出的接收方（thread-local）：chat 主循环在执行 run_command 期间设置，
+# 读线程按行回调；不设置就是原来「只在结束时返回完整输出」的行为。
+_OUTPUT_SINK = threading.local()
+
+
+def set_output_sink(fn):
+    """设置当前线程的命令输出回调；返回上一个，便于调用方恢复。
+
+    注意：回调是在**读线程**里调用的，所以 `_t_run_command` 会在启动读线程前
+    先在当前线程把它取出来，再传进闭包 —— 不能在读线程里读这个 thread-local。
+    """
+    prev = getattr(_OUTPUT_SINK, "fn", None)
+    _OUTPUT_SINK.fn = fn
+    return prev
 
 
 
@@ -586,17 +604,55 @@ def _t_run_command(root, args, stop_event=None, shell_mode="strict",
             return ""
         return ("\n\n【外联审计】" + note) if note else ""
 
+    # 增量输出：读线程边读边回灌（前端 SSE），最终结果仍用完整输出。
+    # 以前用 communicate(timeout=0.2) 轮询，拿不到「跑到一半」的输出 ——
+    # 实测 run_command p90 11.8s、11.3% 超过 10s，用户全程只能干等。
+    chunks = []
+    _dec = codecs.getincrementaldecoder("utf-8")("replace")
+    _out_fn = getattr(_OUTPUT_SINK, "fn", None)   # 必须在当前线程取（读线程拿不到）
+
+    def _reader():
+        try:
+            for raw in proc.stdout:
+                # Popen 是二进制管道；用增量解码器，避免多字节字符被行边界劈开
+                line = _dec.decode(raw) if isinstance(raw, bytes) else raw
+                if not line:
+                    continue
+                chunks.append(line)
+                if _out_fn is not None:
+                    try:
+                        _out_fn(line)
+                    except Exception:        # noqa: BLE001  推流失败不能影响命令
+                        pass
+        except Exception:            # noqa: BLE001  读失败不影响命令本身
+            pass
+
+    reader = threading.Thread(target=_reader, daemon=True, name="cmd-reader")
+    reader.start()
+
+    def _collect():
+        # 子进程可能把管道留给孙子进程：最多等 2 秒，剩下的交给 daemon 线程
+        try:
+            reader.join(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+        return "".join(chunks)
+
     try:
-        # 边等边看停止信号：communicate 超时不会丢输出，可以放心地 0.2 秒轮一次
+        # 边等边看停止信号：输出在 chunks 里，wait 超时不会丢
         deadline = (time.time() + timeout) if timeout else None   # None = 不限超时
         while True:
             if stop_event is not None and stop_event.is_set():
                 _kill_tree(proc.pid)
                 try:
-                    out, _ = proc.communicate(timeout=5)
+                    proc.wait(timeout=5)
                 except Exception:
-                    out = b""
-                body = _clean_output(out)
+                    pass
+                body = _clean_output(_collect())
                 return ("⏹ 已按你的要求终止命令。\n命令：%s\n%s%s"
                         % (display, body, _audit_tail()), None)
             if deadline is None:
@@ -607,21 +663,21 @@ def _t_run_command(root, args, stop_event=None, shell_mode="strict",
                     raise subprocess.TimeoutExpired(display, timeout)
                 wait = min(0.2, remain)
             try:
-                out, _ = proc.communicate(timeout=wait)
+                proc.wait(timeout=wait)
                 break
             except subprocess.TimeoutExpired:
                 continue
     except subprocess.TimeoutExpired:
         _kill_tree(proc.pid)
         try:
-            out, _ = proc.communicate(timeout=5)
+            proc.wait(timeout=5)
         except Exception:
-            out = b""
-        body = _clean_output(out)
+            pass
+        body = _clean_output(_collect())
         return ("❌ 命令超时（%ds）已被终止。\n命令：%s\n%s%s"
                 % (timeout, display, body, _audit_tail()), None)
     used = time.time() - t0
-    body = _strip_cmd_noise(_clean_output(out), proc.returncode)
+    body = _strip_cmd_noise(_clean_output(_collect()), proc.returncode)
     verdict = "成功" if proc.returncode == 0 else "失败"
     head = ("命令：%s\n工作目录：%s\n结论：%s（退出码：%d，用时 %.1fs）"
             % (display, _rel(root, workdir), verdict, proc.returncode, used))

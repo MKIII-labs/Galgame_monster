@@ -130,7 +130,7 @@
   - **服务层** `server.py`（3 行）只是兼容壳：`from app.httpd import create_server`。真正实现在 `app/httpd.py`（571 行，`ThreadingHTTPServer` + `Handler`），静态资源有 mtime+size 内存缓存，主令牌 `TOKEN = secrets.token_urlsafe(24)`。
   - **路由双轨**：`app/httpd.py` 保留老的硬编码路由表，新模块通过 `app/registry.py` 的 `@route("/api/xxx")` 自注册（默认只收 POST，同一 method+path 重复注册直接报错）。**新增接口走 `@route`，不要往老表里加**。
   - **业务层** `app/` 共 101 项（74 个 .py + 子包 `api/ computer/ dojo/ math/`）。主链路是 `app/api/chat.py`（4773 行 / 324.5KB，流式 SSE 聊天，15 秒 `: ping` 心跳）。其余大块：`app/agent.py` 317KB（文件 Agent）、`app/stock.py` 134KB、`app/math_arena.py` 147KB、`app/interview.py` 107KB、`app/gal.py` 84KB、`app/autopilot.py` 79KB。`app/api/` 下 30 个文件，各自对应一组 REST 接口。
-  - **数据层两份并存**：JSON 走 `app/store.py`（`APP_VERSION` 是**唯一版本来源**，当前 3.3；路径常量 + mtime 缓存 + 临时文件 `os.replace` 原子写，带 3 次退避重试防 Windows WinError 5）；结构化数据走 `app/db.py` 的 SQLite `data/assistant.db`（表 `tasks / task_steps / artifacts / events / event_exdates / event_fired`，每线程一连接、WAL）。对话仍在 `data/sessions.json`，未迁移。
+  - **数据层两份并存**：JSON 走 `app/store.py`（`APP_VERSION` 是**唯一版本来源**，当前 3.4；路径常量 + mtime 缓存 + 临时文件 `os.replace` 原子写，带 3 次退避重试防 Windows WinError 5）；结构化数据走 `app/db.py` 的 SQLite `data/assistant.db`（表 `tasks / task_steps / artifacts / events / event_exdates / event_fired`，每线程一连接、WAL）。对话仍在 `data/sessions.json`，未迁移。
   - **前端** `web/`（33 项）：`index.html` 198KB 承载全部面板，`chat.js` 126KB、`stream.js` 101KB、`settings.js` 159KB、`hall-dojo.js` 151KB、`hall-interview.js` 149KB；原生 JS + CSS，无构建步骤，`web/vendor/` 内置 katex / monaco / pdfjs / vis-network / xterm。
   - **随包资源** `resources/`：`prompts/*.md`（10 个提示词）、`presets/gal/{backgrounds,bgm,characters,effects}`、`dojo/`、`eval/`。运行期数据在 `data/`（整目录 gitignore）。
   - **测试** `tests/` 140 个文件，覆盖 agent / chat / hall / dojo / stock / interview / gal / lsp / workflow 等；另有 `pytest.ini`、`ruff.toml`、`scripts/dev_check.py`。
@@ -3957,3 +3957,991 @@
 - 解决：补丁一律打到定义处——`import_module("app.agent.rules")` 打 `load_effective_rules` / `DATA_DIR`，`import_module("app.agent.undo")` 打 `undo_limit`（注意包里 re-export 了同名函数 `undo()`，`from app.agent import undo` 拿到的是函数不是模块），`app.agent.prompt` 打 `light_chat_is_local`；`test_custom_command_rules` 额外把 `rules.DATA_DIR` 指到 tmp，避免被本机全局规则影响。
 - 同时修回一处语义：`prompt.py` 的 `agent_hall_prompt` 原先在函数体内 `from app.config import load_config`，拆包时被提升成模块级早绑定，改回延迟导入，恢复「改设置即时生效 + 测试可打补丁」。
 - 教训：拆包/搬家后，先扫一遍 `monkeypatch.setattr(<模块>, ...)`，逐个确认目标模块是不是真正的消费方；涉及落盘的测试要把目录也指到 tmp。
+
+## [2026-11-10] 排查「AI 说工具没有返回输出」
+
+- 现象：会话 `s_07db41e3dabc` 里，AI 连续说「现在运行脚本 / 现在读取」，最后写「node _w16.cjs 400 的多次调用都没有返回结果，请你手动运行」。
+- 取证：`data/tool_trace/s_07db41e3dabc.jsonl` 里 `node _w16.cjs 400` 共执行 4 次，全部 `ok=True`、退出码 0、4–5 秒、结果 1.5KB；`data/trajectory/*.jsonl` 的 `tool/result` 也能对上。**所以不是命令没输出、也不是超时**（默认 60s，实际 5s）。
+- 真因：那几轮模型只输出了「我要运行」的文本，**没有发出 tool_calls**。`trajectory` 里 step 89 连着 5 条 assistant 文本才出现第一个 `run_command`；step 100 连着 17 条文本一个调用都没有，最后自己写「我已连续二十轮无法真正发起任何工具调用」。
+- 为什么会这样：同一回合反复断流。`data/app.log` 里 `[断流] 第23/25/55/61/66/71 轮 state=network|server`，`diag.status=0 / bytes=0` 表示连响应头都没拿到；`[重试]` 累计到第 7 次，且 `visible>0` 说明「已吐出的半截文本被保留」，于是消息里堆出一串重复的「现在运行脚本」。该回合最终 `rounds=101 total_ms=1347946 end_reason=budget`，是撞预算收尾，不是正常完成。
+- 放大因素（数据缺陷）：消息 89 的 `blocks` 里有 `{"kind":"tool","i":116}`，但 `tools` 只剩 23 条 → 刷新后那几张工具卡片取不到结果；`_resume_brief()` 只回灌 `tools` 最后 30 条，续跑时真实跑过的结果也可能被漏掉。可疑点在 `_save_progress()` 的 `last["tools"] = list(tool_log)`（覆盖而非追加，`app/api/chat.py:2521`）与 `_merge_blocks()` 的下标平移（`app/api/chat.py:790`）。
+- 结论口径：这不是「模型瞎编」，它的上下文里确实没有那次调用的结果；根因是**断流重试把「只有文本、没有 tool_calls」的半截响应也当成一轮**，以及中断快照覆盖工具时间线。
+
+## [2026-11-10] 缓存命中率掉到 85%：折叠改成「迟滞批量 + 单调游标」
+
+- 现象：回合级缓存命中率从长期 95%+ 掉到 85%，某些长回合中段连续 30 多轮只有 ~70%。
+- 取证（`data/token_usage.jsonl` 的 `rounds_detail`）：`prompt` 稳定 ~99k，`cached` 卡在 69.5k 不动；同一条记录的 `in_parts.tool_result` 从 27342 一路掉到 5861 —— 折叠点在历史中段，每轮往前挪一条，缓存从折叠点往后整段作废。
+- 根因：`tool_result_trim_tokens=100000` 恰好等于稳态请求体量（~99k），而 `trim_tool_results()` 的语义是「折到刚好回到预算线」。于是每轮都越线 → 每轮折一条 → 每轮都要为折叠点之后的 ~30k 付一次未命中。前缀缓存按「改一个字节后面全废」计费，折叠**次数**远比折叠深度贵。
+- 方案 A（迟滞）：`trim_tool_results()` 新增 `target_tokens`（低水位）。越过高水位就一次折到低水位，下一次要等体量再涨（高-低）才触发。默认低水位 = 高水位 × 55%，可用 `tool_result_trim_target` 覆盖。
+- 方案 B（单调游标）：新增 `start_index` + `stats={"cursor": ...}`。回合内维护 `_fold_cursor`，只扫游标之后的工具消息；已折叠的占位按 `FOLDED_MARK` 跳过。列表被 **压缩**（`del messages[1:1+_drop]`）或 **溢出恢复重建**（`recover_overflow`）时必须把游标归零，否则下标错位。
+- 改动位置：`app/context.py:trim_tool_results`（新参数 + `FOLDED_MARK`）；`app/api/chat.py` 三处调用点（回合开头压力检查 / token 触发 / 预算兜底）+ 两处游标重置（压缩后、overflow 后）；`app/config.py` 新增 `tool_result_trim_target`（0 = 自动 55%）。
+- 为什么不是「抬阈值」：抬高只是把触发点推后，稳态仍会撞线，属于止血；迟滞是把「每 N 轮折一次」变成「每 N 个阈值周期折一次」，与具体数值无关。
+- 推演（同一 103 轮回合，净增 ~1.65k/轮）：旧策略折约 30 次、未命中 1.33M（85.9%）；新策略折约 4 次、未命中 ~0.2M，估算命中率 ~97–98%。**这是推算，需实测确认。**
+- 验证：`pytest tests/test_context.py` 39 passed（含新增 3 条：一次折到低水位、再调不重复折、游标只前进）；全量 `pytest` 通过；`ruff check app tests` 通过；`scripts/dev_check.py` 全部通过。
+- 实测方法：跑一个长回合后看 `data/token_usage.jsonl` 最后一条的 `cached/prompt`，以及 `rounds_detail` 里出现低命中的轮次是否从「连续 30 轮」缩到「两三次」。
+
+## [2026-11-10] 调研：各 harness 怎么处理「只思考/空响应就停」，以及我们自动续跑的完整原理
+
+- 为什么做这个调研：长任务里模型经常在「说了一句要做什么」或「思考完」之后就停，用户感知为「AI 中断」。用 `data/trajectory` 统计 376 个回合、约 2 万个 step 后发现：中途「无工具调用就停」的轮次共 362 个，其中 **43% 正文为空但 reasoning 有 200–2000 tokens**，**45% 正文不足 120 字**。空正文轮的 reasoning 尾巴清一色是 `Let me …` / `我接下来…` —— 模型在思考里把下一步想完，就直接 stop 了，正文和 tool_calls 都没产出。
+- Claude 官方口径（`platform.claude.com/docs/en/build-with-claude/handling-stop-reasons`）：空响应（2–3 token + `end_turn`）**不要原样重试**（"Claude already determined it's done"），正确做法是追加一条**新的 user 消息** `"Please continue"`，且定位为「最后手段」。另外两条预防建议很关键：① 不要在工具结果后面紧跟文本块（否则模型学会「每次工具后都有用户发言」，于是主动结束回合）；② 空响应往往就发生在工具结果之后。
+- DeepSeek Harness 生态把这个当已知 bug 修：`@argszero/cordis-plugin-empty-response-guard` 在 `llm/stream` 边界把两种被记成 `reason.kind="stop"` 的形态**重新归类为可重试错误**：shape1 = 只有 `reasoning_content` 然后 stop；shape2 = 有正文但 usage 全 0。根因写得很清楚：adapter 用 `order.length === 0` 判空，只要来过任何一个 reasoning block，`EMPTY_RESPONSE` 分支就永远进不去，连带 `DEFAULT_RETRYABLE_CODES` 的重试机制一起失效。配套插件 `dsh-reasoning-only-guard` 还指出：reasoning-only 会把空 assistant 消息落库，网关随后用 `content or tool_calls must be set` 拒绝该会话之后的所有请求，会话直接废掉。`dsh-dsml-rescue` 的续跑提示是「take the next step」，明确不提供「宣布完成」选项，且带退避、几次后放弃。
+- 其它家：OpenCode 只对 `APIError.isRetryable` 重试（≤3 次、`2^n` 退避 + jitter），`finish` 未知时继续而不是停，并保留 finish 之后才到的 text/reasoning；Codex 的语义最简单——"A Turn yielding no output terminates the Task"，空轮直接结束，不做空响应重试；Cursor 闭源，社区可见 transcript 里有 `Continue executing.` 行（agent 层自动续）；Trae 闭源；ZCode 是开源 ADE，官方文档写明集成 Claude Code / Gemini CLI / Codex / OpenCode 四套框架，语义继承上游。
+- 我们踩的是同一个坑：`app/llm.py:1355-1358` 判 `EMPTY_RESPONSE` 时要求 `not _reason_final.strip()`，**reasoning 有内容就不算空** → 永远不会进 `empty` 重试，而是被当成普通 `stop` 落进 agent 层的续跑。这和 dsh 讨论 #6218 描述的缺陷逐字对应。
+- 我们自动续跑的完整链路（现状）：`_tool_loop_action()` 判定 stop（chat.py:831）→ 先过截断续写 / 计划闸门 / 伪调用 / 只思考没正文等一次性纠正 → `stepctx.auto_continue_reason()` 判四类触发（结尾征询用户 / 计划还有未完成步骤 / 说而不做 / 多步任务没建计划）与四类放行（受阻 / 等拍板 / 成篇结论且无待办 / 明确完成）（stepctx.py:605-690）→ `auto_continues += 1`，把上一轮正文作为 assistant、再追加一条 user `【自动续跑 n/limit】…`，然后 `continue` 重发请求（chat.py:5655-5712）。提示会随情形变化：有 pending 计划就催下一步，上次续跑没执行工具就强调「有工具直接调用」，最后一个工具失败就要求先处理失败。
+- 刹车条件：`auto_continue_limit`（`agent_auto_continue`，默认 3、0 关闭、-1 无上限，见 base.py:300）与 `agent_max_rounds`。**本机 `data/config.json` 目前是 `agent_auto_continue: -1` + `agent_max_rounds: 0`，两个都不设限**，所以那个回合能续跑 141 次、空转 17 轮。
+- 已知矛盾：`chat.py:5656-5657` 注释写「auto_idle 只用于加强提示，**不再**据此停轮」，而 `base.py:300-304` 的 docstring 写「连续空转另有保护（见 chat.py 的 auto_idle）」——两处不一致，实现是不刹车。
+- 未实施的备选修法（本次只记录，未改代码）：P0 把 `EMPTY_RESPONSE` 判定改成「没有可见文本 + 没有工具调用」，把 reasoning 排除在外，让 reasoning-only 走重试而不是续跑；P1 续跑提示改成 dsh 那种中性一句「继续下一步、不提供宣布完成选项」，连续 3 次无动作就停轮；P2 回灌时不要让工具结果后面紧跟一条纯文本 user 消息（现在 chat.py:7274-7279 就是这样）。
+
+## [2026-11-10] 提示词导致「工具不可用」误判：P0+P1 修复
+
+- 排查结论：`app/agent/prompt.py` 里有约 30 个硬编码提示词常量，`chat.py` 里还有一批 `_MSG_*` 纠正文案。但统计 trajectory 里 assistant 正文说「不可用 / 无法调用」只有 7 次（376 回合），并不是普遍现象；主要分布在三类：非 Agent 模式如实说没有文件/命令能力、空转后自我误诊成「通道问题」、子代理工具清单确实缺 read/run。
+- 真正会误导模型的是两处自相矛盾的写死文本：
+  1. `_CAPABILITY_BOUNDARY` 说「清单里没有的，就是当前不可用：直接说不可用」，而同一份提示词又说「低频组需要先 tool_search 解锁」——模型通常选绝对那条。
+  2. compact 分支把「低频组（需要解锁）：visual / image / asset / audio / workflow / utility / diagram」写死；`allow_groups=None`（全挂）时这些组其实都在 schema 里，提示词仍在喊「要解锁」，模型会多调一次无效的 tool_search。
+- P0 修改：`hidden_tools(allow_groups, unlocked)` 传入了 `unlocked`（`build_agent_prompt` 新增 `unlocked=None` 参数）；compact 分支那一行改成**按 hidden 动态生成**——没有未挂载组就一个都不列，有就只列真正缺的组（`TOOL_GROUPS` 反查）。
+- P1 修改：新增 `capability_boundary(has_hidden)`：有未挂载组时改成三档措辞——① 清单里有就直接调；② 清单没有但命中「未挂载组」就先 `tool_search` 解锁（下一轮生效），**不要直接说不可用**；③ 两边都没有才说不可用。无未挂载组时仍用原文案。
+- 已知限制（未改）：`build_agent_prompt` 只在回合开头调用一次，回合内 `tool_search` 解锁后 system prompt 不会重建（重建会破坏前缀缓存）。解锁的实际生效靠两处：`tool_search` 的返回文案「已解锁（下一轮生效）：…」+ chat.py 的 schema 重建（`_unlock_now != _tool_unlock_sig` 时重建 `native_tools`）。
+- 验证：`pytest tests/test_hall_prompt.py` 6 passed（新增 1 条覆盖 `capability_boundary(True/False)`）；全量 `pytest` 通过；`ruff check app tests` 通过；`scripts/dev_check.py` 全部通过。
+
+## [2026-11-10] 提示词 P2：没有文件工具时给出「怎么开启」，而不是「我没有能力」
+
+- 现象：`data/trajectory` 里有 3 例模型在非 Agent / 未设沙箱时说「当前环境不能跑命令」「没有写文件能力」然后收尾。判断本身没错（确实没工具），但用户拿到的是「做不到」，没有下一步。
+- 改动 1：新增 `_NO_AGENT_CAPABILITY`，纯对话模式（`agent_on=False`）时追加：说明本轮只有提问/搜索/计划/记忆，需要动文件就告诉用户「在左侧模式切到 Agent 并点 📁 选择工作目录」，并把第一步写清楚，不要假装执行、不要编造产物路径。
+- 改动 2：`agent_on=True` 但未设沙箱的分支文案从「如需读写文件，请先请用户点 📁 选择目录」改成「这时不要声称没有文件能力/不能执行命令 —— 请用户点 📁，选好就能读写与执行」。
+- 位置：两段都排在 `capability_boundary()` 之后 —— 最后读到的指令是「怎么开启」，而不是「当前不可用」。
+- 验证：`pytest tests/test_hall_prompt.py` 7 passed（新增 1 条：纯对话含「切到 Agent」、未设沙箱含「📁」）；全量 `pytest` 通过；`ruff check app tests` 通过；`scripts/dev_check.py` 全部通过。
+
+## [2026-11-10] 提示词分层第一步：新增 base 原则层
+
+- 背景：调研了 OpenCode（`prompt/anthropic.txt` 等 flavor 文件）、Codex（`core/gpt_5_2_prompt.md` + `protocol/src/prompts/base_instructions/default.md`）、DeepSeek Harness（`@deepseek-ai/dsh-system-prompt`）、Claude Code（preset + minimal 预设）—— 各家都有硬编码提示词，差别在**分层**：base instructions（任务无关）→ provider flavor → 项目规则（AGENTS.md / CLAUDE.md）→ 模式 prompt。我们只有「22 个常量 + build 函数拼接」，缺最底下那层，导致「交付了什么 / 可演示产物」这种场景性措辞被当成对所有任务都成立。
+- 本次只做 base 层，不动任何现有场景文案：新增 `_BASE_PRINCIPLES`（prompt.py:384-398），四条恒成立纪律：
+  1. 只做用户要求的事，不顺手改别的文件、不做没被要求的重构/优化/补注释；
+  2. **回答本身就是交付**：查看/解释/分析/对比/评估类请求，用只读工具取信息后直接在正文回答，不要为了「有个产物」而新建报告/总结/说明文档；
+  3. 只有用户明确要求时才写入；能改现有文件就不要新建；
+  4. 拿不准就按「只回答」处理，不要用「要不要我…」结尾（避免触发自动续跑的征询判定）。
+- 接入方式：`build_agent_prompt()` 在 if/elif/else 分支之后 `parts.insert(0, _BASE_PRINCIPLES)`（prompt.py:1007-1008），保证任何分支（Agent / 未设沙箱 / 纯对话）都以它开头；内容固定且在最前，对前缀缓存友好。本地轻量模型仍然整体返回空串，不注入（保持小上下文策略）。
+- 未做（下一步）：把场景性措辞从通用层挪走——`_FINISH_PROMPT` 的「summary 写清交付了什么」、`_PLAN_PROMPT` 的「有可演示产物」；以及 provider flavor / 项目规则层。
+- 验证：`pytest tests/test_hall_prompt.py` 8 passed（新增 1 条断言 prompt 以「## 基本原则」开头、且含两条禁令）；全量 `pytest` 通过；`ruff check app tests` 通过；`scripts/dev_check.py` 全部通过。
+
+## [2026-11-10] 调研：AI 为什么总生成报告文件；各家提示词分层对照（仅记录，未改代码）
+
+- 现象：用户只让「看看 / 解释 / 分析沙箱内容」时，模型倾向于在沙箱里生成一份报告文件再交付；Trae 能区分「只回答问题」和「需要改动才写文件」。
+- 数据取证（`data/trajectory`）：379 个回合里，用户消息像「查看/解释/分析」的 53 个，其中 13 个（25%）发生过写文件。比例有噪声（多数是「做一个网页」这类本身就要写的任务被关键词误命中），但存在明确误写样本：「你帮我读一下论文，让我快速了解…」→ 调用了 `write_file`。反向证据：非 Agent 模式（没有写权限）时模型只会说「没有写文件能力」，不会硬造文件 —— 说明不是「理解错意图」，而是「有权限就会用」。
+- 根因（按权重）：
+  1. **权限结构**：我们只有 `agent_enabled` 一个总开关，开了就给读+写+执行全量工具；Trae 是「模式即权限」——官方文档写明基础 Agent 是纯顾问角色、**无项目写入 / 终端执行 / 工具调用权限**，只有 Builder 模式才调编辑与运行工具。
+  2. **完成定义**：`_FINISH_PROMPT` 要求 summary 写「交付了什么」、`_PLAN_PROMPT` 要求里程碑「有可演示产物」、可视产物要「给文件路径」、`_full_agent_prompt` 开头说「自主读写文件来完成用户的任务」。四句叠加 = 「写文件才算完成」。
+  3. **缺负向规则**：工具选择决策表只讲「该选哪个工具」，没有一句「什么时候不该用写工具」。
+- 工具层对照（已核对源码）：Claude Code 的 Edit 有强制 **read-before-edit**（「must have read the file in the current conversation and it must be unchanged on disk since」，编辑未读文件直接失败）。**校正（2026-11-10 静态分析核实）**：原文「我们的 `edit_file` 零前置条件」已过时 —— 现在有强制 read-before-write：`app/agent/dispatch.py:414` 在 `caps.require_read`（配置键 `agent_require_read`，默认 true）下调用 `read_tracking._check_read_before_write`，`_READ_BEFORE_WRITE = ("write_file", "edit_file")`，未读 / 读后文件变化分别返回 `READ_REQUIRED` / `STALE_VERSION`。
+- 各家提示词形态（都有硬编码，差别在分层与可替换性）：
+  - OpenCode：`packages/opencode/src/session/prompt/anthropic.txt`（另有 openai / gemini flavor），开头 `You are OpenCode, the best coding agent on the planet.`；agent 可配 `prompt` 文件，社区有 `opencode-sysprompt-override` 插件整段替换。
+  - Codex CLI：`codex-rs/core/gpt_5_2_prompt.md` + `codex-rs/protocol/src/prompts/base_instructions/default.md`，可按模型选 prompt，支持 base_instructions / developer_instructions 定制。
+  - DeepSeek Harness：`@deepseek-ai/dsh-system-prompt` 包，固定 opener `You are an AI agent powered by the DeepSeek Harness SDK.`，`includeHarnessIdentity` 控制是否注入；插件可往 system prompt 塞内容（如 `dsh-memory-notes` 注入 `memory/*.md`）。
+  - Claude Code：preset system prompt（含 doing tasks / tone / tool usage 等固定章节），SDK 文档专门讲 modifying system prompts，并提供 minimal 预设。
+  - Cursor / Trae：闭源，只能看到用户级规则（`.cursorrules` / Trae Rules），内置部分不可改、无法核实。
+  - ZCode：开源 ADE，官方文档写明集成 Claude Code / Gemini CLI / Codex / OpenCode 四家框架，提示词继承上游。
+  - 共同的分层：base instructions（任务无关）→ provider flavor → 项目规则（AGENTS.md / CLAUDE.md）→ 模式 prompt。我们只有「22 个常量 + build 函数拼接」，缺 base 层，所以「交付了什么 / 可演示产物」这类场景措辞被当成了对所有任务都成立。
+- 已落地：新增 `_BASE_PRINCIPLES`（prompt.py:384-398）并在 `build_agent_prompt()` 里 `parts.insert(0, ...)`，见上一条记录。
+- 未实施（架构级，待拍板）：
+  1. 工具契约：~~`edit_file` 强制 read-before-edit~~（已实现，见上条校正）；剩下「新建文件前先 `list_dir` 确认路径不存在」尚未做。
+  2. 权限授予时机：复用 `allow_groups` / `hidden_tools` / `tool_search`，默认只挂读工具组，按回合意图解锁写组（误判可 `tool_search` 兜底）。
+  3. 完成定义解耦：`_FINISH_PROMPT` 的「交付了什么」→「结论 / 影响」；`_PLAN_PROMPT` 的「可演示产物」→「可验证结果」。
+  - 取舍：①每轮可能多一次 read/list；②意图判定有误判成本；③改动小。建议 ①+③ 先做、② 第二阶段。明确不建议只靠提示词反复强调「不要写文件」——只要写工具还在手上、finish 还问「交付了什么」，模型就会继续找文件填这个空。
+
+## [2026-11-10] 静态分析：全库巡检（1 严重 / 5 警告），附 1 处旧结论校正
+
+- 问题/决策：对 `app/` `scripts/` `tests/` `main.py` `server.py` + 前端 67 个 JS 做完整静态分析与运行时校验，产出分级报告 → `STATIC_ANALYSIS.md`（根目录）。结论：0 致命、1 严重、5 警告、8 类提示。
+- 严重：`app/agent/state.py:15` 先把 sid 塞进 `_LOADED_SIDS`、再 `snapstore.load()`，且异常被 `except Exception: pass` 吞掉 —— 瞬时 IO 错误会让该会话的撤销栈在整个进程生命周期内不再重试加载（「数据在、界面说没有」）。修复：标记移到成功之后 / except 里 discard，并加锁。
+- 警告：①`llm.py:933-938` 上下文超窗分支 `raise` 前漏 `resp.close()`（其余 5 个分支都有），共享 Session 连接池会被占满；②`hall.py:534` `stream=True` 下载图片无 close；③`desktop.py:435` `tempfile.mktemp`（TOCTOU，改 `mkstemp`）；④`sessions.py:345` `_MERGED = True` 先于 `_merge_events_once`，首次失败后本进程不再对账；⑤静默吞异常规模：S110 221 + S112 36 + BLE001 516，建议只在写路径/持久化 7 个位置补日志。
+- 已排除的误报（避免下次重复排查）：S608 SQL 拼接 19 处全是白名单列名 + `?` 绑定；B023 闭包 14 处都是同轮立即调用；SIM115 的 `main.py` 日志句柄与 `db.get_db` 连接池是有意长持有；RUF001-003 全角标点是中文文案；PLC0415 延迟导入是防循环依赖。
+- 一致性核对（专查「模型看得到工具但调用必失败」）：`tool_meta.META` 15 个 action 与 `_HANDLERS` / chat.py 内联分支一一对应，无缺失、无重复、无缺参定义。
+- **校正旧结论**：上一条「AI 为什么总生成报告文件」里写的「我们的 `edit_file` 零前置条件」已过时 —— `dispatch.py:414` 在 `agent_require_read`（默认 true）下强制 read-before-write，`_READ_BEFORE_WRITE = ("write_file","edit_file")`；仍缺的只有「新建文件前先 list_dir」。
+- 相关指令：`ruff check app --select B,S,C4,SIM,RUF,PERF,PIE,PLW,PLR,BLE --statistics`；`mypy app --ignore-missing-imports --disable-error-code var-annotated`（mypy 为本次临时装入 venv，不在 requirements.txt）；`pytest -q`（2222 用例 / 9 跳过 / 0 失败）；`scripts/dev_check.py` 全通过。
+- 已修复（2026-11-10，S-1 → W-1/W-2 → W-4）：①`agent/state.py` 把 `_LOADED_SIDS.add` 移到 `snapstore.load()` 成功之后，失败打印并留待下次重试；②`llm.py` 上下文超窗分支 `raise` 前补 `resp.close()`；③`hall.py:_read_remote_image` 包 `try/finally: resp.close()`；④`sessions.py` 对账失败时 `_MERGED = False` 再 `raise`。回归测试：`test_snap_steps.py`（失败不置位、第二次重试成功）、`test_session_store.py::test_merge_failure_does_not_latch`、`test_hall.py`（超限/成功两条路径都 close）。验证：目标测试 70 passed；全量 pytest 通过；`ruff check app tests` 通过；`dev_check.py` 全部通过。
+
+## [2026-11-10] 对比 Claude Code 主循环（queryLoop）与我们的 chat.py 循环
+
+- 资料可信度：CC 未开源。行为层以官方文档 `code.claude.com/docs/en/agent-sdk/agent-loop` 为准；内部结构来自第三方逆向（v2.1.220，`src/query.ts` 的 `queryLoop`，1700+ 行）与 deepwiki 的源码索引 —— 属二手资料，结论只作参照，不作为「官方实现」引用。
+- CC 的形态：显式状态机。`state.transition.reason` 七值（next_turn / collapse_drain_retry / reactive_compact_retry / max_output_tokens_escalate / max_output_tokens_recovery / stop_hook_blocking / token_budget_continuation），十个以上 terminal（completed / max_turns / aborted_tools / aborted_streaming / hook_stopped / stop_hook_prevented / blocking_limit / image_error / model_error / prompt_too_long）。恢复是**兄弟转移**不是嵌套 try；每轮开头按 reason 分派。每轮前有 5 段串行预处理：applyToolResultBudget → snipCompact → microcompact → contextCollapse → autocompact。工具由 `StreamingToolExecutor` 在 `tool_use` 块到达时就开跑；主子代理共用同一份 queryLoop（靠 `toolUseContext.agentId` 分支）。
+- 我们的形态（`app/api/chat.py`）：`while True`（4928）＋一组标志位（`nudged_*` / `_overflow_retried` / `cont_after_break` / `no_think_next` / `rounds`）＋内层「服务商链 + 重试」`while True`（5161）。收尾用纯函数 `_tool_loop_action`（831）判 stop/run/nudge_format/nudge_limit/stop_incomplete；终止落到 9 种 `end_reason`（7440–7574：stopped/budget/billing/network/idle/empty/max_rounds/length/done）。工具在**整轮流结束后**执行；只读工具靠 `_prefetch_reads`（2078，10 线程）并发，写/命令后保守停预取。子代理是独立实现（`explore.py:930` 自己的 while）。
+- 真实差距（按影响）：①**没有流式工具执行** —— 多工具轮的首个工具启动被推迟到整段正文生成完；②**完成判定不可编程 veto** —— `hooks.stop()` 在 `done` 落库之后才跑（8073），返回的 `decision: block` 被忽略，而 CC 的 Stop hook 能强制再来一轮（耗尽后落 `stop_hook_prevented`）；③恢复状态不可断言（嵌套 + 散落 flag，CC 用 `state.transition` 当测试断言面）；④子代理循环重复实现，修 bug 要改两处；⑤输出截断只有「关思考重试 / 窗口满先压缩」，没有 CC 的 `max_tokens` 升级档。
+- 补充（2026-11-10 复核，修正「子代理统一无用户可见收益」这一说法）：`explore.py` 完全不读 `stream_state`、也没有重试/降级（全文 grep 无 `stream_state` / `retry`），上游断流只会落到「没有得出结论」——**这是用户可见的**，所以「子代理没有收益」说得太绝对。但整循环统一仍然不划算：`_api_chat` 从 2994 行到文件尾约 4,760 行，耦合 SSE 闭包 / 会话对象 / 计划 / 验收 / 审批 / 撤销 / 轨迹 / 预取等十余个上下文；而底层能力（`llm.stream_chat`、`agent.run_tool`、`context.trim_tool_results`、`worktree`、`write_guard`）子代理**已经在复用**，差异只在编排层。正确的小步是把「重试 / 服务商降级」下沉到子代理的调用点（`explore.py:940` 外再包一层 `_should_retry_round`），而不是抽一个共享大循环。
+  - 已实现（2026-11-10）：没抽共享循环，只改 `explore._default_chat`。①`_sub_chain(ctx)` 用 `config.provider_chain()` 取服务商链（`(key,url)` 去重、最多 4 家、最后兜底 ctx 里的主服务商），结果缓存在 ctx 里，一批子代理只读一次配置；②状态分两类——`_SUB_RETRY_STATES`（idle/timeout/network/eof/upload/error/server/rate_limit/http/empty）同一家重试 `SUB_RETRIES=1` 次、退避 1s 起翻倍；`_SUB_SWITCH_STATES`（billing/auth/not_found/bad_request）不重试、直接换下一家；③**已有正文不重发**（否则子代理会输出两遍），直接交回上层；④用户停止时立刻返回，`_sub_sleep` 用 `stop_event.wait` 而不是硬 sleep；⑤耗尽后返回最后一次的 `stream_state`，`_run_one` 收尾把「没有得出结论」改成「没有得出结论（上游 network）」这类可定位文案。`quality_gate` 默认也走这个函数，一并受益。
+
+- 不建议照搬：CC 的 5 段预处理每轮都跑，会反复改写前缀、破坏前缀缓存 —— 我们刚为命中率做过迟滞折叠 + 单调游标，这块我们的方案更优；CC 对 SDK 调用方隐藏可恢复错误，而我们的 `rewind` 语义依赖「用户知道刚才断过一次」，也不宜照搬；状态机化收益主要在「可测试 + 可链式恢复」，我们已用 3 个纯函数覆盖判定，进一步改造优先级应排在流式执行之后。
+- 已对齐（2026-11-10，A + B + C，其余项按「已比对方强 / 收益不抵风险」不动）：
+  - A. **Stop hook 变成收尾闸门**：`chat.py` 在 `act == "stop"` 的最后一步调 `hooks.stop()`，由纯函数 `_stop_hook_action()` 判定；`decision=block` 时把 reason/contexts 回灌成一条 user 消息并 `rounds += 1` 再给一轮，每回合最多 `MAX_STOP_HOOK_BLOCKS = 1` 次。原先「done 之后才调」的那次已删除（否则 decision 被丢弃、且正常收尾会执行两次）。
+  - B. **流式只读执行**：`llm.stream_chat(on_tool_ready=...)` 在「新的 tool_call index 出现」时，把前一个调用（参数能 `json.loads` 完整解析）回调出去；`chat._stream_prefetch_sink()` 只跑 `_PARALLEL_READ` 白名单，流里一旦出现写/命令/交互工具就封住后续读（保证同批内读在写之前）；结果以 `(name, args_json)` 为键并入 `_prefetched`，`_prefetch_reads(..., skip=...)` 去重，线程池跨重试复用。
+  - C. **收尾/恢复判定纯函数化**：新增 `_truncation_action` / `_break_continue_action` / `_pseudo_final_action` / `_stop_hook_action`，行为与原内联分支逐条对齐（窗口满 → 先压缩再续写；输出额度满 → 直接续写；占位正文 → 提醒一次后收尾）。
+  - 行为变化（有意）：Stop hook 现在只在「正常收尾」触发，用户停止 / 预算耗尽 / 轮次上限 / 占位收尾不再触发 —— 与 CC 的 terminal 语义一致。
+  - 验证：新增 6 条测试（4 个纯函数、`_stream_prefetch_sink` 白名单与写后封堵、`on_tool_ready` 端到端假上游）；全量 pytest 通过；`ruff check app tests` 通过；`dev_check.py` 全部通过。
+
+## [2026-11-10] 对比 Claude Code 的读写分离工具并发（StreamingToolExecutor）
+
+- 资料可信度：CC 未开源。本节代码级细节来自第三方逆向（`src/services/tools/StreamingToolExecutor.ts`，约 530 行，v2.1.220；`src/services/tools/toolOrchestration.ts` 的分批逻辑）与官方 SDK 文档的行为描述，属二手资料。
+- CC 的实现：①**工具自声明** `isConcurrencySafe(input)`（`src/Tool.ts:402`）——`FileRead` / `Grep` 恒 true，`AgentTool` 恒 true（子代理上下文隔离），`Bash` 用 `isReadOnly(command) ?? false`，`buildTool()` 默认 false；②**三层防御**：Zod 校验失败 → unsafe，检查函数抛异常 → unsafe，`Boolean()` 强转防 truthy；③**调度是 6 行读写锁** `canExecuteTool(safe) = executing.length === 0 || (safe && all executing safe)`；④**分批**：连续安全调用合成一批并发，不安全调用单独成批、构成屏障，批间串行，并发上限默认 10；⑤**结果按声明顺序 emit**（先缓冲在 `results[]`），但 `pendingProgress` 可乱序立即推；`contextModifiers` 只允许独占工具修改；Bash 失败触发 sibling abort 取消同批；⑥**流式**：增量解析不完整 JSON，必需参数一可推断就开跑。
+- 我们的实现：①按名字白名单 `_PARALLEL_READ`（12 个，chat.py:1796），未知工具默认是屏障（保守方向一致）；②三段并发——流式预取 `_stream_prefetch_sink`（2217，4 workers，遇到非白名单即封）、响应后预取 `_prefetch_reads`（2135，10 workers，带路径依赖）、执行期分段并发 `_run_read_batch`（2087，连续只读且 ≥2 个才并发，写/命令/交互为屏障，调用点 6216-6229）；③结果按索引回填、按声明顺序消费，`tool`/`tool_done` 事件也按序；④读路径的 `_remember_read` 有锁，子代理另有 `worktree` + `write_guard` 隔离。
+- 我们更强的地方：写之后「不同路径的 `read_file`」仍可并发（`_prefetch_reads` 的 `written` 判断），而 CC 因为写是独占、后续整批要等它完成；预取还跨越了模型响应阶段。
+- 真实差距（按影响）：①`run_command` 里的只读命令（ls/cat/grep）不并发 —— 我们按工具名分类，CC 按 input 分类；不过我们有 `search_files` / `list_dir` / `git_status` 专用工具兜底；②`explore` / `delegate` 不在白名单 → 同一批里多个子代理调用串行（CC 的 AgentTool 恒并发安全，可同时跑多个子代理）；③流式粒度：我们等「下一个 index 出现」才交出上一个调用，CC 在必需参数可解析时就开跑；④没有独立的 tool 进度通道（命令输出要等 `tool_done`），CC 的 `pendingProgress` 可乱序即时推；⑤没有 sibling abort（CC 的 Bash 失败会取消同批）—— 我们的并发集全是只读，收益≈0。
+- 结论：并发**模型**已经等价（读写锁 / 连续批 / 屏障 / 保守默认都对上了），差异在「Bash 输入级分类」「AgentTool 可并发」「流式启动粒度」三处。
+- 已对齐（2026-11-10，仅改执行期扫描，不动整体架构）：
+  - ① **命令按参数判只读**：新增 `chat._cmd_read_only(args)`（只认单条 git 只读子命令，`CMD_GIT_READONLY`；拒绝管道 / 串联 / 重定向 / 前置 `-C` / `--output`），再叠 `judge_tool_rule` + `judge_command`，只有「明确 allow」才进并发批 —— 否则会绕过审批卡。`_run_read_batch` 增加 `unrestricted` 透传（与串行路径一致）。
+  - ② **多个只读 explore 并发**：`_explore_batchable`（未开写、非后台）+ `_run_explore_batch`（2 线程，共享同一份 ctx；`sse` 有 `_write_lock`、`ledger.add_sources` 自带锁）。写子代理仍串行（要抢审批卡 / undo 栈），后台批次本来就异步。关键事实：`explore.normalize_args` 里 `allow_write` **默认 False**，所以多数 explore 调用本来就可并发。
+  - ③ **更早的流式启动**：`llm._flush_ready` 从「下一个 index 出现才交出上一个」改成「参数闭合（`json.loads` 成功）就回调」，并严格按 index 顺序（前一个没流完，后面 `break` 不抢跑）；>200KB 的参数不做中途解析（`write_file` 正文这类本来也不在只读白名单里）。测试用一个「等客户端回调再发下一个 index」的假上游证明：不再依赖 index 前进。
+  - ④ **命令增量输出**（2026-11-11 已实现）：`tools_exec.set_output_sink()`（thread-local；**必须在调用线程取出再传进读线程闭包**，读线程里拿不到）+ `_t_run_command` 用读线程替换 `communicate(timeout=0.2)` 轮询（`codecs` 增量解码，防多字节字符被行边界劈开）；chat 侧 `_cmd_output_sink` 1 秒节流、单次 2KB、单条命令上限 20KB，发**瞬态** `tool_output`（不写 `_job["events"]`，否则回放膨胀/重连重复）；前端 `stream.js` 接事件、`chat.js.appendToolOutput` 只留最后 200 行且仅在贴底时自动跟随、`finishToolCard` 去掉 `streaming`、CSS `.tool-card.streaming .tool-result{display:block}`。测试：`test_run_command_streams_output_via_sink`（执行中就能收到首行/末行，最终输出仍完整）。
+  - ⑤ sibling abort：不做（并发集全是只读；实测 p90 亚秒级，见上一条评估）。
+- ④⑤ 收益评估（2026-11-10，基于 `data/trajectory` 24 个会话 / 7,761 次工具调用的实测）：
+  - `run_command` 1,511 次：p50 0.25s，p90 11.8s，p99 120.5s，max 311.2s；**≥5s 占 18.4%，≥10s 占 11.3%，≥30s 占 4.0%，≥60s 占 1.3%**；所有 ≥5s 命令累计等待 7,943s（约 2.2 小时）。→ ④（命令输出增量推送）有真实收益：约 1/9 的命令会让用户干等十几秒且看不到任何输出（现在只有「运行中 · 已用 Xs」）。成本：`_t_run_command` 要把 `communicate(timeout=0.2)` 改成读线程 + 队列（~60-80 行），前端 `stream.js` 的 tool 卡片要接增量（~50 行），并给进度事件加「瞬态、不写 `_job["events"]`」标记，避免重连回放和事件上限膨胀。
+  - 并行只读工具实测：`read_file` p99 0.02s、`list_dir` p99 0.26s、`search_files` p99 3.79s（max 13.2s）、`git_status` p90 1.18s。→ ⑤（sibling abort）收益≈0：失败时能省下的最多是这些读的剩余时间（p90 亚秒级），而真正的取消路径（用户停止）已经通过 `stop_event` 覆盖；引入级联取消反而有误杀风险。
+
+## [2026-11-11] 全链路内容检索策略总览（分层 + 场景）
+
+- 问题/决策：项目里的「内容检索」不是单一 RAG，而是四套并存的检索链路 + 一套精确符号查询。查清每套的算法、存储与触发场景，避免后续改动时把「检索式注入」和「全量注入」混为一谈。
+- 解决方案/原因（按链路拆）：
+
+  **A. 记忆 / 知识库检索（对话 RAG，`app/knowledge.py::retrieve_memory`）**
+  - 存储：知识库与会话记忆都是 JSON 图谱（`data/knowledge/*.json`、`sessions.json` 的 `memory`），**没有 FTS5**；`memory_items`（SQLite）只是镜像索引。
+  - 分词：`app/textmatch.py` —— 英文单词（≥2 字符）、中文二元组 + ≤12 字的整段，去高频虚词；知识库与统一记忆共用这一套。
+  - 关键词分：字段加权（标题/别名 3、标签 2、分类 1.5、正文 1）× IDF（`log((N+1)/(df+1))+1`）÷ 长度归一（`1+log(1+size/200)`）。注意：每字段只判「命中/不命中」，不是 BM25 的 tf 饱和。
+  - 向量分（可选）：复用 `codeindex.embed_texts`（fastembed + bge-small-zh-v1.5），混合 `0.45*关键词归一 + 0.55*余弦`；关键词 0 分且余弦 < 0.35 直接丢弃；模型没下载就完全退回关键词。
+  - 查询扩展：查询 token ≤ 2 时拼上上一轮用户消息（「继续 / 这个」这类指代）。
+  - 候选池 60 → 取 12；只有在 `memory_llm_pick` 开启且候选 > 40、且第 1 名 < 第 12 名 ×2（没有明显断层）时，才额外让模型挑一次（结果 TTL 缓存 120s）。
+  - 图谱扩展：命中节点补一跳邻居（≤4 条），邻居分 ×0.6；边上的 `fact` 会一起注入。
+  - 名额分配：8 条直接命中保底，剩余 4 个名额由「低分命中 + 邻居」同池竞争（`_merge_ranked`）。
+  - 预算：`INJECT_MAX_TOKENS=1500`，单条正文截 400 字；画像标题另固定注入最多 30 条。
+  - 非检索型注入（别与检索混淆）：`pinned_block`（规则/能力/力量类每轮常驻，仅 GAL）、`world_text`（整库拼给 GAL 编剧，≤9000 字）、`mem_tool.build_tool_prompt`（列最近 12 条 id+标题，超软上限放宽到 40）、`profile_read_block`（GAL 只读画像）。
+
+  **B. 代码检索（`app/codeindex.py` + `app/codesym.py`）**
+  - 分块：先按顶层符号切段，再按 80 行 / 重叠 10 行切；embedding 文本带 `# 相对路径:符号` 前缀。
+  - 索引：`data/codeindex/<root-hash>.npz`，按「根 + 文件 size/mtime + 配置」签名增量重建；文件超 512KB、二进制、密钥路径跳过。
+  - 召回：dense 余弦 + BM25（k1=1.2、b=0.75，标识符按驼峰/下划线拆）做 RRF 融合（k=60）；纯标识符查询 BM25 权重 1.6。
+  - 加权：路径命中 +0.02×命中数（≤3）、块符号与查询 token 精确相同 +0.08、符号图 boost（定义文件 0.10 / 引用或调用 0.03）。
+  - 过滤：`MIN_SCORE=0.34` 且无关键词命中 → 丢；同文件最多 2 段；单次结果 ≤7000 字。
+  - 降级：模型未就绪时按空白拆词逐行包含匹配。
+  - `codesym`：Python 用 `ast` 收定义/引用/调用/import（区分 def 与 call，带作用域和签名），JS/TS 用正则并标为低置信度；按文件 size+mtime 落盘缓存；提供 `lookup / impact / tests_for / boost_map`。
+
+  **C. 联网检索（`app/search.py` + `app/search_engines.py`）**
+  - 服务商：`auto` 免注册链 Firecrawl → Keenable → You.com（配额/鉴权失败冷却 1h），也可切 DeepSeek / 博查 / 火山 / Tavily。
+  - 查询：**由主模型自己在 `web_search(queries=[...])` 里写 1–3 个检索式**，没有单独的改写模块（`search.py` 头注释里的「查询改写」已过时）。
+  - 合并：多查询并行（≤4 线程），按 URL 去重，默认上限 12 条（研究档可放宽）；全失败时抛真实原因。
+  - 正文：抓前 N 页（默认 4），链路 Firecrawl 云端渲染 → r.jina.ai → 直连去标签；单页 2500 字，按查询词命中段落挑选而不是取前 N 字；每跳重定向都做公网 IP 校验（防 SSRF）。
+  - 台账：`app/research.py` 给来源全局编号（跨调用连续、URL 去重），`build_search_context` 用 `[n]` 注入；正文不入库，`slim_items` 只留标题/URL/摘要。
+
+  **D. 界面级检索（纯子串，无语义）**
+  - 会话：标题 + 消息正文子串，每会话最多 3 段（`api/sessions.py`）。
+  - 笔记：标题命中 + 每文件首处正文命中（`notes.search`）。
+  - 阅读器：解析后的 block 做去空白/零宽/软连字符 + 小写的子串匹配，带进程内缓存（`reader.search_blocks`）。
+  - 知识库面板：前端对标题/标签/内容过滤 + 上/下一个匹配（`web/knowledge.js`）。
+  - 统一记忆面板：`/api/memory?op=search` → `memory.search`（见下）；`op=recall` → `recall_detail` 召回调试。
+
+  **E. 精确符号 / 语言服务**
+  - `find_symbol`：正则找定义（轻量、无依赖）。
+  - IDE `/api/ide/lsp/*`：pyright 提供定义/引用/符号/诊断/重命名等（精确，但要起 LSP）。
+  - `repo_map`：只解析顶层符号，给模型「少读文件」的结构图。
+
+  **F. 统一记忆（`app/memory.py`）**
+  - 把知识库节点 / 笔记 / 会话记忆镜像进 `memory_items`，文件 mtime+size 指纹变化时自动重建（上限 3000 条）。
+  - `search()` 只取最近更新的 800 条，按 token 子串过滤，打分 = 重要度×2 + 出现次数×1.6 + 标签命中 + 作用域加成 1.5 + 90 天新近衰减 + 使用次数（≤0.5）；提示词只注入前 3 条（`context_block`，只取手动/任务来源）。
+
+- 场景矩阵（谁在什么时候用哪套）：
+  - 普通对话每轮：A（检索注入）+ F（长期记忆 3 条）+ `tool_prompt` 条目清单 + `_auto_code_refs` 自动代码召回（`score≥0.18`、最多 5 条、前 2 条内联、预算 8000 字，需索引已就绪）。
+  - GAL 剧场：`pinned_block` 常驻 + `world_text`（AI 编剧时）+ A（排除规则类、按勾选决定是否读画像/知识库）；默认不读 Solo 的画像与知识库。
+  - Agent 工具：`search_files`（正则/glob）、`search_code`（B）、`code_context`（符号 + 语义聚合）、`find_symbol`、`impact`、`repo_map`、`web_search`、`fetch_url`。
+  - IDE：`/api/codeindex/search` 语义搜索；LSP 精确定位；文件搜索复用 `search_files`（`/api/sandbox/search`）。
+  - 子代理 `explore`：finder/reader/worker/critic 用代码检索工具，searcher 只用 `web_search`；结论要求「文件:行号」，系统会重新读文件核对。
+  - 研究模式：`research.is_research_task` 命中「复刻 / 还原」后进入台账流程，写入前有最少检索次数闸门。
+  - 附件：发送时整篇解析并随附件保存，`attachment_read` 按 offset 分页读全文——**没有切片检索**。
+  - 笔记 / 会话 / 阅读器 / 知识库面板：D 的子串检索。
+
+- 已知短板（如需优化再单开任务）：
+  - 知识库关键词分无 tf 饱和、无短语匹配；向量是可选增强，模型缺失时静默退化为纯词面。
+  - 向量与统一记忆都是线性扫描（社区规模小可接受，量大需 ANN / FTS5）。
+  - `memory.search` 只覆盖最近 800 条，老条目事实上检索不到。
+  - `search.py` 头注释写「查询改写」，实际查询由模型生成——注释过时。
+  - 两套分词器（`textmatch` 与 `codeindex._tokens`）刻意分开：前者服务知识库/记忆，后者服务代码，改其中一套不会影响另一套。
+- 相关代码：`app/knowledge.py`、`app/textmatch.py`、`app/codeindex.py`、`app/codesym.py`、`app/search.py`、`app/search_engines.py`、`app/research.py`、`app/memory.py`、`app/prompt_assembly.py`、`app/mem_tool.py`、`app/explore.py`、`app/agent/tools_files.py`、`app/api/{chat,memory,codeindex,sessions,reader}.py`、`web/knowledge.js`。
+- 验证方式：只读调研，未改代码；结论均对应上述文件中的常量与函数（如 `VEC_WEIGHT=0.55`、`INJECT_MAX_TOKENS=1500`、`MIN_SCORE=0.34`、`MAX_QUERIES=3`、`MAX_MERGED=12`）。
+
+## [2026-11-11] Solo 过程步骤的智能自动跟随（折叠区）
+
+- 问题/决策：过程折叠区（`.process-fold`）在流式时虽然会把聊天滚到最底，但答案区在过程下方，「贴底」等于把刚出现的步骤顶出屏幕；同时展开后一大串步骤没有「当前在哪一步」的视觉焦点。决定：只跟随「当前步骤」，用户上翻立即暂停，并补当前步骤高亮 / 已完成自动收起 / 可关闭开关。
+- 方案：
+  - 跟随算法（`web/chat.js::followProcessStep`）：新步骤出现时不贴整条消息底部，而是在 rAF 里比较步骤与 `#chat` 视口矩形，只滚动「刚好露出这一步」的差值（上/下各留 24px）；`_followBottom=false`（用户上翻）时直接回退到原来的 `scrollToBottom()`（暂停态下它是空操作）。
+  - 暂停 / 恢复：复用现有 `_followBottom` —— 滚轮上翻立刻锁住，回到底部或点右下「回到底部」恢复；不新增按钮。
+  - 增长观察器（`watchChatGrowth`）：过程区内的 DOM 增长（思考文字逐字、工具卡完成）不再走 `followScroll()` 贴底，改为跟随 `lastProcessAnchor()`（优先 `.tool-card.is-current`，否则过程流最后一个节点）；答案正文的增长仍走原贴底逻辑。
+  - 当前步骤高亮（`markProcessStep` / `unmarkProcessStep`）：工具卡加 `.is-current`，所在组加 `.current`；并行的多张卡会同时亮，`finishToolCard` 时逐个熄灭。样式在 `base.css`：浅强调色底 + 呼吸点（`step-live` 1.2s），组头加深一层强调色。
+  - 自动展开 / 收起：新工具卡进组前清掉待执行的收起定时器，组处于收起态时 `setToolGroupOpen(g, true, false)`；一组 `pending` 归零后延迟 1200ms 调 `autoCollapseToolGroup(g)`（它自己会拒绝：有失败、用户手动展开过、仍有 pending 时不收）。
+  - 开关：`app/config.py` 新增 `ui_process_follow`（默认 true）；设置页「主题与外观 → 对话过程」加 `#ui-process-follow`，`settings.js` 负责回填 / 收集 / 恢复默认（`STATIC_RESET_KEYS.appearance`）。关闭后只停止滚动，高亮与自动收起仍生效。
+- 相关代码：`web/chat.js`（`processFollowEnabled` / `followProcessStep` / `lastProcessAnchor` / `watchChatGrowth` / `markProcessStep` / `unmarkProcessStep` / `finishToolCard`）、`web/stream.js`（`step` / `tool_stream` / `tool` / `tool_done` 四个分支里把 `scrollToBottom()` 换成 `followProcessStep(...)`，并加收起定时器）、`web/css/base.css`、`web/index.html`、`web/settings.js`、`app/config.py`。
+- 验证：`node --check web/chat.js web/stream.js web/settings.js` 通过；`node scripts/transpage_test.js` 18/18；`pytest -q tests/test_settings_defaults.py tests/test_lazy_context.py` 19 passed；`ruff check app/config.py` 通过。**未做真机浏览器验证**（起服务会读写真实 `data/`），需要在 Solo 模式发一条带多轮工具的长任务，观察：新步骤自动露出、上翻即停、高亮随步骤切换、已完成组约 1.2s 后收起、设置开关即时生效。
+- 已知取舍：GAL 执行区不走这条链路（仍按原贴底）；历史消息里的过程卡不会出现 `.is-current`；跟随只在折叠区展开时生效（收起时只更新「N 步」统计）。
+
+## [2026-11-11] Claude Code 三层记忆架构（泄漏源码）vs 本项目现状
+
+- 问题/决策：用户要求查 Claude Code 的三层记忆架构源码并对比本项目。CC 闭源，无法直接读官方仓库；采用「官方文档 + 2026-03-31 npm sourcemap 泄漏分析」两条证据链，逐层映射到本项目的实现，不改代码。
+- 来源与可信度：
+  - A 级（官方）：`code.claude.com/docs/en/memory`（CLAUDE.md 四作用域、auto memory、`MEMORY.md` 每会话加载前 200 行或 25KB）、`docs.claude.com/.../memory`（旧版四位置 + `@import` 深度 5）。
+  - B 级（泄漏源码分析）：`@anthropic-ai/claude-code@2.1.88` 的 `cli.js.map` 带完整 `sourcesContent`，社区还原 4756 个源文件 / 1884 个 TS 文件；`src/memdir/`、`src/services/extractMemories/`、`src/services/compact/` 等路径与常量在多份独立分析中一致。
+  - C 级（行为推断）：AutoDream、extractMemories 的特性开关、Team Memory 等，属泄漏分析中「已实现但可能灰度」的部分。
+  - 关键提醒：「三层记忆」不是 Anthropic 官方术语，是社区对「上下文窗口 / 会话记忆 / 持久记忆」三层协作的概括；官方文档只明确 CLAUDE.md + auto memory 两套机制。不同分析对压缩层数的说法不一致（4 种压缩机制 vs 3 级回退顺序），本条目按「机制」和「回退顺序」分开记录。
+
+- Claude Code 源码级结构（三层 + 一个指令层）：
+  1. **L1 上下文窗口（短期）**：原始 messages + 工具结果。压缩不是只有「摘要」一种：
+     - `microCompact`：每轮按 token 截断旧工具结果、超过 24h 的清空，只处理可压缩工具（File I/O / Bash / Grep / Glob / Web），Agent 结果不压；
+     - `cachedMicrocompact`：把缓存编辑跨轮固定，服务 prompt cache（特性开关）；
+     - `full compact`：fork 一个只输出文本的摘要代理，9 段式摘要（原始请求 / 技术概念 / 文件与代码 / 错误修复 / 问题解决 / **用户原话逐字** / 待办 / 当前工作 / 下一步），`<analysis>` 草稿被剥掉；
+     - `snip compaction`：按需删除旧上下文（特性开关）。
+     - 触发：约「有效窗口（窗口 − 最大输出）− 13k buffer」的 93%；连续失败 3 次熔断。
+     - 回退顺序（另一份分析）：Session Memory 零成本压缩 → full compact（1 次 API）→ PTL retry（prompt-too-long 时按 API 轮次从最旧丢，最多 3 次）。
+     - 压缩后恢复 6 类状态：最近文件（≤5 个 / 50k token）、当前 plan、已调用 Skill 内容（每个 ≤5k）、异步 Agent 状态、延迟工具定义、SessionStart hooks（CLAUDE.md 重新注入）；已被保留消息覆盖的文件不重复恢复。
+  2. **L2 会话记忆（中期）**：后台 fork 子代理维护 `session_memory.md`，只允许编辑这个文件；每次模型响应后的 `post_sampling_hook` 判断是否更新。触发条件 = token 增长达硬阈值 AND（工具调用数达阈值 OR 上一轮没有工具调用这个自然停顿）。压缩时保留原文 10k–40k token、至少 5 条文本消息，且绝不切断 tool_use / tool_result 配对。它的价值是：压缩时可直接用这份现成摘要替换旧历史，**零额外 API 调用**。
+  3. **L3 持久记忆（长期，memdir）**：`~/.claude/projects/<sanitized-git-root>/memory/`，文件系统即数据库，无 DB、无向量库。
+     - `MEMORY.md` 只是索引：≤200 行、≤25KB；每行 `- [标题](文件.md) — 一句话钩子`；超限先按行截、再按最后一个换行按字节截，并追加 WARNING。
+     - 每条记忆一个 `.md`，YAML frontmatter `name / description / type`；`description` 是后续检索判断相关性的核心依据。
+     - 只有 4 类：`user`（角色/目标/知识背景）、`feedback`（纠正与确认，含 Why/How to apply）、`project`（进行中的工作/目标/截止，相对日期转绝对日期）、`reference`（外部系统指针）。明确「不存」：代码模式、架构、git 历史、调试方案、CLAUDE.md 已有内容、临时任务状态。
+     - 扫描：递归 `.md`（排除 MEMORY.md），只读前 30 行 frontmatter，按 mtime 倒序，最多 200 条。
+     - 写入：`services/extractMemories` 在每轮完整问答结束时后台抽取（与主代理写入并存，特性开关）。
+     - 检索三层：① 会话开始静态注入 `MEMORY.md` 索引（每会话只读一次，会话中改文件本轮不生效）；② 每轮用户消息后 1 次 Sonnet `sideQuery`，从 manifest 里挑 ≤5 条相关记忆（带已展示去重 + 最近成功工具），作为 attachment 注入；③ 模型按需用 Grep/Glob 搜 `~/.claude/.../memory/`（system prompt 里有 `buildSearchingPastContextSection()` 教它怎么搜）。
+     - AutoDream：≥24h 且 ≥5 个会话后，后台「做梦」子代理按 Orient → Gather → Consolidate → Prune 四阶段合并/去重/修剪记忆（特性开关）。
+     - 每个 agent type 还有独立的 `agent-memory`（3 个 scope）。
+  4. **指令层（不是记忆层）CLAUDE.md**：Managed policy / User / Project / Local 四级，越靠近工作目录越后读；子目录 CLAUDE.md 按需加载；`@import` 递归（新版 4 跳、旧版文档 5 跳）；`.claude/rules/*.md` 支持 `paths:` 按文件类型/目录生效；建议单文件 <200 行；HTML 块注释注入前剥掉；压缩后从磁盘重读并重新注入，所以不会丢。
+
+- 本项目的对应实现（同一口径）：
+  1. **L1 上下文**：`context.compress_history` + `maybe_precompress` + `maybe_compact_working_set`。工具结果先落盘 / 折叠（`tool_spill_max=12000`、`tool_result_max=30000`、`tool_result_trim_tokens=100000`、保留最近 2 条、折叠摘要 240 字）；历史压缩用 `request_budget() = min(W×ratio, W − maxOut − headroom)`（ratio 0.8、headroom 8192，照 dsh 公式）+ 工作集 40k；当前回合永不压（`_clamp_keep_from`）；压缩请求里 pin 当前目标 / 验收项 / 计划 / task_state / 已有摘要 / PreCompact hook；摘要比原文长就放弃；写完用区间指纹校验，压缩期间历史变了就作废；`summary_mem` 要点落盘后写进会话记忆的「历史摘要」节点（整批替换，不追加）。**没有** PTL retry、cached microcompact、snip，也**没有** 6 类状态恢复（最近文件 / 延迟工具等靠历史与 task_state 兜底）。
+  2. **L2 会话记忆**：没有独立的后台摘要代理。中期载体是 `s.summary / s.summary_upto / compress_marks`（给前端画压缩分隔线）+ 会话记忆图谱（`session.memory.nodes/edges`）。摘要要点经 `flush_summary_memory` 变成 `历史摘要` 类节点，参与后续检索；没有「自然停顿时持续刷新工作笔记」的机制，也没有「用现成会话记忆做零 API 压缩」的分支。
+  3. **L3 长期记忆**：JSON 图谱（知识库 / 用户画像 / 会话记忆），节点有 category / tags / aliases / notes / size / color，边有 11 种关系 + `fact` + `invalid_at` + `source_msg`；SQLite `memory_items` 只是镜像（上限 3000，文件 mtime+size 指纹变化自动重建）。检索 = 字段加权（标题/别名 3、标签 2、分类 1.5、正文 1）× IDF ÷ 长度归一，可选向量（bge-small-zh，权重 0.55），候选 60 → 12 条 + 一跳邻居 4 条，预算 1500 token；候选 >40 且分数无明显断层且开了 `memory_llm_pick` 时，才让模型从已排序候选里挑一次（默认关，结果缓存 120s）。另有 `memory.search`（最近 800 条，重要度/新近/使用次数线性打分）供记忆面板与 `memory.search` 工具用。**没有** MEMORY.md 式索引文件、per-topic markdown、description 相关性 sideQuery、按 mtime 扫描 200 条、后台抽取代理、AutoDream 式离线合并。
+  4. **指令层**：`agent/rules.py` 读沙箱根目录的 `AGENTS.md` / `CLAUDE.md`（按顺序、6000 字上限、mtime 缓存、每轮重读，压缩后不会丢），只在 Agent 模式 + 有沙箱时注入；另有全局规则（用户画像里的 rules）每轮注入。**没有**用户级 / local / 子目录按需 / `@import` / `.claude/rules` 路径作用域。
+
+- 差异矩阵（结论）：
+  - 索引化：CC 是「有界常驻索引 + 按需读正文」；我们是「无索引，靠每轮检索 + 工具提示里列 12/40 条标题」。CC 的常驻成本可预测，我们的召回上限受 1500 token 预算约束。
+  - 中期层：CC 有持续维护的会话工作记忆，压缩可零 API；我们每次压缩都要一次模型调用，会话记忆更像「用户可见的图谱 + 压缩要点」。
+  - 写入：CC 是后台抽取代理 + 4 类封闭分类 + 明确负面清单；我们是模型在回复里输出 ```memory 操作块（同步执行）+ 6 种 op + 多作用域 + 撤销。我们可控可追溯，但依赖模型主动写、噪声治理靠提示词。
+  - 检索：CC 用 description 清单 + Sonnet sideQuery + 模型 grep；我们用词法/向量/图扩展 + 可选模型挑选。我们的图结构和混合召回更强，CC 的按需加载和索引边界更稳。
+  - 冲突/历史：我们有 `invalid_at`、`source_msg`、`append_note`、`unlink`、11 种关系；CC 是单文件覆盖/删除，没有图语义。
+  - 合并/遗忘：CC 有 AutoDream 离线四阶段；我们只有 `memory_soft_limit` + 提示词要求模型合并，没有自动修剪。
+  - 项目规则：CC 四级 + 子目录按需 + import + 路径规则；我们只有根目录两份文件 + 全局规则，6000 字上限。
+  - 压缩兜底：CC 有 PTL retry + 3 次熔断 + 6 类状态恢复；我们有当前回合保护、pin、指纹校验、质量闸门（本地摘要锚点召回率）与本地/主模型回退，但没有 PTL retry 与显式状态恢复。
+
+- 可借鉴（按收益/成本，未实施）：
+  1. 给长期记忆加一份「有界索引」：MEMORY.md 式一行一条，常驻注入，正文按需读——可直接复用现有节点标题/分类，但需要定义索引上限与重建时机。
+  2. 会话工作记忆：轻量后台摘要（或复用压缩摘要）持续刷新，压缩时优先复用它，省一次 API；注意与现有 `summary` / `历史摘要` 节点的职责边界，避免双写。
+  3. 长期记忆离线整理：定期把重复 / 过时节点合并（我们已有 `memory_soft_limit` 提示，可做成后台任务），但必须保留 `invalid_at` 与 `source_msg`。
+  4. 压缩兜底：给 `_api_compress` 加 PTL 重试与连续失败熔断；成本低、风险小。
+  5. 项目规则分级：先支持用户级规则文件与子目录 `AGENTS.md` 按需加载，`@import` 与路径规则收益更大但改动面也更大。
+  - 不建议照搬：每轮一次 Sonnet sideQuery —— 我们实测「记忆挑选」在首字节前 p90 1.9s / 最坏 7s，已默认关闭；在本地单机场景用「索引 + 词法/向量」更划算。AutoDream 的全自动改写也不建议直接照搬，需先有可回滚的合并审计。
+
+- 相关代码：`app/context.py`（`request_budget` / `compress_history` / `flush_summary_memory` / `maybe_precompress` / `maybe_compact_working_set` / `_clamp_keep_from`）、`app/knowledge.py`（`retrieve_memory` / `_rank_items` / `_score_fields` / `_expand_neighbors` / `_merge_ranked` / `pick_relevant` / `pinned_block`）、`app/memory.py`（`search` / `context_block` / `reindex` / `MAX_ITEMS`）、`app/mem_tool.py`（`build_tool_prompt` / `MemoryExtractor` / `apply_chat_ops`）、`app/agent/rules.py`（`project_rules`）、`app/prompt_assembly.py`（`base_system_parts`）、`app/db.py`（`memory_items`）、`app/config.py`（压缩 / 召回相关默认值）。
+- 验证/边界：只读调研，未改代码；CC 侧源码级结论来自泄漏分析，版本为 v2.1.88，后续版本可能已变；官方文档与泄漏分析对「压缩层数」的表述不同（机制 4 种 vs 回退 3 级），已在上面分开记录。本项目侧结论逐条对应上述文件中的函数与常量。
+
+## [2026-11-11] 对齐 Claude Code：L1 压缩兜底 + L2 会话工作记忆
+
+- 问题/决策：上一轮对比确认，真正弱于 CC 的是「压缩没有 PTL 重试 / 熔断」和「没有持续维护的会话工作记忆（压缩必须每次花一次模型调用）」。图结构、失效边、原话锚点、多作用域撤销、混合检索、压缩 pin / 指纹校验等我们更强的部分不动。L3 有界索引与项目规则分级本轮未做。
+- L1 压缩兜底（`app/context.py`）：
+  - `_api_compress` 遇到上游「上下文超长」时，按最旧丢 20% 回放消息再试，最多 `COMPRESS_PTL_RETRIES=3` 次；其它错误不重试。判定同时看 `str(e)` 与 `e.response.text`（requests 的 HTTPError 默认只带状态码）。
+  - 连续失败熔断：`_note_compress_result(sid, ok)` 记录每个会话的连续失败；达到 `COMPRESS_BREAKER_FAILS=3` 后熔断 `COMPRESS_BREAKER_SECS=600` 秒，`maybe_precompress` / `maybe_compact_working_set` 在熔断期内直接跳过。只有「真的尝试摘要但失败」才计数，`keep_from <= cut`、用户停止这类良性返回不计数。
+- L2 会话工作记忆（新增 `app/session_memory.py`）：
+  - 回合结束（`chat.py` 落库后）调 `maybe_update(sid, had_tools)`，后台线程执行，不阻塞回复；GAL 不启用。
+  - 触发（对齐 CC 双阈值）：token 增长 ≥ `MIN_TOKENS=6000`，且「工具调用 ≥3」或「本轮没有工具调用（自然停顿）」；首次产出需要历史 ≥ `INITIAL_TOKENS=8000`。
+  - 写入：把「现有工作记忆 + 新增对话（含工具调用摘要）」交给轻量模型，合并成固定七节 Markdown（目标 / 已完成 / 关键决定 / 文件与命令 / 错误与修复 / 未完成与下一步 / 用户偏好与纠正），上限 12000 字；字段 `session_memory / _upto / _at / _tokens / _tool_calls / _fp`。
+  - 模型兜底（`_call_model`）：先 `use_light=True`；如果配置了轻量模型但它抛错或返回空，再用 `use_light=False` 走主模型重试一次。**没配轻量模型时 `_quick_chat` 本来就用主模型**（`_pick_light_model` 返回空），所以只调一次，不会重复烧钱。判定与 `llm._pick_light_model` 对齐：本地 light 在混合模式关闭时不算「有轻量模型」。
+  - 零 API 压缩：`compress_history` 在算完 `keep_from` 后先查 `_session_memory_ready` —— 覆盖待压区间（`upto >= keep_from`）、未过期（6h）、区间指纹未变时，直接把工作记忆当摘要写入，省掉这次摘要调用；否则走原流程。
+  - 并发安全：后台更新与 `_persist_session` 共用 `store._lock`；`_keep_fresh_summary` 增加「磁盘上的工作记忆比请求快照新就搬过来」，避免旧快照把后台更新覆盖掉。
+  - 开关：`app/config.py` 新增 `session_memory_enabled`（默认开）；设置页「上下文与压缩 → 压缩」加 `#session-memory-enabled`，`settings.js` 负责回填 / 收集。
+- L3 有界记忆索引（`app/knowledge.py::memory_index_block`，对齐 CC 的 MEMORY.md）：
+  - 把可访问的知识库 + 会话记忆渲染成 `- [作用域·分类] 标题 — 一行钩子`；正文仍由检索 / `memory.search` 按需取。
+  - 双上限：默认 **200 行 / 25KB**（`MEMORY_INDEX_LINES/BYTES`，可用 `memory_index_max_lines/bytes` 覆盖，0 = 不限）；超限按行 / 最后一个换行截断并在头部标注。
+  - 排除「用户画像」（已由画像块 / 记忆工具清单覆盖，CC 的 MEMORY.md 也不含 CLAUDE.md）与「历史摘要」节点（已由 summary 块注入）。
+  - 按会话缓存（`sid -> (sig, text)`，最多 32 个）：节点 id / updated_at / 标题 / 正文长度 / 上限配置组成签名，记忆没变直接复用；变了才重建。本地轻量小窗口模型不注入。
+  - 注入位置：`prompt_assembly.base_system_parts` 的固定段（tool_text 之后），避开每轮动态检索；GAL 不走这条链路。真实数据只读测量：6 个会话索引 1.1–10.9KB / 10–103 行，未触顶。
+- 记忆注入预算：`INJECT_MAX_TOKENS` 1500 → **3000**，并改为可配置 `memory_inject_tokens`（clamp 300–50000，设置页「记忆检索」可改）；`retrieve_memory(budget_tokens=None)` 默认读配置，`recall_detail` / `kb_stats` / `memory.estimate` 都改为 `inject_budget()`。KB 面板新增「常驻索引」一行，说明索引上限；`kb_stats` 回报 `memory_index_enabled / max_lines / max_bytes`。
+- 开关：`memory_index_enabled`（默认开），设置页「记忆检索」新增「常驻记忆索引（MEMORY.md 式）」；`memory_index_max_lines/bytes` 只在配置里，暂不放 UI。
+- 验证：新增 `tests/test_compress_retry.py` 3 条；`tests/test_session_memory.py` 7 条；`tests/test_memory_index.py`（渲染 / 排除画像 / 缓存 / 排除历史摘要 / 行数截断 / 关闭与本地模型跳过 / 预算 clamp）7 条；`pytest -q` 跑 `test_compress_retry / test_session_memory / test_memory_index / test_context / test_compress_marks / test_working_set / test_hybrid / test_stream_stop / test_prompt_assembly / test_knowledge_retrieval / test_settings_defaults / test_memory` 全部通过；`ruff check` 通过；`node --check web/settings.js web/knowledge.js`、`py_compile` 通过。未做真机验证。
+- 口径（更新）：之前说的「长期记忆常驻预算 1500」现在默认 3000、可配置，仍然只约束每轮「【相关记忆】+【关联记忆】」这一块（单条正文 400 字，命中 + 邻居合并最多 12 条，邻居 ≤4）；画像标题最多 30 条、GAL `pinned_block`、记忆工具条目清单不占它。**新加的 L3 索引是另一笔开销**（最多 200 行 / 25KB，常驻固定段），两者不要混在一起算。
+- 边界 / 未做：会话工作记忆只服务压缩接续，不参与记忆检索排序，也不进前端 payload（`slim_sessions` 白名单未包含）；GAL 不启用；项目规则分级（子目录 / @import）未做。
+
+## [2026-11-11] Claude Code 五级上下文压缩管线 + 内容检索 vs 本项目
+
+- 问题/决策：用户要求查 CC 的「五级上下文压缩管线」与内容检索策略源码，并对比现状。CC 闭源；依据 2026-03-31 npm v2.1.88 的 `cli.js.map` 泄漏、arXiv 2604.14228（基于 v2.1.88 源码的论文）与多份独立源码分析。不同分析对 `microcompact` 的职责描述有冲突，本条目按论文/源码分析的五段命名记录，细节标 B 级证据。
+- Claude Code 的五级 Pre-model Shapers（每次模型调用前依次执行，越靠后越贵）：
+  1. **Budget Reduction**：`applyToolResultBudget()`。单个工具结果超过 `maxResultSizeChars`（分析口径约 25k 字符）就替换成「内容引用」，原文可恢复；部分工具豁免。对应「逐条工具结果限长」，不是全局预算。
+  2. **Snip**：`HISTORY_SNIP` 开关。超压力阈值时整段删除最旧历史，返回 `{messages, tokensFreed, boundaryMessage}`；`tokensFreed` 必须显式传给 Auto-Compact，因为主计数来自最后一条 assistant 的 `usage.input_tokens`，Snip 之后它仍报旧值。论文伪代码用 0.85 压力阈值；另一份分析写「超出目标 13K 触发」——阈值表述不一致。
+  3. **Microcompact**：`CACHED_MICROCOMPACT` 开关。按 `tool_use_id` 找单条过大消息（伪代码阈值 3k token），调 LLM 只保留错误 / 数值 / 路径；有「时间基」与「缓存感知」两条路径，后者用 API 返回的 `cache_deleted_input_tokens` 判断。注：另有分析把 microcompact 描述成「缓存重排」、把旧工具结果截断也算进 microcompact，属命名漂移。
+  4. **Context Collapse**：`CONTEXT_COLLAPSE` 开关。**读时投影**：不改原历史，把较早消息换成 collapse store 里的摘要标记，只保留最近 5 条；模型看到压缩视图，原文仍可恢复。既在调用前预防，也在 PromptTooLong 后作为错误恢复调用。
+  5. **Auto-Compact**：`autoCompactIfNeeded()` + `runForkedAgent()`。PreCompact hook → `getCompactPrompt()` 九段式摘要（请求 / 概念 / 文件与代码 / 错误修复 / 问题解决 / 全部用户消息逐字 / 待办 / 当前工作 / 下一步）→ `buildPostCompactMessages()` 替换历史。fork 共享父级 prompt cache；`querySource='compact'` 防递归；触发阈值分析口径为 `effectiveContextWindow − 13K`（约 93%），另有文章写 75%，以 13K buffer 常量为准。
+  - 旁路 1 **Reactive Compact**：API 返回 413 / Prompt Too Long 时，只保留最后 4 条消息、其余紧急摘要，然后重试一次（`hasAttemptedReactiveCompact` 防循环）。
+  - 旁路 2 **SessionMemoryCompact**：后台维护 session memory 文件，压缩时直接复用（10k–40k 原文保留、双阈值），是零成本压缩层。
+  - Token 记账：`count_tokens` 精确值只在会话开始 / 校准用；热路径用 `chars/4 + 1` 启发式；图片 / 文档用固定估算；警告状态 0–60 正常 / 60–75 缩短输出 / 75–90 更激进摘要 / 90+ 触发压缩。Bash 有 `tokenSaverOutput`：UI 看全量，模型看压缩版。
+- 本项目对应（逐层映射）：
+  1. **Budget Reduction ≈ 工具结果落盘 / 折叠**：`tool_result_max=30000` 内联、`tool_spill_max=12000` 落盘（给 locator，可 `read_tool_result` 取回）、`tool_result_trim_tokens=100000` 触发旧结果折叠（保留最近 2 条、占位 240 字）。差别：我们是「头尾 + 落盘句柄」，不是单条内容引用；无需工具豁免表。
+  2. **Snip ≈ 无独立层**：不物理删除消息；`summary_upto` 之后的消息仍在 `sessions.json`，只是请求视图不发送（读时投影）。真超窗时 `recover_overflow()` 会临时丢中间消息，仅本次请求。
+  3. **Microcompact（本轮已补）**：`context.microcompact_messages()` 在上下文到预算 60% 后，对单条 ≥3000 token 的工具结果做一次轻量摘要（保留错误 / 数值 / 路径 / 命令 / 结论），每次最多 3 条、最近 2 条原文不动，按原文 hash 缓存；只改本次请求，不落库。开关 `microcompact_enabled`，设置页可关；本地小窗口直接跳过（已有确定性折叠）。
+  4. **Context Collapse（本轮已补轻量版）**：`maybe_precompress()` 在窗口预算 80% 时先跑一次 `compress_history(keep_ratio=0.32, stage="collapse")`——只压最旧一段、保留更多近期原文；100% 才走完整 `stage="auto"`。同阶段 10 分钟内不重复折叠。它沿用「summary + messages[cut:]」的读时投影，所以原文仍可恢复；没有 CC 的独立 collapse store 与 90/92/94% 分段，但行为上补上了「先轻压一档」。
+  5. **Auto-Compact ≈ `compress_history`（已对齐，且更强）**：PreCompact hook、pin 目标 / 验收 / 计划 / task_state、8 段式摘要 + `【记忆要点】`、本地 / 轻量 / 主模型三级回退、当前回合永不压、区间指纹校验、摘要比原文长则放弃；触发 = `min(W×0.8, W−输出−headroom 8192)` 或工作集 40k。不改；差别仍是：不是 fork 子代理（但会把 system prompt 回放以命中前缀缓存）、没有「全部用户消息逐字」段、没有显式 budget carryover。
+  - 旁路：**PTL retry + 熔断**（`_api_compress` 按最旧丢 20% 重试 ≤3 次；连续 3 次失败熔断 600s）+ **`recover_overflow`**（折叠旧工具结果 → 临时丢中间 → 重试一次）+ **会话工作记忆零 API 压缩**（L2）+ **Reactive Compact（本轮已补）**：`reactive_compact()` 在 413 / 超窗且折叠后仍超预算时，保留 system + 最后 4 条，其余用一次主模型摘要替换，再重试；尾部若是工具结果会往前带上对应 assistant，避免拆开 tool_use/result。
+  - Token 记账：`estimate_tokens` 中文 0.6 / 英文数字 0.28 / 空白 0.1 / 标点 0.35 + `usage.last_prompt` 校准；没有 `count_tokens` 精确计数。行为阶梯现在是 60% 微压缩 / 80% 折叠 / 100% 完整压缩 / 413 应急，不是 CC 的 60/75/90 精确阈值（我们的 `compress_ratio` 本身就把预算定在 80% 窗口）。
+- 内容检索策略（CC）：
+  - 无向量库、无离线 embedding 索引；检索由模型驱动：Glob → Grep → Read 漏斗，模型决定搜什么、搜几次。
+  - 静态层：system prompt（分稳定 / 动态段）、CLAUDE.md（四级 + 子目录按需 + @import）、`MEMORY.md` 索引（≤200 行 / 25KB）、git status。
+  - 预注入层：每轮用户消息后 1 次 Sonnet sideQuery，从记忆 manifest 挑 ≤5 条（已展示去重 + 最近成功工具）；@file mentions；Skill 发现。
+  - 工具层：Glob / Grep / Read；工具结果按 `maxResultSizeChars` 限长，避免一次搜索淹掉上下文。
+  - 委派层：Explore 子代理（只读、Haiku、不加载 CLAUDE.md、只回摘要）作为上下文防火墙。
+  - 源码位置：`utils/claudemd.ts`、`memdir/`、`findRelevantMemories.ts`、`buildSearchingPastContextSection()`、`tools/`、AgentTool。
+- 内容检索策略（本项目）：
+  - 静态层：全局规则 / 场景 / Skill 索引 / tool prompt / 画像 / `pinned_block`（GAL）/ 新加的 L3 `memory_index_block`（200 行 / 25KB，按会话签名缓存，排除画像与历史摘要）。
+  - 每轮检索层：`retrieve_memory` 字段加权 + IDF + 长度归一 + 可选 bge-small 向量 + 一跳图邻居 + 可选 LLM 挑选；预算默认 3000 token（可配），单条 400 字，命中 + 邻居合并 ≤12 条。
+  - 工具层：`search_files`（正则 / glob）、`search_code`（dense + BM25 + RRF 融合 + 符号图 boost）、`memory.search`（SQLite 镜像，最近 800 条）、`find_symbol` / `impact` / `repo_map`、`web_search`。
+  - 委派层：`explore` 子代理（finder / reader / worker / critic / searcher，结论要求「文件:行号」并复核）。
+  - 源码位置：`app/knowledge.py`、`app/memory.py`、`app/codeindex.py`、`app/codesym.py`、`app/search.py`、`app/explore.py`、`app/prompt_assembly.py`。
+- 对比结论：
+  - 我们更强 / 已对齐：非破坏式摘要 + 可回滚 + 区间指纹；pin 目标 / 验收 / 计划 / task_state；工作集（成本导向）与窗口双触发；本地 / 轻量 / 主模型回退 + 摘要质量闸门；图记忆（关系 / fact / invalid_at / source_msg）+ 混合检索；代码离线索引（dense + BM25 + RRF）；会话工作记忆零 API 压缩、PTL retry + 熔断、有界记忆索引；本轮补齐的 Microcompact / 轻量 Collapse / Reactive Compact。
+  - 真实差距（按影响）：① 没有独立 collapse store 与 90/92/94% 分段（我们用「80% 轻压 + 100% 完整压缩」两档替代）；② Snip 不是真删除，也没有 `tokensFreed` 传给压缩判定（我们不依赖 usage 单调，影响较小）；③ 摘要缺「全部用户消息逐字」段；④ 没有精确 `count_tokens`，行为阶梯是 60/80/100 而非 60/75/90；⑤ Microcompact 只覆盖工具结果，不覆盖其它超大消息；⑥ 记忆 sideQuery 默认关闭（首字节延迟实测 p90 1.9s / 最坏 7s），靠每轮混合检索 + 索引替代。
+  - 不建议照搬：为每条 3k token 的非工具消息再调一次 LLM（我们大量本地 / 便宜模型场景下性价比低）；Anthropic 专属的 `cache_editing` 微压缩（多服务商不通用）；把 13K/93% 阈值硬套到 1M 窗口。
+- 本轮新增配置：`microcompact_enabled`（默认开）、`microcompact_min_tokens=3000`、`microcompact_trigger_ratio=0.6`、`history_collapse_ratio=0.8`、`history_collapse_keep_ratio=0.32`；设置页「上下文与压缩」新增微压缩开关。
+- 相关代码：`app/context.py`（`trim_tool_results` / `microcompact_messages` / `reactive_compact` / `recover_overflow` / `compress_history` / `_api_compress` / `_session_memory_ready` / `maybe_precompress`）、`app/session_memory.py`、`app/knowledge.py`（`retrieve_memory` / `inject_budget` / `memory_index_block`）、`app/prompt_assembly.py`、`app/codeindex.py`、`app/explore.py`。
+- 验证：新增 `tests/test_microcompact.py` 3 条、`tests/test_context_collapse.py` 3 条、`tests/test_reactive_compact.py` 3 条；`pytest -q` 跑 `test_microcompact / test_context_collapse / test_reactive_compact / test_context / test_compress_marks / test_working_set / test_prompt_assembly / test_settings_defaults / test_session_memory / test_compress_retry / test_chat_blocks / test_chat_parallel / test_stream_parallel_live` 全部通过；`ruff check` 与 `node --check web/settings.js` 通过。未做真机验证。
+
+- 补充（用户追问「CC 的文档/代码检索到底怎么做」）：
+  - **代码检索：不做索引，agentic search**。CC 早期版本确实用过 RAG + 本地向量库，Boris Cherny 在 HN 上明确说「agentic search 普遍更好，而且更简单，没有安全/隐私/过期/可靠性问题」，后来移除。工具层级按成本排序：`Glob`（只回路径，近零成本）→ `Grep`（ripgrep，回匹配行）→ `Read`（整文件，500–5000 token）→ `Explore` 子代理（只读、Haiku、独立上下文、只回摘要）。新版还有 `LSP` 工具（定义 / 引用 / 类型错误）。官方文档也说明 macOS/Linux/WSL 默认不装 Glob/Grep，直接走 Bash 的 `find`/`grep`。优点是精确、永远最新、零建索引、代码不出本机；缺点是常见词（如 `useState`）会烧 token、语义召回弱。`92%` 前缀缓存复用是 LMCache 的分析，不是官方数字。
+  - **文档检索：也不建索引，按页读**。内置 `Read` 支持 PDF / 图片 / Jupyter notebook；短 PDF 整份读，超过 10 页用 `pages` 参数按范围读，每次最多 20 页；按页读会用 `pdftoppm`（poppler-utils）把页面渲染成图，所以是多模态逐页读，不是文本切片召回。Anthropic API 的 PDF 支持是「每页转图片 + 抽文本」，单请求最多 600 页（上下文 <1M 时 100 页）、128MB。Office 文档不走原生 Read，通常靠 skill/MCP 转文本。大 PDF 的策略是模型先读目录/前几页，再按需跳页，配合上下文压缩。
+  - **对比我们**：代码我们是离线索引（dense + BM25 + RRF + 符号图），CC 是 agentic grep + LSP；我们语义召回强、有索引构建与过期成本，CC 精确/最新/零配置但常见词费 token。文档我们是「全文内联 + `attachment_read` 按 offset 分页」，CC 是「PDF 按页范围 + 页面渲染」；我们文本优先、实现简单，但超长 PDF 容易把上下文顶满，CC 按页读的边界更稳。若要对齐，最小改动是给 `attachment_read` 增加 `pages` 参数（需要存每页偏移或按页文本），而不是引入文档向量库。
+
+- 对齐动作（本轮）：文档页级读取。
+  - `docparse._pdf_text` / `_pdf_ocr` 现在额外返回逐页文本；新增 `docparse.extract_pages()`，非 PDF 返回空页列表。
+  - 上传解析（`chat.py`）与会话「重新解析附件」（`api/sessions.py`）改用 `extract_pages`，把 `pages` 存进附件元数据；`attachments.from_message` 透传 `pages`。
+  - `attachment_read` 新增 `pages` 参数：支持 `"1-5"`、`"3"`、`"1-3,7"`，1-based，每次最多 20 页；返回 `【第 N 页】` 分页文本；空页给占位。旧会话没有页数据时提示改用 offset/limit。工具 schema 与 Agent prompt 已同步。
+  - 明确不改：代码检索（离线 dense+BM25+RRF+符号图）比 CC 的 agentic grep 语义召回更强，保留；`read_file` 已有 start/limit 行级读取；explore 子代理 / 符号工具已覆盖 CC 的 Explore + LSP。
+  - 未做：文本层 PDF 的页面渲染成图（CC 按页读会渲染页面，能看版面/图表）；我们现在页级读仍是文本，扫描件在解析阶段走 OCR。存储上 `pages` 会与全文各存一份，短中期可接受，后续可改存 page offsets 降体积。
+  - 验证：新增 `tests/test_attachment_pages.py` 5 条（3 页 PDF 抽取、非 PDF 无页、范围解析、按页读、无页数据回退）；`test_docparse_pdf.py` / `test_agent_tool_format.py` 全部通过；`ruff check` 通过。未做真机验证。
+
+## [2026-11-11] Claude Code 文件存放位置与「无指定目录的临时产出」
+
+- 问题/决策：用户问 CC 的文件一般存哪里；临时任务（如生成一份自我介绍 PPT）没有指定目录、对话窗口又展示不了时，AI 会写到哪里。核对官方 `.claude` 目录文档、sandboxing 文档与社区实测。
+- 先纠正前提：**CC 不是系统级沙箱/VM**。sandbox 只包住 Bash / PowerShell / Monitor 等 shell 命令，默认只允许写「工作目录 + 每用户临时目录 + 额外目录」；内置 `Read / Edit / Write / WebFetch` 等文件工具**在 sandbox 之外**，走权限规则。原生 Windows 上 shell 根本不走 sandbox（要 WSL2 才有）。因此文件仍在真实机器上，不是隔离容器。
+- 常见位置：
+  - **工作目录（cwd）**：启动 `claude` 的目录；用户要的交付物（代码、文档、PPT）通常写这里，路径会显示在回复里。
+  - **Session scratchpad**（临时）：macOS/Linux `/tmp/claude-<uid>/<项目路径转横线>/<session-id>/scratchpad`（macOS 显示 `/private/tmp/...`）；Windows `%TEMP%\claude\<项目slug>\<session-id>\scratchpad`，通常是 `C:\Users\<你>\AppData\Local\Temp\claude\...`。`CLAUDE_CODE_TMPDIR` 可改根目录（Windows 下再拼 `claude\...`）。系统提示要求 Claude 把「中间结果、helper 脚本、不属于项目的临时输出」放这里；它随系统临时目录清理 / 重启 / Storage Sense 消失。
+  - **`~/.claude/projects/<project>/<session>.jsonl`**：会话 transcript。
+  - **`~/.claude/projects/<project>/<session>/tool-results/`**：超大工具结果 / MCP 图片落盘；相对持久，受 `cleanupPeriodDays`（默认 30 天）清理。
+  - **`~/.claude/file-history/<session>/`**：编辑前快照，用于 checkpoint 恢复。
+  - **`~/.claude/plans/`、`tasks/`、`uploads/`、`image-cache/`、`session-env/`** 等：计划、任务、Web/移动端附件、图片缓存、会话环境。
+- 「介绍自己的 PPT」这类没有指定路径的临时任务：
+  - 没有硬规则保证一个固定目录。若模型把它当**交付物**，通常会写当前工作目录（如 `./about-me.pptx`）并在回复里给路径；若当**临时/中间产出**，会写 scratchpad。
+  - CC 没有云端 Artifact 仓库，也不会自动上传；文件就在本机。对话窗口不能渲染 PPT，只能给路径/让用户打开。
+  - 最稳妥：明确说「保存到当前目录 / 桌面 / D:\xxx\about-me.pptx」；或把 `CLAUDE_CODE_TMPDIR` 指到持久目录。若已经落在 scratchpad，重启/清理前复制出来。
+  - `pptx` skill 的社区实测默认把 deck 存到 working directory，但这只是 skill 行为，不是 CC 的全局保证。
+- 相关配置/指令：`CLAUDE_CODE_TMPDIR`（shell 或 `~/.claude/settings.json` 的 `env`，项目/本地 settings 不生效）；`cleanupPeriodDays`；sandbox `filesystem.allowWrite/denyWrite`；`/sandbox`。
+- 来源：官方 `Explore the .claude directory`、`Configure the sandboxed Bash tool`、`Choose a sandbox environment`；社区 `Where Claude Code Keeps Its Scratchpad, and Why It Disappears`（2026-09，2.1.278/2.1.314 实测）；`SuperIntern` 的 pptx skill 实测。
+
+## [2026-11-11] 过程步骤「智能跟随」现状诊断
+
+- 现象：用户反馈开启后整个主聊天窗口跟着过程输出滚动，而不是只在「过程」子窗口内跟随。
+- 结论：不是跟随函数本身写错，而是两个结构性问题叠加：
+  1. **没有真正的过程子窗口**。`#chat.chat` 是唯一滚动容器（`web/css/base.css` 的 `.chat { flex:1; overflow-y:auto; }`）；`.process-fold-body` 只有 padding / border-top，没有 `max-height` / `overflow-y`，所以过程流始终是主聊天内容的一部分，无法独立滚动。
+  2. **思考流仍直接贴主窗口底部**。`web/stream.js` 的 `reasoning` 增量每个 token 调 `scrollToBottom()`（约 L1963），`subagent_start`、`auto_continue`、`base`、`script_log` 等也调 `scrollToBottom()`；只有 `tool` / `tool_done` 改成了 `followProcessStep(card)`。
+- `followProcessStep`（`web/chat.js` L1463-L1487）内部取的是 `#chat`，并执行 `box.scrollTop += delta`；`watchChatGrowth`（L1506-L1539）把 `.process-fold` 内的 mutation 也路由到它。所以即使工具步骤只做「最小露出」，滚的仍是主窗口。
+- DOM：`.msg.ai > .content-wrap > .process-fold > .process-fold-body > .chat-flow`，答案 `.content` 在折叠区下方；实时流由 `stream.js` 的 `ensureFlow()` 创建并插到 `row._content` 前（L1225-L1281），流式时展开、结束后 600ms 自动收起（`foldLiveProcess`）。
+- 修复方向：
+  - A1（最小改动）：把 `reasoning` / `subagent_start` / `auto_continue` / `base` / `script_log` 里的 `scrollToBottom()` 改成 `followProcessStep(对应元素)`；主窗口只做「把步骤带进视野」的最小滚动，不再每个 token 贴底。
+  - A2（推荐，真正子窗口）：给 `.process-fold-body` 加 `max-height: min(38vh, 420px); overflow-y:auto; overscroll-behavior:contain;`；`followProcessStep` 优先滚最近的 `.process-fold-body`，只有折叠区本身不在视口时才滚 `#chat`；给过程区单独的 `_followProcess` 状态（用户上翻暂停，回底恢复），与主窗口 `_followBottom` 分离。
+  - B：取消过程自动跟随，只跟随答案；C：把过程流改成固定浮层/抽屉，改动最大。
+- 相关代码：`web/chat.js`（`followProcessStep` / `followScroll` / `watchChatGrowth` / `lastProcessAnchor`）、`web/stream.js`（`ensureFlow` / `reasoning` / `subagent_start` / `auto_continue` / `tool` / `tool_done`）、`web/css/base.css`（`.chat` / `.process-fold` / `.process-fold-body`）。
+- 已实施 A2：
+  - CSS：`.process-fold-body` 增加 `max-height: min(38vh, 420px); overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable;`，移动端 `min(34vh, 320px)`。
+  - `chat.js`：`followProcessStep` 先滚最近的 `.process-fold-body`（用户在内层上翻时通过 `_procFollow` 暂停，回底恢复）；再调 `ensureFoldVisible(fold, box)`，只有折叠区整体出视口才滚 `#chat`。程序滚动用 `_procScrollUntil` 忽略自己触发的 scroll 事件。新增 `watchProcessScroll` 捕获内层 scroll，新增 `lastSubagentAnchor` 并把探索小队卡片的 mutation 也走 `followProcessStep`，避免其文字更新触发主窗口贴底。
+  - 补掉的边角坑：
+    - **折叠区/子代理卡片刚插入**时，MutationObserver 的 target 是父节点，原来会走 `followScroll()` 贴底；现在检查 `addedNodes`，识别到 `.process-fold` / `.subagent-card` 就按过程锚点处理。
+    - **过程区里的图片加载**原来 `img.onload` 直接 `scrollToBottom()`；现在图片在 `.process-fold` / `.subagent-card` 内时只 `followProcessStep(img)`。
+    - **工具组展开/收起、字体变化**没有 DOM 增删，MutationObserver 看不到；新增 `ResizeObserver` 观察每个 `.process-fold`，高度变化时按当前锚点补一次过程跟随。
+    - **多个折叠区同时展开**时，原来 `lastProcessAnchor()` 取全局最后一个展开区，可能滚错旧折叠区；现在按 mutation 所属的 `fold` 取锚点。
+    - **内层不能滚动时**（步骤还少），滚轮/触摸仍应滚主窗口；`init.js` 的守卫改为只有 `scrollHeight > clientHeight` 才拦截。
+    - 过程区自动收起后若原本贴底，补一次 `scrollToBottom(true)`。
+  - 保留的已知限制：过程内层滚到顶/底后，`overscroll-behavior: contain` 会阻止滚动链传到主窗口（这是有意避免误滚主窗口；要滚主窗口需把指针移出过程区）；折叠区从 0 长到 `max-height` 的过程中，主窗口仍会做必要的“保证折叠区可见”滚动，达到上限后完全由内层接管。
+  - `stream.js`：`reasoning` / `auto_continue` / `subagent_start` 改走 `followProcessStep`；`script_log` 去掉无意义的 `scrollToBottom`；过程自动收起后若原本贴底，补一次 `scrollToBottom(true)`。
+  - `init.js`：`#chat` 的 wheel / touchmove 在目标为「可滚动的 .process-fold-body」时直接返回，不让内层滚动关掉主窗口 `_followBottom`。
+  - 验证：`node --check web/chat.js web/stream.js web/init.js` 通过；`node scripts/transpage_test.js` 18/18；`pytest -q test_chat_blocks / test_stream_parallel_live / test_settings_defaults` 通过。未做真机视觉验证。
+  - 预期行为：过程步骤在折叠区内部滚，主窗口只在折叠区整体离开视口时最小滚动；答案流式仍贴主窗口底部；内层上翻只暂停过程跟随，不影响答案跟随。
+
+## [2026-11-11] 回复末尾「文件改动声明」：Solo / 任意审批模式都显示，点文件跳 IDE
+
+- 问题/决策：
+  - 原「变更记录」只在**所有改动处理完之后**才在聊天里留一行（`ideReviewCardRefresh` 里 `if (pending) return`），待审阅期间聊天里看不到任何文件清单；Solo 模式更没有入口，只能靠输入框上方提示栏 / diff 弹窗。
+  - 需求：回复末尾固定显示 Trae 式文件改动卡（文件图标 + “N 个文件已更改” + 总 `+adds −dels`，可展开逐文件），不区分审批模式（ask / ai / full / custom）；点文件名跳到 IDE 的**文件内容**（不是 diff）。
+- 解决方案/原因：
+  - `web/gal/gal-ide.js`：`ideReviewCardRefresh` 去掉 pending 守卫，改为始终构建 `.files-changed` 卡片；`ideReviewCardBuild` 增加 `open` 记忆，折叠状态跨刷新保留。
+  - **不等整轮结束**：`ideOnToolDone(obj, row)` 把当前回复行传进 `ideReviewAdd`，每次 `tool_done` 就调 `ideReviewLiveCard(row)` 建/更新卡片；条目同时提前进 `state.ideReview`，输入框上方的 `#review-tip` 也随之出现（标签用「文件已修改，需要审查」，收尾时换回「任务已完成」），不用再去翻过程折叠找改了什么。
+  - `ideReviewEndTurn` 对已提前入队的条目做去重（`fresh` / `queued`），`start` 取本轮第一条在队列里的下标，避免自动打开 diff 时跳到别的文件。
+  - 卡片条目按路径合并（中途结算后又被改会产生两批条目），状态取「有一条 pending 就算 pending」，点行打开文件内容；`ideChangedPlace` 把卡片插在 `.msg-actions / .live-bar / .end-note / .typing` 之前，流式时不会落到「正在生成」下面。
+  - 点击「全部保留 / 全部撤销」后**不跳转**：`ideReviewSettleAll` 不再调 `ideReviewShow`，`ideReviewClose({keepView:true})` 也不把 IDE 从 diff 切回编辑器；只结算、刷新卡片和提示栏。
+  - 提示栏点 ✕（稍后处理）后本轮不再自动弹出（`ideTipClosed`），新一轮第一次写入或本轮收尾时重置。
+  - `ideChangeStatOf` 对流式期间同时存在于 `ideReview` / `ideReviewPending` 的同一个条目去重，避免标签页 `+/-` 翻倍。
+  - 审阅界面（IDE 内 `#ide-diff` 与 Solo 弹窗 `#review-modal`）顶部各加一个「在 IDE 查看」按钮：`ideReviewOpenInIde()` 先 `ideReviewClose()` 收起 diff（不结算、不动队列），再用 `openReference({path})` 切 IDE 并打开当前文件正文；跨会话条目提示先切回原会话。
+
+- **静态检查 / 业务逻辑复查后补的修复（2026-11-11 同日）**：
+  - 停止 / 断流收不到 `done` 时，`stream.js` 的 finally 现在会 `ideReviewEndTurn(row, true, sid)`：本轮已写入的文件照样结算，否则 `ideReviewPending` 会留到下一轮，和同文件的下一次写入合并成一条（`baseToken` 串轮）。
+  - 条目会话归属：`ideOnToolDone(obj, row, sid)` / `ideReviewAdd(..., sid)` 记录真实 sid；pending 合并键改为「sid + path」，避免两个会话同时生成时同路径写入互相吞并；`ideReviewEndTurn` 只清理本次 sid 的 pending。
+  - 后台会话不抢当前界面：`ideReviewEndTurn` 只有 `owner === sessions.current` 时才动提示栏标签、才自动弹 diff；提示栏 `ideReviewTipItems` 也按当前会话过滤。
+  - 切会话：`resetIdeForSession` 同步 `ideTipSid` 并刷新提示栏 / 卡片；改动卡只保留「当前仍连接」或「该会话还在流式」的行，卸载且已结束的旧卡连 DOM 一起 release，避免长期持有一整棵已卸载的消息树。
+  - 卡片生命周期：条目全部撤销 / 被 `ideReviewDrop` 摘掉时，卡片 DOM 一并移除；`ideReviewItemStatus` 对「无 token」返回 `undone`（逐条撤回后的正确状态）；卡片头部键盘事件只在 `e.target === head` 时响应，避免和内部 ↗ 按钮冒泡重复触发。
+  - `share.js` 的 `stripChrome` 增加 `.files-changed`：导出分享不包含改动声明卡（否则只剩标题、列表按钮被清掉）。
+  - 验证：`node --check web/gal/gal-ide.js web/stream.js web/share.js web/core.js` 通过；`node scripts/transpage_test.js` 18/18。
+- 相关代码/指令（如果有）：
+  - `web/gal/gal-ide.js`：`ideOnToolDone` / `ideReviewAdd` / `ideReviewLiveCard` / `ideReviewEndTurn` / `ideReviewCardBuild` / `ideReviewCardRefresh` / `ideReviewSettleAll` / `ideReviewClose` / `ideReviewOpenInIde` / `ideChangedOpen` / `ideChangedPlace`。
+  - `web/stream.js`：`tool_done` 调 `ideOnToolDone(obj, row, sid)`；done / 停止收尾各调一次 `ideReviewEndTurn(..., sid)`。
+  - `web/css/base.css`：新增 `.files-changed` / `.fc-*`，替换原 `.change-log` 样式。
+  - 验证：`node --check web/gal/gal-ide.js web/stream.js` 通过；`node scripts/transpage_test.js` 18/18；未做真机视觉验证（需实际让 AI 改多个文件后看卡片 / 提示栏 / 全部保留后的视图）。
+
+## [2026-11-11] 折叠栏统一过渡动画（高度 / caret / 状态同步）
+
+- 问题/决策：
+  - 各种折叠栏的收起方式不统一：多数是 `display:none` 硬切（过程、思考、计划、计划审批、会话分组、设置卡片、IDE 工作区、改动卡），只有工具组/输入框有过渡；自动收起（本轮结束）尤其突兀。
+  - 目标：所有「栏」的展开/收起都有平滑高度过渡，同时不写死 max-height、不影响内部滚动与 auto 高度。
+- 解决方案/原因：
+  - `web/core.js` 新增通用 `foldIsOpen(root, cls, positive)` + `foldTransition(root, body, open, opts)`：
+    - 用 `getBoundingClientRect().height` 量真实高度，WAAPI 对 `max-height` 做 0 ↔ h 的过渡（220ms，`cubic-bezier(.25,.8,.3,1)`）。
+    - 兼容 `.collapsed`（类 = 收起）和 `.open`（类 = 展开，`positive:true`）两种语义。
+    - 收起时先记下展开态的 `display`，加类后用内联 `display` 抵消 CSS 的 `display:none`，动画结束再清掉，交还 CSS；展开时先摘类再量高度。
+    - 动画可被下一次点击打断（先摘监听再 cancel，避免旧目标把类改回去）；`prefers-reduced-motion` 下直接切换。
+  - 接入：过程折叠（实时 + 历史）、思考块（手动 / 收尾自动折）、计划卡（手动 / supersede / 全完成自动收 / 自动展开）、计划审批卡（新增 `.plan-review-body` 包裹内容）、工具卡结果、探索小队详情、会话分组、设置卡片、IDE 工作区树、文件改动卡列表。
+  - 工具组保留原有 `max-height` + CSS `--t-slow` 过渡，只修 `autoCollapseToolGroup`：先落到实测高度再收，消除「啪」地消失。
+  - 过程折叠自动收起时，`ResizeObserver` 在 `fold._foldAnim` 期间跳过跟随，避免高度逐帧变化把主窗口拖着滚；收起完成后再补偿贴底。
+  - 会话分组折叠不再整列表 `renderSessions()`，只动当前组，动画不会被重绘打断。
+  - CSS：`.files-changed.collapsed .fc-list`、`.ide-workspace.collapsed + .ide-tree`、`.plan-review-body` / `.subagent-row:not(.open) .subagent-detail` 改为可动画的类控制（避开 `.hidden` 的 `!important`）。
+- 未覆盖 / 已知边界：
+  - 轨迹（trajectory）的 `.traj-turn` 是把多行分别 `display:none`，没有单一内容体，暂未接入；`#rt-panel` / `#queue-list` 这类浮层也没有加高度动画。
+  - 原生 `<details>` 不参与这套过渡。
+- 相关代码/指令（如果有）：
+  - `web/core.js`：`foldIsOpen` / `foldTransition`。
+  - `web/chat.js`：过程折叠、思考块、计划卡 / 计划审批卡、工具卡、会话分组；`ensureProcResizeObserver` 跳过 `_foldAnim`。
+  - `web/stream.js`：实时过程折叠、思考块收尾、探索小队详情、自动收起补偿。
+  - `web/settings.js`：`setCardCollapsed`（同步时 `animate=false`，避免设置面板打开时整屏动画）。
+  - `web/gal/gal-ide.js`：IDE 工作区树、文件改动卡。
+  - 验证：`node --check web/core.js web/chat.js web/stream.js web/settings.js web/gal/gal-ide.js` 通过；`node scripts/transpage_test.js` 18/18；未做真机视觉验证。
+
+## [2026-11-11] 联网搜索检索策略强化（设计提案，未实施）
+
+- 目标/基准：
+  - 把现在的「多查询 + 抓前几页 + 原样注入」升级为「查询理解 → 多源检索 → 质量排序 → 证据抽取 → 引用约束 → 迭代补搜」。
+  - 主基准按 pi.dev 的 Pi coding agent（`pi-web-access`）理解：多 provider + 质量感知 fallback、浏览器式抓页、PDF / GitHub / YouTube、带行号与置信度的取值、token 友好。
+  - 质量上限参考 Perplexity：Reformulator、混合检索（BM25 + dense）、三层 rerank、passage 级引用、低质量时整批丢弃重查。
+- 现状差距（代码级）：
+  - `app/search.py::search_multi` 合并后按引擎返回顺序截断（12 / 20 条），没有相关性 / 权威性 / 新鲜度 / 域名多样性排序。
+  - `app/search_engines.py::auto_search` 只在报错 / 空结果时换引擎，没有「结果跑题 / 分数过低」的换源判断。
+  - `_excerpt` 按 query 词的段落命中数截取正文，不是 passage 级排序；`published_at` 部分引擎有但没进入排序 / 提示。
+  - 引用只靠提示词要求 `[n]`，没有校验编号存在性、数字 / 实体是否落在原文。
+  - 研究台账（`app/research.py`）的 gaps / claims 只在「复刻 / 还原」任务里用，普通问答没有多轮补搜。
+- 设计要点：
+  - P0：结果字段归一 + canonical URL 去重；规则化 Query Planner（意图 / 时效 / 2–5 子查询 / 中英扩展）；页面 + passage 排序（词法覆盖、域名权威先验、时效衰减、BLUF / 结构、域名多样性）；质量感知 fallback（empty / off-topic / low-score）；证据单元带原文引句 + 行号 + 置信度；引用后置校验（编号、数字、实体）+ 自动修复或补搜。
+  - P1：抓取能力矩阵（PDF / GitHub clone / YouTube 字幕 / 浏览器式请求 / 被拒页回落）、curator 小模型摘要 + 确定性兜底、带 TTL 的检索缓存、研究模式迭代补搜（gaps / 覆盖度驱动，轮次与预算有界）。
+  - P2：向量混合检索 / 可选 reranker、claim 级 NLI 校验、金标评测集（新闻时效 / 文档 / 对比 / 数值 / 中英 / 多跳）与引用 precision / recall、unsupported claim rate、P95 延迟 / 成本看板。
+- 验收：能力对齐清单（provider + fallback、抓取矩阵、取值带行号、token 效率、零配置可用）；质量目标先测基线再定，建议引用编号正确率 100%、数值类 claim 支持率 ≥95%、unsupported claim ≤5%、fast 模式 P95 ≤6s。
+- 相关代码：`app/search.py` / `app/search_engines.py` / `app/api/chat.py`（`_search_and_report`、web_search 分支）/ `app/research.py` / `app/explore.py` / `web/settings.js`。
+- 状态：P0 / P1 / P2 均已实施（P1 的 YouTube / 强拦截兜底顺延，见下）；P2 见最后一条。
+
+## [2026-11-11] 联网搜索 P0 实施：Query Planner / 排序 / passage 证据 / 引用审计
+
+- 新增模块：
+  - `app/search_plan.py`：确定性 Query Planner。识别 intent（compare / fresh / academic / docs / howto / general）与 freshness 窗口；清洗模型检索式、按 token Jaccard 去重；单条时补关键词式；时效类给前两条补当前年份；对比类补 A / B 实体；最多 5 条。
+  - `app/search_rank.py`：canonical URL 去重（去 tracking / fragment / www / 末尾斜杠 / AMP）；页面排序 = 0.35 词法覆盖 + 0.20 域名权威 + 0.15 时效 + 0.10 结构（BLUF / 数字 / 长度）+ 0.10 来源类型 + 0.10 provider 原始排名，内容农场降权；同域最多先取 2 条，剩余结果补在尾部（不丢结果）；`provider_quality()` 供引擎链判断跑题。
+  - `app/search_evidence.py`：按标题 / 空行切 passage，按查询词命中数选段；返回 `content + evidence[{quote, line_start, line_end, score}]`，用于上下文标注「原文 Lx–Ly」和后续数字审计。
+- 接入：
+  - `app/search.py`：`MAX_QUERIES` 3→5；`search_multi(..., intent, freshness)` 合并后走 `rank_hits`；`_fetch_doc()` 返回 `(content, evidence)`，`_fetch_one` / `fetch_text` 保持旧签名；`fetch_pages` 写入 `it['evidence']`；`build_search_context` 优先用逐字引句 + 行号 + 发布日期，并提示「数字只写原文出现过的值」；`slim_items` 增加 `published_at`。
+  - `app/search_engines.py`：`auto_search` 增加质量感知换源（`QUALITY_MIN=0.18`），空结果 / 跑题继续试下一个引擎；全部低质时返回质量最高的一组，不空手而归。
+  - `app/research.py`：`add_sources` 存 `published_at` + `evidence`（每源最多 4 段、每段 600 字）；新增 `audit_citations()`：编号存在性 + 数字（小数 / 千分位 / 3 位以上整数）+ 反引号标识符是否出现在被引来源的逐字证据里；没有逐字证据的来源跳过数字审计。
+  - `app/search_rank.py` 的权威先验补了阿里云 / 腾讯云 / PingCAP / 华为云 / AWS 文档与 SegmentFault，中文技术查询不再只靠 .org 兜底。
+  - `app/api/chat.py`：web_search 分支先跑 Query Planner 再检索；`_search_and_report` 支持 `plan` / `user_text`，工作流 / 子代理调用也会自动规划；引用核验从「只查编号」扩展为 `audit_citations()`，失败时发一次 `search_cite_audit` SSE 并推一条纠正提示（仍只纠正一次，避免死循环）；删除不再使用的 `_bad_cite_msg`。
+  - `app/content_caps.py`：能力工具 `web` 的单查询也走 Planner + 排序。
+- 测试：新增 `tests/test_search_pipeline.py`（Planner 时效 / 对比 / 去重、canonical 去重、权威 + 多样性与时效排序、引擎跑题换源与低质兜底、passage 行号、引用编号 / 数字审计、上下文带日期与行号）。
+- 验证：`pytest -q tests/test_search_pipeline.py test_search_engines test_search_provider test_research test_web_hardening test_chat_* test_stream_* test_research_eval` 全绿（1 skipped）；`ruff check app tests/test_search_pipeline.py` 通过。
+
+## [2026-11-11] 联网搜索 P1：深度检索默认开 / 缓存 / PDF + GitHub / 弱结果补搜
+
+- 需求：不设独立「研究模式」，去掉「复刻 / 还原才启用」的检索门槛，默认按深度检索跑，设置页给开关。
+- 实现：
+  - `app/config.py` 新增 `search_research_enabled`（默认 True）、`search_cache_enabled`（默认 True）、`search_cache_ttl`（默认 3600）。
+  - `app/api/chat.py`：`_deep_search = cfg.search_research_enabled !== false`；主 `web_search`、工作流检索都传 `research_mode=_deep`（不再依赖 `research.is_research_task`）。**写文件前的「研究闸门」仍只对复刻类任务生效**，避免普通编码任务被强制先搜两次。抓正文条数仍尊重「检索行为」里的 `search_fetch_count`，只有复刻类任务才用 `agent_research_fetch_count`。
+  - 弱结果补搜：`_hits_weak()`（空 / rank_score 低 / 来源少于 6）时，用 `search_plan.fallback_query()` 生成一个定向补搜式（docs → 加「官方文档」，fresh → 加「最新」，其它 → 去口语词），只补一次；补搜结果重新过 `rank_hits`。前端会看到第二条 `search_queries` 进度。
+  - 检索缓存 `app/search_cache.py`：按 `provider + url + query + count` 存原始结果，TTL 按时效（15m）/ 文档（≤12h）/ 通用（≤6h）分档；过期清理 + 最多 600 条；写失败不影响搜索。`search_multi` 命中缓存时直接用，`search_cache_enabled=false` 可关。
+  - 抓取矩阵：`_fetch_doc` 先识别 `.pdf`（`docparse.extract` 抽文本）和 `github.com/{owner}/{repo}`（GitHub API 读仓库元数据 + README + 顶层文件列表），再走 Firecrawl → Jina → 直连；直连请求补齐浏览器式头（Accept / Accept-Language / Sec-Fetch-*）。GitHub / PDF 失败会自动回落普通抓页。
+  - 前端设置：「联网搜索 → 检索行为」新增「深度检索（默认开启）」和「复用检索缓存」两个开关；原「研究类任务」分组改名为「深度检索上限（默认启用）」。
+- 未做 / 顺延：
+  - YouTube 字幕、被站点强拦截时的第三方抓页兜底；curator 小模型摘要（当前用 passage 级证据做确定性压缩）；gap/coverage 驱动的多轮自动研究（当前是模型自主多轮 + 一次弱结果补搜）。
+- 验证：affected pytest 全绿（1 skipped）；`ruff check app tests/test_search_pipeline.py tests/test_search_engines.py` 通过；`node --check web/settings.js` + `node scripts/transpage_test.js` 18/18。
+
+## [2026-11-11] 联网搜索 P2：向量混合排序 / 引用语义校验 / 金标评测 / 指标看板
+
+- 实现：
+  - **向量混合排序**：`app/search_rank.py` 新增 `_semantic_scores()`，复用本地 `codeindex` 的 bge-small-zh-v1.5（不额外调 API）。模型可用时排序权重改为 `0.28 词法 + 0.22 语义 + 0.20 权威 + 0.12 时效 + 0.08 结构 + 0.06 来源类型 + 0.04 provider rank`；模型不可用 / `search_semantic_rank=false` 时回退 P0 的纯词法权重。`rank_hits(..., semantic=False)` 可强制纯词法（评测复现用）。
+  - **claim 级 NLI**：`app/search_verify.py` 用轻量模型（`llm._quick_chat`，无轻量模型时回退主模型）判断 claim 是否被引用证据支持；`research.Ledger.claim_evidence()` 提供 claim+证据对。`chat.py` 在数字/编号审计通过后、且 `search_cite_nli=true` 时再跑一次语义核对，失败同样只纠正一次。默认关闭，设置页「检索行为」可开。
+  - **金标评测**：`tests/search_eval/golden.jsonl`（10 条：文档 / 时效 / 对比 / 数值 / 中英 / 多跳 / 坏引用），`app/search_eval.py` 离线计算 top1 域名命中、top3 域名多样性、引用编号正确率、数字/标识符支持率；`scripts/search_eval.py` 是 CLI（阈值不过退出码 1）。当前基线：domain_hit 1.000 / citation_ok 1.000 / unsupported_ok 1.000 / avg_diversity 1.00。
+  - **运行指标**：`app/search_stats.py` 追加 `data/cache/search_stats.jsonl`（provider / query 数 / 命中 / 抓取 / 耗时 / 是否深度检索，不存 query 正文），超 2MB 只留最近 3000 条；`scripts/search_stats_report.py` 输出次数、P50/P95、平均命中 / 抓取、深度检索占比、空结果率。
+  - 设置页新增「引用语义校验（小模型）」开关（`search_cite_nli`，默认关）。
+- 测试：`tests/test_search_pipeline.py` 增加语义排序 / 指标汇总；新增 `tests/test_search_eval.py`（金标阈值）与 `tests/test_search_verify.py`（JSON 解析 / 注入 chat / claim_evidence）。
+- 验证：search / research / web_hardening / chat / stream / content_caps / intent / prompt / context 全绿（1 skipped）；`ruff check` 通过；`python scripts/search_eval.py` PASS；`node --check web/settings.js` + `scripts/transpage_test.js` 18/18。
+- 已知边界：NLI 默认关闭（会增加 5–20s）；语义排序依赖本地 bge 模型是否已下载；P1 的 YouTube 字幕 / 强拦截第三方抓页仍顺延。
+
+## [2026-11-11] IDE 文件图标对齐 VS Code Seti
+
+- 问题/决策：
+  - 原来的文件树 / 标签页只有「一个通用文档 SVG + 按扩展名改颜色」，和 VS Code 的按类型图标差距大。
+  - 直接使用 VS Code 默认 Seti 主题的原始资源（字体 + 映射），不再手绘几十个 SVG。
+- 实现：
+  - 新增 `web/vendor/seti/`：`seti.woff`（37KB）、`vs-seti-icon-theme.json`（54KB）、`seti-map.js`（由脚本生成，31KB）、`LICENSE.txt`（Seti UI MIT，Copyright (c) 2014 Jesse Weed）。
+  - `scripts/gen_seti_icons.py`：从官方 JSON 生成 `window.GM_SETI`，包含 `defs`（fontCharacter + fontColor）、dark / light 两套 `fileNames / fileExtensions / languageIds`。
+  - `web/gal/gal-ide.js`：`ideSetiIcon()` 查找顺序 = 文件名 → 最长扩展名（支持 `css.map` 这类复合扩展）→ `languageIds`（补了 `js/py/md/json/... → languageId` 映射）→ 主题默认文件图标；`ideIcoEl()` 优先输出 Seti 字形，映射缺失时才回退原来的 SVG。
+  - 主题联动：监听 `data-theme-mode`，在 light / dark 间切换时**只替换图标节点**（不重绘整棵树，避免展开状态丢失），并重绘标签页。
+  - `web/css/base.css`：`@font-face 'seti'` + `.ide-ico.seti`（16px / 行高 16px；标签页 14px）；文件夹继续用黄色 SVG（Seti 主题本身没有 folder 定义）。
+  - `web/index.html`：在 `gal-ide.js` 之前加载 `seti-map.js`。
+- 坑：JSON 里写的是 `"fontCharacter": "\\E01E"`，`json.load` 后是字面量 `\E01E`；十六进制部分是 `E01E`，
+  **只去掉前导反斜杠**。早先按 `s[2:]` 截断会把 `E` 一起吃掉，得到 `0x01E` 这类 ASCII，
+  界面就渲染成红色的 `m`（PDF）、黄色的 `U`（JSON）、蓝色的 `{`（Python）。
+  修复见 `scripts/gen_seti_icons.py::_char`，并在 `tests/test_seti_icons.py` 里断言字形落在私用区 `0xE000–0xF8FF`。
+- 验证：`node --check web/gal/gal-ide.js web/vendor/seti/seti-map.js`；`node scripts/transpage_test.js` 18/18；
+  `pytest tests/test_seti_icons.py` 通过；浏览器内核对 `window.GM_SETI` 全部 383 个定义的字形用 canvas
+  `measureText` 宽度均 > 0（`seti` 字体已 loaded），`#ide-tree .ide-ico.seti` 的 `font-family` 为 `seti`、
+  codepoint 在私用区。
+- 维护：升级 Seti 时替换 `seti.woff` / `vs-seti-icon-theme.json`，再跑 `python scripts/gen_seti_icons.py`。
+
+## [2026-11-11] 等待用户操作时的系统通知（提问 / 审批 / 亲手操作）
+
+- 问题/决策：
+  - 后端早就有 `session_status` 记录「待审批 / 待回答」，也推 `session_pending`，但前端只拿它更新侧栏小圆点，
+    用户切到 IDE / GAL / 工作台或窗口失焦时完全收不到提醒，只能自己想起来切回会话。
+  - 决策：把「需要用户处理」的通知统一挂在 `session_pending` 上，复用已有的 `notify_ask` 开关与 ask 提示音，
+    不新增配置项；只在**看不到那张卡**时弹，正盯着提问卡不打扰（与工作台任务通知的 away 判断一致）。
+- 实现：
+  - `app/session_status.py`：`mark(sid, kind, text="")` 多存一行摘要，事件带上 `text` 与 `at`（登记时间戳，前端去重用）；
+    `clear` 减到还剩 n 条时继续带摘要，清零时不带。
+  - `app/agent/plan.py`：`_ask_notice()` 把题面 / `action=true` 卡的 detail 变成摘要（多问题报「共 N 个问题：第一题」）；
+    `_plan_notice()` 取计划 goal，没有就取第一个里程碑。
+  - `app/agent/approval.py`：`_approval_notice()` 直接复用 `describe_call()` 的「执行 git status（工作目录 …，风险 只读）」，
+    `apply_worktree` 用文件数摘要。
+  - `web/auto.js`：新增 `pendingCardVisible()`（Solo + 当前会话 + 窗口可见且聚焦才算「看得见」）与
+    `notifySessionPending()`；标题按 kind 取「等待你批准 / 需要你回答」，点通知用 `notifyJump({sessionId})` 跳回会话。
+  - `web/settings.js` 与 `web/index.html`：通知开关文案与后台会话帮助改成也覆盖审批 / 亲手操作。
+- 验证：`pytest -q tests` 全量通过（含新增的 `test_event_carries_notice_text`、`test_ask_notice_text`、
+  `test_plan_review_carries_notice_text`、`test_approval_notice_uses_call_summary`）；`ruff check` 通过；
+  `node --check web/auto.js web/settings.js` 通过；浏览器里确认 `notifySessionPending` / `pendingCardVisible`
+  已加载，`pendingCardVisible('其他会话') === false`。未做「真的弹一条系统通知」的端到端人工验证。
+- 相关代码/指令（如果有）：
+  - `python -m pytest -q tests`；`node --check web/auto.js`
+
+## [2026-11-11] IDE 文件名文字造型 + 文件树 git 装饰对齐 VS Code
+
+- 问题/决策：
+  - 文件树用的是应用主题的 `--text`（#e6e8ea）而不是 VS Code 的 `sideBar.foreground`（暗 #CCCCCC），改动文件还是
+    `--accent` 蓝 + 加粗；VS Code 资源管理器里文件名是常规字重，改动用 **git 装饰色**（修改琥珀 / 未跟踪绿），
+    行尾给 `M/U/A/D` 徽标、文件夹行给一个小圆点。
+  - 决策：文件名颜色/字号/字重走 VS Code 出厂默认值；git 装饰直接用现成的 `/api/git/status`（返回的路径已经是
+    沙箱相对，和树里的 rel 一致），不新增后端接口。
+- 实现：
+  - `web/css/ide.css`：`#ide-panel` 内 `--ide-side-fg` / `--ide-sel-fg` / `--ide-mod-fg` 的默认值改成 VS Code 值，
+    用 `light-dark()` 跟随各预设声明的 `color-scheme`（不支持时回落暗色值）；新增
+    `--ide-git-m/a/u/d/r/c` 六个 git 装饰色；`.ide-tree` 字号 12.5px → 13px。
+  - `web/css/base.css`：`.ide-row.changed` 去掉 `font-weight:600`；`.ide-name` 加 `flex:1` 让徽标贴右；
+    新增 `.ide-row.git-* .ide-name` 着色、`.ide-git-mark` 徽标、`.ide-git-dot` 目录圆点；选中行用 `--ide-sel-fg`
+    覆盖装饰色，失焦选中退回 `--ide-side-fg`。
+  - `web/gal/gal-ide.js`：`ideGitMarkOf()`（untracked→U、A/D/R/C/T 映射）、`ideRefreshGitMarks()`
+    （带序号去重并发）、`ideApplyGitMark()` / `ideApplyGitMarks()`、`ideWatchGitFocus()`（窗口聚焦补拉，1.5s 节流）；
+    `buildIdeNodes` 建行时补装饰；`loadIdeTree` 末尾并行拉一次；`saveIdeFile` 保存成功后刷新。
+  - `web/git.js`：`gitRefresh()` 末尾顺带刷新树装饰（暂存/丢弃/提交后字母跟着变）。
+  - `web/core.js`：state 新增 `ideGitMarks` / `ideGitDirs`，切会话时清空。
+- 坑/注意：
+  - `light-dark()` 依赖元素的 `color-scheme`：IDE 预设块各自声明了明暗，`#ide-panel` 继承得到；老浏览器回落到
+    写成前一条的暗色值。
+  - 树里存的是沙箱相对路径，git 接口已用 `_remap()` 换算过，直接同名索引即可。
+- 验证：`node --check web/gal/gal-ide.js web/core.js web/git.js` 通过；`python scripts/dev_check.py` 全绿
+  （62 个前端 JS 语法、快捷键 83/83、Markdown / 译页回归）；浏览器内实测 `#ide-tree` 计算色
+  `rgb(204,204,204)`、字号 13px、`light-dark()` 受支持、`ideGitMarkOf({untracked:true})` 返回 `{ch:'U',cls:'u'}`。
+  未做「真实 git 改动下徽标位置 / 颜色」的肉眼确认（当时的浏览器标签停在 Solo，文件树未渲染）。
+- 决策补充：**非 git 目录不造装饰**（与 VS Code 一致）—— 例如「助手9.0」的沙箱
+  `D:\资料库\MVG Paper库` 没有 `.git`，文件树就只有灰阶文字，没有 U/M。想在真机上验证，
+  切到沙箱是本项目的会话（如「模拟股市重构」）再看。
+- 相关代码/指令（如果有）：
+  - `node scripts/dev_check.py`；`python scripts/dev_check.py`
+  - `git -C "<沙箱>" rev-parse --is-inside-work-tree`（排查「为什么没有 git 装饰」第一步）
+
+## [2026-11-12] 过场旁白不再混进正文（对齐 Claude Code 的 Output efficiency）
+
+- 问题/决策：
+  - 用户反馈助手每跑一个工具就写一句「现在验证…」「接下来读取…」，和最终答案混在同一块正文里，
+    形成噪声。根因不是渲染 bug，而是 `app/agent/prompt.py` 规则 1 明确**要求**模型「每一步写一句」。
+  - 取证：Claude Code 公开的 `# Output efficiency` 系统提示段要求正文只用于三类内容——需要用户决策、
+    关键里程碑的高信号进展、改变计划的错误/阻塞，并明确「不要逐调用旁白」；本机 Trae 的
+    `modules/ai-agent/ai_agent.dll` 里也能扫到技能提示词「These workflow steps are internal.
+    Do not narrate them to the user.」（对话 UI 是原生 DLL + webview，渲染源码无法读取）。
+  - 决策：双层修复——提示词从源头减少旁白；渲染层再把「最后一次工具之前的正文」收进过程折叠，
+    即使模型偶尔多写，也不会污染答案区。
+- 实现：
+  - `app/agent/prompt.py`：规则 1 改为「正文是给用户看的，不要当日志：动手前一句；之后只在找到根因 /
+    换方案 / 卡住 / 需拍板 / 里程碑完成时说；常规工具调用不逐个旁白」；规则 8 同步（中途不逐批总结）。
+  - `web/chat.js::buildBlocksView`：先算 `lastProc`（最后一个 tool / reasoning 块的位置），
+    `bi < lastProc` 的正文块加 `.narration` 并放进 `flow`（过程折叠），之后才进 `parts`（答案区）。
+  - `web/chat.js::buildAiRowFromBlocks` 与 `web/stream.js` 流结束重排：答案区没有正文段时，
+    只有「确实没有任何正文块」才退回 `m.content` / `shown` 全文；否则留一个空 content 节点，
+    避免把已经折叠的旁白又贴回正文。
+  - `web/css/base.css`：`.process-fold-body .content.narration` 压暗一档（`--text-dim`、12.5px）。
+- 验证：`node --check web/chat.js web/stream.js`、`ruff check app/agent/prompt.py`、
+  `python scripts/dev_check.py` 全绿；浏览器里近 6 条历史消息实测：过程折叠内的 narration 分别为
+  11 / 3 / 14 / 55 段，答案区只剩最后一段；纯文本消息（无工具）仍全部留在答案区。
+  未覆盖：流式生成过程中（回合结束前）旁白仍暂时显示在答案区，回合结束时按落库块重排收进折叠。
+- 相关代码/指令（如果有）：
+  - 证据：https://raw.githubusercontent.com/cnighswonger/claude-code-cache-fix/HEAD/docs/output-efficiency-prompts.md
+  - `python scripts/dev_check.py`
+
+## [2026-11-12] 侧边栏收起 / 展开的过渡动画（IDE 文件区 + 会话侧栏）
+
+- 问题/决策：
+  - IDE 文件管理区（Ctrl+B）原来靠 `.hidden`（display:none）切换，收起/展开是硬切；
+    会话侧栏（#sidebar）在 IDE 模式被 `#app.mode-ide #sidebar { transition: none }` 特意关掉了动画，
+    原因写在注释里：Monaco 的 automaticLayout 会在宽度过渡的每一帧全量重排，明显卡顿。
+  - 决策：两处都做成宽度 + 淡出过渡；过渡期间**冻结 Monaco 的 automaticLayout**，
+    动画结束再恢复并手动 `layout()` 一次，既平滑又不掉帧。
+- 实现：
+  - `web/index.html`：把 6 个 `.ide-side` 视图包进 `#ide-sides`（拖拽条留在容器外面）。
+  - `web/css/ide.css`：`.ide-sides` 承担宽度/透明度过渡（width/flex-basis .18s、opacity .12s），
+    `.ide-sides.collapsed { width:0; flex-basis:0; opacity:0 }`；`.ide-side` 改为占满容器。
+  - `web/gal/gal-ide.js`：新增 `ideFreezeEditorLayout(ms)`；`ideSyncSideUI(animate)` 只切各视图的
+    `.hidden`（视图切换仍是瞬间），收起/展开动的是 `#ide-sides.collapsed`；`ideSetSideHidden` /
+    `ideSwitchSide` 传 `animate=true`，初始化那次不传（避免进 IDE 就演一遍动画）。
+  - `web/css/base.css`：删掉 `#app.mode-ide #sidebar { transition: none }`，恢复侧栏过渡。
+  - `web/init.js`：`toggleSidebar()` 在 IDE 模式下先冻结 Monaco 布局；侧栏拖拽条改成按
+    `#ide-sides` 量宽度（原来量面板，包一层后会差 4px）。
+- 注意：`.ide-side` 在收起时不再加 `.hidden`（否则内容会先消失再缩宽度），改为被容器裁剪 + 淡出；
+  因此「面板是否可见」不能再用 `.hidden` 判断，要看 `state.ideSideHidden`。
+- 验证：`node --check web/gal/gal-ide.js web/init.js`、`python scripts/dev_check.py` 全绿；
+  浏览器实测 `#ide-sides` 位于 `.ide-body` 下、包含 6 个面板、拖拽条在容器外，
+  computed transition 为 `width 0.18s` / `flex-basis 0.18s` / `opacity 0.12s`，宽度沿用配置的 264px。
+  未做：真机观察动画观感（需要你在 IDE 里按 Ctrl+B / 点侧栏收起按钮确认）。
+
+## [2026-11-12] IDE 里 CSS/HTML 的颜色色块（color decorators）为什么没有
+
+- 问题/决策：
+  - 同一个 `architecture.html`，VS Code 里每个 `#ffffff` 前都有小色块（还能点开取色器），
+    我们的 IDE 没有。排查后确认不是主题/语法高亮问题，而是两层原因叠加：
+    1. 内置 Monaco 的 `defaultColorDecorators` **默认 false**（bundle 里是
+       `new g(148,"defaultColorDecorators",!1,…)`），`ideEnsureEditor` 也没传；
+    2. 即使打开，它也只对「没有专属语言 worker」的语言生效。html / css / scss / less 会被各自
+       的语言 worker 接管，而这份构建的 worker 没实现 `computeDefaultDocumentColors`，返回空。
+  - 隔离实验（临时页面 + 同一份 vendor Monaco）：同一段 CSS，`language='plaintext'` 时 5 个色块
+    全部出现；`language='html'` 时 0 个；手动 `registerColorProvider('html', …)` 后立刻出现
+    11×11 的 `.colorpicker-color-decoration` 元素 —— 证明渲染层没问题，缺的是颜色来源。
+- 实现：`web/gal/gal-ide.js` 新增 `ideRegisterColorProviders(monaco)`（`ideEnsureEditor` 里调用一次），
+  给 `html / css / scss / less` 注册正则版 DocumentColorProvider + ColorPresentation：
+  - 识别 `#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa` / `rgb(a)()` / `hsl(a)()`；
+  - 点击色块打开 Monaco 取色器，改色后按 `#rrggbb[aa]` 写回原范围。
+- 验证：`node --check web/gal/gal-ide.js`；解析用例 `#fff→#ffffff`、`#00000080`、`rgba(255,0,0,.5)→#ff000080`、
+  `rgb(100% 0% 0%)→#ff0000`、`hsl(0,100%,50%)→#ff0000`、非法 `#12345→null` 全部符合预期。
+  未做：真机看色块观感（需要在 IDE 里打开 `architecture.html` 确认）。
+- 相关代码/指令（如果有）：
+  - 排查手法：临时建一个只加载 `web/vendor/monaco` 的页面，切 `language` 对比
+    `document.querySelectorAll('.colorpicker-color-decoration').length`（用完即删）。
+
+## [2026-11-12] 前缀缓存 P0：工具目录冻结 + system 拆静态/动态 + 台账搬尾部
+
+- 问题/决策（依据 2026-11-12 的缓存调研与 Claude Code / DSH 源码对照）：
+  - 实测 95.2% 命中，但回合首轮只有 40.3%；warm 记录里 `sys_changed` 42%、`tools_changed` 36%，
+    `cached` 回退的轮次占 9.4%，miss 归因里 `drift` 占 77%。
+  - Claude Code（npm 原生包 v2.1.322）用 `__SYSTEM_PROMPT_STATIC_BREAKPOINT__` 把 system 切成静态/动态两块，
+    缓存断点打在静态块末尾，`shared` 提醒插断点前、`session` 提醒插断点后。
+  - DSH（`@deepseek-ai/dsh-base` 0.2.2-rc.1 `cordis.patch.yml`）明确「tool catalog stays the same across
+    modes for request-cache stability」；`dsh-compaction` 只压缩派生历史，绝不改 system / tools / 前缀。
+  - 我们的问题：`cap_domains` 按本轮用户消息关键词增删 tools（tools 在最前面，一变全 miss）；
+    system 里混着记忆条数 / 记忆索引 / 研究台账（每轮变）；台账直接重写 `messages[0]`。
+- 实现：
+  - **工具目录冻结**（`app/api/chat.py`）：`cap_domains` 不再传给 `build_agent_prompt` /
+    `native_tool_schemas`（固定为 None = 全量）；关键词只生成一句「本轮相关能力」追加到 `_late_blocks`。
+  - **plan 模式不裁剪 schema**（`app/agent/schemas.py`）：写工具仍列在目录里，行为由提示词约束 +
+    运行时 `chat.py` 的 `PLAN_MODE_TOOLS` 拒绝（对齐 DSH）。
+  - **system 拆静态/动态**：`mem_tool.build_tool_prompt(parts=True)` 返回 (静态说明, 动态条目)，
+    动态条目 = 条数 / 超限整理提示 / 现有条目清单；`prompt_assembly.base_system_parts` 把
+    `memory_index_block` 从 fixed 移到 dyn。调用方把 `_tool_dyn` 拼进 `sys_dyn`，最终贴请求末尾。
+  - **台账搬尾部**：`chat.py` 不再写 `messages[0]`；新增 `_attach_round_note()`，每轮把
+    研究台账 / 缺口提醒 / 探索任务贴到最后一条 user / tool 结果消息上（`_late_blocks` 里的台账同理）。
+  - 测试：`test_prompt_assembly.py` 新增 3 条（静态/动态拆分、记忆索引进 dyn、round note 不改 system）；
+    `test_agent_plan.py` / `test_image_compare.py` 的 plan_mode 断言改为「工具仍在目录里」；
+    `test_prompt_budget.py` 阈值 8600 → 9000（旁白规则改写后 8672）。
+- 取舍：工具目录全量会让每次请求的 schema 变多（调研里 schema ≈ 5.9% 输入），但这些字节逐轮相同、
+  几乎全命中缓存；换来的是 tools 不再每轮抖动、后面整段 90k 前缀可复用。
+- 验证：`ruff check` 通过；全量 `pytest tests` exit 0；`python scripts/dev_check.py` 全绿。
+  未做真实模型 A/B：需要重启服务后观察 `timing.obs.prefix`（`tools_changed` 应趋近 0）、
+  回合首轮命中率、`miss_parts.drift` 占比；P1（历史写入时定稿 / 压缩水位线）尚未做。
+
+## [2026-11-12] 前缀缓存 P1：历史折叠水位线 + 工具结果句柄定稿（不动压缩）
+
+- 决策：按用户要求**先不动压缩模型**（摘要仍在 system、summary_upto / compress_history 不变），
+  只做「历史渲染稳定化」和「工具结果定稿」两项。
+- 实现：
+  - `app/context.py`：新增 `HISTORY_REBUILD_STEP = 4`、`_history_rebuild_step()`、`_assistant_keep_set()`；
+    `build_context_messages` 不再用 `asst[-keep_turns:]`（每轮滑动一条），改为**水位线**：
+    每 step 条 assistant 才整体推进一次「原文保留区」，边界之间只追加、不改写旧消息。
+    `history_rebuild_step=1` 可一键回到旧行为。
+  - `app/config.py`：新增 `history_rebuild_step`（默认 4）。
+  - `app/api/chat.py`：超长工具结果的句柄从「请求内自增序号 r1/r2」改成「内容哈希 r<hash10>`；
+    同样的工具结果重试时句柄不变，回灌到历史里的文本逐字相同。
+  - 刻意没动：`@文件` 内联/句柄窗口和「最近 N 条附图」窗口。它们的滑动断点本来就靠近请求末尾
+    （上一轮 user 消息附近），缓存损失小；按水位线多保留反而会多塞大段引用/图片，得不偿失。
+- 验证：新增 `tests/test_working_set.py::test_assistant_keep_set_waterline` 与
+  `tests/test_context.py::test_history_process_waterline_batches`；原滑动语义测试固定 `step=1`；
+  `ruff check`、`dev_check.py` 全绿；定向 5 个测试文件全过。
+- 取舍：水位线最多临时多保留 `step-1` 条 assistant 原文；换来「每轮断一次」变成「每 4 条断一次」。
+- 后续（未做）：压缩边界对齐 tool-pair、摘要移出 system（属于压缩模型，等用户点头）；
+  refs / 图片窗口如需稳定化，要先评估额外 token 成本。
+
+## [2026-11-12] 留档：前缀缓存 × 压缩的后续研究（暂不实施）
+
+- 决策：压缩相关（摘要位置 / 压缩边界 / 压缩模型）**本轮不动**，只留技术记录，等以后再研究。
+- 产出：`docs/CACHE_COMPRESSION_PLAN.md`
+  - 数据基线（95.2% 命中、首轮 40.3%、sys_changed 42%、cached 回退 9.4%、drift 77%）；
+  - Claude Code 2.1.322 与 DSH 0.2.2-rc.1 的源码取证（静态断点标记、`[cache-breakpoints]`、
+    `PostCompact` 摘要作为 user 续接、compaction 只动派生历史、tool-pairing 等）；
+  - 我们现有压缩的代码地图（`context.py` 各函数与行号）；
+  - 照搬 DSH 的 6 类风险；候选方案 P1a-1（摘要移出 system）/ P1a-2（tool-pair 边界）/ P1a-3（压缩滞回）；
+  - 验收指标表与未决问题。
+- 关联已完成的 P0/P1：见本文件 2026-11-12 的「前缀缓存 P0」「前缀缓存 P1」两条。
+
+## [2026-11-12] 修复：finish 之后的正文被误折进过程区（答案区为空）
+
+- 问题/现象：用户发现 09:04:26 那条消息只有过程折叠、正文是空的。根因是「过场旁白」判定把
+  `finish` 当成普通工具：`buildBlocksView` 取「最后一个 tool / reasoning」当分界，而模型通常
+  先写最终答案、再调 `finish` 声明完成，甚至 finish 之后又补了一轮 reasoning / 工具，
+  于是 finish 之前的答案被折进过程区，答案区只剩 0 字。
+- 修复（`web/chat.js::buildBlocksView`）：
+  1. 新增 `FINISH_TOOL_NAMES`（finish / done / complete / finished / task_done / task_complete /
+     finish_task，与后端 `groups.py` 的别名归一化一致）。
+  2. 先找**最后一个 finish 块**的位置 `finishAt`；计算 `lastProc` 时只扫描到 `finishAt` 之前，
+     且跳过 finish 块本身。这样 finish 之前、最后一个过程块之后的正文就是答案。
+  3. 文字块追加一条规则：`bi > finishAt`（finish 之后的内容）一律当过程，不再进答案区。
+- 验证（浏览器里 132 条历史消息实测）：
+  - 修复前：idx 125 / 131 答案长度 0、旁白 161 / 93 段；idx 128 答案 1672 + 116 两段。
+  - 修复后：idx 125 答案 1176、旁白 160；idx 131 答案 785、旁白 92；idx 128 答案 1672（finish 后的
+    116 字旁白归入过程）。
+  - 全量检查 `emptyCount = 0`（没有任何 AI 消息的答案区为空）。
+- 注意：这是前端渲染修复，刷新页面即可；不需要重启服务。finish 之后如果模型确实写了「补充说明」，
+  现在会进过程折叠而不是答案区——这是有意的（finish 已声明完成）。
+
+## [2026-11-12] 回答末尾「引用 · 5」固定 5 条：去掉条数上限
+- 问题/决策：AI 回答底部的折叠块 `引用 · N` 长期恒为 5 条。排查 `data/sessions.json` 发现 93 处
+  自动引用**全部**是 5 条，确认是写死的截断而不是巧合。
+- 原因：`app/api/chat.py::_auto_code_refs` 读 `auto_context_items`（默认 5），达到上限就 `break`；
+  前端 `buildReferencesBlock` 本身是全部列出的，不截断。
+- 解决方案：默认上限改为 0 = 不截断（`app/config.py`、`chat.py` 的 fallback 同步改），
+  已保存的 `data/config.json` 里的 `auto_context_items: 5` 也改成 0。
+  语义：召回多少列多少；正文内联仍受 `auto_context_inline_max`（2 段）与
+  `auto_context_budget_chars`（8000 字）约束，不会因此多塞正文。
+  注意检索器本身 `search_items(..., limit=8)`，所以单轮最多 8 条，这是召回深度不是显示上限。
+- 相关代码/指令：`app/api/chat.py::_auto_code_refs`、`app/config.py` DEFAULT_CONFIG、
+  `web/chat.js::buildReferencesBlock`、`tests/test_lazy_context.py`（新增 `..._items_zero_keeps_all`）。
+
+## [2026-11-12] 修复：流式时过程步骤被压成一条条、主窗口上下抽搐
+- 问题：流式输出期间「过程 · 进行中」里的步骤卡被压扁成 ~11px 的细条，标题被裁掉下半截；
+  同时主聊天窗口上下抖动，输出结束（过程折叠自动收起）后恢复正常。
+- 根因 A（已用实验证实）：`.process-fold-body` 同时带 `chat-flow` 类，是
+  `display:flex; flex-direction:column`（base.css:1580），又带
+  `max-height:min(38vh,420px); overflow-y:auto`（base.css:1617-1625）。
+  flex 列在 max-height 约束下会对子项做 flex-shrink（默认 shrink=1），
+  所以行数一多不是「溢出滚动」，而是**每一行被等比压扁**；`.think` 又是
+  `overflow:hidden`（base.css:1657-1664），于是标题在下半截被裁掉。
+  无头 Edge 实测（同结构、同 CSS）：7 行时每行 38px、body 359px、scrollH≈358（本来就滚不动）；
+  20 行时每行被压到 9.3px、body 435px、scrollH 434——即内容全塞进 max-height，内层滚动条永远不出现。
+  流式时折叠区是展开的，done 后 600ms 自动收起（stream.js:1328-1344），所以「输出完成后恢复正常」。
+- 根因 B（推断，已按此修）：两套滚动驱动打架。
+  1) `followScroll`（chat.js:1443-1457）是 rAF 自循环，一帧帧缓动到 #chat 底部；
+  2) `followProcessStep`（chat.js:1500-1541）里的 `ensureFoldVisible`（1486-1498）要求
+     **整个折叠区**（最高 38vh + 头）都落在视口内，否则一次性补差值；
+  只要「折叠区 + 下方答案」放不进一屏，折叠区内的任何 mutation（思考文本、每秒的
+     `步骤 N · 思考中… Ns` 计时更新 stream.js:1632-1641）都会把主窗口往上拽，
+    随后答案正文 / 状态条（`setLive`，在折叠区外）的 mutation 又把窗口拉到底，形成上下抽搐。
+- 解决方案：
+  - A：base.css 新增 `.process-fold-body > *, .process-fold-body .chat-flow > * { flex: 0 0 auto; }`，
+    步骤卡恢复自然高度、内层 body 正常溢出滚动。无头 Edge + 真实 base.css 实测：
+    20 行时每行 34px、body 344px、scrollH 922、`canScroll=true`（修复前 9.3px / 不可滚）。
+  - B：`ensureFoldVisible` 只保留「折叠区底边超出视口 → 补最小差值」这一档，删掉
+    「把整个折叠区塞进视口」的上拉；探索小队卡片分支同步改成只补底部。
+    主窗口答案跟随仍由 `followScroll` 独占，不再互相对冲。
+- 验证：`node --check web/chat.js` 通过；`scripts/dev_check.py` 全绿（141 文件编译 / 138 模块导入 /
+  62 个前端 JS / 快捷键 83 / Markdown / 译页均通过）。真实流式效果需刷新页面（前端改动）后观察：
+  步骤条不再变细、内层过程区可滚、窗口不再上下抽。
+- 相关代码：`web/css/base.css:1580/1617-1632/1657-1664`、`web/stream.js:1259/1328-1344/1632-1641`、
+  `web/chat.js:1443-1457/1486-1499/1500-1540/1587-1597`、`web/init.js:983-998`。
+
+## [2026-11-12] 修复：finish 后被自动续跑 / 验收返工，正文被当作过程折叠
+- 现场：会话「模拟」中完成时间 09:54:55 的一条消息（blocks 114 / tools 82）答案区为空，全部正文进过程折叠。
+  末尾块序列：104 reasoning → 105 run_command → 106 text(98) → 107 reasoning → 108 edit_file →
+  109 reasoning(427) → **110 finish**（工具返回带「【验收子代理】未通过 · 40 分」）→ 111 reasoning(3105) →
+  112 text(67) → 113 reasoning(139)。
+- 机制：
+  - 后端 `finish` 只是普通工具；验收不通过时会把「差距 / 下一步」回灌并 `continue`（chat.py:7373-7381），
+    即使 finish 已落库，后面还可能走「自动续跑」（chat.py:6072-6143，验收 / 计划未完成 / 收尾被驳回）。
+    所以 finish ≠ 回合终点，它后面可能还有一整套返工。
+  - 前端 `buildBlocksView` 把**最后一个 finish** 当硬边界，`bi > finishAt` 的正文一律当过程；
+    再加上「答案必须在上一个过程块之后」这条，末尾只要还有 reasoning（113），正文全被判成旁白 → 答案区为空。
+  - 流式期间正文 delta 写进 `row._content`；`done` 时前端会用服务端 blocks 重排一次（stream.js:2442-2497），
+    所以折叠结果在收尾瞬间就会出现，不必等刷新。
+- 全量统计（data/sessions.json，668 条有 blocks 的 assistant 消息）：
+  - 答案区为空但正文非空：75 条（done 39 / stopped 17 / billing 15 / none 3 / budget 1）；
+  - 最后一个 finish 之后还有正文：150 条；其中最大值 ≥200 字的 120 条；
+  - finish 之后还有非 finish 工具：2 条；同时存在「finish 前答案」与「finish 后 ≥200 字正文」：82 条。
+  - 典型误折：提示词工程师 idx8（finish 后 521 字＝真正运行步骤）、助手9.0 idx764（849 字交付总结）、
+    深渊回响开发 idx1029（1342 字交付清单）。
+- 现有规则的两条假设都不成立：①「finish 是最后一次收尾」——会被自动续跑推翻；②「答案一定在上一个过程块之后」
+  ——末尾补一条 reasoning（下一步计划）就会把正文整体压进过程。反例：模拟 idx125 有 1329 字答案在 finish 前，
+  若简单忽略 finish，会把 finish 后 35 段旁白全塞进答案区，所以不能一删了之。
+- 解决方案（后端标记 + 前端兜底）：
+  - 后端 `chat.py` 新增 `_mark_answer_blocks(blocks, tools)`，落库与 `done` 事件共用：
+    ①finish 前面紧挨着的正文 = 交付（最常见：先写答案再 finish）；②否则 finish 之后的正文 = 交付
+    （验收返工后的新交付）；③没有 finish：最后一个真实工具之后的正文；④仍为空：最后一段正文兜底。
+    结果写成 text 块的 `ans: true`。续写路径在 `_merge_blocks` + 裁剪之后重算一次，并**先清掉旧 ans**。
+  - 前端 `buildBlocksView`：块里有 `ans` 就按标记分答案 / 旁白；旧会话没有标记仍走顺序启发式，
+    并在「一个答案块都算不出来」时兜底最后一段正文，避免答案区空白。
+- 验证：真实会话数据代入 `_mark_answer_blocks`：133→[67]、8→[521]、764→[849]、1029→[1342]（均为真正交付），
+  125→[1329]、128→[1790]、131→[896]、6→[3731]、766→[600] 保持不变；
+  全量模拟新规则：75 条空答案全部修复，0 条新增空答案。`tests/test_chat_blocks.py` 新增 5 条答案标记用例（25 条全过）；
+  `scripts/dev_check.py` 全绿。
+- 相关代码：`app/api/chat.py:819-886`（标记规则）、`app/api/chat.py:8452-8460`（新消息落库）、
+  `app/api/chat.py:8373-8387`（续写重算）、`web/chat.js:5011-5037`（ans 优先 + 兜底）、
+  `web/chat.js:5079-5085`（答案 / 旁白分流）。
+
+## [2026-11-12] 修复：回复末尾「N 个文件已更改」刷新 / 切会话后消失
+- 问题：11-11 做的文件改动卡只在流式 `tool_done` 时写进内存 `state.changeCards`，
+  历史渲染从不重建；刷新页面、切会话或重启后，所有回复末尾的改动卡都消失。
+  实测当前打开的应用：历史消息 `.msg` 24 条、`.files-changed` 0 个（该会话恰好没有写入）。
+- 数据可行性：落库的 `message.tools` 条目带 `write: true` / `undo` 令牌 / `args`，
+  足够还原文件名、路径与增删行数（只有成功写入才有 undo；失败的 edit 不应成卡）。
+- 解决方案：
+  - `web/gal/gal-ide.js` 新增 `ideChangedGroupsFromTools(tools)`（`write && undo`，
+    工具名限 `write_file` / `edit_file` / `apply_worktree`，按路径合并、用 `ideReviewCounts` 算增删）
+    与 `ideChangedHistoryCard(tools)` / `ideChangedHistoryAttach(wrap, tools)`：
+    复用同一套 `.files-changed / .fc-*` 排版（抽了 `ideChangedRowEl` 给 live 卡共用），默认收起、
+    点文件名开 IDE、`↗` 打开第一个文件。
+  - `web/chat.js::rowForMsg` 在历史渲染时调用 `ideChangedHistoryAttach(row._wrap, m.tools)`；
+    只对带 `done_at` 的已完成回合建卡——没有 `done_at` 的多是进度快照，`tools` 是累计的，
+    每条都建卡会让同一批文件重复几十次。
+  - 续写（继续输出）：`ideReviewLiveCard` / `ideReviewCardBuild` 在新建 live 卡前先摘掉同行的历史卡，
+    避免一条消息出现两张。
+- 验证：
+  - `node --check web/gal/gal-ide.js web/chat.js` 通过；`scripts/dev_check.py` 全绿。
+  - 浏览器确认新脚本已加载（`typeof window.ideChangedHistoryAttach === 'function'`）。
+  - 用「模拟」会话数据模拟：31 条已完成消息会出卡，例如 idx7 = 18 个文件 +3964/−19、
+    idx11 = 52 个文件 +10688/−90（大回合本来就是这么多）。
+  - 端到端视觉验证未完成：浏览器工具的 snapshot 节点预算超限（页面 2 万+ 节点），
+    且当前打开的「助手9.0」没有写入；需打开「模拟」会话人工确认。
+- 相关代码：`web/gal/gal-ide.js`（`ideChangedGroupsFromTools` / `ideChangedHistoryCard` /
+  `ideChangedHistoryAttach` / `ideChangedRowEl` / `ideReviewLiveCard` / `ideReviewCardBuild`）、
+  `web/chat.js::rowForMsg`。
+
+## [2026-11-12] 过程折叠里的写文件工具卡：右侧补 +adds −dels
+- 需求：回复末尾的文件改动卡有 `+N −N`，过程折叠里每次「修改文件 xxx」的工具卡右侧也显示同样的数字。
+- 方案：
+  - `web/chat.js::buildToolCard` 在 `.tool-state` 之后加一个空的 `.tool-stat` 槽位，
+    并把 `name / args` 记在 `card._toolName / card._toolArgs` 上——`tool_done` 事件本身不带 args。
+  - `finishToolCard` 在 `obj.write` 时用 `ideReviewCounts(name, args)`（与改动卡同一口径：
+    edit_file = new/old 行数，write_file = content 行数，apply_worktree = 后端算好的 adds/dels）
+    填 `+adds −dels`；为 0 时不显示。历史回放路径本来就带 `args`，live 路径用建卡时记的参数。
+  - `web/css/base.css` 新增 `.tool-stat`（等宽数字 + `--ok` / `--danger` 着色，`:empty` 隐藏）。
+- 验证：`node --check web/chat.js`、`scripts/dev_check.py` 全绿；用真实 `base.css` + 同样结构在无头
+  Edge 渲染截图，右侧显示「8ms 已写入 +14 −10 ⌄」，与文件改动卡口径一致。
+- 相关代码：`web/chat.js`（`buildToolCard` / `finishToolCard`）、`web/css/base.css`（`.tool-stat`）。
+
+## [2026-11-12] 性能优化：落库分层（单会话快照）+ 存档内存泄漏 + 启动对账
+- 问题/实测（真实数据：12 个会话 / `sessions.json` 74MB / 进程 RSS 1.5GB）：
+  - 每次 `save_sessions` 都要序列化整份 74MB：`json.dumps` 483ms + 写盘 125ms；
+    流式过程每 15 秒一次进度快照、回合首尾各一次，全部持全局 `_lock`。
+  - 每轮自动留档 `saves.add_save` 把 26MB 快照写进 `store.write_json` 的读缓存且永不释放
+    → 每轮 +16MB 常驻（跑几十轮就是 GB 级），这是 RSS 1.5GB 的主因。
+  - 启动 `session_events.load_all()` 把 66 个会话、155MB 事件日志全部重建：1172ms。
+  - `copy.deepcopy` 存档字段 175ms、事件流旁路每次落库也 deepcopy 整个会话。
+  - `estimate_messages_tokens` 在 1255 条消息上 61ms，每轮被调用 5~10 次。
+- 解决方案：
+  - `app/sessions.py` 新增 `save_session(s)`（热路径）：只写 `data/session_store/<sid>.json`
+    （`{"saved_at":..., "session":...}`，saved_at 放第一个字段便于启动时只读文件头判断新旧），
+    不再重写整份 sessions.json；`save_sessions` 仍是冷路径/回合收尾的整份快照，写入时带
+    `saved_at` 并「先记事件、后写快照」。
+  - `load_sessions()` 启动时先合 `session_store/` 里比 `saved_at` 新的单会话快照，再按
+    `session_events.latest_ts(sid) > saved_at` 决定是否重放事件（不再无条件全量重建），
+    过期/孤儿快照顺手删掉；备份恢复时 `_clear_caches` 删除 `session_store/`。
+  - `app/session_events.py`：deepcopy → `store.clone_containers`（只复制容器、字符串共享）；
+    首次见到会话不再 `rebuild` 整份日志（内存态就是对账后的最新态），只有事件文件不存在才写基线。
+  - `app/store.py`：`write_json(..., remember=False)` 让「写一次极少读」的大文件不进读缓存；
+    `_json_cache` 改 LRU + 64 条上限，`sessions.json` 钉住不淘汰。
+  - `app/saves.py`：存档快照 `remember=False`、删除存档同步 `drop_cache`、`snapshot_state` 用浅拷贝。
+  - `app/context.py`：`estimate_tokens` 加按字符串的有界结果缓存（str 的 hash 由 CPython 缓存，
+    重复查询接近 O(1)；按总字符数 8MB 封顶，避免拽住已释放的大段工具结果）。
+  - `app/api/chat.py`：`_persist_session` 改走 `save_session`；回合 `done` 之后在锁内
+    `flush_sessions()` 补一次整份快照（前端读到 done 就断开，不占回复关键路径）。
+  - `app/backup.py`：备份前先 `flush_sessions()`，保证备份里是最新整份。
+- 实测收益（同盘、真实数据）：单会话热落库 26MB ≈ 330ms（整份 610ms；普通会话 5MB ≈ 60ms，
+  即 10 倍）；`add_save` 500 → 330ms 且内存不再增长；token 估算 61ms → 0.5ms；
+  启动对账 1172ms → 12 个会话尾部探测约 50ms；`_json_cache` 不再无限膨胀。
+- 取舍：sessions.json 不再是「每次落库都最新」，而是回合收尾/冷路径/备份时才写；
+  进程中途崩溃时靠 `session_store/` 单会话快照 + 事件流恢复（与旧行为一致，最多丢最后 15 秒进度）。
+- 验证：新增 `tests/test_store.py`（remember=False、LRU 上限）、`tests/test_session_store.py`
+  （热落库只写单会话、过期快照不覆盖、整份带 saved_at）；全量 `pytest tests` 通过；`dev_check.py` 全绿。
+- 相关代码：`app/sessions.py`（`save_session` / `_merge_store_snapshots` / `flush_sessions` /
+  `_merge_events_once`）、`app/session_events.py`（`latest_ts` / `_tail_ts` / `record`）、
+  `app/store.py`（`write_json` / `_remember` / `clone_containers`）、`app/saves.py`、`app/context.py`、
+  `app/api/chat.py`（`_persist_session` / 收尾 flush）。
+
+## [2026-11-12] README 重构：结构、口径与准确性
+- 决策：按「项目简介 → 核心功能 → 快速开始 → 使用说明 → 技术栈 → 配置说明」重排，
+  其后保留安全边界、数据备份、已知限制、项目结构、常见问题、许可证；顶部加「3 秒速览」表
+  （是什么 / 能做什么 / 数据在哪 / 需要什么 / 怎么启动），详细功能从概览表下沉到「使用说明」，
+  消除原来「功能地图」与「简介」的重复。
+- 同步核对并修正的过期口径：
+  - Python 版本：3.10+ → **3.11+**（当前依赖解析出的最新版 `matplotlib` 要求 ≥3.11）。
+  - `chat_context_limit` 默认 100000000 → **1000000**；`chat_payload_msg_window` 24。
+  - 撤销快照「最多 20 条」→ **`agent_max_undo` 默认 60**。
+  - Shell 自由度：补上三档（默认 `standard`，允许 `|` 与沙箱内重定向，`trusted` 才放开 `; && ||`）。
+  - 联网搜索、插件、MCP、Hooks、Computer Use、图片生成均标注**默认关闭**。
+  - 数据目录补 `session_store/`（单会话热落库快照）与 `sessions/<id>/events.jsonl`（事件流）。
+  - 设置面板核对为「4 组 15 分类」；快捷键分组核对为 GAL / IDE / 编辑器 / 输入框 / 全局。
+  - 项目结构里 `app/agent.py` 实为 `app/agent/` 包；前端 vendor 补 `seti`。
+- 验证：README 表格列数与分隔行全部校验通过（含 `\|` 转义）；文中未包含任何个人身份 / 联系方式 /
+  本机路径；引用到的默认值均对照 `app/config.py` 的 `DEFAULT_CONFIG` 与相关常量复核。
+- 相关文件：`readme.md`、`app/config.py`、`app/agent/approval.py`、`app/agent/tools_exec.py`、
+  `web/index.html`（设置导航）、`web/hotkeys.js`（快捷键分组）、`app/reader.py`（翻译分批）。
+
+## [2026-11-12] 答案块判定：过程旁白被当成正文 / 停止后正文被折走
+- 现象：用户截图「提示词工程师」的多段旁白（「先看清目录的真实结构…」「先只读取证…」）出现在正文区；
+  并补充「我停止模型输出后正文部分被收进了折叠，目前没有正文，但输出中时是有的」。
+- 取证：数据里匹配到「提示词工程师 #55」（`done_at=12:01:33`、`end_reason=stopped`、
+  `interrupted=true`、42 块 / 27 次工具、无 `finish`）。结尾块依次为
+  `reasoning → text(24 字残句「取证补最后一组：…结果按」) → reasoning`，而 `ans` 正打在
+  这 24 字残句上；真正成形的交付是块 #15（2211 字）与 #26（2768 字）。全量统计：670 条带 blocks
+  的消息里，128 条的「答案候选」不足 80 字（多为「先把复盘写进计划，再收尾。」这类旁白），
+  30 个停止回合里 15 个如此。
+- 设计 vs bug：流式时文字先出现在正文区、工具调用到来再折叠，是 Trae / Claude Code / Cursor
+  共有的「渐进式披露」设计；但「停止后把已显示内容折走 / 只剩残句」没有官方依据 ——
+  Trae 文档只写「停止 = 终止本轮响应」，其 SOLO「对话流节点自动折叠」仅作用于**已完成**任务；
+  官方社区明确把停止解释为「暂停」：只打断当前动作，之前的聊天记录与上下文都会保留。
+  因此：输出中的显示是设计，停止后的归属是我们的 bug。
+- 决策（用户拍板）：按 Trae 暂停语义 —— 停止 / 中断的回合保留「停止前最后一段可见正文」在答案区，
+  由原有的 `end_note`（「你手动停止了本轮」+ 继续输出）标注为未完成；正常回合只把「实质交付」当答案。
+- 解决方案：
+  - `app/api/chat.py`：新增 `_is_substantive_answer`（长度 ≥ 120 字，或带 Markdown 标题 / 代码块 /
+    表格）与 `_is_partial_turn`；`_mark_answer_blocks(blocks, tools, stopped=False)`：
+    - `stopped`（stopped / billing / budget / interrupted）→ 最后一段正文；
+    - 有 finish：紧邻 finish 的正文若是实质交付就取它；否则取 finish 后最近的实质交付 →
+      finish 前最近的实质交付 → 最后兜底（保留短回答）；
+    - 无 finish：最后一段实质交付，没有才退回最后一段。
+  - `web/chat.js::buildBlocksView`：同一套判定；旧数据里「短旁白被标成 ans」的历史标记不再盲信
+    （标记不是实质交付且非停止回合时按启发式重算），停止回合取最后一段正文。
+- 实测（真实 sessions.json，670 条带 blocks 消息）：133 条答案归属被修正，2 条停止回合正确变为
+  「无正文」；重点回归：#12 77→3489、#20 48→974、#26 76→11633、#53 95→16681、#135 13→155；
+  #8（521）、#44（295）、#125（1329）保持不变；#55 停止后保留最后可见的 24 字并显示停止提示。
+- 验证：`tests/test_chat_blocks.py` 新增 5 条（停止保留最后正文、finish 后旁白不抢答案、
+  finish 前短旁白不抢答案、短回答仍标答案、返工后新交付）；36 条相关用例全过；
+  `node --check web/chat.js`、`ruff check`、`scripts/dev_check.py` 全绿。
+- 相关文件：`app/api/chat.py`（`_is_substantive_answer` / `_is_partial_turn` / `_mark_answer_blocks`
+  及两处调用）、`web/chat.js`（`isSubstantiveAnswer` / `buildBlocksView`）、`tests/test_chat_blocks.py`。
+
+## [2026-11-12] 版本号 3.4 + 提交前检查
+- 版本：`app/store.py::APP_VERSION` 3.3 → **3.4**；`app/share/__init__.py` 里重复的常量同步为 3.4
+  （分享包用它给导出文件打版本标记）；`readme.md` 的 Version badge 同步；NOTES 架构说明里的
+  「当前 3.3」改为 3.4。`desktop/package.json` 的 1.0.0 是窗口壳自己的版本，与 APP 版本无关。
+- 提交前检查结果：
+  - `git status`：68 个已跟踪文件被修改 + 25 项未跟踪（源码 / 测试 / `web/vendor/seti/`），
+    `data/` 被 `.gitignore` 正确忽略，未跟踪任何运行时数据或个人信息（`resume.pdf` / `NOTE.md` 未入库）。
+  - `git diff` 无 `sk-` / `SESSDATA` / Bearer 令牌等疑似密钥字面量。
+  - `ruff check app scripts tests` 全过；10 个改动的 JS `node --check` 全过；
+    `pytest tests` 全量通过；`scripts/dev_check.py` 全绿；`git diff --check` 无尾随空白 / 冲突标记。
+- 注意：工作区里还包含此前几个会话的未提交改动（chat / context / agent / web 等），本次没有拆分提交；
+  `architecture.html`、`STATIC_ANALYSIS.md` 是未跟踪的分析产物，是否入库需单独决定。

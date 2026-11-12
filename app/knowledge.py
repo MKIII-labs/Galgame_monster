@@ -12,7 +12,8 @@ import uuid
 import requests
 
 from app.store import DATA_DIR, read_json, write_json, drop_cache, _lock
-from app.config import get_api_conf, normalize_content
+from app.config import (get_api_conf, light_chat_is_local, load_config,
+                        normalize_content)
 from app.context import estimate_tokens
 from app.profile import load_profile, save_profile
 from app.sessions import load_sessions, save_sessions, find_session, ensure_session_kb_fields
@@ -33,8 +34,11 @@ PROFILE_INJECT_LIMIT = 30  # 用户画像固定注入的上限条数
 NEIGHBOR_LIMIT = 4      # 命中节点额外带上的一跳邻居上限
 MATCH_KEEP = PICK_LIMIT - NEIGHBOR_LIMIT   # 直接命中的保底条数，其余名额与邻居同池竞争
 INJECT_NODE_CHARS = 400 # 单条节点注入正文上限
-INJECT_MAX_TOKENS = 1500  # 相关记忆整块注入的 token 预算
+INJECT_MAX_TOKENS = 3000  # 相关记忆整块注入的 token 预算（可被 memory_inject_tokens 覆盖）
 WORLD_MAX_CHARS = 9000    # world_text（整库喂给编剧）的字符上限
+# 记忆索引（L3，对齐 CC 的 MEMORY.md）：常驻标题清单按「行数 + 字节」双上限截断。
+MEMORY_INDEX_LINES = 200
+MEMORY_INDEX_BYTES = 25000
 # 记忆挑选结果缓存（进程内）：key -> (时间戳, 下标列表)。
 # 挑选是一次非流式模型往返且位于首字节前，同一问话/同一批候选重复触发时可直接复用。
 _PICK_CACHE = {}
@@ -57,6 +61,15 @@ def _llm_pick_enabled():
         v = False
     _PICK_CFG.update({"t": now, "v": v})
     return v
+
+
+def inject_budget():
+    """每轮「相关记忆」整块的 token 预算（默认 3000，可配置）。"""
+    try:
+        v = int((load_config() or {}).get("memory_inject_tokens") or INJECT_MAX_TOKENS)
+    except (TypeError, ValueError):
+        v = INJECT_MAX_TOKENS
+    return max(300, min(50000, v))
 
 # 「规则型」类别：这些节点承载的是世界规则 / 能力规则 / 力量体系之类的**硬约束**，
 # 必须**每轮常驻注入**，不能只靠关键词检索命中——否则模型会把规则当成「可选参考」而忽略。
@@ -778,7 +791,7 @@ def _inject_line(node, score=None, relation=""):
 
 
 def retrieve_memory(s, user_text, exclude_pinned=False, skip_profile=False, include_kbs=True,
-                    recent_text="", budget_tokens=INJECT_MAX_TOKENS, include_session=True):
+                    recent_text="", budget_tokens=None, include_session=True):
     """检索记忆：用户画像固定注入 + 其余来源两段式召回。返回 (文本块, 条数)
 
     exclude_pinned=True 时跳过「规则型」节点——它们由 pinned_block 常驻注入，
@@ -791,6 +804,13 @@ def retrieve_memory(s, user_text, exclude_pinned=False, skip_profile=False, incl
 
     recent_text 用于查询扩展：用户只说「继续 / 这个」时，拼上一轮的话再检索。
     """
+    if budget_tokens is None:
+        budget_tokens = inject_budget()
+    else:
+        try:
+            budget_tokens = max(1, int(budget_tokens))
+        except (TypeError, ValueError):
+            budget_tokens = inject_budget()
     if not recent_text:
         msgs = [m for m in (s.get("messages") or [])
                 if m.get("role") == "user" and (m.get("content") or "").strip()]
@@ -865,7 +885,143 @@ def recall_detail(s, user_text, recent_text="", include_kbs=True, include_sessio
                     "kind": kind, "relation": rel})
     return {"query": query, "tokens": sorted(q), "items": out,
             "used_model": used_model, "candidates": len(items),
-            "budget": INJECT_MAX_TOKENS}
+            "budget": inject_budget()}
+
+
+# ------------------------------------------------------------
+# 有界记忆索引（L3，对齐 Claude Code 的 MEMORY.md）
+# ------------------------------------------------------------
+_MEM_INDEX_CACHE = {}
+_MEM_INDEX_CACHE_MAX = 32
+_MEM_INDEX_LOCK = threading.Lock()
+
+
+def _profile_kb_id():
+    """只查索引、不创建：提示词装配不该顺手新建一个「用户画像」库。"""
+    for item in (load_kb_index().get("kbs") or []):
+        if item.get("name") == PROFILE_KB_NAME:
+            return item.get("id") or ""
+    return ""
+
+
+def memory_index_block(s, include_profile=True, include_kbs=True, include_session=True,
+                       max_lines=None, max_bytes=None):
+    """长期记忆的常驻标题清单（CC MEMORY.md 的对齐版）。
+
+    - 只列「作用域 · 分类 · 标题 — 一行钩子」，正文仍由检索 / memory.search 按需取；
+    - 行数 / 字节双上限（默认 200 行 / 25KB），超限截断并标注；
+    - 按节点 updated_at 倒序；同一 id 只出现一次；
+    - 按会话缓存：记忆没变就直接复用，变了才重建（CC 是每会话只读一次，这里更及时一点）；
+    - 本地轻量模型窗口太小，直接不注入。
+    """
+    cfg = load_config() or {}
+    if cfg.get("memory_index_enabled", True) is False:
+        return ""
+    try:
+        if light_chat_is_local(cfg):
+            return ""
+    except Exception:                     # noqa: BLE001  模式判断失败不影响索引
+        pass
+    if max_lines is None:
+        try:
+            max_lines = int(cfg.get("memory_index_max_lines", MEMORY_INDEX_LINES) or 0)
+        except (TypeError, ValueError):
+            max_lines = MEMORY_INDEX_LINES
+    if max_bytes is None:
+        try:
+            max_bytes = int(cfg.get("memory_index_max_bytes", MEMORY_INDEX_BYTES) or 0)
+        except (TypeError, ValueError):
+            max_bytes = MEMORY_INDEX_BYTES
+
+    pkb_id = ""
+    if include_profile and (s or {}).get("use_profile") is not False:
+        pkb_id = _profile_kb_id()
+    scopes = []
+    if pkb_id:
+        kb = load_kb(pkb_id)
+        if kb:
+            scopes.append((pkb_id, kb.get("name") or PROFILE_KB_NAME, kb.get("nodes") or []))
+    if include_kbs:
+        for kb_id in ((s or {}).get("kb_ids") or []):
+            kb_id = str(kb_id or "")
+            if not kb_id or kb_id == pkb_id:
+                continue
+            kb = load_kb(kb_id)
+            if kb:
+                scopes.append((kb_id, kb.get("name") or "知识库", kb.get("nodes") or []))
+    if include_session:
+        scopes.append(("session", "会话记忆",
+                       (((s or {}).get("memory") or {}).get("nodes") or [])))
+
+    rows, seen = [], set()
+    for key, name, nodes in scopes:
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            # 「历史摘要」节点已经由 summary 块单独注入，索引里再列一遍纯属重复。
+            if key == "session" and str(n.get("category") or "") == "历史摘要":
+                continue
+            nid = str(n.get("id") or n.get("title") or "")
+            if not nid or nid in seen:
+                continue
+            seen.add(nid)
+            rows.append((key, name, n))
+
+    h = hashlib.sha1()
+    h.update(("cfg|%s|%s\n" % (max_lines, max_bytes)).encode("utf-8", "ignore"))
+    for key, _name, n in rows:
+        h.update(("%s|%s|%s|%s|%s\n" % (
+            key, n.get("id") or "", n.get("updated_at") or 0,
+            n.get("title") or "", len(str(n.get("content") or "")))).encode(
+                "utf-8", "ignore"))
+    sig = h.hexdigest()
+    sid = str((s or {}).get("id") or "")
+    if sid:
+        with _MEM_INDEX_LOCK:
+            hit = _MEM_INDEX_CACHE.get(sid)
+        if hit and hit[0] == sig:
+            return hit[1]
+
+    rows.sort(key=lambda x: float(x[2].get("updated_at")
+                                  or x[2].get("created_at") or 0), reverse=True)
+    total = len(rows)
+    truncated = bool(max_lines and total > max_lines)
+    picked = rows[:max_lines] if max_lines else rows
+    lines = []
+    for _key, name, n in picked:
+        title = str(n.get("title") or "").strip()
+        if not title:
+            continue
+        cat = str(n.get("category") or "其他").strip() or "其他"
+        hook = ""
+        for ln in str(n.get("content") or "").splitlines():
+            if ln.strip():
+                hook = ln.strip()
+                break
+        if len(hook) > 80:
+            hook = hook[:80] + "…"
+        lines.append("- [%s·%s] %s%s" % (name, cat, title,
+                                         (" — " + hook) if hook else ""))
+
+    body = "\n".join(lines)
+    if max_bytes and len(body.encode("utf-8")) > max_bytes:
+        cut = body.encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
+        body = cut.rsplit("\n", 1)[0]
+        truncated = True
+    if body:
+        head = ("【记忆索引】（长期记忆标题清单，共 %d 条；正文请用 memory.search "
+                "或检索按需取，不要逐条复述）" % total)
+        if truncated:
+            head += "（已按行数 / 字节上限截断）"
+        out = head + "\n" + body
+    else:
+        out = ""
+    if sid:
+        with _MEM_INDEX_LOCK:
+            if len(_MEM_INDEX_CACHE) >= _MEM_INDEX_CACHE_MAX:
+                _MEM_INDEX_CACHE.pop(next(iter(_MEM_INDEX_CACHE)))
+            _MEM_INDEX_CACHE[sid] = (sig, out)
+    return out
 
 
 # ------------------------------------------------------------
@@ -983,9 +1139,21 @@ def kb_stats(kb_ids):
     keys = ("nodes", "chars", "tokens", "pinned_nodes", "pinned_chars", "pinned_tokens")
     total = {k: sum(i[k] for i in items) for k in keys}
     total["libraries"] = len(items)
+    cfg = load_config() or {}
+    try:
+        idx_lines = int(cfg.get("memory_index_max_lines", MEMORY_INDEX_LINES) or 0)
+    except (TypeError, ValueError):
+        idx_lines = MEMORY_INDEX_LINES
+    try:
+        idx_bytes = int(cfg.get("memory_index_max_bytes", MEMORY_INDEX_BYTES) or 0)
+    except (TypeError, ValueError):
+        idx_bytes = MEMORY_INDEX_BYTES
     return {"items": items, "total": total,
-            "inject_max_tokens": INJECT_MAX_TOKENS,
-            "world_max_chars": WORLD_MAX_CHARS}
+            "inject_max_tokens": inject_budget(),
+            "world_max_chars": WORLD_MAX_CHARS,
+            "memory_index_enabled": cfg.get("memory_index_enabled", True) is not False,
+            "memory_index_max_lines": idx_lines,
+            "memory_index_max_bytes": idx_bytes}
 
 
 def _norm_text(s):

@@ -128,12 +128,19 @@ def _guidance_lists_profile(s, scopes):
     return "{current_auto}" in (tmpl or "")
 
 
-def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=True):
-    """生成「记忆工具」说明；没有可写作用域时返回空串"""
+def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=True,
+                      parts=False):
+    """生成「记忆工具」说明；没有可写作用域时返回空串。
+
+    parts=True 时返回 (静态说明, 动态条目)：
+    - 静态说明只随配置变化，可以放进 system 吃前缀缓存；
+    - 动态条目（条数 / 超限整理提示 / 现有条目清单）随记忆写入变化，
+      调用方应把它贴到请求末尾，否则每次写记忆都会让 system 及其后的历史全部 miss。
+    """
     scopes = writable_scopes(s, include_profile=include_profile, include_kb=include_kb,
                              include_session=include_session)
     if not scopes:
-        return ""
+        return ("", "") if parts else ""
     cfg = load_config() or {}
     # 0 是合法值（= 不设软上限 / 用默认列表长度），不能用 `or` 兜底吃掉
     try:
@@ -190,7 +197,6 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
         "- 对话历史随时可能被压缩。后面还要用到的信息，现在就写进本会话记忆，不要依赖聊天记录。",
         "",
         "可用作用域：" + scope_desc,
-        "本会话记忆现有 %d 条、%d 条关系。" % (len(session_nodes), len(session_edges)),
         "输出格式（只有确实需要变更时才输出；没有变更就完全不要输出这个块）：",
         "```memory",
         '{"ops":[{"scope":"<作用域ID>","op":"add|update|delete|link|unlink|append_note",'
@@ -232,8 +238,15 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
         "确实找不到相关条目才跳过，不要因为「关系不明确」就一条都不连。"
         "from / to 必须已存在；要连的节点若还没有，先 add 再 link（同一块内按顺序执行）。",
     ]
+    extra = (_profile_guidance(s, scopes) + _kb_guidance(scopes)).strip()
+    if extra:
+        lines += ["", extra]
+    # ---- 动态段：条数 / 超限整理提示 / 现有条目清单 ----
+    # 这三块随记忆写入变化，放在 system 里会让它后面的整段历史每轮 miss 前缀缓存；
+    # parts=True 时单独返回，由调用方贴到请求末尾（和检索记忆同一位置）。
+    dyn = ["本会话记忆现有 %d 条、%d 条关系。" % (len(session_nodes), len(session_edges))]
     if over_limit:
-        lines += [
+        dyn += [
             "",
             "## 本会话记忆需要整理（%d 条 / %d 条关系）" % (len(session_nodes),
                                                               len(session_edges)),
@@ -242,13 +255,12 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
             "- 给关键事件补关系：新进展至少连一条 purpose / cause / condition / means，并写清 fact；",
             "- 整理目标：≤ %d 条。" % soft_limit,
         ]
-    extra = (_profile_guidance(s, scopes) + _kb_guidance(scopes)).strip()
-    if extra:
-        lines += ["", extra]
-    lines += ["", "现有条目（作用域 | ID | 标题；每个作用域最多列最近更新的 %d 条，"
-                  "正文按需检索，不在这里列）：" % recent_n]
-    lines.extend(rows or ["（暂无条目）"])
-    return "\n".join(lines)
+    dyn += ["", "现有条目（作用域 | ID | 标题；每个作用域最多列最近更新的 %d 条，"
+                "正文按需检索，不在这里列）：" % recent_n]
+    dyn.extend(rows or ["（暂无条目）"])
+    if parts:
+        return "\n".join(lines), "\n".join(dyn)
+    return "\n".join(lines + dyn)
 
 
 # ============================================================

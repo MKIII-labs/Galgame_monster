@@ -927,18 +927,19 @@ async function init() {
     const apply = (w) => document.documentElement.style.setProperty('--ide-side-w', clamp(w) + 'px');
     const saved = Number((state.config || {}).ide_side_width);
     if (saved >= 180 && saved <= 460) apply(saved);
+    // 宽度按容器 #ide-sides 计（面板本身是 100%，容器还带着 4px 拖拽条）
     const persist = () => {
-      const side = $('#ide-side-explorer');
-      const w = (side && side.offsetParent) ? clamp(side.getBoundingClientRect().width) : 260;
+      const wrap = $('#ide-sides');
+      const w = (wrap && wrap.offsetParent) ? clamp(wrap.getBoundingClientRect().width) : 260;
       const cfg = Object.assign({}, state.config || {}, { ide_side_width: w });
       api('/api/config', cfg).then(() => { state.config = cfg; }).catch(() => {});
     };
     rz.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      const side = $('#ide-side-explorer');
-      if (!side) return;
+      const wrap = $('#ide-sides');
+      if (!wrap) return;
       const startX = e.clientX;
-      const startW = side.getBoundingClientRect().width;
+      const startW = wrap.getBoundingClientRect().width;
       rz.classList.add('dragging');
       document.body.style.userSelect = 'none';
       const onMove = (ev) => apply(startW + (ev.clientX - startX));
@@ -988,11 +989,16 @@ async function init() {
     if (_programmaticScroll > 0 || Date.now() < _smoothScrollUntil) return;
     setFollowBottom(isAtBottom(FOLLOW_SLOP));
   });
-  // 滚轮向上 = 明确要看历史：立刻锁住，不等 scroll 事件排队
+  // 滚轮向上 = 明确要看历史：立刻锁住，不等 scroll 事件排队。
+  // 过程折叠区有自己的滚动条：在内层滚动只影响过程跟随，不能把主窗口跟随一起关掉。
   $('#chat').addEventListener('wheel', (e) => {
+    const body = e.target.closest && e.target.closest('.process-fold-body');
+    if (body && body.scrollHeight > body.clientHeight + 1) return;   // 内层能滚：交给它
     if (e.deltaY < 0) setFollowBottom(false);
   }, { passive: true });
-  $('#chat').addEventListener('touchmove', () => {
+  $('#chat').addEventListener('touchmove', (e) => {
+    const body = e.target.closest && e.target.closest('.process-fold-body');
+    if (body && body.scrollHeight > body.clientHeight + 1) return;
     if (_programmaticScroll > 0) return;
     setFollowBottom(isAtBottom(FOLLOW_SLOP));
   }, { passive: true });
@@ -1062,6 +1068,11 @@ async function init() {
   };
   function toggleSidebar(force) {
     const on = (typeof force === 'boolean') ? force : !$('#app').classList.contains('side-collapsed');
+    // IDE 模式下侧栏宽度过渡会带着 Monaco 一起变宽：过渡期间冻结自动布局，
+    // 否则每一帧都全量 layout，动画看起来就是「卡一下」（见 base.css 的说明）。
+    if (state.uiMode === 'ide' && typeof ideFreezeEditorLayout === 'function') {
+      ideFreezeEditorLayout(240);
+    }
     applySidebarCollapsed(on);
     try {
       if (window.matchMedia('(max-width: 900px)').matches) localStorage.setItem('gm.sideMobile', on ? '1' : '0');

@@ -35,6 +35,7 @@ SNIPPET_MAX = 600          # Firecrawl 的 description 是整页 markdown，必�
 DEFAULT_TIMEOUT = 20
 SCRAPE_TIMEOUT = 30
 QUOTA_COOLDOWN = 3600      # 配额 / 鉴权失败后冷却多久（秒）
+QUALITY_MIN = 0.18         # 引擎结果与查询的最低相关度；低于它先换源，但会留作兜底
 
 
 class EngineError(Exception):
@@ -208,13 +209,18 @@ _ENGINES = {"firecrawl": firecrawl_search,
 
 # ---------------------------------------------------------------- 自动链
 def auto_search(query, count=8, cfg=None):
-    """按 CHAIN 顺序检索；失败换下一个。全失败时抛 EngineError（带每个引擎的原因）。"""
+    """按 CHAIN 顺序检索；失败或结果明显跑题时换下一个。
+
+    全失败时抛 EngineError（带每个引擎的原因）；如果所有引擎都只给了低质量结果，
+    返回其中质量最高的一组 —— 有结果总比空手好。
+    """
     cfg = cfg or load_config()
     if not modsearch_enabled(cfg):
         raise EngineError("modsearch 已关闭（设置 → 联网与数据源 → 联网搜索）", kind="disabled")
     keys = engine_keys(cfg)
     enabled = engine_enabled(cfg)
     errors = []
+    best, best_q, best_name = None, -1.0, ""
     for name in CHAIN:
         if not enabled.get(name, True):
             continue
@@ -232,13 +238,29 @@ def auto_search(query, count=8, cfg=None):
         except Exception as e:               # noqa: BLE001  单个引擎异常不能拖垮整条链
             errors.append("%s: %s" % (name, e))
             continue
-        if items:
+        if not items:
+            errors.append("%s: 没有结果" % name)
+            continue
+        try:
+            from app.search_rank import provider_quality
+            quality = provider_quality(items, query)
+        except Exception:                    # noqa: BLE001  排序层异常不影响搜索本身
+            quality = 1.0
+        if quality >= QUALITY_MIN:
             for it in items:
                 it["engine"] = name
             if errors:
                 print("[搜索] 已降级到 %s（%s）" % (name, "；".join(errors)))
             return items
-        errors.append("%s: 没有结果" % name)
+        # 明显跑题：先记下最优的一组，继续试后面的引擎
+        errors.append("%s: 结果与查询相关度低（%.2f）" % (name, quality))
+        if quality > best_q:
+            best, best_q, best_name = items, quality, name
+    if best:
+        for it in best:
+            it["engine"] = best_name
+        print("[搜索] 引擎结果相关度都偏低，返回最优的一组（%s）" % "；".join(errors))
+        return best
     raise EngineError("免注册引擎都没能返回结果 → " + "；".join(errors), kind="all")
 
 

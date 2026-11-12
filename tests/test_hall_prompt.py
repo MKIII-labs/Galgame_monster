@@ -54,3 +54,31 @@ def test_build_prompt_hall_switch(monkeypatch):
                         lambda: {"agent_hall_prompt": True})
     p2 = agent.build_agent_prompt({}, search_ready=False)
     assert "模拟股市" in p2
+
+def test_capability_boundary_points_to_tool_search_when_hidden():
+    """有未挂载组时，能力边界必须先让模型去 tool_search 解锁，而不是直接说「不可用」。
+
+    回归：旧文案是「清单里没有 = 当前不可用，直接说不可用」，和同一份提示词里的
+    「低频组需要先 tool_search 解锁」打架，模型通常选绝对那条。
+    """
+    from app.agent.prompt import capability_boundary
+
+    with_hidden = capability_boundary(True)
+    assert "tool_search" in with_hidden
+    assert "不要直接说" in with_hidden
+    plain = capability_boundary(False)
+    assert "tool_search" not in plain
+
+def test_prompt_tells_user_how_to_enable_file_tools():
+    """P2：没有文件工具时，要给出「怎么开启」的下一步，不能只说「我没有能力」。"""
+    plain = agent.build_agent_prompt({}, search_ready=False)
+    assert "切到 Agent" in plain
+    no_sandbox = agent.build_agent_prompt({"agent_enabled": True}, search_ready=False)
+    assert "📁" in no_sandbox
+
+def test_base_principles_come_first_and_forbid_report_files():
+    """base 层：通用原则必须排在所有提示词最前，且明确「不要为有产物而建文件」。"""
+    p = agent.build_agent_prompt({"agent_enabled": True, "sandbox": "."}, search_ready=False)
+    assert p.startswith("## 基本原则"), p[:40]
+    assert "不要为了「有个产物」而新建文件" in p
+    assert "能改现有文件就不要新建" in p

@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """会话读写、精简与旧格式解析"""
 import os
+import re
 import time
 
-from app.store import SESSION_FILE, LEGACY_HISTORY, DATA_DIR, read_json, write_json, new_id
+from app.store import (SESSION_FILE, LEGACY_HISTORY, DATA_DIR, read_json, write_json,
+                       drop_cache, new_id)
 
 # 「当前会话」单独存一个几十字节的小文件：切会话时只改它，
 # 不再为了一个 current 字段把 20MB 的 sessions.json 全量重写（实测 230ms）。
@@ -12,6 +14,22 @@ CURRENT_FILE = os.path.join(DATA_DIR, "current_session.json")
 MSG_WINDOW = 80
 # 每个会话最多保存多少个「提问标记」：悬浮按钮太多会挡住聊天区
 MAX_QMARKS = 20
+# 单会话快照目录（跟 SESSION_FILE 同目录：测试把 SESSION_FILE 指到临时目录时也隔离）
+STORE_DIRNAME = "session_store"
+_SID_RE = re.compile(r"[^A-Za-z0-9_-]")
+_SAVED_AT_RE = re.compile(r'"saved_at"\s*:\s*([0-9]+(?:\.[0-9]+)?)')
+
+
+def _safe_sid(sid):
+    return _SID_RE.sub("_", str(sid or "").strip())[:80]
+
+
+def _store_dir():
+    return os.path.join(os.path.dirname(SESSION_FILE), STORE_DIRNAME)
+
+
+def _store_path(sid):
+    return os.path.join(_store_dir(), _safe_sid(sid) + ".json")
 
 
 def ensure_session_kb_fields(s):
@@ -218,25 +236,44 @@ def _store_mode():
         return "json"
 
 
-def _merge_events_once(data):
+def _merge_events_once(data, skip=None):
     """启动后第一次加载：事件流比 sessions.json 新时，以事件流为准。
 
-    为什么只在第一次：运行期间所有写入都会同时更新 JSON 与事件流；
-    只有「上次进程崩溃 / JSON 写失败」才会出现事件流领先，这时读一次即可。
+    为什么只在第一次：运行期间所有写入都会同时更新单会话快照与事件流；
+    只有「上次进程崩溃 / 快照写失败」才会出现事件流领先，这时读一次即可。
     会话**列表**仍以 JSON 为准（删除会话后不会从事件流里复活）。
+
+    skip：已经由单会话快照恢复过的会话（那份快照比事件流还新，不用再重放）。
+    只有「事件流最后一条比 sessions.json 的 saved_at 新」的会话才重建 ——
+    以前每个启动都要把所有会话的事件日志（实测 155MB）重建一遍，白花 1 秒多。
     """
     try:
         from app import session_events as se
     except Exception as e:
         print("[事件] 模块不可用，跳过对账：%s" % e)
         return
-    rebuilt = se.load_all()
+    skip = {str(x) for x in (skip or ())}
+    try:
+        agg_at = float(data.get("saved_at") or 0)
+    except (TypeError, ValueError):
+        agg_at = 0.0
     dirty = False
     for s in data.get("sessions") or []:
         sid = s.get("id")
-        ev = rebuilt.get(sid)
+        if not sid or str(sid) in skip:
+            continue
+        try:
+            ts = se.latest_ts(sid)
+        except Exception:                # noqa: BLE001  读不到就按「没有事件」处理
+            ts = 0.0
+        if ts <= 0:
+            se.record(s)                 # 事件流缺失：补一条基线
+            continue
+        if ts <= agg_at:
+            continue                     # 事件流没有比 sessions.json 更新的内容
+        ev = se.rebuild(sid)
         if not ev:
-            se.record(s)              # 事件流缺失：补一条基线
+            se.record(s)                 # 事件流缺失：补一条基线
             continue
         try:
             newer = float(ev.get("updated_at") or 0) > float(s.get("updated_at") or 0) + 1e-6
@@ -250,7 +287,104 @@ def _merge_events_once(data):
             dirty = True
             print("[事件] 会话 %s 从事件流恢复（JSON 落后）" % sid)
     if dirty:
+        data["saved_at"] = time.time()
         write_json(SESSION_FILE, data, indent=None)
+
+
+# ---------------------------------------------------------------------------
+# 单会话快照（热路径落库）
+# ---------------------------------------------------------------------------
+
+def _saved_at_of(path):
+    """读快照的 saved_at：先只读文件头 256 字节（写入时 saved_at 在第一个字段），
+    读不到才退回完整解析 —— 启动时不该为了比时间戳把几十 MB 的全解析一遍。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            head = f.read(256)
+        m = _SAVED_AT_RE.search(head)
+        if m:
+            return float(m.group(1))
+    except (OSError, ValueError):
+        pass
+    obj = read_json(path, None)
+    drop_cache(path)
+    try:
+        return float((obj or {}).get("saved_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def save_session(s):
+    """热路径落库：只写「这一条会话」的快照 + 事件流，不重写整份 sessions.json。
+
+    为什么可以只写一条：sessions.json 是整份快照，写一次要把全部会话序列化
+    （实测 74MB / 约 570ms，且持全局锁），而流式过程中每 15 秒就要落一次进度。
+    改成每会话一个文件后只序列化变更的那一条（通常 10~150ms）。
+    sessions.json 仍是权威快照，回合收尾与冷路径会写回来（`save_sessions`），
+    所以外部脚本 / 备份读它是完整的，只是可能落后一个回合。
+    快照里的 `saved_at` 用于启动时判断「这份快照是否比 sessions.json 新」。
+    """
+    if not isinstance(s, dict) or not s.get("id"):
+        return
+    path = _store_path(s["id"])
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # saved_at 必须是第一个字段：启动时靠文件头判断新旧，不解析整份文件
+        write_json(path, {"saved_at": time.time(), "session": s},
+                   indent=None, remember=False)
+    except Exception as e:               # noqa: BLE001  快照失败不影响主流程
+        print("[存储] 单会话快照失败：%s" % e)
+    try:
+        from app import session_events
+        session_events.record(s)
+    except Exception as e:               # noqa: BLE001
+        print("[事件] %s" % e)
+
+
+def _merge_store_snapshots(data):
+    """把「比 sessions.json 新」的单会话快照并回来（进程中途退出时的热路径数据）。
+
+    返回恢复过的会话 id 集合。过期 / 孤儿的快照顺手删掉，避免目录越积越大。
+    """
+    d = _store_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return set()
+    try:
+        agg_at = float(data.get("saved_at") or 0)
+    except (TypeError, ValueError):
+        agg_at = 0.0
+    rows = data.get("sessions") or []
+    index = {str(s.get("id") or ""): s for s in rows}
+    recovered = set()
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        p = os.path.join(d, name)
+        ts = _saved_at_of(p)
+        if ts <= agg_at:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+            continue
+        obj = read_json(p, None)
+        drop_cache(p)                    # 快照只在启动时读一次，别常驻
+        sess = (obj or {}).get("session")
+        sid = str((sess or {}).get("id") or "")
+        cur = index.get(sid)
+        if not cur:
+            # 会话列表以 sessions.json 为准：已删除的会话不因残留快照复活
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+            continue
+        cur.clear()
+        cur.update(sess)
+        recovered.add(sid)
+    return recovered
 
 
 def _mark_resume_pending(data):
@@ -343,12 +477,21 @@ def load_sessions():
         if not any(s["id"] == data.get("current") for s in data["sessions"]):
             data["current"] = data["sessions"][0]["id"]
         if not _MERGED:
+            # 先置位、后执行时，任何一次瞬时 IO 失败（事件流读盘 / write_json）
+            # 都会让本进程永久跳过对账；失败必须回滚标记，下次 load 再试一次。
             _MERGED = True
-            if _store_mode() == "events":
-                _merge_events_once(data)
-            if _mark_resume_pending(data):
-                # 走 save_sessions 而不是 write_json：这次变更也要进事件流
-                save_sessions(data)
+            try:
+                # 1) 上次进程中途退出时热路径写下的单会话快照（比 sessions.json 新）
+                recovered = _merge_store_snapshots(data)
+                # 2) 没有快照可用的会话，再看事件流是否更新
+                if _store_mode() == "events":
+                    _merge_events_once(data, skip=recovered)
+                if _mark_resume_pending(data):
+                    # 走 save_sessions 而不是 write_json：这次变更也要进事件流
+                    save_sessions(data)
+            except Exception:
+                _MERGED = False
+                raise
         _apply_current(data)
         return data
 
@@ -372,8 +515,23 @@ def load_sessions():
 
 
 def save_sessions(data):
+    """冷路径落库：把整份会话快照写回 sessions.json（热路径用 `save_session`）。
+
+    先记事件、后写快照：
+    - 事件的时间戳一定早于快照里的 saved_at，启动对账时不会把刚写过的内容再重放一遍；
+    - 快照写失败（Windows 占用 / 盘满）时，事件流仍能把它恢复出来。
+    """
     if data is None:
         return
+    # append-only 旁路事件：覆盖所有落盘路径（生成、压缩、改名、删除后的截断）。
+    # 失败只打日志，绝不影响主流程；没变化的会话由签名快速跳过。
+    try:
+        from app import session_events
+        session_events.record_all(data.get("sessions") or [])
+    except Exception as e:
+        print("[事件] %s" % e)
+    # saved_at 标记这份快照的时间，启动时用来判断单会话快照是否更新（见 _merge_store_snapshots）
+    data["saved_at"] = time.time()
     write_json(SESSION_FILE, data, indent=None)   # 只有程序读，紧凑格式写得更快、更小
     # current 同步到侧车文件（只在真的变了时写）：新建 / 删除 / 存档恢复
     # 都会改 current，不跟着同步的话下次 load 会被旧值覆盖。
@@ -384,13 +542,15 @@ def save_sessions(data):
             set_current(cur)
     except Exception:
         pass
-    # append-only 旁路事件：覆盖所有落盘路径（生成、压缩、改名、删除后的截断）。
-    # 失败只打日志，绝不影响主流程；没变化的会话由签名快速跳过。
-    try:
-        from app import session_events
-        session_events.record_all(data.get("sessions") or [])
-    except Exception as e:
-        print("[事件] %s" % e)
+
+
+def flush_sessions(data=None):
+    """把内存里的全量快照落盘一次（回合收尾 / 备份前）。
+
+    热路径只在 `session_store/` 里写单会话快照；整份 sessions.json 靠这里跟上，
+    外部脚本、备份、以及「直接打开 data/sessions.json 看」都仍然拿得到完整数据。
+    """
+    save_sessions(data if isinstance(data, dict) else load_sessions())
 
 
 def sandbox_group(path):

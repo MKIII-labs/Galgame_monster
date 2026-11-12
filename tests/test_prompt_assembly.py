@@ -347,3 +347,36 @@ def test_chat_ops_summary_counts_append_note(monkeypatch):
                         lambda sid, allowed, ops: ({"append_note": 1}, [], {}))
     out = mem_tool.apply_chat_ops("s1", [{"op": "append_note", "content": "补充"}])
     assert out and out["summary"] == "追加 1"
+
+
+def test_memory_tool_prompt_splits_static_and_dynamic():
+    """记忆条数 / 现有条目属于动态段：留在 system 里会让写一次记忆就整段 miss。"""
+    from app import mem_tool
+    static, dyn = mem_tool.build_tool_prompt({"ai_write": True}, parts=True)
+    assert "## 记忆工具" in static
+    assert "现有条目" not in static and "本会话记忆现有" not in static
+    assert "本会话记忆现有" in dyn and "现有条目" in dyn
+    # 不带 parts 时行为不变（仍是完整文本）
+    assert "现有条目" in mem_tool.build_tool_prompt({"ai_write": True})
+
+
+def test_memory_index_goes_to_dynamic_tail(monkeypatch):
+    """L3 记忆索引随记忆写入变化，必须落在 dyn（贴请求末尾），不能进 fixed。"""
+    from app import knowledge
+    monkeypatch.setattr(knowledge, "memory_index_block", lambda *a, **k: "【记忆索引】X")
+    fixed, dyn, _n = pa.base_system_parts({}, "问", include_session=False,
+                                          include_kbs=False)
+    assert "【记忆索引】X" not in fixed
+    assert "【记忆索引】X" in dyn
+
+
+def test_round_note_appends_to_tail_not_system():
+    """研究台账 / 缺口提醒贴请求末尾，绝不改写 messages[0]。"""
+    from app.api import chat
+    msgs = [{"role": "system", "content": "S"},
+            {"role": "user", "content": "U"},
+            {"role": "assistant", "content": "A"},
+            {"role": "user", "content": "TOOL_RESULT"}]
+    chat._attach_round_note(msgs, "【研究台账】")
+    assert msgs[0]["content"] == "S"
+    assert msgs[-1]["content"].endswith("【研究台账】")

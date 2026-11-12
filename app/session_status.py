@@ -4,8 +4,10 @@
 只存内存（进程重启即清空）——这些状态本来就属于「当前这一轮」，
 写进 sessions.json 会在崩溃后留下永远消不掉的假待办。
 
-变化时通过常驻推送总线发一条 `session_pending`，前端据此更新会话行的小圆点：
-    {"type": "session_pending", "sid": "...", "kind": "approval"|"ask"|"", "count": n}
+变化时通过常驻推送总线发一条 `session_pending`，前端据此更新会话行的小圆点，
+并在用户看不到该会话时弹系统通知：
+    {"type": "session_pending", "sid": "...", "kind": "approval"|"ask"|"", "count": n,
+     "text": "这次要你做什么", "at": 登记时间戳（前端去重用）}
 """
 import threading
 import time
@@ -19,29 +21,43 @@ _lock = threading.Lock()
 _pending = {}          # sid -> {"kind": str, "n": int, "at": float}
 
 
-def _publish(sid, kind, count):
+def _publish(sid, kind, count, text="", at=0):
+    obj = {"type": "session_pending", "sid": sid,
+           "kind": kind if count else "", "count": count}
+    if text:
+        obj["text"] = text
+    if at:
+        obj["at"] = at
     try:
-        events.publish({"type": "session_pending", "sid": sid,
-                        "kind": kind if count else "", "count": count})
+        events.publish(obj)
     except Exception:                       # noqa: BLE001  推送失败不影响主流程
         pass
 
 
-def mark(sid, kind):
-    """登记一个待处理交互（同一会话同类会累加计数）。"""
+def mark(sid, kind, text=""):
+    """登记一个待处理交互（同一会话同类会累加计数）。
+
+    text 是给系统通知用的一行摘要（问题题面 / 要执行的命令 / 计划目标）。
+    同类重复登记时保留最新一条：后来的那条通常才是用户真正要处理的事。
+    """
     s = str(sid or "").strip()
     if not s or kind not in KINDS:
         return
+    summary = str(text or "").strip()[:200]
     with _lock:
         cur = _pending.get(s)
         if cur and cur.get("kind") == kind:
             cur["n"] = int(cur.get("n") or 0) + 1
             cur["at"] = time.time()
+            if summary:
+                cur["text"] = summary
         else:
-            cur = {"kind": kind, "n": 1, "at": time.time()}
+            cur = {"kind": kind, "n": 1, "at": time.time(), "text": summary}
             _pending[s] = cur
         n = cur["n"]
-    _publish(s, kind, n)
+        at = cur["at"]
+        summary = cur.get("text") or ""
+    _publish(s, kind, n, summary, at)
 
 
 def clear(sid, kind=None):
@@ -57,10 +73,13 @@ def clear(sid, kind=None):
         if n:
             cur["n"] = n
             kind = cur["kind"]
+            text = cur.get("text") or ""
+            at = cur.get("at") or 0
         else:
             _pending.pop(s, None)
             kind = ""
-    _publish(s, kind or "", n)
+            text, at = "", 0
+    _publish(s, kind or "", n, text, at)
 
 
 def drop(sid):

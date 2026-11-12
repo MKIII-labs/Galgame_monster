@@ -16,12 +16,32 @@
   /* 文件 / 列表项配色（对齐 VS Code 的 sideBar / list / tab 语义）
      —— VS Code 的资源管理器文件名用 sideBar.foreground，选中项用自己的前后景，
         都不是"强调色"；以前我们把选中与改动都涂成 --accent，是本次要修的偏差。 */
-  --ide-side-fg: var(--text);             /* sideBar.foreground */
-  --ide-sel-fg: var(--text);              /* list.activeSelectionForeground（未启用 IDE 主题时配 --bg-active 的对比度） */
+  /* 取值 = VS Code 出厂默认主题（Dark Modern / Light Modern）的 sideBar.foreground 与
+     list.activeSelectionForeground。light-dark() 跟随当前 color-scheme（IDE 预设各自声明明暗），
+     不支持时回落到前一条（深色值），保证旧浏览器也不会丢色。 */
+  --ide-side-fg: #CCCCCC;                 /* sideBar.foreground */
+  --ide-side-fg: light-dark(#3B3B3B, #CCCCCC);
+  --ide-sel-fg: #FFFFFF;                  /* list.activeSelectionForeground */
+  --ide-sel-fg: light-dark(#000000, #FFFFFF);
   --ide-sel-inactive: var(--bg-hover);    /* list.inactiveSelectionBackground（侧栏失焦时的当前文件） */
   --ide-tab-fg: var(--text);              /* tab.activeForeground */
   --ide-tab-fg-dim: var(--text-dim);      /* tab.inactiveForeground */
-  --ide-mod-fg: var(--accent);            /* AI 改过的文件（VS Code 无对应物，见 ide.css 预设块注释） */
+  --ide-mod-fg: #E2C08D;                  /* AI 改过的文件（VS Code 无对应物，取 git modified 观感） */
+  --ide-mod-fg: light-dark(#895503, #E2C08D);
+  /* 文件树的 git 装饰色：VS Code `gitDecoration.*` 的出厂默认值
+     （modified / added / untracked / deleted / renamed / conflicted） */
+  --ide-git-m: #E2C08D;
+  --ide-git-m: light-dark(#895503, #E2C08D);
+  --ide-git-a: #81B88B;
+  --ide-git-a: light-dark(#587C0C, #81B88B);
+  --ide-git-u: #73C991;
+  --ide-git-u: light-dark(#587C0C, #73C991);
+  --ide-git-d: #C74E39;
+  --ide-git-d: light-dark(#AD0707, #C74E39);
+  --ide-git-r: #73C991;
+  --ide-git-r: light-dark(#007100, #73C991);
+  --ide-git-c: #E4676B;
+  --ide-git-c: light-dark(#AD0707, #E4676B);
 
   /* ===== VS Code 官方参数对齐（取证来源与置信度见 docs/IDE_VSCODE_PARITY.md）=====
      只写在 #ide-panel 作用域内：IDE 工作区对齐 VS Code，右侧对话区与 Solo / GAL 不受影响。 */
@@ -102,11 +122,21 @@
 .act-btn:hover { color: var(--ide-activity-fg); background: var(--bg-hover); }
 .act-btn.active { color: var(--ide-activity-fg); background: var(--bg-hover); }
 
+/* 侧边栏容器：收起 / 展开只动这一层的宽度与透明度。
+   各视图（资源管理器 / 搜索 / Git …）仍用 .hidden 瞬间切换，不参与宽度动画；
+   过渡期间 JS 会冻结 Monaco 的 automaticLayout，避免每帧全量 layout。 */
+.ide-sides {
+  display: flex; min-width: 0; overflow: hidden;
+  width: var(--ide-side-w, 260px); flex: 0 0 var(--ide-side-w, 260px);
+  transition: width .18s var(--ease), flex-basis .18s var(--ease),
+              opacity .12s var(--ease);
+}
+.ide-sides.collapsed { width: 0; flex: 0 0 0; opacity: 0; }
 /* 侧边栏（Trae 风：与活动栏同色、极淡分隔线、紧凑头部）
    宽度 260px：右侧还挂着对话栏，取中间的克制值；宽度由拖拽条控制（见 init.js）。 */
 .ide-side {
   display: flex; flex-direction: column;
-  width: var(--ide-side-w, 260px); flex: 0 0 var(--ide-side-w, 260px);
+  width: 100%; flex: 1 1 auto; min-width: 0;
   background: var(--bg-side);
   border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   overflow: hidden;
@@ -155,6 +185,8 @@
 .ide-ws-caret { flex: none; display: inline-flex; align-items: center; height: 17px; color: var(--text-dim); }
 .ide-ws-caret .ic { width: 14px; height: 14px; transition: transform var(--t-fast) var(--ease); }
 .ide-workspace.collapsed .ide-ws-caret .ic { transform: rotate(-90deg); }
+/* 折叠态由工作区行的类控制；动画期间 JS 会用内联 display 抵消它 */
+.ide-workspace.collapsed + .ide-tree { display: none; }
 .ide-ws-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .ide-ws-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
 .ide-workspace .ide-root {
@@ -164,7 +196,8 @@
 }
 .ide-tree {
   flex: 1 1 auto; overflow: auto; padding: 2px 6px 10px;
-  font-size: 12.5px; color: var(--ide-side-fg);
+  /* VS Code 工作台基准字号 13px（docs/IDE_VSCODE_PARITY.md §2.1） */
+  font-size: 13px; color: var(--ide-side-fg);
 }
 /* 正在读盘的文件：立刻给点击反馈，不用等到内容返回 */
 .ide-row.loading { opacity: .55; cursor: progress; }

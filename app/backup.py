@@ -159,6 +159,15 @@ def backup_name():
 def _write_zip(sink, data_dir=None, db_file=None):
     """把备份内容写进 sink 驱动的 zip；返回 manifest 里的文件清单。"""
     root = _root(data_dir)
+    # 热路径只在 session_store/ 里写单会话快照，sessions.json 可能落后一个回合；
+    # 备份前补一次全量快照，保证备份里是「点备份这一刻」的完整数据。
+    try:
+        if root == os.path.abspath(store.DATA_DIR):
+            from app.sessions import flush_sessions
+            with store._lock:            # 序列化的是内存对象：别和流式落库撞车
+                flush_sessions()
+    except Exception as e:               # noqa: BLE001  快照失败不该阻断备份
+        print(f"[备份] 全量落盘失败：{e}")
     dbf = _db_path(root, db_file)
     files = []
     writer = _SinkWriter(sink)
@@ -455,6 +464,9 @@ def _clear_caches(root):
             knowledge.drop_cache(path)
         except Exception:
             pass
+    # 恢复后，恢复前留下的单会话快照可能比备份里的 sessions.json 还新，
+    # 下次启动会把旧数据「恢复」回来 —— 直接清掉，以备份为准。
+    shutil.rmtree(os.path.join(root, "session_store"), ignore_errors=True)
 
 
 def restore_backup(data, data_dir=None, db_file=None, make_safety=True):

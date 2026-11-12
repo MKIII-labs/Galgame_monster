@@ -156,3 +156,39 @@ def test_preview_undo_move_back(tmp_path):
     finally:
         agent.accept(token)
         _cleanup("t-preview4")
+
+
+def test_ensure_loaded_retries_after_transient_failure(monkeypatch):
+    """撤销栈读盘失败时不能把会话标记成「已加载」，否则本进程内永久不再重试。"""
+    from app.agent import state as agent_state
+    from app.agent.undo import _UNDO
+    from app import snapstore
+
+    sid = "t-load-retry"
+    token = "tok-retry"
+    agent_state._LOADED_SIDS.discard(sid)
+    _UNDO.pop(token, None)
+
+    calls = {"n": 0}
+
+    def flaky(_sid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("文件被占用")
+        return {token: {"label": "写文件", "kind": "restore", "path": "", "ops": []}}
+
+    monkeypatch.setattr(snapstore, "load", flaky)
+    try:
+        agent_state._ensure_loaded(sid)       # 第一次失败
+        assert calls["n"] == 1
+        assert sid not in agent_state._LOADED_SIDS     # 关键：失败不置位
+        assert token not in _UNDO
+
+        agent_state._ensure_loaded(sid)       # 第二次会重试并成功
+        assert calls["n"] == 2
+        assert token in _UNDO
+        assert _UNDO[token]["sid"] == sid
+        assert sid in agent_state._LOADED_SIDS
+    finally:
+        _UNDO.pop(token, None)
+        agent_state._LOADED_SIDS.discard(sid)

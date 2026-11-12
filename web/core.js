@@ -60,6 +60,8 @@ const state = {
   ideClip: null,             // 文件树剪贴板：{ mode: 'copy' | 'cut', paths: [] }
   ideDirty: false,
   ideChanged: new Set(),     // AI 改动过、需要在文件树里高亮的文件
+  ideGitMarks: {},           // 文件树 git 装饰：rel -> { ch: 'M'|'U'|…, cls: 'm'|'u'|… }
+  ideGitDirs: {},            // 含改动的目录 -> 汇总状态类（文件夹行右侧的小圆点）
   // IDE 运行时字段：首次进入 IDE 前就需有默认值，否则点文件会因 undefined 抛错
   ideSide: 'explorer',
   ideSideHidden: false,      // 文件管理区（活动栏右侧）是否收起
@@ -79,8 +81,8 @@ const state = {
   ideMonacoDefaults: null,   // 从 VS Code 导入的编辑器默认项
   // 变更审阅（Trae 式）：同一轮同一文件合并为一条，diff 取第一次写入前的快照
   ideDiffs: {},              // rel -> undo token（兼容旧的单文件 diff 入口）
-  ideReview: [],             // 待审阅：[{ path, tokens, baseToken, name }]
-  ideReviewPending: [],      // 本轮新增，回合结束后并入 ideReview
+  ideReview: [],             // 待审阅：[{ path, tokens, baseToken, name, sid, adds, dels }]
+  ideReviewPending: [],      // 本轮写入的临时条目；流式期间就提前并进 ideReview，回合结束按 sid 清空
   ideReviewIdx: 0,           // 当前审阅到第几条
   ideReviewSurface: '',      // 'ide' | 'modal'
   ideDiffEditor: null,       // IDE 内嵌 diff 编辑器
@@ -89,7 +91,7 @@ const state = {
   ideReviewModels: null,
   ideSettledTokens: {},      // token -> 'accepted' | 'undone'
   reviewCardBtns: {},        // token -> [聊天卡片上的按钮]
-  changeCards: [],           // 聊天流里的「变更记录」：{ row, items, el }
+  changeCards: [],           // 聊天流里的「文件改动声明」：{ row, items, el, open, sid }
   lastPlan: [],              // 最近一次 update_plan 的步骤（提示栏展开任务项用）
   ideDiffDoc: null,          // IDE 内嵌审阅的合成文档（行号 / 折叠条定位）
   ideReviewDoc: null,        // Solo 弹窗里的同一份
@@ -286,6 +288,85 @@ function replayEnter(el, cls) {
   el.classList.remove(cls);
   void el.offsetWidth;
   el.classList.add(cls);
+}
+
+/* ---------- 折叠栏过渡（通用） ----------
+   适用于「根节点靠一个类控制折叠、内容体在收起时 display:none」的结构。
+   用实测高度 + WAAPI 做 max-height 动画：auto 高度、内部可滚动都适用，不写死高度。
+   root：折叠类所在的根；body：被收起的内容体；open：目标状态。
+   opts.cls：折叠类名（默认 collapsed）。
+   opts.positive：类名表示「展开」而不是「收起」（如 .think 的 open）。
+   动画期间给 body 一个内联 display 抵消 CSS 的 display:none，结束后清掉交还给 CSS。 */
+function foldIsOpen(root, cls, positive) {
+  if (!root) return false;
+  if (root._foldAnim && typeof root._foldOpen === 'boolean') return root._foldOpen;
+  const has = root.classList.contains(cls || 'collapsed');
+  return positive ? has : !has;
+}
+
+function foldTransition(root, body, open, opts) {
+  if (!root || !body) return;
+  const o = opts || {};
+  const cls = o.cls || 'collapsed';
+  const positive = !!o.positive;
+  const target = !!open;
+  const setClass = (isOpen) => root.classList.toggle(cls, positive ? isOpen : !isOpen);
+  const finish = () => {
+    body.style.display = '';
+    body.style.maxHeight = '';
+    body.style.overflow = '';
+    setClass(target);
+    if (o.done) o.done(target);
+  };
+  const current = foldIsOpen(root, cls, positive);
+  if (current === target) {
+    if (!root._foldAnim) { setClass(target); if (o.done) o.done(target); }
+    return;
+  }
+  // 打断上一段动画：先摘监听，否则 cancel 会按旧目标把类改回去
+  const prev = root._foldAnim;
+  if (prev) {
+    prev.onfinish = null;
+    prev.oncancel = null;
+    try { prev.cancel(); } catch (e) { /* 忽略 */ }
+    root._foldAnim = null;
+  }
+  root._foldOpen = target;
+  body.style.display = '';
+  body.style.maxHeight = '';
+  body.style.overflow = '';
+  const reduce = window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce || !body.animate) {
+    setClass(target);
+    if (o.done) o.done(target);
+    return;
+  }
+  // 目标态先落到根上：caret / aria 等状态立即切换
+  if (target) {
+    setClass(true);
+  } else {
+    const disp = getComputedStyle(body).display;
+    setClass(false);
+    if (disp !== 'none') body.style.display = disp;   // 抵消 display:none，动画结束再撤
+  }
+  const h = Math.ceil(body.getBoundingClientRect().height);
+  if (!h) { finish(); return; }
+  body.style.overflow = 'hidden';
+  const from = target ? 0 : h;
+  const to = target ? h : 0;
+  body.style.maxHeight = from + 'px';
+  const anim = body.animate(
+    [{ maxHeight: from + 'px' }, { maxHeight: to + 'px' }],
+    { duration: Math.max(0, Number(o.ms) || 220), easing: o.ease || 'cubic-bezier(.25,.8,.3,1)' });
+  root._foldAnim = anim;
+  anim.onfinish = () => {
+    if (root._foldAnim === anim) root._foldAnim = null;
+    finish();
+  };
+  anim.oncancel = () => {
+    if (root._foldAnim === anim) root._foldAnim = null;
+  };
 }
 
 // 「XX 失败」统一提示（等价于 toast('XX失败：' + e, 'error')）

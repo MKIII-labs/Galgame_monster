@@ -266,14 +266,14 @@ def _pdf_text(raw, progress=None):
 
     if not pages:
         return None, (warn or "无法解析该 PDF") + \
-            "。请执行：.venv\\Scripts\\pip install pypdf pypdfium2", False
+            "。请执行：.venv\\Scripts\\pip install pypdf pypdfium2", False, []
 
     joined = "\n\n".join(p.strip() for p in pages if p.strip())
     # 两种情况都要转视觉：① 几乎没有文字（扫描件）② 抽出来不是正常文字（CID 乱码）
     # 阈值取「每页 5 字」——只为抓真正没文本层的页，别把短文档（封面 / 票据）也误判
     if len(joined) < PDF_TEXT_MIN_PER_PAGE * len(pages) or _sane_ratio(joined) < PDF_SANE_MIN:
-        return (joined or None), warn, True
-    return joined, warn, False
+        return (joined or None), warn, True, pages
+    return joined, warn, False, pages
 
 
 def _pdf_render_pages(raw, max_pages=PDF_MAX_OCR_PAGES, progress=None):
@@ -313,8 +313,8 @@ def _pdf_ocr(raw, ocr, max_pages=PDF_MAX_OCR_PAGES, progress=None):
     """
     shots, total = _pdf_render_pages(raw, max_pages, progress=progress)
     if not shots:
-        return "", "PDF 逐页渲染失败（缺少 pypdfium2，或文件已损坏）。", 0
-    parts, ok, fail = [], 0, 0
+        return "", "PDF 逐页渲染失败（缺少 pypdfium2，或文件已损坏）。", 0, []
+    parts, ok, fail, page_map = [], 0, 0, {}
     for pno, jpg in shots:
         if progress:
             try:
@@ -326,6 +326,7 @@ def _pdf_ocr(raw, ocr, max_pages=PDF_MAX_OCR_PAGES, progress=None):
         except Exception as e:
             print("[PDF] 第 %d 页识别异常：%s" % (pno, e))
             t = ""
+        page_map[pno] = t
         if t:
             ok += 1
             parts.append("【第 %d 页】\n%s" % (pno, t))
@@ -333,13 +334,14 @@ def _pdf_ocr(raw, ocr, max_pages=PDF_MAX_OCR_PAGES, progress=None):
             fail += 1
             parts.append("【第 %d 页】\n（本页未识别出内容，可能是空白页或图片太模糊）" % pno)
     if not ok:
-        return "", "该 PDF 没有文本层，逐页识别也没得到内容（可能是空白页或扫描质量太差）。", 0
+        return "", "该 PDF 没有文本层，逐页识别也没得到内容（可能是空白页或扫描质量太差）。", 0, []
+    pages = [page_map.get(i, "") for i in range(1, max(page_map) + 1)]
     warn = "该 PDF 没有文本层（扫描件），已用视觉模型逐页识别：成功 %d 页%s。" % (
         ok, ("，失败 %d 页" % fail) if fail else "")
     if total > len(shots):
         warn += "文件共 %d 页，只识别了前 %d 页（可用页数上限 %d）。" % (
             total, len(shots), max_pages)
-    return "\n\n".join(parts), warn, ok
+    return "\n\n".join(parts), warn, ok, pages
 
 
 def extract(name, raw, ocr=None, progress=None):
@@ -376,10 +378,10 @@ def extract(name, raw, ocr=None, progress=None):
             return None, cwarn
         warn = cwarn
     elif ext == ".pdf":
-        text, warn, needs_ocr = _pdf_text(raw, progress=progress)
+        text, warn, needs_ocr, _pages = _pdf_text(raw, progress=progress)
         if needs_ocr:
             if ocr is not None:
-                otext, owarn, okn = _pdf_ocr(raw, ocr, progress=progress)
+                otext, owarn, okn, _opages = _pdf_ocr(raw, ocr, progress=progress)
                 if okn:
                     return otext, owarn
                 warn = owarn or warn
@@ -408,3 +410,36 @@ def extract(name, raw, ocr=None, progress=None):
     if MAX_CHARS and len(text) > MAX_CHARS:
         return text[:MAX_CHARS], (warn + "；" if warn else "") + "文档较长，只取了前 %d 字" % MAX_CHARS
     return text, warn
+
+
+def extract_pages(name, raw, ocr=None, progress=None):
+    """与 extract 相同，但额外返回 PDF 的逐页文本（list[str]，1-based 对应页码）。
+
+    非 PDF 返回空列表；扫描件 OCR 只返回实际处理过的页。其它格式仍按整篇读，
+    这样 attachment_read 可以按页定位，而不用从头按字符 offset 翻。
+    """
+    ext = os.path.splitext(str(name or ""))[1].lower()
+    if ext != ".pdf":
+        text, warn = extract(name, raw, ocr=ocr, progress=progress)
+        return text, warn, []
+    text, warn, needs_ocr, pages = _pdf_text(raw, progress=progress)
+    if needs_ocr:
+        if ocr is not None:
+            otext, owarn, okn, opages = _pdf_ocr(raw, ocr, progress=progress)
+            if okn:
+                return otext, owarn, [p.strip() for p in opages]
+            warn = owarn or warn
+        if not text:
+            return None, ("%s；" % warn if warn else "") + \
+                "该 PDF 没有可提取的文本层（可能是扫描件）。" \
+                "在「设置 → 视觉模型」或「聊天模型」里配好密钥后重试，即可自动逐页识图。", []
+    if text is None:
+        return None, warn, []
+    text = (text or "").strip()
+    if not text:
+        return None, "没有提取到文本（可能是扫描件 / 空文件 / 纯图片文档）", []
+    pages = [str(p or "").strip() for p in (pages or [])]
+    if MAX_CHARS and len(text) > MAX_CHARS:
+        return text[:MAX_CHARS], (warn + "；" if warn else "") + \
+            "文档较长，只取了前 %d 字" % MAX_CHARS, pages
+    return text, warn, pages

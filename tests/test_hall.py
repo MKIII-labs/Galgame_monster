@@ -557,3 +557,39 @@ def test_geo_describe_caches_per_round_and_photo(monkeypatch):
 def test_geo_describe_rejects_unknown_round():
     out, err = hall.geo_describe("nope")
     assert out is None and "过期" in err
+
+
+# ---------------- 远程图片下载：连接必须释放 ----------------
+
+class _FakeResp:
+    headers = {"Content-Type": "image/png"}
+
+    def __init__(self, chunk=b"\x89PNG"):
+        self._chunk = chunk
+        self.closed = False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, _n):
+        yield self._chunk
+
+    def close(self):
+        self.closed = True
+
+
+def test_read_remote_image_closes_on_oversize(monkeypatch):
+    """超限是常见失败路径：stream=True 的连接必须关掉，否则留在 keep-alive 池里。"""
+    resp = _FakeResp(b"x" * 100)
+    monkeypatch.setattr(hall.requests, "get", lambda *a, **k: resp)
+    with pytest.raises(RuntimeError):
+        hall._read_remote_image("http://example.com/a.png", limit=10)
+    assert resp.closed is True
+
+
+def test_read_remote_image_closes_on_success(monkeypatch):
+    resp = _FakeResp()
+    monkeypatch.setattr(hall.requests, "get", lambda *a, **k: resp)
+    mime, b64 = hall._read_remote_image("http://example.com/a.png")
+    assert mime == "image/png" and b64
+    assert resp.closed is True

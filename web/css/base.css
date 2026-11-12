@@ -553,10 +553,9 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 #app.side-collapsed #sidebar {
   width: 0; flex: 0 0 0; padding: 0; border: 0;
 }
-/* IDE 模式下取消侧栏宽度动画：Monaco 的 automaticLayout 会在过渡的每一帧重排，
-   180ms 的 width 过渡 = 十几次全量 layout，表现就是「收起/展开明显卡一下」。
-   其它模式保留动画（那里只有普通 DOM，没有编辑器）。 */
-#app.mode-ide #sidebar { transition: none; }
+/* IDE 模式下也保留侧栏宽度动画，但过渡期间由 gal-ide.js 的 ideFreezeEditorLayout()
+   冻结 Monaco 的 automaticLayout（否则每帧一次全量 layout，收起/展开会明显卡一下），
+   过渡结束再恢复并手动 layout 一次。 */
 #app.side-collapsed .sidebar-body {
   opacity: 0; visibility: hidden; pointer-events: none;
   transition: opacity var(--t-fast) var(--ease), visibility var(--t-press) linear var(--t);
@@ -1027,9 +1026,13 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 }
 .ide-row:hover { background: var(--bg-hover); }
 .ide-row.active { background: var(--bg-active); color: var(--ide-sel-fg); }
-/* 侧栏没有键盘焦点时用 VS Code 的 list.inactiveSelectionBackground（比聚焦态暗一档）。 */
+/* 侧栏没有键盘焦点时用 VS Code 的 list.inactiveSelectionBackground（比聚焦态暗一档），
+   文字同时退回 sideBar.foreground —— VS Code 的失焦选中不用白色文字。 */
 #ide-panel:not(:focus-within) .ide-row.active { background: var(--ide-sel-inactive, var(--bg-hover)); }
-.ide-row.changed { color: var(--ide-mod-fg); font-weight: 600; }
+#ide-panel:not(:focus-within) .ide-row.active .ide-name { color: var(--ide-side-fg); }
+/* AI 改过的文件：VS Code 的 git 装饰不加粗，这里只靠颜色区分；
+   真正的 git 状态（下面 .ide-row.git-* 规则）会盖过这一档颜色。 */
+.ide-row.changed { color: var(--ide-mod-fg); }
 /* 目录箭头：chevron 图标，收起时旋转 -90°，展开时朝下 */
 .ide-caret {
   flex: none; width: 14px; height: 14px;
@@ -1038,14 +1041,62 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 }
 .ide-caret .ic { width: 13px; height: 13px; transform: rotate(-90deg); transition: transform var(--t-fast) var(--ease); }
 .ide-row[aria-expanded="true"] .ide-caret .ic { transform: none; }
-.ide-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* flex:1：让行尾的 git 状态字母贴右边（VS Code 的装饰徽标就在最右侧） */
+.ide-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* 文件名按 git 状态着色（VS Code explorer.decorations 的默认观感） */
+.ide-row.git-m .ide-name { color: var(--ide-git-m); }
+.ide-row.git-a .ide-name { color: var(--ide-git-a); }
+.ide-row.git-u .ide-name { color: var(--ide-git-u); }
+.ide-row.git-d .ide-name { color: var(--ide-git-d); }
+.ide-row.git-r .ide-name { color: var(--ide-git-r); }
+.ide-row.git-c .ide-name { color: var(--ide-git-c); }
+/* 选中行优先：list.activeSelectionForeground 盖过装饰色（与 VS Code 一致） */
+.ide-row.active .ide-name { color: var(--ide-sel-fg); }
+.ide-git-mark {
+  flex: none; margin-left: 6px; font-size: 11px; line-height: 1;
+  font-weight: 600; letter-spacing: .2px;
+}
+.ide-git-mark.m { color: var(--ide-git-m); }
+.ide-git-mark.a { color: var(--ide-git-a); }
+.ide-git-mark.u { color: var(--ide-git-u); }
+.ide-git-mark.d { color: var(--ide-git-d); }
+.ide-git-mark.r { color: var(--ide-git-r); }
+.ide-git-mark.c { color: var(--ide-git-c); }
+/* 文件夹行的小圆点：目录里有未提交改动，颜色取子文件里最重的那一种状态 */
+.ide-git-dot {
+  flex: none; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%;
+  background: var(--ide-side-fg);
+}
+.ide-git-dot.m { background: var(--ide-git-m); }
+.ide-git-dot.a { background: var(--ide-git-a); }
+.ide-git-dot.u { background: var(--ide-git-u); }
+.ide-git-dot.d { background: var(--ide-git-d); }
+.ide-git-dot.r { background: var(--ide-git-r); }
+.ide-git-dot.c { background: var(--ide-git-c); }
 
-/* 文件 / 文件夹图标（内联 SVG + 按类型着色，VS Code / Seti 风格近似）
+/* 文件 / 文件夹图标（VS Code Seti 文件图标字体 + 文件夹 SVG 兜底）
    尺寸 16px：VS Code 的 `predefined-file-icon` 是 16px。 */
+@font-face {
+  font-family: 'seti';
+  src: url('/static/vendor/seti/seti.woff') format('woff');
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+}
 .ide-ico { flex: none; width: 16px; height: 16px; display: inline-flex; align-items: center; }
 .ide-ico svg { width: 16px; height: 16px; display: block; }
+.ide-ico.seti {
+  justify-content: center;
+  font-family: 'seti';
+  font-size: 16px;
+  line-height: 16px;
+  font-weight: normal;
+  font-style: normal;
+  -webkit-font-smoothing: antialiased;
+}
 .ide-tab .ide-ico { width: 14px; height: 14px; }
 .ide-tab .ide-ico svg { width: 14px; height: 14px; }
+.ide-tab .ide-ico.seti { font-size: 14px; line-height: 14px; }
 /* 文件类型图标：刻意使用的固定品牌色（各语言的官方识别色），
    不随主题变，也不参与色板收敛 —— 改了反而会让用户认不出文件类型 */
 .ide-ico.ico-folder { color: #dcb67a; }
@@ -1531,6 +1582,9 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 .chat-flow .think { margin: 0; }
 .chat-flow .tool-list { margin: 0; }
 .chat-flow .tool-group { margin: 0; }
+/* 过场旁白（夹在工具之间的正文）：收进过程折叠后压暗一档，和最终答案区分开 */
+.process-fold-body .content.narration { color: var(--text-dim); font-size: 12.5px; }
+.process-fold-body .content.narration p { margin: 4px 0; }
 
 /* 过程折叠：思考 + 工具收成一行，点开看全过程；答案始终留在下面 */
 .process-fold {
@@ -1560,8 +1614,26 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 .process-fold.has-fail .process-fold-caret { color: var(--danger); }
 .process-fold-caret { font-size: 11px; transition: transform var(--t); }
 .process-fold.collapsed .process-fold-caret { transform: rotate(-90deg); }
-.process-fold-body { padding: 6px 9px 8px; border-top: 1px solid var(--border); }
+.process-fold-body {
+  padding: 6px 9px 8px;
+  border-top: 1px solid var(--border);
+  /* 过程步骤有自己的滚动条：主聊天不再被每一步推着走 */
+  max-height: min(38vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+/* 过程体（流式时直接带 .chat-flow）是「max-height + overflow-y:auto」的滚动容器，
+   不是弹性布局容器：flex 列的默认 flex-shrink:1 会在内容超过 max-height 时
+   把每一步等比压扁（标题被裁掉下半截，内层滚动条也永远出不来）。
+   这里固定子项高度，让它正常溢出滚动。历史回放时步骤在嵌套的 .chat-flow 里，
+   一并约束，避免同一结构以后被复用又踩一遍。 */
+.process-fold-body > *,
+.process-fold-body .chat-flow > * { flex: 0 0 auto; }
 .process-fold.collapsed .process-fold-body { display: none; }
+@media (max-width: 640px) {
+  .process-fold-body { max-height: min(34vh, 320px); }
+}
 .process-fold .chat-flow { margin: 0; }
 .process-fold .think, .process-fold .tool-group { margin: 0 0 6px; }
 .process-fold .think:last-child, .process-fold .tool-group:last-child { margin-bottom: 0; }
@@ -2501,6 +2573,11 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 .tool-group-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-group.running .tool-group-ico { color: var(--accent); animation: tool-spin 1.2s linear infinite; }
 @keyframes tool-spin { to { transform: rotate(360deg); } }
+/* 正在跑的那一组：头部加一层很浅的强调色，和已完成的组区分开 */
+.tool-group.current .tool-group-head {
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-hover));
+  color: var(--text);
+}
 /* 折叠用实测高度过渡（JS 里设置 max-height），不再 display:none 硬切 */
 .tool-group-body {
   position: relative; overflow: hidden; padding: 2px 6px 6px;
@@ -2662,9 +2739,11 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 .plan-review-caret { flex: none; display: inline-flex; color: var(--text-dim); transition: transform var(--t-fast) var(--ease); }
 .plan-review-caret .ic { width: 14px; height: 14px; }
 .plan-review-card.collapsed .plan-review-caret { transform: rotate(-90deg); }
+.plan-review-card.collapsed .plan-review-body,
 .plan-review-card.collapsed .plan-review-list,
 .plan-review-card.collapsed .plan-review-comment,
 .plan-review-card.collapsed .plan-review-actions { display: none; }
+.plan-review-body { display: flex; flex-direction: column; gap: 7px; min-height: 0; }
 .plan-review-list { display: flex; flex-direction: column; gap: 5px; }
 .plan-review-item { display: flex; align-items: flex-start; gap: 7px; }
 .plan-review-id {
@@ -2846,6 +2925,7 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 .subagent-row.fail .subagent-ico { color: var(--danger); }
 /* 展开区：指标 + 结论预览（默认收起） */
 .subagent-detail { padding: 0 10px 8px calc(10px + var(--depth, 0) * 16px + 14px); }
+.subagent-row:not(.open) .subagent-detail { display: none; }
 .subagent-metrics { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 5px; }
 .subagent-metric { color: var(--text-dim); font-size: 11px; }
 .subagent-metric b {
@@ -3004,6 +3084,14 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 .tool-state { flex: none; color: var(--text-dim); }
 .tool-card.running .tool-state { color: var(--accent); }
 .tool-card.failed .tool-state { color: var(--danger); }
+/* 写文件的工具卡：右侧显示与「文件改动卡」一致的 +adds −dels */
+.tool-stat {
+  flex: none; font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11.5px; font-variant-numeric: tabular-nums;
+}
+.tool-stat:empty { display: none; }
+.tool-stat .add { color: var(--ok); font-weight: 600; }
+.tool-stat .del { color: var(--danger); font-weight: 600; }
 /* Git 操作卡：与普通命令区分；高危操作标红 */
 .tool-card.git-op .tool-ico,
 .tool-card.git-op .tool-name { color: var(--accent); }
@@ -3025,25 +3113,75 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
   color: var(--text-dim); font-size: 12px; line-height: 1.5; background: var(--bg-hover);
 }
 .tool-card.open .tool-result, .tool-card.always-open .tool-result { display: block; }
+/* 命令执行中：卡片自动展开显示增量输出（高度仍受 260px + 内部滚动约束） */
+.tool-card.streaming .tool-result { display: block; }
+.tool-card.streaming .tool-state { color: var(--accent); }
+/* 当前步骤高亮：正在执行的步骤加浅底 + 呼吸点；并行执行时可能同时亮多张 */
+.tool-card.is-current { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.tool-card.is-current .tool-ico { color: var(--accent); }
+.tool-card.is-current .tool-state::before {
+  content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 5px;
+  border-radius: 50%; background: var(--accent); vertical-align: 1px;
+  animation: step-live 1.2s var(--ease) infinite;
+}
+@keyframes step-live { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 .tool-actions { padding: 0 10px 8px; }
 .tool-actions:empty { display: none; }
 
-/* 变更记录：处理完之后在回复下方留一行，不再承担待审查入口 */
-.change-log {
-  display: flex; align-items: center; gap: 8px;
-  margin-top: 10px; padding: 6px 10px;
-  border: 1px solid var(--border); border-radius: 8px;
-  background: color-mix(in srgb, var(--ok) 6%, transparent);
-  font-size: 12.5px; color: var(--text-dim);
+/* 回复末尾的「文件改动声明」：折叠条 + 逐文件列表，点击文件名跳到 IDE */
+.files-changed {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+  font-size: 13px;
 }
-.change-log-mark { flex: none; color: var(--ok); }
-.change-log-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.change-log-stat {
+.fc-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 10px 12px; cursor: pointer; user-select: none;
+}
+.fc-head:hover { background: var(--bg-hover); }
+.fc-ico {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 5px;
+  border: 1px solid var(--border); color: var(--text-dim);
+}
+.fc-ico-head { width: 30px; height: 30px; border-radius: 8px; }
+.fc-title { font-weight: 600; color: var(--text); }
+.fc-caret { flex: none; color: var(--text-mute); font-size: 11px; line-height: 1; }
+.fc-status { flex: none; color: var(--ok); font-size: 12px; }
+.fc-status.undone { color: var(--danger); }
+.fc-stat {
   flex: none; margin-left: auto;
   font-family: ui-monospace, Menlo, Consolas, monospace;
 }
-.change-log-stat .add { color: var(--ok); font-weight: 600; }
-.change-log-stat .del { color: var(--danger); font-weight: 600; }
+.fc-stat .add, .fc-file-stat .add { color: var(--ok); font-weight: 600; }
+.fc-stat .del, .fc-file-stat .del { color: var(--danger); font-weight: 600; }
+.fc-open {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; margin-left: 4px;
+  border: 0; border-left: 1px solid var(--border); border-radius: 0;
+  background: transparent; color: var(--text-dim); font-size: 13px; cursor: pointer;
+}
+.fc-open:hover { color: var(--accent); }
+.fc-list { border-top: 1px solid var(--border); }
+.files-changed.collapsed .fc-list { display: none; }
+.fc-file {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 12px; border: 0; background: transparent;
+  color: var(--text); font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.fc-file:hover { background: var(--bg-hover); }
+.fc-name { flex: none; font-weight: 600; }
+.fc-path {
+  min-width: 0; color: var(--text-mute); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fc-file-stat {
+  flex: none; margin-left: auto;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+}
 .tool-undo {
   padding: 3px 10px; border: 1px solid var(--border); border-radius: 7px;
   background: transparent; color: var(--text-dim); font-size: 12px; cursor: pointer;

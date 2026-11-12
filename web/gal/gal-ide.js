@@ -110,6 +110,30 @@ function applyUiMode(mode) {
 // IDE 首次进入时初始化：装载本地 Monaco，并做一次性绑定
 let ideInited = false;
 
+// 主题在 light / dark 间切换时，Seti 图标要换成对应的一套颜色（VS Code 也是两套）。
+let ideThemeIconObs = null;
+function ideRefreshThemeIcons() {
+  // 只换图标，不重建整棵树：renderIdeTree 会把展开状态全部收起来
+  const tree = $('#ide-tree');
+  if (tree) {
+    $$('#ide-tree .ide-row').forEach((row) => {
+      const nm = row.querySelector('.ide-name');
+      const old = row.querySelector('.ide-ico');
+      if (!nm || !old) return;
+      row.replaceChild(ideIcoEl(nm.textContent, row.dataset.dir === '1'), old);
+    });
+  }
+  if (typeof renderIdeTabs === 'function') renderIdeTabs();
+}
+function ideWatchThemeIcons() {
+  if (ideThemeIconObs || !window.MutationObserver) return;
+  ideThemeIconObs = new MutationObserver(() => {
+    try { ideRefreshThemeIcons(); } catch (e) { /* 忽略 */ }
+  });
+  ideThemeIconObs.observe(document.documentElement,
+                          { attributes: true, attributeFilter: ['data-theme-mode'] });
+}
+
 /* 顶部提示条：只在第一次进 IDE 时出现，点 ✕ 后记住，不再打扰。
    常驻说明条是"网页横幅"而不是 IDE 的观感来源，所以默认不再一直挂在那儿。 */
 const IDE_NOTICE_KEY = 'ide_notice_seen_v1';
@@ -135,17 +159,21 @@ function ideBindWorkspace() {
   const ws = $('#ide-workspace');
   const tree = $('#ide-tree');
   if (!ws || !tree) return;
-  const apply = (collapsed) => {
-    ws.classList.toggle('collapsed', collapsed);
+  const apply = (collapsed, animate) => {
     ws.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    tree.classList.toggle('hidden', collapsed);
+    if (animate && typeof foldTransition === 'function') {
+      foldTransition(ws, tree, !collapsed, { cls: 'collapsed' });
+    } else {
+      ws.classList.toggle('collapsed', collapsed);
+    }
   };
   let collapsed = false;
   try { collapsed = localStorage.getItem(IDE_WS_KEY) === '1'; } catch (e) { collapsed = false; }
-  apply(collapsed);
+  apply(collapsed, false);
   ws.onclick = () => {
-    const next = !ws.classList.contains('collapsed');
-    apply(next);
+    const collapsedNow = !foldIsOpen(ws, 'collapsed');
+    const next = !collapsedNow;              // next = 目标折叠态
+    apply(next, true);
     try { localStorage.setItem(IDE_WS_KEY, next ? '1' : '0'); } catch (e) { /* 忽略 */ }
   };
   ws.onkeydown = (e) => {
@@ -177,6 +205,8 @@ function ideInitOnce() {
   ideDragBindGlobal();                // 原生拖出后没有 dragend：兜底清理拖拽源
   ideCtxBind();                       // 文件树右键菜单（容器只绑定一次）
   ideTabsBind();                      // 顶部标签页：右键菜单 / 滚轮 / 快捷键
+  ideWatchThemeIcons();               // light / dark 切换时重画文件图标
+  ideWatchGitFocus();                 // 窗口重新聚焦时补拉 git 装饰
   ideIntelBindUI();
   const repAll = $('#ide-replace-all');
   if (repAll) repAll.onclick = () => ideReplaceAll();
@@ -385,8 +415,114 @@ function idePushRecent(rel) {
   ideRenderWelcome();
 }
 
+/* ---------------- 颜色装饰（CSS / HTML 里的色块 + 取色器） ----------------
+   Monaco 的 defaultColorDecorators 走的是语言 worker 的正则扫描，只对「没有专属 worker」的
+   语言生效；html / css / scss / less 都被各自的语言 worker 接管，而这份构建的 worker 没有
+   实现 computeDefaultDocumentColors，所以这四个语言不显示色块（VS Code 由语言服务提供）。
+   这里补一个正则版 provider：hex / rgb(a) / hsl(a) 都识别，点色块可打开 Monaco 取色器。 */
+const IDE_COLOR_LANGS = ['html', 'css', 'scss', 'less'];
+const IDE_COLOR_RE = /#[0-9a-fA-F]{3,8}\b|\brgba?\([^)]*\)|\bhsla?\([^)]*\)/g;
+
+function ideHslToRgb(h, s, l) {
+  if (!s) return { red: l, green: l, blue: l };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const hue = (t) => {
+    let x = t;
+    if (x < 0) x += 1;
+    if (x > 1) x -= 1;
+    if (x < 1 / 6) return p + (q - p) * 6 * x;
+    if (x < 1 / 2) return q;
+    if (x < 2 / 3) return p + (q - p) * (2 / 3 - x) * 6;
+    return p;
+  };
+  return { red: hue(h + 1 / 3), green: hue(h), blue: hue(h - 1 / 3) };
+}
+
+// 把 #rgb / #rgba / #rrggbb / #rrggbbaa / rgb(a)() / hsl(a)() 解析成 Monaco 的 Color 数值
+//（red/green/blue/alpha 都是 0–1）。解析不了返回 null，交给调用方跳过。
+function ideParseColorToken(raw) {
+  const s = String(raw || '').trim();
+  let m = /^#([0-9a-fA-F]{3,8})$/.exec(s);
+  if (m) {
+    let h = m[1];
+    if (h.length === 3 || h.length === 4) h = h.split('').map((c) => c + c).join('');
+    if (h.length === 6) h += 'ff';
+    if (h.length !== 8) return null;
+    return {
+      red: parseInt(h.slice(0, 2), 16) / 255,
+      green: parseInt(h.slice(2, 4), 16) / 255,
+      blue: parseInt(h.slice(4, 6), 16) / 255,
+      alpha: parseInt(h.slice(6, 8), 16) / 255,
+    };
+  }
+  const parts = (m2) => m2[1].split(/[,\s/]+/).filter(Boolean);
+  m = /^rgba?\(([^)]*)\)$/i.exec(s);
+  if (m) {
+    const p = parts(m);
+    if (p.length < 3) return null;
+    const ch = (v) => (v.indexOf('%') >= 0 ? parseFloat(v) / 100 : parseFloat(v) / 255);
+    const a = p[3] === undefined ? 1
+      : (p[3].indexOf('%') >= 0 ? parseFloat(p[3]) / 100 : parseFloat(p[3]));
+    const out = { red: ch(p[0]), green: ch(p[1]), blue: ch(p[2]), alpha: a };
+    return Object.values(out).some((v) => Number.isNaN(v)) ? null : out;
+  }
+  m = /^hsla?\(([^)]*)\)$/i.exec(s);
+  if (m) {
+    const p = parts(m);
+    if (p.length < 3) return null;
+    const h = (((parseFloat(p[0]) % 360) + 360) % 360) / 360;
+    const sat = parseFloat(p[1]) / 100;
+    const light = parseFloat(p[2]) / 100;
+    const a = p[3] === undefined ? 1
+      : (p[3].indexOf('%') >= 0 ? parseFloat(p[3]) / 100 : parseFloat(p[3]));
+    if ([h, sat, light, a].some((v) => Number.isNaN(v))) return null;
+    return Object.assign(ideHslToRgb(h, sat, light), { alpha: a });
+  }
+  return null;
+}
+
+function ideColorHex(c) {
+  const h = (v) => Math.max(0, Math.min(255, Math.round((Number(v) || 0) * 255)))
+    .toString(16).padStart(2, '0');
+  const alpha = Number(c.alpha);
+  return '#' + h(c.red) + h(c.green) + h(c.blue) + (alpha < 1 ? h(alpha) : '');
+}
+
+let _ideColorRegistered = false;
+
+function ideRegisterColorProviders(monaco) {
+  if (_ideColorRegistered || !monaco || !monaco.languages) return;
+  _ideColorRegistered = true;
+  const provider = {
+    provideDocumentColors(model) {
+      const text = model.getValue();
+      const out = [];
+      IDE_COLOR_RE.lastIndex = 0;          // 带 g 的正则：每次重扫前归零
+      let m;
+      while ((m = IDE_COLOR_RE.exec(text))) {
+        const color = ideParseColorToken(m[0]);
+        if (!color) continue;
+        const a = model.getPositionAt(m.index);
+        const b = model.getPositionAt(m.index + m[0].length);
+        out.push({ color: color,
+                   range: new monaco.Range(a.lineNumber, a.column, b.lineNumber, b.column) });
+      }
+      return out;
+    },
+    provideColorPresentations(model, info) {
+      const hex = ideColorHex(info.color || {});
+      return [{ label: hex, textEdit: { range: info.range, text: hex } }];
+    },
+  };
+  IDE_COLOR_LANGS.forEach((lang) => {
+    try { monaco.languages.registerColorProvider(lang, provider); } catch (e) { /* 忽略 */ }
+  });
+}
+
 function ideEnsureEditor(monaco) {
   if (state.ideEditor) return state.ideEditor;
+  ideRegisterColorProviders(monaco);
   const host = $('#ide-editor');
   if (!host) return null;
   const d = state.ideMonacoDefaults || {};
@@ -985,6 +1121,8 @@ function resetIdeForSession() {
   state.ideOpen = '';
   state.ideDir = '';
   state.ideChanged.clear();
+  state.ideGitMarks = {};
+  state.ideGitDirs = {};
   state.ideDiffs = {};
   if (state.ideDiffModels) {
     state.ideDiffModels.forEach((m) => { try { m.dispose(); } catch (e) { /* 忽略 */ } });
@@ -1010,6 +1148,11 @@ function resetIdeForSession() {
     galSetNode(null);
     galLoadCharacters().then(() => galRenderFromSession());
   }
+  // 换会话：输入框上方的待审阅提示跟着切到新会话（有遗留改动就继续显示）；
+  // 已卸载消息里的改动卡顺手清掉（下次写入 / 收尾会重建）。
+  ideTipSid = state.sessions.current;
+  if (typeof ideReviewTipRefresh === 'function') ideReviewTipRefresh();
+  if (typeof ideReviewCardRefresh === 'function') ideReviewCardRefresh();
 }
 
 async function loadIdeTree() {
@@ -1031,6 +1174,7 @@ async function loadIdeTree() {
   state.ideTree = r.tree;
   renderIdeTree(r.tree);
   ideWatchSig = JSON.stringify(r.tree);      // 监听基线：下一次不一致才重绘
+  ideRefreshGitMarks();                      // git 装饰与目录树并行拉取，不阻塞首屏
 }
 
 // 文件树图标：内联 SVG + 按扩展名着色（VS Code / Seti 风格近似，离线可用）
@@ -1049,6 +1193,28 @@ const IDE_ICON_TYPES = {
   txt: 'txt', log: 'txt', lock: 'lock',
   png: 'img', jpg: 'img', jpeg: 'img', gif: 'img', webp: 'img', bmp: 'img', svg: 'img', ico: 'img',
 };
+
+// Seti 主题里 js / py / md / json 这些不在 fileExtensions，而是在 languageIds；
+// 这里补一份「扩展名 → VS Code languageId」的常用映射（与 VS Code 的语言注册表一致）。
+const IDE_LANG_BY_EXT = {
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascriptreact',
+  ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'typescriptreact',
+  py: 'python', pyw: 'python', pyi: 'python',
+  md: 'markdown', markdown: 'markdown', mdx: 'markdown',
+  json: 'json', jsonc: 'json', jsonl: 'jsonl',
+  html: 'html', htm: 'html', xhtml: 'html',
+  css: 'css', scss: 'scss', sass: 'sass', less: 'less',
+  vue: 'vue', yml: 'yaml', yaml: 'yaml',
+  sh: 'shellscript', bash: 'shellscript', zsh: 'shellscript', ps1: 'powershell',
+  bat: 'bat', cmd: 'bat',
+  c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp',
+  cs: 'csharp', java: 'java', go: 'go', rs: 'rust', php: 'php', rb: 'ruby',
+  sql: 'sql', lua: 'lua', r: 'r', swift: 'swift', kt: 'kotlin', dart: 'dart',
+  tex: 'latex', latex: 'latex', xml: 'xml', gradle: 'gradle',
+  tf: 'terraform', tfvars: 'terraform', ex: 'elixir', exs: 'elixir',
+  hs: 'haskell', clj: 'clojure', coffee: 'coffeescript',
+  gitignore: 'ignore', gitattributes: 'ignore', env: 'dotenv',
+};
 function ideIconClass(name) {
   const n = String(name || '').toLowerCase();
   if (n === '.gitignore' || n === '.gitattributes' || n.endsWith('.lock') || n === 'package-lock.json') {
@@ -1059,10 +1225,53 @@ function ideIconClass(name) {
   return t ? ('ico-' + t) : 'ico-file';
 }
 
+// VS Code Seti 图标字体：优先按文件名 / 最长扩展名匹配；找不到就用主题的默认文件图标。
+// 返回 {ch, color}；字体映射还没加载 / 类型缺失时返回 null，调用方回退内联 SVG。
+function ideSetiIcon(name, isDir) {
+  const map = window.GM_SETI;
+  if (!map || !map.defs) return null;
+  const mode = document.documentElement.getAttribute('data-theme-mode') === 'light'
+    ? 'light' : 'dark';
+  const pack = (mode === 'light' && map.light) ? map.light : map.dark;
+  if (!pack) return null;
+  const n = String(name || '').toLowerCase();
+  let id = '';
+  if (isDir) {
+    id = (pack.folderNames || {})[n] || '';
+    if (!id) return null;          // Seti 主题本身不带文件夹图标：继续用黄色 SVG
+  } else {
+    id = (pack.fileNames || {})[n] || '';
+    if (!id && n.indexOf('.') >= 0) {
+      const parts = n.split('.');
+      for (let i = 1; i < parts.length && !id; i++) {
+        const suffix = parts.slice(i).join('.');
+        id = (pack.fileExtensions || {})[suffix] || '';
+      }
+    }
+    if (!id) {
+      const ext = n.indexOf('.') >= 0 ? n.split('.').pop() : '';
+      const lang = IDE_LANG_BY_EXT[ext];
+      if (lang) id = (pack.languageIds || {})[lang] || '';
+    }
+    if (!id) id = pack.file || '';
+  }
+  const def = (map.defs || {})[id];
+  if (!def || !def[0]) return null;
+  return { ch: def[0], color: def[1] || '' };
+}
+
 // 构建一个可复用的图标元素
 function ideIcoEl(name, isDir) {
   const ico = document.createElement('span');
-  ico.className = 'ide-ico ' + (isDir ? 'ico-folder' : ideIconClass(name));
+  ico.className = 'ide-ico';
+  const seti = ideSetiIcon(name, isDir);
+  if (seti) {
+    ico.classList.add('seti');
+    ico.textContent = seti.ch;
+    if (seti.color) ico.style.color = seti.color;
+    return ico;
+  }
+  ico.classList.add(isDir ? 'ico-folder' : ideIconClass(name));
   ico.innerHTML = isDir ? IDE_SVG_FOLDER : IDE_SVG_FILE;
   return ico;
 }
@@ -1488,6 +1697,110 @@ function ideDragBindGlobal() {
   document.addEventListener('drop', clear);
 }
 
+/* ---------------- 文件树的 Git 装饰（VS Code explorer 风格） ----------------
+   文件名按 git 状态着色，行尾给 M / U / A / D / R 字母，文件夹行给一个小圆点。
+   数据来自 /api/git/status（路径已经换算成「沙箱相对」，与树里的 rel 一致）。 */
+
+const IDE_GIT_CH = { m: 'M', a: 'A', d: 'D', r: 'R', u: 'U', c: 'U' };
+const IDE_GIT_TIP = {
+  m: '已修改（未暂存/未提交）', a: '新增', d: '已删除', r: '重命名',
+  u: '未跟踪', c: '冲突',
+};
+
+function ideGitMarkOf(f) {
+  if (f && f.untracked) return { ch: 'U', cls: 'u' };
+  const s = String((f && f.status) || 'M');
+  if (s === 'A') return { ch: 'A', cls: 'a' };
+  if (s === 'D') return { ch: 'D', cls: 'd' };
+  if (s === 'R' || s === 'C') return { ch: s, cls: 'r' };
+  if (s === 'U' || s === 'T') return { ch: 'U', cls: 'c' };
+  return { ch: 'M', cls: 'm' };
+}
+
+/* 目录圆点的颜色取「子文件里最重的那一种状态」：冲突 > 删除 > 修改 > 新增 > 未跟踪 > 重命名。
+   VS Code 也是用这个思路给文件夹装饰上色的。 */
+const IDE_GIT_PRIORITY = ['c', 'd', 'm', 'a', 'u', 'r'];
+
+function ideGitDirsOf(marks) {
+  const dirs = {};
+  Object.keys(marks || {}).forEach((p) => {
+    const cls = marks[p] && marks[p].cls;
+    if (!cls) return;
+    const seg = String(p || '').split('/');
+    for (let i = 1; i < seg.length; i++) {
+      const d = seg.slice(0, i).join('/');
+      const cur = dirs[d];
+      if (!cur || IDE_GIT_PRIORITY.indexOf(cls) < IDE_GIT_PRIORITY.indexOf(cur)) dirs[d] = cls;
+    }
+  });
+  return dirs;
+}
+
+/* 给单行套上装饰。新建行与增量刷新共用，先清掉旧的再按当前数据重建。 */
+function ideApplyGitMark(row, rel, isDir) {
+  if (!row) return;
+  row.classList.remove('git-m', 'git-u', 'git-a', 'git-d', 'git-r', 'git-c');
+  const old = row.querySelector('.ide-git-mark, .ide-git-dot');
+  if (old) old.remove();
+  if (isDir) {
+    const cls = (state.ideGitDirs || {})[rel];
+    if (!cls) return;
+    const dot = document.createElement('span');
+    dot.className = 'ide-git-dot ' + cls;
+    dot.title = '目录内有改动' + (IDE_GIT_TIP[cls] ? '：' + IDE_GIT_TIP[cls] : '');
+    row.appendChild(dot);
+    return;
+  }
+  const mk = (state.ideGitMarks || {})[rel];
+  if (!mk) return;
+  row.classList.add('git-' + mk.cls);
+  const b = document.createElement('span');
+  b.className = 'ide-git-mark ' + mk.cls;
+  b.textContent = mk.ch || IDE_GIT_CH[mk.cls] || 'M';
+  b.title = IDE_GIT_TIP[mk.cls] || '';
+  row.appendChild(b);
+}
+
+function ideApplyGitMarks() {
+  $$('#ide-tree .ide-row').forEach((row) => {
+    ideApplyGitMark(row, row.dataset.path || '', row.dataset.dir === '1');
+  });
+}
+
+let _ideGitSeq = 0;
+let _ideGitAt = 0;
+
+/* 拉一次 git 状态。失败（非 git 仓库 / 未设置沙箱）就当没有装饰，不影响文件树。 */
+async function ideRefreshGitMarks() {
+  if (state.uiMode !== 'ide' || !state.sessions.current) return;
+  const seq = ++_ideGitSeq;
+  _ideGitAt = Date.now();
+  let r;
+  try { r = await api('/api/git/status', { session_id: state.sessions.current }); }
+  catch (e) { return; }
+  if (seq !== _ideGitSeq) return;             // 并发刷新：只认最后一次
+  const marks = {};
+  ((r && r.files) || []).forEach((f) => {
+    const p = String((f && f.path) || '');
+    if (p) marks[p] = ideGitMarkOf(f);
+  });
+  state.ideGitMarks = marks;
+  state.ideGitDirs = ideGitDirsOf(marks);
+  ideApplyGitMarks();
+}
+
+/* 窗口重新获得焦点时补拉一次（外部改了文件 / 切回窗口时状态可能已变）。
+   1.5 秒内只拉一次，避免频繁切窗口打爆接口。 */
+function ideWatchGitFocus() {
+  if (ideWatchGitFocus.bound) return;
+  ideWatchGitFocus.bound = true;
+  window.addEventListener('focus', () => {
+    if (state.uiMode !== 'ide') return;
+    if (Date.now() - _ideGitAt < 1500) return;
+    ideRefreshGitMarks();
+  });
+}
+
 function buildIdeNodes(items, prefix, depth) {
   const d = depth || 0;
   const wrap = document.createElement('div');
@@ -1513,6 +1826,7 @@ function buildIdeNodes(items, prefix, depth) {
     nm.className = 'ide-name';
     nm.textContent = it.name;
     row.appendChild(care); row.appendChild(ideIcoEl(it.name, it.dir)); row.appendChild(nm);
+    ideApplyGitMark(row, rel, !!it.dir);     // 先建行再补 git 装饰：刷新时只改这两个节点
     node.appendChild(row);
     if (it.dir) {
       const kids = document.createElement('div');
@@ -1735,8 +2049,10 @@ async function setUiMode(mode) {
    处理掉就自动变空 —— 不需要另存一张表，也不会残留旧数字。 */
 function ideChangeStatOf(rel) {
   let adds = 0, dels = 0, n = 0;
+  const seen = [];
   (state.ideReview || []).concat(state.ideReviewPending || []).forEach((it) => {
-    if (!it || it.path !== rel) return;
+    if (!it || it.path !== rel || seen.indexOf(it) >= 0) return;   // 流式期间同一条会同时在两个队列里
+    seen.push(it);
     adds += Number(it.adds) || 0;
     dels += Number(it.dels) || 0;
     n += 1;
@@ -3139,14 +3455,20 @@ function ideReviewCounts(name, args) {
   return { adds: 0, dels: 0 };
 }
 
-function ideReviewAdd(rel, token, name, args) {
+function ideReviewAdd(rel, token, name, args, row, sid) {
   if (!rel || !token) return;
   rel = String(rel).replace(/\\/g, '/');
-  let it = (state.ideReviewPending || []).find((x) => x.path === rel);
+  const owner = sid || state.sessions.current;
+  if (!state.ideReviewPending) state.ideReviewPending = [];
+  const pending = state.ideReviewPending;
+  // 本轮第一次写入：允许提示栏重新自动出现（上一轮点过「稍后处理」不该一直压着）
+  if (!pending.some((x) => (x.sid || owner) === owner)) ideTipClosed = false;
+  // 合并键带会话：多个会话同时生成时，同路径的写入不能串成一条
+  let it = pending.find((x) => x.path === rel && (x.sid || owner) === owner);
   if (!it) {
     it = { path: rel, tokens: [], baseToken: token, name: name || 'edit_file',
-           sid: state.sessions.current, adds: 0, dels: 0 };
-    state.ideReviewPending.push(it);
+           sid: owner, adds: 0, dels: 0 };
+    pending.push(it);
   }
   if (it.tokens.indexOf(token) < 0) it.tokens.push(token);
   const c = ideReviewCounts(name, args);
@@ -3154,29 +3476,71 @@ function ideReviewAdd(rel, token, name, args) {
   it.dels += c.dels;
   if (!state.ideDiffs) state.ideDiffs = {};
   state.ideDiffs[rel] = it.baseToken;
+  // 同时进审阅队列：提示栏不必等整轮结束，改完一个文件就能「查看变更 / 全部保留」
+  if ((state.ideReview || []).indexOf(it) < 0) state.ideReview.push(it);
   ideUpdateDiffBtn();
+  // 模型每改完一个文件就把改动声明挂到当前回复末尾，本轮还没结束也能看到
+  ideReviewLiveCard(row, owner);
 }
 
-function ideReviewEndTurn(row) {
-  const pending = state.ideReviewPending || [];
-  state.ideReviewPending = [];
-  if (!pending.length) return;
-  const start = state.ideReview.length;
-  pending.forEach((it) => state.ideReview.push(it));
-  ideUpdateDiffBtn();
-  // 聊天里不再插「待审查卡」：待处理状态交给输入框上方的提示栏，
-  // 处理完才在聊天里留一行记录（见 ideReviewCardRefresh）。
-  if (row) ideReviewCardBuild(row, pending);
-  if (!state.ideReview.length) return;
+/* 流式过程中边改边更新：卡片保存一份快照，后续写入会同步反映到同一张卡上；
+   用户中途结算后，已结算的文件仍留在卡片里（状态变成「已保留 / 已撤销」）。 */
+function ideReviewLiveCard(row, sid) {
+  if (!row || !row._wrap || !row._wrap.isConnected) return;   // 后台会话 / 已卸载的行不建卡
+  const owner = sid || state.sessions.current;
+  const items = (state.ideReviewPending || []).filter((it) => (it.sid || owner) === owner);
+  if (!items.length) return;
+  let c = (state.changeCards || []).find((x) => x.row === row);
+  if (!c) {
+    // 续写：这一行可能已有历史回显卡，先摘掉，避免同一条消息出现两张
+    const stale = row._wrap.querySelector('.files-changed');
+    if (stale) stale.remove();
+    c = { row: row, items: [], el: null, open: true, sid: owner };
+    state.changeCards.push(c);
+  }
+  items.forEach((it) => {
+    if ((c.items || []).indexOf(it) < 0) c.items.push(it);
+  });
+  ideReviewCardRefresh();
+  ideReviewLiveTip = true;             // 提示栏同步提前出现（标签改成「文件已修改」）
   ideReviewTipShow();
+}
+
+function ideReviewEndTurn(row, quiet, sid) {
+  // 只结算本次流所属会话的条目：后台会话同时生成时不能互相吞掉
+  const owner = sid || state.sessions.current;
+  const all = state.ideReviewPending || [];
+  const pending = all.filter((it) => (it.sid || owner) === owner);
+  state.ideReviewPending = all.filter((it) => (it.sid || owner) !== owner);
+  if (!pending.length) return;
+  // 流式期间已经提前入队的条目不要重复入队
+  const fresh = pending.filter((it) => (state.ideReview || []).indexOf(it) < 0);
+  const queued = pending.filter((it) => (state.ideReview || []).indexOf(it) >= 0);
+  const start = queued.length ? state.ideReview.indexOf(queued[0])
+    : state.ideReview.length - fresh.length;
+  fresh.forEach((it) => state.ideReview.push(it));
+  ideUpdateDiffBtn();
+  // 回复末尾的文件改动声明：先按行数估算显示，真实增删数到了再刷新一次。
+  // 待审阅状态同时交给输入框上方的提示栏，两处入口互不依赖。
+  if (row) ideReviewCardBuild(row, pending, owner);
+  ideReviewCardRefresh();
+  if (!state.ideReview.length) return;
+  // 提示栏 / 自动弹 diff 都只服务于当前会话：后台会话收尾时不抢当前界面
+  const isCurSid = owner === state.sessions.current;
+  if (isCurSid) {
+    if (!quiet) ideReviewLiveTip = false;   // 正常收尾：标签回到「任务已完成」
+    ideTipClosed = false;                   // 收尾提醒：中途点过「稍后处理」也再出现一次
+    ideReviewTipShow();
+  }
   // 新一批改动进来：上一批的 AI 摘要已经过时，先收起来
   ['#ide-review-ai', '#review-ai'].forEach((sel) => {
     const b = $(sel);
     if (b) { b.classList.add('hidden'); b.innerHTML = ''; }
   });
   ideReviewPrefetchStats(pending);
-  // 只在能展示 diff 的模式里自动打开；大厅 / GAL 里只入队，等用户点「查看变更」
-  if (state.uiMode === 'ide' || state.uiMode === 'solo') {
+  // 只在能展示 diff 的模式里自动打开；大厅 / GAL 里只入队，等用户点「查看变更」。
+  // 中途停止（quiet）不抢视图；后台会话的改动也不在别的会话里弹 diff。
+  if (!quiet && isCurSid && (state.uiMode === 'ide' || state.uiMode === 'solo')) {
     ideReviewShow(start);
   }
 }
@@ -3520,6 +3884,10 @@ function ideReviewDrop(it) {
   const list = state.ideReview || [];
   const i = list.indexOf(it);
   if (i >= 0) list.splice(i, 1);
+  // 改动声明里的对应行也去掉（整条已无增删，留着只会显示 0 / 0）
+  (state.changeCards || []).forEach((c) => {
+    c.items = (c.items || []).filter((x) => x !== it);
+  });
   ideUpdateDiffBtn();
   ideReviewCardRefresh();
   ideReviewTipRefresh();
@@ -3555,7 +3923,7 @@ async function ideReviewShow(idx) {
   await ideReviewRender(it, surface);
 }
 
-function ideReviewClose() {
+function ideReviewClose(opts) {
   const surface = state.ideReviewSurface;
   state.ideReviewSurface = '';
   ideReviewHideHunkBar();
@@ -3568,7 +3936,7 @@ function ideReviewClose() {
       if (typeof hideWithAnim === 'function') hideWithAnim(modal);
       else modal.classList.add('hidden');
     }
-  } else if (state.uiMode === 'ide') {
+  } else if (state.uiMode === 'ide' && !(opts && opts.keepView)) {
     ideShowView('editor');
   }
 }
@@ -3715,63 +4083,328 @@ function ideReviewStep(delta) {
   if (next !== state.ideReviewIdx) ideReviewShow(next);
 }
 
-/* ---------- 聊天流里的「变更卡」（对齐 VS Code / Trae 的 files changed bar） ---------- */
+/* ---------- 聊天流里的「文件改动声明」（对齐 Trae 的 files changed bar） ---------- */
 
 function ideReviewItemStatus(it) {
   const tokens = it.tokens || [];
-  if (!tokens.length) return 'pending';
+  // 没有 token = 这些写入已经被逐条撤回（reviewForgetToken 会摘掉条目）
+  if (!tokens.length) return 'undone';
   const states = tokens.map((t) => state.ideSettledTokens[t]);
   if (states.every((s) => s === 'accepted')) return 'accepted';
   if (states.every((s) => s === 'undone')) return 'undone';
   return 'pending';
 }
 
-/* 聊天流里的「变更记录」：只在处理完之后留一行。
-   待审查入口交给输入框上方的提示栏，避免同一件事在界面上出现两次。 */
-function ideReviewCardBuild(row, items) {
-  if (!row || !items || !items.length) return;
-  state.changeCards = (state.changeCards || []).filter((c) => c.row !== row);
-  state.changeCards.push({ row: row, items: items, el: null });
+const FC_ICON = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" ' +
+  'stroke="currentColor" stroke-width="1.25" stroke-linejoin="round">' +
+  '<path d="M4 1.9h4.6L12.1 5.4v8.7H4z"/><path d="M8.6 1.9v3.5h3.5"/></svg>';
+
+function ideChangedBase(p) {
+  const s = String(p || '').replace(/\\/g, '/');
+  const i = s.lastIndexOf('/');
+  return i < 0 ? s : s.slice(i + 1);
 }
 
-function ideReviewCardRefresh() {
-  (state.changeCards || []).forEach((c) => {
-    const total = c.items.length;
-    const pending = c.items.filter((it) => ideReviewItemStatus(it) === 'pending').length;
-    if (pending) return;                       // 还没处理完：提示栏负责
-    if (!c.row || !c.row._wrap || !c.row._wrap.isConnected) return;
-    const adds = c.items.reduce((n, it) => n + (it.adds || 0), 0);
-    const dels = c.items.reduce((n, it) => n + (it.dels || 0), 0);
-    const states = c.items.map(ideReviewItemStatus);
-    const verb = states.every((s) => s === 'accepted') ? '已保留'
-      : states.every((s) => s === 'undone') ? '已撤销' : '已处理';
-    if (!c.el) {
-      c.el = document.createElement('div');
-      c.el.className = 'change-log';
-      c.row._wrap.appendChild(c.el);
+/* 点文件名跳到 IDE 里对应的文件内容（不是 diff）。
+   条目属于别的会话时，当前沙箱里没有这个文件，先提示切回原会话。 */
+function ideChangedOpen(it) {
+  if (!it || !it.path) return;
+  if (it.sid && state.sessions.current && it.sid !== state.sessions.current) {
+    return toast('这个文件属于之前的会话，切回该会话后才能打开');
+  }
+  if (typeof openReference === 'function') return openReference({ path: it.path });
+  if (typeof setUiMode !== 'function' || typeof openIdeFile !== 'function') {
+    return toast('IDE 还没有准备好');
+  }
+  setUiMode('ide').then(() => openIdeFile(it.path))
+    .catch((e) => toast('打开失败：' + (e && e.message ? e.message : e), 'error'));
+}
+
+/* 审阅界面顶部的「在 IDE 查看」：收起 diff，切到 IDE 打开当前这个文件的正文。
+   只收起界面，不动审阅队列（撤销 / 保留仍然可用）。 */
+function ideReviewOpenInIde() {
+  const it = (state.ideReview || [])[state.ideReviewIdx];
+  if (!it || !it.path) return;
+  if (it.sid && state.sessions.current && it.sid !== state.sessions.current) {
+    return toast('这个文件属于之前的会话，切回该会话后才能打开');
+  }
+  ideReviewClose();
+  ideChangedOpen(it);
+}
+
+/* 卡片挂在「正文之后、操作条/等待提示之前」：回合结束时正文 / 过程折叠会重排一次，
+   每次刷新都重新定位，避免卡片被排到过程区上面或落到「正在生成」提示下面。 */
+function ideChangedPlace(c) {
+  const wrap = c && c.row && c.row._wrap;
+  if (!wrap || !c.el) return;
+  let anchor = null;
+  for (let i = 0; i < wrap.children.length; i++) {
+    const n = wrap.children[i];
+    if (n.classList.contains('msg-actions') || n.classList.contains('live-bar')
+        || n.classList.contains('end-note') || n.classList.contains('typing')) {
+      anchor = n;
+      break;
     }
-    c.el.innerHTML = '<span class="change-log-mark">✓</span>' +
-      '<span class="change-log-text"></span>' +
-      '<span class="change-log-stat"></span>';
-    c.el.querySelector('.change-log-text').textContent =
-      '本轮 ' + total + ' 个文件的变更' + verb;
-    c.el.querySelector('.change-log-stat').innerHTML =
-      '<b class="add">+' + adds + '</b> <b class="del">−' + dels + '</b>';
+  }
+  if (anchor) wrap.insertBefore(c.el, anchor);
+  else wrap.appendChild(c.el);
+}
+
+/* 单行文件（live 审阅卡与历史回显卡共用同一套排版 / 点击行为）。 */
+function ideChangedRowEl(g) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'fc-file';
+  row.title = g.path;
+  row.innerHTML =
+    '<span class="fc-ico">' + FC_ICON + '</span>' +
+    '<span class="fc-name"></span>' +
+    '<span class="fc-path"></span>' +
+    '<span class="fc-file-stat"><b class="add"></b> <b class="del"></b></span>';
+  row.querySelector('.fc-name').textContent = ideChangedBase(g.path);
+  row.querySelector('.fc-path').textContent = '.\\' + String(g.path).replace(/\//g, '\\');
+  row.querySelector('.fc-file-stat .add').textContent = '+' + g.adds;
+  row.querySelector('.fc-file-stat .del').textContent = '−' + g.dels;
+  row.onclick = () => ideChangedOpen(g);
+  return row;
+}
+
+/* 从落库的 tools 还原改动列表：只有成功的写入才有 undo 令牌，失败的编辑不算。 */
+function ideChangedGroupsFromTools(tools) {
+  const groups = [];
+  (tools || []).forEach((t) => {
+    if (!t || !t.write || !t.undo) return;
+    const name = String(t.tool || '');
+    if (name !== 'write_file' && name !== 'edit_file' && name !== 'apply_worktree') return;
+    const a = t.args || {};
+    const path = String(a.path || '').replace(/\\/g, '/');
+    if (!path) return;
+    const c = ideReviewCounts(name, a);
+    let g = groups.find((x) => x.path === path);
+    if (!g) {
+      g = { path: path, sid: '', adds: 0, dels: 0 };
+      groups.push(g);
+    }
+    g.adds += c.adds;
+    g.dels += c.dels;
+  });
+  return groups;
+}
+
+/* 历史消息末尾的「N 个文件已更改」：卡片以前只在流式 tool_done 时建在内存里，
+   刷新 / 切会话 / 重启后整条就没了；这里用落库的 tools 重建一份（默认收起）。 */
+function ideChangedHistoryCard(tools) {
+  const groups = ideChangedGroupsFromTools(tools);
+  if (!groups.length) return null;
+  const el = document.createElement('div');
+  el.className = 'files-changed collapsed';
+  el._open = false;
+  const head = document.createElement('div');
+  head.className = 'fc-head';
+  head.setAttribute('role', 'button');
+  head.setAttribute('aria-expanded', 'false');
+  head.tabIndex = 0;
+  head.innerHTML =
+    '<span class="fc-ico fc-ico-head">' + FC_ICON + '</span>' +
+    '<span class="fc-title"></span>' +
+    '<span class="fc-caret">⌄</span>' +
+    '<span class="fc-status"></span>' +
+    '<span class="fc-stat"><b class="add"></b> <b class="del"></b></span>' +
+    '<button type="button" class="fc-open" title="在 IDE 中打开">↗</button>';
+  head.querySelector('.fc-title').textContent = groups.length + ' 个文件已更改';
+  const adds = groups.reduce((n, g) => n + g.adds, 0);
+  const dels = groups.reduce((n, g) => n + g.dels, 0);
+  head.querySelector('.fc-stat .add').textContent = '+' + adds;
+  head.querySelector('.fc-stat .del').textContent = '−' + dels;
+  head.querySelector('.fc-open').onclick = (e) => {
+    e.stopPropagation();
+    ideChangedOpen(groups[0]);
+  };
+  const list = document.createElement('div');
+  list.className = 'fc-list';
+  groups.forEach((g) => list.appendChild(ideChangedRowEl(g)));
+  el.appendChild(head);
+  el.appendChild(list);
+  const setOpen = (next) => {
+    el._open = next;
+    const caretEl = head.querySelector('.fc-caret');
+    if (caretEl) caretEl.textContent = next ? '⌃' : '⌄';
+    head.setAttribute('aria-expanded', next ? 'true' : 'false');
+    foldTransition(el, list, next, { cls: 'collapsed' });
+  };
+  head.onclick = () => setOpen(!foldIsOpen(el, 'collapsed'));
+  head.onkeydown = (e) => {
+    if (e.target !== head) return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    setOpen(!foldIsOpen(el, 'collapsed'));
+  };
+  return el;
+}
+
+/* 挂到一条历史 AI 消息的末尾（正文之后、操作条之前）。 */
+function ideChangedHistoryAttach(wrap, tools) {
+  if (!wrap || !wrap.querySelector) return;
+  if (wrap.querySelector('.files-changed')) return;     // 已有 live 卡 / 已挂过
+  const el = ideChangedHistoryCard(tools);
+  if (!el) return;
+  let anchor = null;
+  for (let i = 0; i < wrap.children.length; i++) {
+    const n = wrap.children[i];
+    if (n.classList.contains('msg-actions') || n.classList.contains('live-bar')
+        || n.classList.contains('end-note') || n.classList.contains('typing')) {
+      anchor = n;
+      break;
+    }
+  }
+  if (anchor) wrap.insertBefore(el, anchor);
+  else wrap.appendChild(el);
+}
+
+function ideReviewCardBuild(row, items, sid) {
+  if (!row || !items || !items.length) return;
+  // 流式期间已经挂过同一张卡：合并条目，保留折叠状态和 DOM，避免闪一下
+  const ex = (state.changeCards || []).find((c) => c.row === row);
+  if (ex) {
+    items.forEach((it) => {
+      if ((ex.items || []).indexOf(it) < 0) ex.items.push(it);
+    });
+    return;
+  }
+  // 续写：这一行可能已有历史回显卡，先摘掉，避免同一条消息出现两张
+  const stale = row._wrap && row._wrap.querySelector
+    && row._wrap.querySelector('.files-changed');
+  if (stale) stale.remove();
+  state.changeCards.push({
+    row: row, items: items.slice(), el: null, open: true,
+    sid: sid || state.sessions.current,
   });
 }
 
+/* 一轮结束时把「文件改动声明」挂到回复末尾：不区分审批模式，也不等审阅结果。
+   待处理时也能展开看每个文件、点进去定位；处理完之后补一个状态标记。 */
+function ideReviewCardRefresh() {
+  const alive = [];
+  (state.changeCards || []).forEach((c) => {
+    if (!c.row || !c.row._wrap) return;              // 行已彻底销毁
+    const items = (c.items || []).filter((it) => it && it.path);
+    if (!items.length) {                             // 条目全被撤销 / 丢弃：卡片本身也摘掉
+      if (c.el && c.el.parentNode) c.el.remove();
+      return;
+    }
+    if (!c.row._wrap.isConnected) {
+      // 会话还在生成时先留着，切回来继续更新；已结束会话的旧消息卡直接丢，
+      // 否则会一直攥着卸载的 DOM 子树，长期运行的内存只会越积越多。
+      if (c.sid && state.streams && state.streams[c.sid]) { alive.push(c); return; }
+      if (c.el && c.el.parentNode) c.el.remove();
+      return;
+    }
+    alive.push(c);
+    if (!c.el) {
+      c.el = document.createElement('div');
+      c.el.className = 'files-changed';
+      c.el._open = c.open !== false;
+    }
+    const open = c.el._open !== false;
+    c.open = open;
+    // 同一文件在「中途结算后又被改」时会有两批条目：按路径并成一行，计数累加
+    const groups = [];
+    items.forEach((it) => {
+      let g = groups.find((x) => x.path === it.path);
+      if (!g) {
+        g = { path: it.path, sid: it.sid, adds: 0, dels: 0, states: [] };
+        groups.push(g);
+      }
+      g.adds += Number(it.adds) || 0;
+      g.dels += Number(it.dels) || 0;
+      g.states.push(ideReviewItemStatus(it));
+    });
+    const adds = groups.reduce((n, g) => n + g.adds, 0);
+    const dels = groups.reduce((n, g) => n + g.dels, 0);
+    const states = groups.reduce((a, g) => a.concat(g.states), []);
+    const done = states.every((s) => s !== 'pending');
+    const status = !done ? ''
+      : states.every((s) => s === 'accepted') ? '已保留'
+      : states.every((s) => s === 'undone') ? '已撤销' : '已处理';
+
+    // 重绘前停掉可能还在跑的高度动画：它持有的是旧的 list 节点
+    if (c.el._foldAnim) {
+      try { c.el._foldAnim.cancel(); } catch (e) { /* 忽略 */ }
+      c.el._foldAnim = null;
+    }
+    c.el.innerHTML = '';
+    const head = document.createElement('div');
+    head.className = 'fc-head';
+    head.setAttribute('role', 'button');
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    head.tabIndex = 0;
+    head.innerHTML =
+      '<span class="fc-ico fc-ico-head">' + FC_ICON + '</span>' +
+      '<span class="fc-title"></span>' +
+      '<span class="fc-caret">' + (open ? '⌃' : '⌄') + '</span>' +
+      '<span class="fc-status"></span>' +
+      '<span class="fc-stat"><b class="add"></b> <b class="del"></b></span>' +
+      '<button type="button" class="fc-open" title="在 IDE 中打开">↗</button>';
+    head.querySelector('.fc-title').textContent = groups.length + ' 个文件已更改';
+    const st = head.querySelector('.fc-status');
+    st.textContent = status;
+    st.classList.toggle('undone', status === '已撤销');
+    head.querySelector('.fc-stat .add').textContent = '+' + adds;
+    head.querySelector('.fc-stat .del').textContent = '−' + dels;
+    const jump = head.querySelector('.fc-open');
+    jump.onclick = (e) => { e.stopPropagation(); ideChangedOpen(groups[0]); };
+
+    const list = document.createElement('div');
+    list.className = 'fc-list';
+    const setOpen = (next) => {
+      c.el._open = next;
+      c.open = next;
+      const caretEl = head.querySelector('.fc-caret');
+      if (caretEl) caretEl.textContent = next ? '⌃' : '⌄';
+      head.setAttribute('aria-expanded', next ? 'true' : 'false');
+      foldTransition(c.el, list, next, { cls: 'collapsed' });
+    };
+    head.onclick = () => setOpen(!foldIsOpen(c.el, 'collapsed'));
+    head.onkeydown = (e) => {
+      if (e.target !== head) return;            // 焦点在内层 ↗ 按钮时别重复响应
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      setOpen(!foldIsOpen(c.el, 'collapsed'));
+    };
+    groups.forEach((g) => list.appendChild(ideChangedRowEl(g)));
+
+    c.el.appendChild(head);
+    c.el.appendChild(list);
+    c.el.classList.toggle('collapsed', !open);   // 折叠态由根节点统一表达
+    ideChangedPlace(c);
+  });
+  state.changeCards = alive;
+}
+
 /* ---------- 输入框上方的审阅提示栏 ----------
-   一轮改完、还有文件没处理时出现；处理完或者点 ✕ 就收起。
+   一旦有改完的文件就出现（不再等整轮结束）；处理完或者点 ✕ 就收起。
    左侧两个图标分别展开「任务项」和「待审查文件」，右侧是本轮的批量操作。 */
 const IDE_PLAN_MARK = { done: '✓', doing: '●', pending: '○', blocked: '!' };
 let ideTipSid = '';
 let ideTipPanel = '';
+let ideReviewLiveTip = false;      // true：本轮还在生成，提示栏文案用「文件已修改」
+let ideTipClosed = false;          // 用户点过「稍后处理」：本轮内不再自动弹出
 
 function ideReviewTipItems() {
-  return (state.ideReview || []).filter((it) => ideReviewItemStatus(it) === 'pending');
+  // pending 里的条目可能已经提前进 ideReview，按对象去重；
+  // 别的会话的文件不在当前输入框上方提示（切会话后由刷新统一收起）。
+  const cur = state.sessions.current;
+  const out = [];
+  (state.ideReview || []).concat(state.ideReviewPending || []).forEach((it) => {
+    if (out.indexOf(it) >= 0) return;
+    if (it.sid && cur && it.sid !== cur) return;
+    if (ideReviewItemStatus(it) === 'pending') out.push(it);
+  });
+  return out;
 }
 
 function ideReviewTipShow() {
+  if (ideTipClosed) return;            // 用户点了「稍后处理」
   if (!ideReviewTipItems().length) return ideReviewTipHide();
   ideTipSid = state.sessions.current;
   ideReviewTipRefresh();
@@ -3791,6 +4424,11 @@ function ideReviewTipRefresh() {
   const items = ideReviewTipItems();
   if (!items.length) return ideReviewTipHide();
   bar.classList.remove('hidden');
+  const lab = bar.querySelector('.rt-label');
+  if (lab) {
+    lab.textContent = ideReviewLiveTip
+      ? '文件已修改，需要审查' : '任务已完成，文件需要审查';
+  }
   const n = $('#rt-files-n');
   if (n) n.textContent = String(items.length);
   if (ideTipPanel) ideReviewTipFill(ideTipPanel);
@@ -3859,7 +4497,7 @@ function ideReviewTipBind() {
   const on = (sel, fn) => { const el = bar.querySelector(sel); if (el) el.onclick = fn; };
   on('#rt-tasks', () => ideReviewTipPanel('tasks'));
   on('#rt-files', () => ideReviewTipPanel('files'));
-  on('#rt-close', () => ideReviewTipHide());
+  on('#rt-close', () => { ideTipClosed = true; ideReviewTipHide(); });
   on('#rt-keep', () => {
     const items = ideReviewTipItems();
     if (items.length) ideReviewSettleAll('accept', items);
@@ -3902,15 +4540,19 @@ async function ideReviewSettleAll(action, items) {
     tokens.forEach((t) => { state.ideSettledTokens[t] = accept ? 'accepted' : 'undone'; });
     ideReviewSyncCards(tokens, accept ? '已保留' : '已撤回');
     (items || []).forEach((it) => {
-      const i = (state.ideReview || []).indexOf(it);
-      if (i >= 0) state.ideReview.splice(i, 1);
+      // 提示栏可能提前出现，条目还在 pending 里，两处都要摘掉
+      [state.ideReview, state.ideReviewPending].forEach((arr) => {
+        const i = (arr || []).indexOf(it);
+        if (i >= 0) arr.splice(i, 1);
+      });
       if (state.ideDiffs) delete state.ideDiffs[it.path];
     });
     ideUpdateDiffBtn();
     ideReviewCardRefresh();
     ideReviewTipRefresh();
-    if (!state.ideReview.length) ideReviewClose();
-    else ideReviewShow(Math.min(state.ideReviewIdx, state.ideReview.length - 1));
+    // 全部保留 / 全部撤销只做结算，不带着视图跳走：
+    // 不打开下一个文件的 diff，也不把 IDE 从 diff 切回编辑器。
+    if (!state.ideReview.length) ideReviewClose({ keepView: true });
     toast(accept ? '已保留本轮全部改动' : '已撤销本轮全部改动');
   } finally {
     ideReviewBusy = false;
@@ -4001,24 +4643,47 @@ function ideReviewKeydown(e) {
    交互对齐 VS Code：点**当前已激活**的活动栏图标 = 收起，再点任意图标 = 展开；
    另配 Ctrl+B（同 VS Code 的 Toggle Primary Side Bar）。
    收起时活动栏不再高亮 —— 否则会「看着是选中态，右边却空着」。
-   显隐只用已有的 .hidden 类（`display:none`），所以编辑区会自动补上空间。 */
+   收起 / 展开动的是 #ide-sides 的宽度（.collapsed），过渡期间冻结 Monaco 布局；
+   各视图之间仍然用 .hidden 瞬间切换，不参与动画。 */
 const IDE_SIDE_LABEL = { explorer: '资源管理器', search: '沙箱内搜索', git: '源代码管理', debug: '运行和调试', annos: '批注', docs: '文献库' };
 
+/* 侧栏做宽度过渡时冻结 Monaco 的 automaticLayout：
+   否则过渡的每一帧都会触发一次全量 layout（收起/展开会明显卡一下）。
+   过渡结束再恢复，并手动 layout 一次把编辑器对齐到最终宽度。 */
+let _ideLayoutTimer = 0;
+
+function ideFreezeEditorLayout(ms) {
+  const ed = state.ideEditor;
+  if (!ed || typeof ed.updateOptions !== 'function') return;
+  clearTimeout(_ideLayoutTimer);
+  try { ed.updateOptions({ automaticLayout: false }); } catch (e) { return; }
+  _ideLayoutTimer = setTimeout(() => {
+    try {
+      ed.updateOptions({ automaticLayout: true });
+      ed.layout();
+    } catch (e) { /* 编辑器已销毁：忽略 */ }
+  }, Math.max(120, Number(ms) || 240));
+}
+
 // 把 state 同步到界面（显隐 + 活动栏高亮 + 悬停提示）
-function ideSyncSideUI() {
+// animate=true 时给侧栏宽度做过渡；初始化那次传 false，避免进 IDE 就演一遍动画。
+function ideSyncSideUI(animate) {
   const hid = !!state.ideSideHidden;
-  const ex = $('#ide-side-explorer');
-  const se = $('#ide-side-search');
-  const gi = $('#ide-side-git');
-  const db = $('#ide-side-debug');
-  const an = $('#ide-side-annos');
-  const dc = $('#ide-side-docs');
-  if (ex) ex.classList.toggle('hidden', hid || state.ideSide !== 'explorer');
-  if (se) se.classList.toggle('hidden', hid || state.ideSide !== 'search');
-  if (gi) gi.classList.toggle('hidden', hid || state.ideSide !== 'git');
-  if (db) db.classList.toggle('hidden', hid || state.ideSide !== 'debug');
-  if (an) an.classList.toggle('hidden', hid || state.ideSide !== 'annos');
-  if (dc) dc.classList.toggle('hidden', hid || state.ideSide !== 'docs');
+  const map = {
+    explorer: '#ide-side-explorer', search: '#ide-side-search', git: '#ide-side-git',
+    debug: '#ide-side-debug', annos: '#ide-side-annos', docs: '#ide-side-docs',
+  };
+  Object.keys(map).forEach((k) => {
+    const el = $(map[k]);
+    if (el) el.classList.toggle('hidden', state.ideSide !== k);
+  });
+  // 收起 / 展开只动容器：各视图保持挂载，展开时不会先白一下再渲染
+  const sides = $('#ide-sides');
+  if (sides) {
+    const changed = sides.classList.contains('collapsed') !== hid;
+    sides.classList.toggle('collapsed', hid);
+    if (changed && animate) ideFreezeEditorLayout(240);
+  }
   const sr = $('#ide-side-resizer');
   if (sr) sr.classList.toggle('hidden', hid);   // 侧栏收起时不留一条 4px 的拖拽条
   $$('#ide-panel .act-btn[data-act]').forEach((b) => {
@@ -4039,7 +4704,7 @@ function idePersistSideHidden() {
 // 只控制显隐（Ctrl+B / 收起按钮走这里）
 function ideSetSideHidden(hidden) {
   state.ideSideHidden = !!hidden;
-  ideSyncSideUI();
+  ideSyncSideUI(true);                 // 收起 / 展开都走宽度过渡
   idePersistSideHidden();
 }
 
@@ -4050,7 +4715,7 @@ function ideToggleSidebar() { ideSetSideHidden(!state.ideSideHidden); }
 function ideSwitchSide(which) {
   state.ideSide = which;
   state.ideSideHidden = false;
-  ideSyncSideUI();
+  ideSyncSideUI(true);                 // 从收起态切图标时也是展开动画
   if (which === 'search') { const i = $('#ide-search-input'); if (i) i.focus(); }
   if (which === 'git' && typeof gitRefresh === 'function') gitRefresh();   // 每次切进来都拉一次最新状态
   if (which === 'debug') debugRenderBreakpoints();
@@ -4299,6 +4964,7 @@ async function saveIdeFile() {
     }
     renderIdeTabs(); ideUpdateStatus();
     ideFlashStatus('已保存');
+    ideRefreshGitMarks();              // 保存后文件名 / 状态字母立刻跟着变
     // 语言服务读的是磁盘上的文件：保存后重跑一次诊断，错误才跟着更新
     if (ideLspEligible(rel)) ideIntelSchedule(rel);
     if (ideMdEligible(rel)) ideMdLintSchedule();
@@ -5023,7 +5689,7 @@ async function ideImportVsCode() {
 
 // AI 改文件后：高亮 + 刷新；若改的正是当前打开的文件且未编辑，则自动重载
 let ideReloadTimer = null;
-function ideOnToolDone(obj) {
+function ideOnToolDone(obj, row, sid) {
   if (!obj || !obj.write) return;
   const a = obj.args || {};
   const paths = [a.path, a.from, a.to]
@@ -5034,7 +5700,7 @@ function ideOnToolDone(obj) {
   if (obj.undo && (obj.name === 'write_file' || obj.name === 'edit_file'
                    || obj.name === 'apply_worktree')) {
     const p = String(a.path || '').replace(/\\/g, '/');
-    if (p) ideReviewAdd(p, obj.undo, obj.name, a);
+    if (p) ideReviewAdd(p, obj.undo, obj.name, a, row, sid);
   }
   ideUpdateDiffBtn();
   if (state.uiMode !== 'ide') return;
@@ -5071,11 +5737,13 @@ function ideOnToolDone(obj) {
   bind('ide-review-undo', () => ideReviewSettle('undo'));
   bind('ide-review-keep', () => ideReviewSettle('accept'));
   bind('ide-review-ai-btn', () => ideReviewAiSummary('ide'));
+  bind('ide-review-open-ide', () => ideReviewOpenInIde());
   bind('review-prev', () => ideReviewStep(-1));
   bind('review-next', () => ideReviewStep(1));
   bind('review-undo', () => ideReviewSettle('undo'));
   bind('review-keep', () => ideReviewSettle('accept'));
   bind('review-ai-btn', () => ideReviewAiSummary('modal'));
+  bind('review-open-ide', () => ideReviewOpenInIde());
   bind('review-close', () => ideReviewClose());
   document.addEventListener('keydown', ideReviewKeydown);
   ideReviewTipBind();

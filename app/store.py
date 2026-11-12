@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """路径常量、共享锁与带 mtime 缓存的 JSON 读写"""
+import collections
 import json
 import os
 import random
@@ -7,7 +8,7 @@ import threading
 import time
 import uuid
 
-APP_VERSION = "3.3"
+APP_VERSION = "3.4"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(ROOT, "web")
 DATA_DIR = os.path.join(ROOT, "data")             # 运行时数据（整目录 gitignore）
@@ -68,7 +69,22 @@ def consume_stop(sid):
     except (TypeError, ValueError):
         return False
 
-_json_cache = {}   # path -> (mtime, data)
+_json_cache = collections.OrderedDict()   # path -> (mtime, data)
+# 读缓存上限：以前无上限，任何 read_json 过的文件都会一直驻留（阅读器分块、知识库、
+# 研报这类大 JSON 读一次就长期占内存）。这里按「最近最少使用」淘汰。
+_JSON_CACHE_MAX = 64
+# 常读大文件（sessions.json 有几十 MB）不参与淘汰，否则被清掉后一次重新解析要几百毫秒。
+_json_pinned = {os.path.abspath(SESSION_FILE)}
+
+
+def _remember(path, mtime, data):
+    _json_cache[path] = (mtime, data)
+    _json_cache.move_to_end(path)
+    while len(_json_cache) > _JSON_CACHE_MAX:
+        victim = next((p for p in _json_cache if os.path.abspath(p) not in _json_pinned), None)
+        if victim is None:
+            break
+        _json_cache.pop(victim, None)
 
 
 def read_json(path, default=None):
@@ -81,6 +97,7 @@ def read_json(path, default=None):
         return default
     hit = _json_cache.get(path)
     if hit and hit[0] == mtime:
+        _json_cache.move_to_end(path)
         return hit[1]
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -88,14 +105,16 @@ def read_json(path, default=None):
     except Exception as e:
         print(f"[存储] 读取失败 {os.path.basename(path)}：{e}")
         return default
-    _json_cache[path] = (mtime, data)
+    _remember(path, mtime, data)
     return data
 
 
-def write_json(path, obj, indent=2):
+def write_json(path, obj, indent=2, remember=True):
     """写 JSON。先落临时文件再 os.replace —— 中途崩溃/断电不会把原文件写坏
     （os.replace 在同一分区上是原子的）。
     indent=None 写紧凑格式，用于「只有程序读」的文件（sessions / 用量之类）。
+    remember=False：写进去的内容不进读缓存。给「写一次、极少读」的大文件用
+    （会话存档快照每轮都写一份，进了缓存就是每轮泄漏几十 MB）。
 
     tmp 用唯一名 + replace 失败重试：sessions.json 已经到十几 MB，写入窗口里
     很容易撞上杀软扫描或另一个读句柄，Windows 会直接抛 WinError 5（拒绝访问）。
@@ -122,14 +141,32 @@ def write_json(path, obj, indent=2):
         except OSError:
             pass
         return
+    if not remember:
+        _json_cache.pop(path, None)
+        return
     try:
-        _json_cache[path] = (os.path.getmtime(path), obj)
+        _remember(path, os.path.getmtime(path), obj)
     except OSError:
         _json_cache.pop(path, None)
 
 
 def drop_cache(path):
     _json_cache.pop(path, None)
+
+
+def clone_containers(obj):
+    """复制容器、共享标量：落盘快照用的浅拷贝。
+
+    与 copy.deepcopy 的区别：字符串 / 数字 / 布尔不复制。Python 里字符串不可变，
+    共享引用就够了；会话动辄几十 MB，deepcopy 会把全部容器再分配一遍，
+    每次落库多花上百毫秒、还多占几十 MB。这里只重建 dict / list 骨架。"""
+    if isinstance(obj, dict):
+        return {k: clone_containers(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [clone_containers(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(clone_containers(v) for v in obj)
+    return obj
 
 
 def new_id():

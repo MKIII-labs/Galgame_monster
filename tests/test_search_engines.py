@@ -2,7 +2,7 @@
 """免注册引擎链：字段收敛、失败转移、冷却、云端抓页与错误上抛。"""
 import pytest
 
-from app import search, search_engines
+from app import search, search_cache, search_engines, search_rank
 
 
 class _Resp:
@@ -20,6 +20,9 @@ def isolated(tmp_path, monkeypatch):
     """冷却文件写到临时目录，并清掉可能存在的真实环境变量 Key。"""
     monkeypatch.setattr(search_engines, "STATE_FILE", str(tmp_path / "engines.json"))
     monkeypatch.setattr(search_engines, "load_config", lambda: {})
+    monkeypatch.setattr(search_cache, "CACHE_FILE", str(tmp_path / "search_cache.json"))
+    monkeypatch.setattr(search_rank, "load_config",
+                        lambda: {"search_semantic_rank": False})
     for env in search_engines.ENV_KEYS.values():
         monkeypatch.delenv(env, raising=False)
     return tmp_path

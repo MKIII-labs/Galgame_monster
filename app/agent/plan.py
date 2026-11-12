@@ -99,8 +99,19 @@ def new_plan_review(sid, plan):
                               "action": "", "comment": "", "steps": None,
                               "ts": time.time()}
     from app import session_status
-    session_status.mark(sid, "approval")
+    session_status.mark(sid, "approval", _plan_notice(plan))
     return rid
+
+
+def _plan_notice(plan):
+    """计划审批的系统通知摘要：优先计划目标，其次第一个里程碑。"""
+    p = plan if isinstance(plan, dict) else {}
+    t = str(p.get("goal") or "").strip()
+    if not t:
+        ms = p.get("milestones") or []
+        if ms and isinstance(ms[0], dict):
+            t = str(ms[0].get("title") or "").strip()
+    return ("计划：" + t) if t else "计划待批准"
 
 
 def get_plan_review(rid):
@@ -524,6 +535,21 @@ def plan_brief(plan):
 # ============================================================
 
 
+def _ask_notice(items):
+    """提问卡的系统通知摘要：问答取题面，「等你操作」卡取要用户做的事。"""
+    if not items:
+        return ""
+    first = items[0]
+    if first.get("action"):
+        t = (str(first.get("detail") or "").strip()
+             or str(first.get("question") or "").strip())
+        return ("需要你在本机操作：" + t) if t else "需要你在本机操作"
+    q = str(first.get("question") or "").strip()
+    if len(items) > 1:
+        return "共 %d 个问题：%s" % (len(items), q)
+    return q
+
+
 def new_asks(sid, questions, timeout=None):
     """一次登记一组提问（可含多个问题）。返回 (qid, 规范化后的问题列表)。
 
@@ -581,7 +607,7 @@ def new_asks(sid, questions, timeout=None):
                       "questions": clean, "created_at": now,
                       "timeout": tmo, "expires_at": (now + tmo) if tmo > 0 else 0}
     from app import session_status
-    session_status.mark(sid, "ask")          # 侧栏会话行显示「待回答」
+    session_status.mark(sid, "ask", _ask_notice(clean))   # 侧栏圆点 + 系统通知摘要
     return qid, clean
 
 

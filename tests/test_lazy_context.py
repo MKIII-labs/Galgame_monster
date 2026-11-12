@@ -139,6 +139,23 @@ def test_auto_context_respects_item_limit(monkeypatch, tmp_path):
     assert len(refs) == 3
 
 
+def test_auto_context_items_zero_keeps_all(monkeypatch, tmp_path):
+    """默认 0 = 不截断：召回多少列多少（以前固定截到 5 条）。"""
+    from app.api import chat as chat_mod
+    from app import codeindex
+
+    monkeypatch.setattr(codeindex, "status", lambda root: {"state": "ready"})
+    items = [{"path": "f%d.py" % i, "start": 1, "end": 2, "score": 0.5,
+              "snippet": "y" * 10} for i in range(9)]
+    monkeypatch.setattr(codeindex, "search_items",
+                        lambda root, q, limit=8: {"items": items})
+    monkeypatch.setattr(chat_mod, "load_config",
+                        lambda: {"chat_auto_context": True,
+                                 "auto_context_items": 0})
+    refs = chat_mod._auto_code_refs({"sandbox": str(tmp_path)}, "请帮我找一下这个逻辑")
+    assert len(refs) == 9
+
+
 # ---------------------------------------------------------------- 渲染与配置
 def test_msg_text_renders_slim_ref_without_body():
     m = {"role": "user", "content": "看这个",
@@ -162,4 +179,5 @@ def test_new_config_defaults():
     assert d["agent_read_dedupe"] is True
     assert d["read_outline_mode"] is False
     assert d["auto_context_inline_max"] == 2
+    assert d["auto_context_items"] == 0        # 0 = 引用条数不截断
     assert d["repo_summary_inject"] is False

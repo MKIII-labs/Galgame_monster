@@ -429,6 +429,17 @@ def judge_shell(mode, unrestricted=False, interactive=True):
     return "ask", "持久 shell 属于高危操作（任意命令），需要确认"
 
 
+def _approval_notice(tool, args):
+    """审批通知的一行摘要：直接复用审批卡上的「先看一眼」。"""
+    a = args if isinstance(args, dict) else {}
+    if tool == "apply_worktree":
+        return "回写子代理改动：%s" % (a.get("summary") or a.get("agent") or "")
+    try:
+        return describe_call(tool, a).get("text") or str(tool or "")
+    except Exception:                        # noqa: BLE001  摘要失败不能挡住审批本身
+        return str(tool or "")
+
+
 def new_approval(sid, tool, args):
     aid = "p_" + uuid.uuid4().hex[:10]
     with _approvals_lock:
@@ -436,7 +447,7 @@ def new_approval(sid, tool, args):
                            "tool": tool, "args": args, "remember": False,
                            "ts": time.time()}
     from app import session_status
-    session_status.mark(sid, "approval")     # 侧栏会话行显示「待批准」
+    session_status.mark(sid, "approval", _approval_notice(tool, args))
     return aid
 
 

@@ -725,7 +725,8 @@ def _http_failure(status, detail_raw):
 def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event=None,
                 emit=None, on_visible=None, on_flush=None, allow_tool=True,
                 tools=None, timeout=(10, 300), max_tokens=None, kind=None,
-                idle_timeout=None, stall_timeout=None, temperature=None):
+                idle_timeout=None, stall_timeout=None, temperature=None,
+                on_tool_ready=None):
     """一次流式聊天调用：转发 SSE 增量，并顺手摘掉 ```memory / ```tool 代码块。
 
     P1-step5b：原来这是 api/chat.py 里的一个闭包 `call_model`，
@@ -856,6 +857,51 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
     mem_mx = mem_tool.MemoryExtractor()
     tool_mx = agent.ToolExtractor() if allow_tool else None
     sent = 0
+
+    # 原生工具调用「参数流完」就通知上层（对齐 Claude Code 的 StreamingToolExecutor）：
+    # 只读工具可以趁正文还在生成时先跑，不必等整条消息结束。
+    # 判定用「参数已闭合 + 能完整解析成 JSON」，并且严格按 index 顺序放行 ——
+    # 前一个没流完时，后一个绝不抢跑（保证同批里读在写之前）。
+    _ready_sent = set()
+    _EARLY_READY_MAX = 200_000     # 超大参数（write_file 正文）不做中途解析，省 CPU
+
+    def _slot_ready(_slot):
+        raw = str((_slot or {}).get("arguments") or "")
+        if not raw.strip() or not raw.rstrip().endswith("}"):
+            return False                  # 还没闭合
+        try:
+            json.loads(raw)
+            return True
+        except Exception:
+            return False                  # 半截 JSON（含嵌套对象未闭合）
+
+    def _flush_ready(before_idx=None):
+        if on_tool_ready is None:
+            return
+        for _i in sorted(native_calls):
+            if before_idx is not None and _i >= before_idx:
+                break
+            if _i in _ready_sent:
+                continue
+            _slot = native_calls[_i]
+            if not _slot.get("name"):
+                break                     # 占位：按声明顺序，不能越过它
+            if not _slot_ready(_slot):
+                break                     # 前一个还没流完，后面的不抢跑
+            _ready_sent.add(_i)
+            try:
+                _call = agent.normalize_call({"function": {
+                    "name": _slot["name"],
+                    "arguments": _slot["arguments"] or "{}",
+                }})
+            except Exception:
+                _call = None
+            if _call:
+                try:
+                    on_tool_ready(_call)
+                except Exception:         # noqa: BLE001  预取失败不能影响主流程
+                    pass
+
     # 读上游与解析拆到两个线程：Windows 上无法从外部打断已阻塞的 recv
     # （resp.close / sock.shutdown / sock.close / os.close 都实测无效），
     # 所以让主线程只从队列取行，每 0.2 秒检查一次停止信号 —— 点「停止」最多 0.2 秒返回。
@@ -931,6 +977,9 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
                         _state2, _msg2 = _http_failure(_st2, _raw2)
                         raise UpstreamError(_state2, _msg2, _retry_after)
                 elif status == 400 and _looks_like_context_overflow(detail):
+                    # 这条分支同样要关掉流：_resp_holder 还没登记，读线程也不会接管，
+                    # 不关就泄漏一个 keep-alive 连接（共享 Session 池只有 16 个）。
+                    resp.close()
                     raise UpstreamError(
                         "context",
                         "🧹 上下文超出模型窗口（上游 400）。请先压缩历史，"
@@ -1154,6 +1203,8 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
                         _idx = int(_tc.get("index", 0))
                     except (TypeError, ValueError):
                         _idx = 0
+                    if _idx not in native_calls:
+                        _flush_ready(_idx)    # 更早的调用参数已流完
                     _slot = native_calls.setdefault(
                         _idx, {"id": "", "name": "", "arguments": ""})
                     if _tc.get("id"):
@@ -1163,6 +1214,12 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
                         _slot["name"] = str(_fn["name"])
                     if _fn.get("arguments"):
                         _slot["arguments"] += str(_fn["arguments"])
+                        # 参数一闭合就提前交出：不必等下一个 index，也不必等整条消息结束。
+                        # 超大参数跳过中途解析（它们本来也在只读白名单之外）。
+                        if (len(_slot["arguments"]) <= _EARLY_READY_MAX
+                                and str(_fn["arguments"]).rstrip().endswith("}")
+                                and _slot_ready(_slot)):
+                            _flush_ready()
                 if _has_tool:
                     _meaningful = True
                     # 原生工具调用的参数是静默累积的：整轮结束前前端看不到任何东西。

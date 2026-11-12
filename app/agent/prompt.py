@@ -4,7 +4,7 @@ import re
 from app import langs
 from app.config import light_chat_is_local
 
-from .groups import (hidden_tools, tool_group_catalog)
+from .groups import (TOOL_GROUPS, hidden_tools, tool_group_catalog)
 from .rules import project_rules
 from .sandbox import (_extract_dir, _extract_path, _extract_paths, _extract_pattern, _tree, clean_sandbox)
 from .tools_web import (_extract_abs_time, _extract_url)
@@ -82,8 +82,11 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "web(action=search|fetch|note)",
             "history(action=list|undo|redo|recover)",
             "acceptance / ask_user / finish / read_tool_result / tool_search",
-            "低频组（需要时先 tool_search 解锁）：visual / image / asset / audio / "
-            "workflow / utility / diagram",
+            # 只列「真的没挂载」的组：全挂时一个都不列，避免模型以为工具缺失
+            # 而多调一次 tool_search（旧版这里写死了七组，全挂时也在喊「要解锁」）。
+            *(["未挂载的工具组（需要时先 tool_search 解锁）：" + " / ".join(
+                g for g, names in TOOL_GROUPS.items() if set(names) & set(hidden))]
+              if hidden else []),
         ]
     else:
         tools_block = [
@@ -162,9 +165,10 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "- see_image     {path, question?}            真的看一眼图片（PNG/JPG/WEBP/GIF/BMP），"
             "回传视觉模型对内容的文字描述；写完图 / 下载完图后用它确认实际长什么样。"
             "需要已配置视觉模型或聊天 API 密钥",
-            "- attachment_read {id?, name?, question?, offset?, limit?}  回看本会话里用户之前发过的图片 / 文档："
+            "- attachment_read {id?, name?, question?, pages?, offset?, limit?}  回看本会话里用户之前发过的图片 / 文档："
             "历史消息里带 att_xxx 编号；不给 id/name 就列出全部。图片重新识图，"
-            "文档返回发送时抽取的正文（可用 offset/limit 分段读）。用户提到「刚才那张图 / 之前那个文件」时用它",
+            "文档返回发送时抽取的正文（可用 offset/limit 分段读；PDF 可用 pages=\"1-5\" 按页读，每次最多 20 页）。"
+            "用户提到「刚才那张图 / 之前那个文件」时用它",
             "- image_compare {reference, candidate, region?, max_side?}  参考物 vs 产物的客观对照："
             "轮廓 IoU、宽高比、SSIM、主色分布、边缘密度、局部 3×3 差与总分 0–100；"
             "只做像素 / 形状统计，不判断好不好看；有地面 / 阴影 / 图注时用 region 裁到主体",
@@ -254,7 +258,10 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
         "**读类工具批量发**：看多个文件优先用 read_files(paths=[...])，比逐个 read_file 少好几轮。"
         "**看文件不要写脚本**：read_file 有 raw 原文、read_files 一次 16 个、search_files 支持"
         "多处命中 / 上下文 / 计数，只有循环、条件分支或复杂计算才用脚本。"
-        "每一步写一句「这一步要确认什么」，拿到结果后写一句「结果说明了什么」，然后**直接进入下一步**。"
+        "**正文是给用户看的，不要当日志**：动手前用一句话说明打算怎么做；之后只在关键节点补一句——"
+        "找到根因、换了方案、卡住、需要用户拍板、完成一个里程碑。"
+        "常规工具调用不要逐个旁白（不要写「现在读取 X」「接下来验证 Y」这类过场句），"
+        "结果正常就**直接进入下一步**，分析留到最后的总结里。"
         "任务没做完时不要问「要不要继续」这种没有信息量的问题；"
         "但**卡住时必须在当轮停下**：同一目标连续 2 次失败，或最近 10 次工具调用没有一次成功写入/改动，"
         "就用 ask_user（action:true）说明试过什么、卡在哪、需要你做什么，"
@@ -271,8 +278,8 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
         "6. `.git`、`.venv`、`node_modules`、`__pycache__` 与本项目 `data/` 目录禁止访问。",
         "7. 文本文件编码会自动识别（UTF-8 / GBK 等），read_file 会告诉你检测到的编码，"
         "edit_file 会**保持原编码**写回，不必担心乱码。",
-        "8. **写总结的时机**：整个任务做完了再写「改了什么、为什么」，中途每一步只用一句话说进展。"
-        "不要把每个批次都当成收尾来总结。",
+        "8. **写总结的时机**：整个任务做完了再写「改了什么、为什么」；中途不要逐批写总结，"
+        "只有关键节点一句话（见规则 1），不要把每个批次都当成收尾来总结。",
         "9. **禁止假称已执行**：只有工具返回成功，才能说「已写入 / 已修改 / 已删除」。"
         "没有发起调用或工具报错时，如实说「还没改」，不要用完成语气。",
         "10. **可视产物先自己验收完，再一次性交付**（网页 / 小游戏 / UI / 图表 / 动画）："
@@ -378,6 +385,23 @@ def _visual_prompt(file_ready=False):
                      + _VISUAL_TAIL)
 
 
+# ---------------------------------------------------------------
+# base 层：任务无关的通用原则。
+# 对标 Claude Code / Codex 的 base instructions —— 这里只放「恒成立」的纪律，
+# 任何场景性措辞（产物、交付物、报告）都不要写进来；它是所有任务共享的地基。
+# 放在提示词最前面、内容固定，对前缀缓存也友好。
+# ---------------------------------------------------------------
+_BASE_PRINCIPLES = "\n".join([
+    "## 基本原则（所有任务都适用）",
+    "1. 只做用户要求的事：不顺手改其他文件，也不做没被要求的重构、优化或补注释。",
+    "2. 回答本身就是交付：查看、解释、分析、对比、评估这类请求，用只读工具取到信息后"
+    "直接在正文里回答；不要为了「有个产物」而新建文件（报告、总结、说明文档都不需要）。",
+    "3. 只有用户明确要求创建 / 修改 / 生成文件时才写入；能改现有文件就不要新建文件。",
+    "4. 拿不准要不要动手时，按「只回答」处理，把结论说清楚即可；"
+    "不要用「要不要我…」结尾。",
+])
+
+
 # 能力边界：防止模型把「提示词里提到」当成「我手上就有」，也防止它猜「这句是写给别的环境的」
 
 
@@ -387,6 +411,35 @@ _CAPABILITY_BOUNDARY = "\n".join([
     "系统提示里提到、但清单里没有的，就是当前不可用：直接说「当前不可用」，"
     "不要假装调用过，也不要猜「这句话是写给别的环境的」。",
 ])
+
+# 非 Agent 模式：模型确实没有文件 / 命令工具，但不能只说「我没有能力」就收尾。
+# 真实踩过：模型用「没有写文件能力 / 不能执行命令」结束，用户不知道下一步该点什么。
+_NO_AGENT_CAPABILITY = "\n".join([
+    "## 当前模式：对话（没有文件 / 命令工具）",
+    "本轮没有文件读写、命令执行、IDE 改动这类能力，只有提问 / 联网搜索 / 计划 / 记忆。",
+    "当用户的请求需要动文件或跑命令时：不要用「我没有能力」一句话收尾，"
+    "直接告诉他「在左侧模式里切到 Agent，并点 📁 选择工作目录」就能继续，"
+    "并把第一步要做什么说清楚；不要假装执行过，也不要编造产物路径。",
+])
+
+
+def capability_boundary(has_hidden=False):
+    """能力边界文案。
+
+    has_hidden=True 时本轮有「未挂载的工具组」：必须先让模型去 tool_search 解锁，
+    不能沿用「清单里没有 = 当前不可用」的绝对说法 —— 两句话打架时模型通常选绝对那条，
+    于是明明能解锁的工具被它当成不存在（真实踩过：连续多轮说「工具不可用」）。
+    """
+    if not has_hidden:
+        return _CAPABILITY_BOUNDARY
+    return "\n".join([
+        "## 能力边界（重要）",
+        "你实际能调用哪些工具，**以本轮下发的工具清单 / schema 为准**。",
+        "清单里没有的工具，先看下面的「未挂载的工具组」：命中任何一组就先调 "
+        "tool_search 解锁（下一轮生效），**不要直接说「不可用」**。",
+        "只有既不在清单里、也不在未挂载列表里的能力，才是当前不可用；"
+        "这时直说，不要假装调用过。",
+    ])
 
 
 def _proto_block(native=False):
@@ -920,7 +973,7 @@ def intent_hint(text, session=None):
 
 def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=None,
                        computer_on=False, plan_mode=False,
-                       allow_groups=None):
+                       allow_groups=None, unlocked=None):
     """生成注入系统提示的「工具」说明（提问始终可用）。
 
     search_ready：本轮是否把 web_search 交给模型自主调用（由 chat.py 按
@@ -941,7 +994,9 @@ def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=No
     proto = _proto_block(bool(native_tools))
     # 只有原生 tool schema 才会「隐藏」工具；文本协议下所有工具仍可直接调用，
     # 所以只在原生模式里把未挂载的工具组列给模型（避免它误以为工具不存在）。
-    hidden = hidden_tools(allow_groups, None) if native_tools else None
+    # unlocked 必须一起传：已经 tool_search 解锁的组要从 hidden 里移除，
+    # 否则提示词会一直说「这组没挂载」，模型再怎么解锁也仍然看到「不可用」。
+    hidden = hidden_tools(allow_groups, unlocked) if native_tools else None
     if agent_on and sandbox:
         parts = [_full_agent_prompt(sandbox, bool(s.get("allow_outside_read")),
                                     include_tree=False, compact=bool(native_tools),
@@ -949,9 +1004,12 @@ def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=No
     elif agent_on:
         parts = [(_ASK_PROMPT.replace("%PROTO%", proto)
                   + "\n\n## 文件 Agent\n已开启 Agent 但**尚未指定沙箱目录**；"
-                    "如需读写文件，请先请用户在界面上点「📁」选择目录。")]
+                    "这时不要声称「没有文件能力」「不能执行命令」——"
+                    "请用户点界面上的「📁」选择工作目录，选好之后就能读写与执行。")]
     else:
         parts = [_ASK_PROMPT.replace("%PROTO%", proto)]
+    # base 层永远排最前：先立通用纪律，再讲这一轮具体有哪些能力
+    parts.insert(0, _BASE_PRINCIPLES)
     parts.append((_SEARCH_PROMPT if search_ready else _NO_SEARCH_PROMPT)
                  .replace("%PROTO%", proto))
     parts.append(_REMINDER_PROMPT.replace("%PROTO%", proto))
@@ -976,7 +1034,10 @@ def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=No
                                     domains=cap_domains, hall=_hall)
     if cap_prompt:
         parts.append(cap_prompt)
-    parts.append(_CAPABILITY_BOUNDARY)
+    parts.append(capability_boundary(bool(hidden)))
+    # 纯对话模式再补一段收尾口径（放在能力边界之后：最后读到的是「怎么开启」，而不是「不可用」）
+    if not agent_on:
+        parts.append(_NO_AGENT_CAPABILITY)
     parts.append(_tool_decision_prompt(file_ready=bool(agent_on and sandbox),
                                        search_ready=bool(search_ready),
                                        native=bool(native_tools), hall=_hall,

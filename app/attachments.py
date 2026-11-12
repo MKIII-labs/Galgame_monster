@@ -61,6 +61,7 @@ def from_message(msg, index=0):
             out.append(_entry(DOC, f, doc.get("name") or f, doc.get("mime"),
                               doc.get("size"), index,
                               text=doc.get("text") or "",
+                              pages=doc.get("pages") or [],
                               warn=doc.get("warn") or "", error=doc.get("error") or "",
                               chars=int(doc.get("chars") or 0)))
     else:
@@ -70,6 +71,7 @@ def from_message(msg, index=0):
             f = doc.get("file") or doc.get("name")
             out.append(_entry(DOC, f, doc.get("name") or f, doc.get("mime"),
                               doc.get("size"), index, text=msg.get("doc_text") or "",
+                              pages=doc.get("pages") or [],
                               warn=doc.get("warn") or "", error=doc.get("error") or "",
                               chars=int(doc.get("chars") or 0)))
     return out

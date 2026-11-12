@@ -532,16 +532,21 @@ def _reason_of(text):
 def _read_remote_image(url, timeout=25, limit=_IMAGE_LIMIT):
     """下载远程图片，返回 (mime, base64)。超限直接放弃，避免巨型请求打满上下文。"""
     resp = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=timeout, stream=True)
-    resp.raise_for_status()
-    mime = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
-    buf = b""
-    for chunk in resp.iter_content(65536):
-        buf += chunk
-        if len(buf) > limit:
-            raise RuntimeError("图片超过 %d MB" % (limit // 1024 // 1024))
-    if not buf:
-        raise RuntimeError("图片为空")
-    return mime, base64.b64encode(buf).decode("ascii")
+    # stream=True 的连接必须显式释放：超限 / 空图都是常见失败路径，
+    # 不关就会把连接留在 keep-alive 池里（requests 只在读到底时才自动归还）。
+    try:
+        resp.raise_for_status()
+        mime = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
+        buf = b""
+        for chunk in resp.iter_content(65536):
+            buf += chunk
+            if len(buf) > limit:
+                raise RuntimeError("图片超过 %d MB" % (limit // 1024 // 1024))
+        if not buf:
+            raise RuntimeError("图片为空")
+        return mime, base64.b64encode(buf).decode("ascii")
+    finally:
+        resp.close()
 
 
 def ai_locate(image_url, style=""):

@@ -107,8 +107,15 @@ def _search_web(args, ctx):
         count = max(1, min(int(args.get("count") or default_count), 10))
     except (TypeError, ValueError):
         count = default_count
+    # 与主循环共用 Query Planner / 排序：单查询也补时效锚点、按相关度排
     try:
-        items = search.search_web(q, provider, url, key, count)
+        from app import search_plan, search_rank
+        plan = search_plan.plan("", [q])
+        queries = plan.get("queries") or [q]
+        items = search.search_web(queries[0], provider, url, key, count)
+        items = search_rank.rank_hits(items, queries, intent=plan.get("intent") or "general",
+                                      freshness=plan.get("freshness") or "",
+                                      max_items=count)
     except Exception as e:
         return "❌ 搜索失败：%s" % e
     if not items:

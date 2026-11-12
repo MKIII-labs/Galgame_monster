@@ -430,8 +430,8 @@ def _parse_stored_doc(sid, meta):
         txt = (txt or "").strip()
         return "" if txt.startswith(("⚠️", "❌")) else txt
 
-    return docparse.extract(str(meta.get("name") or ""), raw,
-                            ocr=(_ocr if vision_available() else None))
+    return docparse.extract_pages(str(meta.get("name") or ""), raw,
+                                  ocr=(_ocr if vision_available() else None))
 
 
 def _api_attach_reparse(h):
@@ -451,10 +451,12 @@ def _api_attach_reparse(h):
         meta = _attach_meta(msgs, index, doc_index)
         if meta is None:
             return h._json({"ok": False, "error": "找不到附件"}, 404)
-        text, warn = _parse_stored_doc(sid, meta)
+        text, warn, pages = _parse_stored_doc(sid, meta)
         if text:
             meta["chars"] = len(text)
             meta["text"] = text
+            if pages:
+                meta["pages"] = pages
             meta.pop("error", None)
             if warn:
                 meta["warn"] = warn

@@ -276,16 +276,36 @@ async function refreshSessionQuiet(sid) {
   } catch (e) { /* 静默失败：事件刷新不是关键路径 */ }
 }
 
+/* 提问卡 / 审批卡是否正摆在用户眼前：是就别弹系统通知。
+   Solo 之外（IDE / GAL / 工作台）看不到聊天区，窗口隐藏或失焦也算看不到。 */
+function pendingCardVisible(sid) {
+  if (typeof state === 'undefined' || state.uiMode !== 'solo') return false;
+  if (sid && sid !== state.sessions.current) return false;
+  if (typeof document === 'undefined') return true;
+  return !document.hidden && document.hasFocus();
+}
+
+/* 等待用户回答 / 批准：只在看不到那张卡时提醒，点通知跳回对应会话。
+   at 是后端登记时间戳，拼进去重键：同一张卡重复推送只提醒一次。 */
+function notifySessionPending(sid, kind, text, at) {
+  if (pendingCardVisible(sid)) return;
+  const title = kind === 'approval' ? '等待你批准' : '需要你回答';
+  const key = 'pending:' + sid + ':' + kind + ':' + (at || 0);
+  notifyOnce(key, title, String(text || '').slice(0, 140), 'ask', { sessionId: sid });
+}
+
 function handleAutoEvent(obj) {
   if (!obj || !obj.type) return;
-  // 会话运行态（待审批 / 待回答）：只改侧栏小圆点，不弹通知
+  // 会话运行态（待审批 / 待回答）：更新侧栏圆点；看不到那张卡时再弹系统通知
   if (obj.type === 'session_pending') {
     const sid = String(obj.sid || '');
     if (sid) {
       state.pending = state.pending || {};
-      if (obj.kind) state.pending[sid] = String(obj.kind);
+      const kind = String(obj.kind || '');
+      if (kind) state.pending[sid] = kind;
       else delete state.pending[sid];
       if (typeof renderSessions === 'function') renderSessions();
+      if (kind) notifySessionPending(sid, kind, obj.text, obj.at);
     }
     return;
   }

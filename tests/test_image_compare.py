@@ -88,7 +88,8 @@ def test_schema_and_plan_mode_expose_image_compare():
           for t in agent.native_tool_schemas(agent_on=True, plan_mode=True,
                                              allow_groups={"image"})]
     assert "image" in ro
-    assert "edit" not in ro
+    # 工具目录跨模式固定（缓存稳定），写工具仍列在 schema 里，plan 模式由运行时拒绝
+    assert "edit" in ro
     # acceptance 允许把它们当机检项
     assert "image_compare" in chat._ACCEPT_SAFE
     assert "image_analyze" in chat._ACCEPT_SAFE

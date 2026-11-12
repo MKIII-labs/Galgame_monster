@@ -36,6 +36,12 @@ _RESEARCH_RE = re.compile(
     re.I)
 
 _CITE_RE = re.compile(r"\[(\d{1,3})\]")
+# 只审计「有辨识度」的数字：千分位 / 小数 / 3 位以上整数；
+# 单字数字太容易误报（序号、列表、年份片段），不纳入。
+_NUM_RE = re.compile(
+    r"(?<![\w.])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d{3,})(?:\s*(?:%|％))?")
+_CLAIM_SPLIT_RE = re.compile(r"(?<=[。！？!?；;])\s*|\n+")
+_IDENT_RE = re.compile(r"`([^`]{2,40})`")
 
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
@@ -49,6 +55,13 @@ def is_research_task(text):
 def _safe_sid(sid):
     s = re.sub(r"[^A-Za-z0-9_-]", "", str(sid or ""))
     return s or "default"
+
+
+def _to_int(v, default=0):
+    try:
+        return int(v if v not in (None, "") else default)
+    except (TypeError, ValueError):
+        return default
 
 
 class Ledger:
@@ -118,11 +131,23 @@ class Ledger:
                     if len(self.sources) >= MAX_SOURCES:
                         continue
                     n = len(self.sources) + 1
+                    ev = []
+                    for x in (it.get("evidence") or [])[:4]:
+                        if not isinstance(x, dict):
+                            continue
+                        quote = str(x.get("quote") or "").strip()
+                        if not quote:
+                            continue
+                        ev.append({"quote": quote[:600],
+                                   "line_start": _to_int(x.get("line_start")),
+                                   "line_end": _to_int(x.get("line_end"))})
                     self.sources.append({
                         "n": n, "url": u,
                         "title": str(it.get("title") or ""),
                         "site": str(it.get("site") or ""),
                         "snippet": str(it.get("snippet") or "")[:300],
+                        "published_at": str(it.get("published_at") or "")[:40],
+                        "evidence": ev,
                         "query": str(query or "")[:120]})
                     by_url[u] = n
                 out.append((n, it))
@@ -213,6 +238,87 @@ class Ledger:
             if n >= 1 and n not in have:
                 bad.add(n)
         return sorted(bad)
+
+    def _evidence_by_n(self):
+        out = {}
+        for s in self.sources:
+            n = _to_int(s.get("n"))
+            quotes = []
+            for e in (s.get("evidence") or []):
+                if isinstance(e, dict) and e.get("quote"):
+                    quotes.append(str(e.get("quote")))
+            out[n] = "\n".join(quotes)
+        return out
+
+    def audit_citations(self, text):
+        """校验正文里的引用：编号是否存在 + 数字是否真的出现在被引来源原文里。
+
+        返回 {"bad": [不存在的编号], "unsupported": [{n, claim, missing}]}。
+        只审计有辨识度的数字（小数 / 千分位 / 3 位以上整数），减少误报；
+        来源没有存逐字证据时跳过数字审计（snippet 太短，容易误报）。
+        """
+        body = str(text or "")
+        bad = self.bad_citations(body)
+        if not self.sources:
+            return {"bad": bad, "unsupported": []}
+        ev_by_n = self._evidence_by_n()
+        unsupported = []
+        for claim in _CLAIM_SPLIT_RE.split(body):
+            claim = claim.strip()
+            if not claim:
+                continue
+            cited = []
+            for m in _CITE_RE.finditer(claim):
+                n = _to_int(m.group(1))
+                if n in ev_by_n:
+                    cited.append(n)
+            if not cited:
+                continue
+            src_text = "\n".join(ev_by_n[n] for n in cited)
+            if not src_text.strip():
+                continue
+            norm_src = src_text.replace(",", "")
+            missing = []
+            for m in _NUM_RE.finditer(claim):
+                val = m.group(1).replace(",", "")
+                if not val or val in norm_src:
+                    continue
+                missing.append(m.group(0).strip())
+            # 反引号里的标识符 / 代码（`pip install x`、`v1.2.3`）也要求出现在原文里
+            for m in _IDENT_RE.finditer(claim):
+                term = m.group(1).strip()
+                if not term or not re.search(r"[A-Za-z0-9]", term):
+                    continue
+                if term not in src_text:
+                    missing.append("`%s`" % term)
+            if missing:
+                unsupported.append({
+                    "n": cited[0],
+                    "claim": claim[:200],
+                    "missing": list(dict.fromkeys(missing))[:4],
+                })
+        return {"bad": bad, "unsupported": unsupported[:5]}
+
+    def claim_evidence(self, text, limit=5):
+        """给 NLI 校验用的 claim + 引用证据对；只取有引用且有逐字证据的句子。"""
+        ev_by_n = self._evidence_by_n()
+        out = []
+        for claim in _CLAIM_SPLIT_RE.split(str(text or "")):
+            claim = claim.strip()
+            if not claim:
+                continue
+            cited = [_to_int(m.group(1)) for m in _CITE_RE.finditer(claim)]
+            cited = [n for n in cited if n in ev_by_n]
+            if not cited:
+                continue
+            ev = ev_by_n.get(cited[0]) or ""
+            if not ev.strip():
+                continue
+            out.append({"i": len(out) + 1, "n": cited[0],
+                        "claim": claim[:300], "evidence": ev[:800]})
+            if len(out) >= max(1, int(limit or 5)):
+                break
+        return out
 
     def context_block(self, max_sources=6, max_gaps=6):
         """给系统提示的短摘要；没有内容时返回空串（不污染上下文）。"""

@@ -82,18 +82,19 @@ def system_clock_short(now=None):
                time.strftime("%H:%M", t)))
 
 
-def tool_prompt(s, include_profile=True, include_kb=True, include_session=True):
+def tool_prompt(s, include_profile=True, include_kb=True, include_session=True, parts=False):
     """记忆工具说明块：把「你有读写权限 + 可用作用域 + 现有条目」写进提示，
     模型才会在回复里给出写入指令（而不是嘴上说「我无法记录」）。
 
-    include_profile / include_kb / include_session 供 GAL 与会话级开关使用。"""
+    include_profile / include_kb / include_session 供 GAL 与会话级开关使用。
+    parts=True 返回 (静态说明, 动态条目)：动态条目必须贴到请求末尾，别放进 system。"""
     try:
         return mem_tool.build_tool_prompt(s, include_profile=include_profile,
                                           include_kb=include_kb,
-                                          include_session=include_session)
+                                          include_session=include_session, parts=parts)
     except Exception as e:
         print(f"[记忆工具] 提示词生成失败：{e}")
-        return ""
+        return ("", "") if parts else ""
 
 
 GLOBAL_RULES_HEAD = "【全局规则（必须遵守；与本轮用户消息冲突时以本轮为准）】"
@@ -140,19 +141,34 @@ def base_system_parts(s, query, gal_mode=False, profile_manual="", tool_text="",
     if tool_text:
         fixed = (fixed + "\n\n" + tool_text) if fixed else tool_text
 
+    # 记忆索引（L3，对齐 CC 的 MEMORY.md）：长期记忆的标题级常驻清单。
+    # 只列标题与一行钩子，正文仍由检索 / memory.search 按需取；本地小窗口模型不注入。
+    # 注意：它随记忆写入变化，属于**动态段**（放到 system 里会让后面整段历史每轮 miss）。
+    try:
+        from app.knowledge import memory_index_block
+        idx_text = memory_index_block(
+            s, include_profile=False,
+            include_kbs=bool(include_kbs), include_session=bool(include_session))
+    except Exception as e:                   # noqa: BLE001  索引失败不能拦住对话
+        idx_text = ""
+        print(f"[记忆索引] 生成失败：{e}")
+
     # 只有用户真的写了规则时才加执行纪律：没有目标可推进时它只是噪音
     if manual:
         fixed += EXECUTION_RULES
 
     # ---- 以下都是「每轮易变」段 ----
     dyn = ""
+    # 记忆索引：随记忆写入变化，放动态段（贴请求末尾），保住 system 的稳定前缀
+    if idx_text:
+        dyn = idx_text
     # 记忆检索：从用户画像 + 会话记忆 + 绑定的知识库召回。
     mem_block, mem_count = retrieve_memory(s, query, exclude_pinned=bool(gal_mode),
                                            skip_profile=bool(tool_text) or bool(skip_profile),
                                            include_kbs=bool(include_kbs),
                                            include_session=bool(include_session))
     if mem_block:
-        dyn = mem_block
+        dyn = (dyn + "\n\n" + mem_block) if dyn else mem_block
     else:
         mem_count = 0
 

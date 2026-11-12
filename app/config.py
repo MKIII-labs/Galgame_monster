@@ -60,11 +60,17 @@ DEFAULT_CONFIG = {
     "aside_max_tokens": 800,
     # 提问时自动从沙箱代码索引召回相关片段（只读）；没有索引会先后台建一次
     "chat_auto_context": True,
+    # Solo 过程折叠区的「智能跟随」：新步骤出现时把它带进视野；用户上翻立即暂停，
+    # 回到底部 / 点「回到底部」后恢复。关闭后只更新折叠头统计，不再自动滚动
+    #（当前步骤高亮与自动展开 / 收起仍然生效）。
+    "ui_process_follow": True,
     # 自动召回的注入预算：高置信的前 N 段内联正文，其余只给 path:行号按需读。
     # 0 = 不设预算（旧行为：最多 5 段全部内联）。
     "auto_context_budget_chars": 8000,
     "auto_context_inline_max": 2,
-    "auto_context_items": 5,
+    # 自动引用条数上限：0 = 不截断，召回多少就列多少（只影响条目数，
+    # 正文内联仍受上面两项预算限制）。
+    "auto_context_items": 0,
     # 会话第一次提问时注入一眼仓库结构（默认关：会多一次目录遍历；
     # 放在引用里而不是 system，避免文件变化打断前缀缓存）。
     "repo_summary_inject": False,
@@ -83,6 +89,21 @@ DEFAULT_CONFIG = {
     # 0 = 关闭（整段保留）。
     "history_process_keep_turns": 2,
     "history_process_digest": 240,
+    # 原文保留区的推进粒度（水位线）：每 step 条 assistant 才整体推进一次边界。
+    # 1 = 旧行为（每来一条新 assistant 就有一条旧消息被压成摘要，前缀每轮断一次）；
+    # 4 = 边界之间只追加、不改写，缓存可连续命中，代价是最多临时多留 3 条原文。
+    "history_rebuild_step": 4,
+    # 会话工作记忆（L2）：回合结束后由轻量模型把新增对话合并进一份结构化工作笔记；
+    # 压缩时若它已覆盖待压区间且足够新，直接复用，省掉一次压缩调用（零 API 分支）。
+    "session_memory_enabled": True,
+    # 微压缩（L3）：上下文超过预算 60% 时，对单条过大的工具结果做一次轻量摘要。
+    "microcompact_enabled": True,
+    "microcompact_min_tokens": 3000,
+    "microcompact_trigger_ratio": 0.6,
+    # 渐进折叠（L4）：窗口预算用到 80% 时先轻压一档（保留更多原文），
+    # 到 100% 再走完整压缩；只影响窗口预算，不影响 40k 工作集。
+    "history_collapse_ratio": 0.8,
+    "history_collapse_keep_ratio": 0.32,
     # 省费模式（token_profile）：
     #   balanced = 引用正文只在最后一条用户消息内联、历史轮次只留句柄；
     #              界面上下文 / 意图提示 / 自动化目标贴到请求末尾，不破坏 system 前缀。
@@ -115,6 +136,12 @@ DEFAULT_CONFIG = {
     "memory_soft_limit": 60,
     "memory_organize_every": 20,
     "memory_list_recent": 40,
+    # 每轮「相关记忆」整块注入的 token 预算（正文仍按单条 400 字截断）。
+    "memory_inject_tokens": 3000,
+    # 有界记忆索引（对齐 CC 的 MEMORY.md）：常驻标题清单，行数 / 字节双上限（0 = 不限）。
+    "memory_index_enabled": True,
+    "memory_index_max_lines": 200,
+    "memory_index_max_bytes": 25000,
     # 单次模型调用的输出上限（max_tokens，硬截断）；0 = 不传，用服务商默认。
     # 思考模式的 reasoning 也计入这个额度：设得太小，模型会在写工具块之前就被截断
     # （现象是正文停在冒号、却没有工具调用，见 NOTE 43.76）。
@@ -193,6 +220,17 @@ DEFAULT_CONFIG = {
     # 复刻 / 还原 / 从零实现类任务：单轮信息量放宽（0 = 用上面两项）。
     "search_research_merged_max": 20,
     "search_research_fetch_chars": 4000,
+    # 深度检索（默认开）：所有联网搜索都放宽合并条数 / 正文字数，弱结果自动补搜一次。
+    # 关闭后回到 search_merged_max / search_fetch_chars，且不做自动补搜。
+    "search_research_enabled": True,
+    # 查询级检索缓存：同一 provider + 检索式在 TTL 内直接复用，省额度与延迟。
+    "search_cache_enabled": True,
+    "search_cache_ttl": 3600,          # 通用查询缓存秒数；时效类会自动缩短
+    # 向量混合检索：本地 bge 模型可用时，排序混入 query↔标题/摘要的语义相似度。
+    "search_semantic_rank": True,
+    # 引用语义校验（P2，可选）：用轻量模型判断 claim 是否真的被引用证据支持；
+    # 默认关闭，开启后每次带引用的回答会多一次小模型调用。
+    "search_cite_nli": False,
     # 搜索服务商余额接口：留空时按服务商自动识别（bocha / tavily）；volc 无可用接口。
     "search_balance_url": "",
     "learning_presets": {},
@@ -343,6 +381,11 @@ DEFAULT_CONFIG = {
     # 工具结果总量触发（真实 token）：最近一次响应返回的 prompt_tokens + 之后新增内容的估算
     # 超过这个值，就按「单条结果」把较早的折叠成摘要。0 = 不按 token 触发。
     "tool_result_trim_tokens": 100000,
+    # 低水位（tokens）：触发后一次折到这里，而不是折到刚好卡线。
+    # 前缀缓存按「改一个字节、后面全废」计费，折叠**次数**比折叠深度更贵；
+    # 折到刚好卡线会导致下一轮又超、再折一条，历史中段每轮都被改写。
+    # 0 = 自动取高水位的 55%。
+    "tool_result_trim_target": 0,
     # 子代理的独立上下文预算（tokens）：每个侦察兵只看自己的 messages，超预算就折自己的旧结果，
     # 与主对话互不影响。0 = 不限。
     "subagent_context_tokens": 60000,

@@ -63,6 +63,21 @@ def test_plan_review_rejects_second_answer():
     assert agent.resolve_plan_review("pr_missing", "approve") is False
 
 
+def test_plan_review_carries_notice_text(monkeypatch):
+    """计划审批也要在事件里带摘要：通知里显示计划目标，而不是只有一句「待批准」。"""
+    from app import events
+    seen = []
+    monkeypatch.setattr(events, "publish", lambda obj: seen.append(obj))
+
+    sid = "s_test_plan_notice"
+    rid = agent.new_plan_review(sid, _plan())
+    ev = [o for o in seen if o.get("type") == "session_pending"][-1]
+    assert ev["kind"] == "approval" and ev["text"] == "计划：做个页面"
+
+    agent.resolve_plan_review(rid, "approve")
+    agent.wait_plan_review(rid, timeout=0.2)
+
+
 def test_plan_review_timeout_returns_none():
     sid = "s_test_plan_review3"
     rid = agent.new_plan_review(sid, _plan())

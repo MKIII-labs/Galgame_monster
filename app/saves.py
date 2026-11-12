@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 
-from app.store import DATA_DIR, drop_cache, read_json, write_json, new_id
+from app.store import DATA_DIR, drop_cache, read_json, write_json, new_id, clone_containers
 from app.sessions import load_sessions, find_session, ensure_session_kb_fields
 
 SAVES_DIR = os.path.join(DATA_DIR, "saves")
@@ -80,7 +80,7 @@ def _migrate(sid):
         if isinstance(state, dict):
             write_json(_state_path(sid, save_id),
                        {"id": save_id, "ts": it.get("ts") or 0, "state": state},
-                       indent=None)
+                       indent=None, remember=False)
         metas.append({k: it.get(k) for k in META_FIELDS})
     write_json(_index_path(sid), {"session_id": sid, "items": metas}, indent=None)
     drop_cache(legacy)                 # 旧文件可能很大，解析结果别留在内存里
@@ -109,7 +109,7 @@ def _absorb_legacy(sid, items):
             continue
         write_json(_state_path(sid, save_id),
                    {"id": save_id, "ts": it.get("ts") or 0, "state": it["state"]},
-                   indent=None)
+                   indent=None, remember=False)
         items.append({k: it.get(k) for k in META_FIELDS})
         added += 1
     if added:
@@ -147,10 +147,12 @@ def _write_index(sid, items):
 
 
 def _remove_state(sid, save_id):
+    p = _state_path(sid, save_id)
     try:
-        os.remove(_state_path(sid, save_id))
+        os.remove(p)
     except OSError:
         pass
+    drop_cache(p)
 
 
 def drop_saves(sid):
@@ -166,10 +168,12 @@ def drop_saves(sid):
     try:
         if os.path.isdir(d):
             for name in os.listdir(d):
+                p = os.path.join(d, name)
                 try:
-                    os.remove(os.path.join(d, name))
+                    os.remove(p)
                 except OSError:
                     pass
+                drop_cache(p)
             os.rmdir(d)
     except OSError as e:
         print(f"[存档] 清理失败：{e}")
@@ -219,7 +223,7 @@ def make_label(s):
 
 def snapshot_state(s):
     """深拷贝可恢复字段"""
-    return {k: copy.deepcopy(s[k]) for k in RESTORE_FIELDS if k in s}
+    return {k: clone_containers(s[k]) for k in RESTORE_FIELDS if k in s}
 
 
 def _trim(items):
@@ -252,8 +256,11 @@ def add_save(sid, s, label=None, manual=False):
         except OSError:
             pass
         # 先写快照再写 index：index 里不能出现指向不存在文件的条目
+        # remember=False：存档是「写一次、只在手动回退时读」的大文件，
+        # 进读缓存等于每轮自动留档都泄漏几十 MB（长会话跑几十轮就是 GB 级）。
         write_json(_state_path(sid, save_id),
-                   {"id": save_id, "ts": ts, "state": snapshot_state(s)}, indent=None)
+                   {"id": save_id, "ts": ts, "state": snapshot_state(s)},
+                   indent=None, remember=False)
         items.append(meta)
         for old in _trim(items):
             _remove_state(sid, old.get("id"))
@@ -279,7 +286,9 @@ def _find(sid, save_id):
 
 
 def _load_state(sid, save_id):
-    obj = read_json(_state_path(sid, save_id), None)
+    p = _state_path(sid, save_id)
+    obj = read_json(p, None)
+    drop_cache(p)                  # 存档只在还原时读一次，没必要常驻内存
     if isinstance(obj, dict) and isinstance(obj.get("state"), dict):
         return obj["state"]
     return None

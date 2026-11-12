@@ -391,7 +391,7 @@ async function renderKbTokenEst(ids) {
   try { r = await api('/api/kb/stats', { ids: list }); } catch (e) { r = null; }
   if (!r || !r.ok) { box.classList.add('hidden'); return; }
   const t = r.total || {};
-  const cap = Number(r.inject_max_tokens) || 1500;
+  const cap = Number(r.inject_max_tokens) || 3000;
   const worldChars = Number(r.world_max_chars) || 9000;
   const density = t.chars ? (t.tokens / t.chars) : 0.5;   // 用这个库自己的字/token 密度折算上限
   const worldTokens = Math.round(worldChars * density);
@@ -401,6 +401,12 @@ async function renderKbTokenEst(ids) {
     + ' token <span class="kb-token-hint">（库的总量，不是每次对话的成本）</span></div>');
   lines.push('<div><b>日常每轮</b>：按检索命中注入，最多 <b>' + cap
     + '</b> token / 轮 —— 整库不会全塞进提示词</div>');
+  if (r.memory_index_enabled !== false) {
+    const idxLines = Number(r.memory_index_max_lines) || 200;
+    const idxBytes = Number(r.memory_index_max_bytes) || 25000;
+    lines.push('<div><b>常驻索引</b>：标题清单最多 ' + idxLines + ' 行 / '
+      + kbFmtNum(idxBytes) + ' 字节（只列标题与一行钩子，正文仍按需检索）</div>');
+  }
   lines.push('<div><b>GAL 编剧一次性</b>：整库上限 ' + kbFmtNum(worldChars) + ' 字 ≈ '
     + kbFmtNum(worldTokens) + ' token，每次生成只喂一次</div>');
   if (t.pinned_nodes) {
@@ -432,7 +438,7 @@ async function renderMemTokenEst() {
   const p = r.profile || {};
   const s = r.session || {};
   const cap = Number(r.profile_inject_limit) || 30;
-  const budget = Number(r.inject_max_tokens) || 1500;
+  const budget = Number(r.inject_max_tokens) || 3000;
   if (pbox) {
     pbox.innerHTML = '<div><b>用户画像</b>：共 ' + (p.items || 0) + ' 条 · '
       + kbFmtNum(p.chars) + '字 ≈ ' + kbFmtNum(p.tokens) + ' token'

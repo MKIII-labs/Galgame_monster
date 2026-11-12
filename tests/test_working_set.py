@@ -99,3 +99,17 @@ def test_persist_keeps_newer_summary():
     s2 = {"summary": "较新", "summary_upto": 30}
     fresh2 = {"summary": "较旧", "summary_upto": 20}
     assert chat._keep_fresh_summary(s2, fresh2)["summary"] == "较新"
+
+
+def test_assistant_keep_set_waterline():
+    """原文保留区按 batch 推进：边界之间只追加，不会每轮压掉一条旧消息。"""
+    msgs = [{"role": "assistant", "content": "a"} for _ in range(12)]
+    # step=4：4 条时边界为 4，只保留最近 2 条
+    assert context._assistant_keep_set(msgs[:4], 2, 4) == {2, 3}
+    # 5~7 条：边界仍是 4，已保留的 2/3 不动，新消息继续加入
+    assert context._assistant_keep_set(msgs[:5], 2, 4) == {2, 3, 4}
+    assert context._assistant_keep_set(msgs[:7], 2, 4) == {2, 3, 4, 5, 6}
+    # 到 8 条才整体推进一次（批量压 2~5）
+    assert context._assistant_keep_set(msgs[:8], 2, 4) == {6, 7}
+    # step=1 = 旧行为：最近 keep 条
+    assert context._assistant_keep_set(msgs[:5], 2, 1) == {3, 4}

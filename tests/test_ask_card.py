@@ -96,6 +96,25 @@ def test_dismiss_endpoint_and_route():
     agent.wait_answers(qid, timeout=1)      # 消费掉，避免残留
 
 
+def test_ask_notice_text(monkeypatch):
+    """提问登记时把题面带给系统通知（多问题只报条数 + 第一题）。"""
+    from app import events
+    seen = []
+    monkeypatch.setattr(events, "publish", lambda obj: seen.append(obj))
+
+    qid, _c = agent.new_asks("s_ask_notice",
+                             [{"question": "用哪个方案？"}, {"question": "要不要备份？"}])
+    ev = [o for o in seen if o.get("type") == "session_pending"][-1]
+    assert ev["kind"] == "ask" and ev["text"] == "共 2 个问题：用哪个方案？"
+    agent.wait_answers(qid, timeout=0.01)          # 消费掉，避免残留在全局表里
+
+    qid2, _c2 = agent.new_asks("s_ask_action", [{"question": "登录账号", "action": True,
+                                                 "detail": "在弹出的窗口里扫码"}])
+    ev = [o for o in seen if o.get("type") == "session_pending"][-1]
+    assert ev["text"] == "需要你在本机操作：在弹出的窗口里扫码"
+    agent.wait_answers(qid2, timeout=0.01)
+
+
 def test_defaults_include_ask_and_notify():
     cfg = default_config()
     assert cfg["question_policy_scope"] == "autopilot"

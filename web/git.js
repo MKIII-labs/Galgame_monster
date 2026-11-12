@@ -183,6 +183,8 @@ async function gitRefresh() {
   gitRenderSyncState();
   await gitLoadHistory();
   await gitLoadOps();
+  // 文件树的装饰与面板同源：暂存 / 丢弃 / 提交之后树里的字母与颜色也一起变
+  if (typeof ideRefreshGitMarks === 'function') ideRefreshGitMarks();
 }
 
 /* 远端同步按钮：没有远程时置灰并给出原因（点一下也能看到提示） */

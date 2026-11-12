@@ -22,14 +22,13 @@
 落盘位置：data/sessions/<会话 id>/events.jsonl。单文件超过上限时滚动到
 events.1.jsonl（只保留一份历史，更老的会被覆盖）。
 """
-import copy
 import json
 import os
 import re
 import threading
 import time
 
-from app.store import DATA_DIR
+from app.store import DATA_DIR, clone_containers
 
 _LOCK = threading.Lock()
 # 每个会话「上一次落库时的快照」。sessions.json 的读缓存会返回同一个对象，
@@ -178,24 +177,26 @@ def record(new, data_dir=None):
             old = _LAST.get(sid)
         if old is not None and _sig(old) == _sig(new):
             return                       # 没变化：不深拷贝、不写事件
-        snap = copy.deepcopy(new)
+        snap = clone_containers(new)
         with _LAST_LOCK:
             _LAST[sid] = snap
         if old is None:
-            old = rebuild(sid, data_dir)
-            if old is None:
-                # 第一次见到这个会话：写一条完整基线，之后全是增量。
-                # 这样事件流可以独立重建，而不是缺一段前缀。
-                path = path_of(sid, data_dir)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                _rotate(path)
-                with _LOCK:
-                    with open(path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps({"ts": time.time(),
-                                            "seq": _next_seq(sid, path),
-                                            "type": "session/baseline",
-                                            "session": new}, ensure_ascii=False) + "\n")
+            # 本进程第一次见到这个会话：sessions.json / 单会话快照在启动时已经
+            # 对账过，当前内存状态就是最新状态，直接拿它当基线即可。
+            # 以前这里会 rebuild（重放整份事件日志，最大的会话 50MB+ 要几百毫秒），
+            # 现在只在「事件文件还不存在」时补一条完整基线。
+            path = path_of(sid, data_dir)
+            if os.path.exists(path) or os.path.exists(path[:-len(".jsonl")] + ".1.jsonl"):
                 return
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _rotate(path)
+            with _LOCK:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"ts": time.time(),
+                                        "seq": _next_seq(sid, path),
+                                        "type": "session/baseline",
+                                        "session": snap}, ensure_ascii=False) + "\n")
+            return
         evs = diff(old, new)
         if not evs:
             return
@@ -219,6 +220,48 @@ def record_all(rows, data_dir=None):
         record(s, data_dir)
 
 
+def _tail_ts(path):
+    """读事件文件最后一条的 ts（只读尾部 64KB，不解析整份文件）。"""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return 0.0
+    if size <= 0:
+        return 0.0
+    try:
+        with open(path, "rb") as f:
+            back = min(size, 65536)
+            f.seek(size - back)
+            chunk = f.read()
+    except OSError:
+        return 0.0
+    for line in reversed(chunk.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line.decode("utf-8"))
+            return float(obj.get("ts") or 0)
+        except (ValueError, TypeError, UnicodeDecodeError):
+            continue           # 崩溃留下的半行：继续往前找
+    return 0.0
+
+
+def latest_ts(sid, data_dir=None):
+    """某会话事件流最后一条的时间戳；没有事件文件时返回 0。
+
+    用于启动对账：只有「事件比快照新」的会话才值得重放事件，
+    不然每次启动都会把所有会话的 100MB+ 事件日志重建一遍。
+    """
+    path = path_of(sid, data_dir)
+    rotated = path[:-len(".jsonl")] + ".1.jsonl"
+    for p in (path, rotated):          # 先看最新的那份；滚动后新文件可能还不存在
+        ts = _tail_ts(p)
+        if ts:
+            return ts
+    return 0.0
+
+
 def _apply(evt, s, messages):
     typ = evt.get("type")
     if typ == "session/baseline":
@@ -226,7 +269,7 @@ def _apply(evt, s, messages):
         s.clear()
         s.update({k: v for k, v in snap.items() if k != "messages"})
         messages.clear()
-        messages.extend(copy.deepcopy(snap.get("messages") or []))
+        messages.extend(clone_containers(snap.get("messages") or []))
     elif typ == "session/created":
         s.update(evt.get("session") or {})
     elif typ == "session/meta":

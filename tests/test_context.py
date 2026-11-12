@@ -279,6 +279,47 @@ def test_trim_tool_results_keeps_search_sources():
     assert "[2] 红石" in folded
 
 
+def test_trim_tool_results_folds_to_target_in_one_shot():
+    """迟滞折叠：给低水位就一次折到位，而不是折到刚好卡线。
+
+    折到卡线会让下一轮又超、再折一条 → 历史中段每轮都被改写，
+    前缀缓存从折叠点往后整段 miss（实测命中率掉到 ~70%）。
+    """
+    msgs = [_msg("system", "sys")]
+    for _ in range(8):
+        msgs.append(_msg("user", context.TOOL_MSG_PREFIX + "\n" + "x" * 3000))
+    # 高水位 3000：老行为只会折到 <=3000（约 4 条）；低水位 600 要求折到 1 条以内
+    trimmed = context.trim_tool_results(msgs, 3000, target_tokens=600)
+    assert trimmed == 6                                    # 保留最近 2 条，其余全折
+    assert msgs[-1]["content"].count("x") == 3000          # 最近两条仍是原文
+    assert msgs[-2]["content"].count("x") == 3000
+    assert "已折叠" in msgs[1]["content"]
+    # 折完已在低水位以下：同一高水位下再调一次不该再折（否则就是每轮都改写）
+    assert context.trim_tool_results(msgs, 3000, target_tokens=600) == 0
+
+
+def test_trim_tool_results_cursor_advances_only():
+    """回合内游标：折过的区间不再重复扫，折叠点只前进不回退。"""
+    msgs = [_msg("system", "sys")]
+    for _ in range(6):
+        msgs.append(_msg("user", context.TOOL_MSG_PREFIX + "\n" + "x" * 3000))
+    stat = {}
+    first = context.trim_tool_results(msgs, 1000, target_tokens=200,
+                                      stats=stat)
+    assert first > 0 and stat.get("cursor", 0) > 0
+    cursor = stat["cursor"]
+    # 用游标再扫一遍：已经折过的都跳过，结果必须是 0
+    assert context.trim_tool_results(msgs, 1000, target_tokens=200,
+                                     start_index=cursor) == 0
+    # 游标之后新追加的结果仍会被处理
+    for _ in range(3):
+        msgs.append(_msg("user", context.TOOL_MSG_PREFIX + "\n" + "x" * 3000))
+    stat2 = {}
+    again = context.trim_tool_results(msgs, 1000, target_tokens=200,
+                                      start_index=cursor, stats=stat2)
+    assert again >= 1 and stat2.get("cursor", 0) > cursor
+
+
 def test_trim_history_to_budget():
     msgs = [_msg("system", "sys")] + [_msg("user", "x" * 2000) for _ in range(10)]
     out, dropped = context.trim_history_to_budget(msgs, 1000)
@@ -469,8 +510,13 @@ def _asst(proc, final):
                        {"kind": "text", "text": final}]}
 
 
-def test_history_process_compaction_keeps_recent_turns():
+def test_history_process_compaction_keeps_recent_turns(monkeypatch):
     """B档 B1：旧回合只留「过程摘要 + 最后一段答案」，最近 2 条原文保留。"""
+    # 固定成 step=1 的旧行为来验证「滑动窗口」本身的语义
+    monkeypatch.setattr(context, "load_config",
+                        lambda: {"history_process_keep_turns": 2,
+                                 "history_process_digest": 240,
+                                 "history_rebuild_step": 1})
     s = {"messages": [
         {"role": "user", "content": "u1"}, _asst("过程一" * 100, "答案一"),
         {"role": "user", "content": "u2"}, _asst("过程二" * 100, "答案二"),
@@ -484,6 +530,37 @@ def test_history_process_compaction_keeps_recent_turns():
     assert "过程一" * 100 not in asst[0]              # 过程全文不在了
     assert asst[1] == "过程二" * 100 + "\n\n答案二"    # 最近 2 条不动
     assert asst[2] == "过程三" * 100 + "\n\n答案三"
+
+
+def test_history_process_waterline_batches(monkeypatch):
+    """水位线：条数没跨过 step 时全部保留原文；跨过才批量压一次。"""
+    monkeypatch.setattr(context, "load_config",
+                        lambda: {"history_process_keep_turns": 2,
+                                 "history_process_digest": 240,
+                                 "history_rebuild_step": 4})
+    three = {"messages": [
+        {"role": "user", "content": "u1"}, _asst("过程一" * 100, "答案一"),
+        {"role": "user", "content": "u2"}, _asst("过程二" * 100, "答案二"),
+        {"role": "user", "content": "u3"}, _asst("过程三" * 100, "答案三"),
+        {"role": "user", "content": "u4"},
+    ]}
+    asst = [m["content"] for m in context.build_context_messages(three, "SYS")
+            if m["role"] == "assistant"]
+    assert all(not x.startswith("【本回合过程摘要】") for x in asst)   # 3 < 4：全保留
+
+    four = {"messages": [
+        {"role": "user", "content": "u1"}, _asst("过程一" * 100, "答案一"),
+        {"role": "user", "content": "u2"}, _asst("过程二" * 100, "答案二"),
+        {"role": "user", "content": "u3"}, _asst("过程三" * 100, "答案三"),
+        {"role": "user", "content": "u4"}, _asst("过程四" * 100, "答案四"),
+        {"role": "user", "content": "u5"},
+    ]}
+    asst = [m["content"] for m in context.build_context_messages(four, "SYS")
+            if m["role"] == "assistant"]
+    assert asst[0].startswith("【本回合过程摘要】")
+    assert asst[1].startswith("【本回合过程摘要】")
+    assert asst[2] == "过程三" * 100 + "\n\n答案三"
+    assert asst[3] == "过程四" * 100 + "\n\n答案四"
 
 
 def test_history_process_compaction_skips_unreliable_messages(monkeypatch):

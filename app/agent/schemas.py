@@ -3,7 +3,7 @@
 from app import tool_meta
 
 from .dispatch import _HANDLERS
-from .groups import (PLAN_MODE_TOOLS, SEE_MAX_IMAGES, _PLUGIN_TOOLS, _PLUGIN_TOOLS_LOCK, _json_type, hidden_tools)
+from .groups import (SEE_MAX_IMAGES, _PLUGIN_TOOLS, _PLUGIN_TOOLS_LOCK, _json_type, hidden_tools)
 
 
 def _fn_tool(name, description, props=None, required=None):
@@ -286,12 +286,15 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      "回看本会话里用户之前发过的图片 / 文档附件（历史消息里会给出 att_xxx 编号）。"
                      "用户说「刚才那张图 / 之前那个文件」时用它，不要让用户重发。"
                      "图片会重新识图（原生视觉可用时直接附到本轮上下文）；"
-                     "文档返回发送时抽取的正文，可用 offset / limit 分段读。"
+                     "文档返回发送时抽取的正文，可用 offset / limit 分段读；"
+                     "PDF 可用 pages 按页读（如 \"1-5\"，每次最多 20 页）。"
                      "不传 id / name 时列出本会话全部附件",
                      {"id": {"type": "string", "description": "附件编号（att_xxx）"},
                       "name": {"type": "string", "description": "可选：按文件名查找（id 优先）"},
                       "question": {"type": "string",
                                    "description": "可选：看图时重点看什么"},
+                      "pages": {"type": "string",
+                                "description": "PDF 页码范围，如 \"1-5\"、\"3\"、\"1-3,7\"；每次最多 20 页"},
                       "offset": {"type": "integer",
                                  "description": "文档正文起始字符，默认 0"},
                       "limit": {"type": "integer",
@@ -1108,11 +1111,10 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                    if str((t.get("function") or {}).get("name") or "") not in hide]
             if len(out) < before:
                 out.append(_tool_search_schema())
-    if plan_mode:
-        # /plan 规划轮：只把只读工具 + 计划工具交给模型，写 / 命令 / Git 提交
-        # 连 schema 都不下发，避免它先写一版再被运行时拒绝。
-        out = [t for t in out
-               if ((t.get("function") or {}).get("name") in PLAN_MODE_TOOLS)]
+    # /plan 规划轮**不再**裁剪工具目录（对齐 DSH：The tool catalog stays the same across
+    # modes for request-cache stability）。tools 在请求最前面，增减一次就让整段前缀 miss；
+    # plan 模式的行为约束交给提示词，写操作仍由运行时按 PLAN_MODE_TOOLS 拒绝。
+    _ = plan_mode
     # 工具元层：把 lsp_* / git_* / plan_* / 文件操作等收敛为少量 action 工具。
     # 被隐藏或 plan_mode 过滤掉的 action 不会出现在 enum 里；旧工具名仍可调用。
     _names = [str((t.get("function") or {}).get("name") or "") for t in out]

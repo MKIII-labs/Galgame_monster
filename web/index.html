@@ -297,6 +297,8 @@
         <button class="act-btn" id="ide-open-vscode" title="在 VS Code 中打开当前沙箱"><svg class="ic"><use href="#i-code"/></svg></button>
       </div>
 
+      <!-- 侧边栏容器：收起 / 展开靠它做宽度过渡（各视图仍用 .hidden 切换） -->
+      <div class="ide-sides" id="ide-sides">
       <!-- 侧边栏：资源管理器 -->
       <div class="ide-side" id="ide-side-explorer">
         <div class="ide-side-head">
@@ -470,6 +472,8 @@
         </div>
       </div>
 
+      </div><!-- /.ide-sides -->
+
       <!-- 侧栏宽度拖拽条（双击恢复 260px） -->
       <div id="ide-side-resizer" class="ide-side-resizer" title="拖动调整侧栏宽度（双击恢复默认）"></div>
 
@@ -539,6 +543,8 @@
                         title="让 AI 总结这批改动（摘要 + 风险 + 流程图）">AI 摘要</button>
                 <button id="ide-review-prev" class="ico-btn" title="上一个文件">‹</button>
                 <button id="ide-review-next" class="ico-btn" title="下一个文件">›</button>
+                <button id="ide-review-open-ide" class="review-btn ghost" type="button"
+                        title="在 IDE 中打开这个文件">在 IDE 查看</button>
                 <button id="ide-review-undo" class="review-btn ghost" type="button">撤销 <kbd>Ctrl</kbd><kbd>Backspace</kbd></button>
                 <button id="ide-review-keep" class="review-btn primary" type="button">保留 <kbd>Ctrl</kbd><kbd>Enter</kbd></button>
               </div>
@@ -1639,6 +1645,12 @@
           </div>
           <p class="hint">切换界面明暗；应用窗口的标题栏也会跟随。GAL 演出主题（樱粉 / 夜蓝 / 和风纸 / 极简黑白 / 霓虹夜景 / 像素复古）在「GAL 演出」里单独设置，进入 GAL 模式时它会覆盖配色。详见「功能说明 → 主题与外观」。</p>
 
+          <h4 class="set-group" data-search="过程 步骤 自动跟随 滚动 暂停 高亮">对话过程</h4>
+          <label class="check-row" data-search="过程 步骤 自动跟随 滚动 暂停 当前步骤">
+            <input type="checkbox" id="ui-process-follow"> 过程步骤自动跟随（滚到当前步骤；用户上翻时暂停）
+          </label>
+          <p class="hint">开启后，过程折叠区里每出现一个新步骤会自动带进视野，但不强行拉到整条消息底部；你往上翻立即暂停，回到底部或点右下「回到底部」恢复。关闭后只更新「N 步」统计，不再自动滚动（当前步骤高亮与已完成步骤的自动收起仍然生效）。</p>
+
           <h4 class="set-group" data-search="ide 编辑器 主题 vscode trae 配色 独立 解耦 语法高亮">IDE 编辑器主题</h4>
           <label class="check-row" data-search="ide 独立主题 深色 默认 开关 跟随界面主题">
             <input type="checkbox" id="ide-theme-enabled"> 为 IDE 单独设置主题（关闭则跟随界面主题）
@@ -2272,7 +2284,7 @@
               <li><strong>排队只在同一个会话里生效</strong>：当前会话正在生成时，Enter 的内容会排队；别的会话空闲就可以直接发。</li>
               <li><strong>生成中的会话不能删</strong>：避免收尾时又把它写回来；先点停止再删。</li>
               <li><strong>GAL 剧场例外</strong>：舞台、配音、选项都是单实例，切会话仍会停止。</li>
-              <li><strong>后台完成会发系统通知</strong>（需要通知权限）；审批卡 / 提问卡在后台会话里看不见，记得切回去处理。</li>
+              <li><strong>后台完成会发系统通知</strong>（需要通知权限）；审批卡 / 提问卡 / 等你动手的操作也会在你没看那个会话时发通知，点通知直接跳回去处理。</li>
             </ul>
           </div>
         </details>
@@ -2432,6 +2444,8 @@
                 title="让 AI 总结这批改动（摘要 + 风险 + 流程图）">AI 摘要</button>
         <button id="review-prev" class="ico-btn" title="上一个文件" type="button">‹</button>
         <button id="review-next" class="ico-btn" title="下一个文件" type="button">›</button>
+        <button id="review-open-ide" class="review-btn ghost" type="button"
+                title="在 IDE 中打开这个文件">在 IDE 查看</button>
         <button id="review-undo" class="review-btn ghost" type="button">撤销 <kbd>Ctrl</kbd><kbd>Backspace</kbd></button>
         <button id="review-keep" class="review-btn primary" type="button">保留 <kbd>Ctrl</kbd><kbd>Enter</kbd></button>
         <button id="review-close" class="modal-close" title="关闭">✕</button>
@@ -3051,6 +3065,7 @@
 <script src="/static/gal/gal-media.js"></script>
 <script src="/static/gal/gal-voice.js"></script>
 <script src="/static/gal/gal-editor.js"></script>
+<script src="/static/vendor/seti/seti-map.js"></script>
 <script src="/static/gal/gal-ide.js"></script>
 <script src="/static/transpage.js"></script>
 <script src="/static/reader.js"></script>

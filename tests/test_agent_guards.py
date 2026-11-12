@@ -8,6 +8,29 @@ from app.api import chat
 from app.api import sandbox as sandbox_api
 
 
+# ---------------------------------------------------------------- 审批通知
+def test_approval_notice_uses_call_summary(monkeypatch):
+    """审批事件要带「先看一眼」摘要：通知里直接说清楚要执行什么。"""
+    from app import events
+    seen = []
+    monkeypatch.setattr(events, "publish", lambda obj: seen.append(obj))
+
+    aid = agent.new_approval("s_notice", "run_command", {"argv": ["git", "status"]})
+    ev = [o for o in seen if o.get("type") == "session_pending"][-1]
+    assert ev["kind"] == "approval"
+    assert "执行 git status" in ev["text"]
+    agent.resolve_approval(aid, False)
+    agent.wait_approval(aid, timeout=0.2)
+
+    # 子代理回写：用文件数 / 增删行摘要，而不是工具名 apply_worktree
+    aid2 = agent.new_approval("s_notice", "apply_worktree",
+                              {"agent": "writer", "summary": "3 个文件（+10 / −2）"})
+    ev = [o for o in seen if o.get("type") == "session_pending"][-1]
+    assert ev["text"] == "回写子代理改动：3 个文件（+10 / −2）"
+    agent.resolve_approval(aid2, False)
+    agent.wait_approval(aid2, timeout=0.2)
+
+
 # ---------------------------------------------------------------- 写后自检
 def test_post_write_check_python(tmp_path):
     p = tmp_path / "a.py"
@@ -674,4 +697,86 @@ def test_read_tools_allow_node_modules_but_not_git(tmp_path):
         raise AssertionError("写路径不应放行 node_modules")
     except agent.SandboxError:
         pass
+
+
+# ---------------- 命令的只读分类（决定能否与其他读并发） ----------------
+
+def test_cmd_read_only_accepts_git_read_commands():
+    assert chat._cmd_read_only({"argv": ["git", "status"]})
+    assert chat._cmd_read_only({"cmd": "git log --oneline -5"})
+    assert chat._cmd_read_only({"cmd": "git show HEAD:app/a.py"})
+
+
+def test_cmd_read_only_rejects_writes_and_composition():
+    # 会写文件
+    assert not chat._cmd_read_only({"cmd": "git diff --output=x.patch"})
+    # 非只读子命令
+    assert not chat._cmd_read_only({"cmd": "git commit -m x"})
+    # 管道 / 串联 / 重定向：不猜
+    assert not chat._cmd_read_only({"cmd": "git status | head"})
+    assert not chat._cmd_read_only({"cmd": "git status; rm -rf ."})
+    # 前置参数（-C）会让子命令位置不确定：保守判否
+    assert not chat._cmd_read_only({"argv": ["git", "-C", "sub", "status"]})
+    # 非 git 一律不算
+    assert not chat._cmd_read_only({"cmd": "python x.py"})
+    assert not chat._cmd_read_only({})
+
+
+# ---------------- 多个只读 explore 并发（对齐 CC 的 AgentTool 并发安全） ----------------
+
+def test_explore_batchable_only_read_only_and_foreground():
+    assert chat._explore_batchable({"goal": "g"})
+    assert not chat._explore_batchable({"goal": "g", "allow_write": True})
+    assert not chat._explore_batchable({"goal": "g", "background": True})
+
+
+def test_run_explore_batch_is_concurrent_and_keeps_indexes():
+    """用 Barrier 证明是并发跑的：顺序执行会超时。"""
+    barrier = threading.Barrier(2, timeout=3)
+
+    def fake(args, ctx):
+        barrier.wait()
+        return {"ok": True, "goal": args.get("goal")}
+
+    calls = [{"tool": "explore", "args": {"goal": "a"}},
+             {"tool": "explore", "args": {"goal": "b"}}]
+    out = chat._run_explore_batch([0, 1], calls, {}, fake)
+    assert out[0][0]["goal"] == "a"
+    assert out[1][0]["goal"] == "b"
+
+
+def test_run_explore_batch_turns_exception_into_result():
+    """单个子代理批次炸了也要有结果，不能让主循环丢配对。"""
+    def boom(args, ctx):
+        raise RuntimeError("炸了")
+
+    calls = [{"tool": "explore", "args": {}}, {"tool": "explore", "args": {}}]
+    out = chat._run_explore_batch([0, 1], calls, {}, boom)
+    assert out[0][0]["ok"] is False and "炸了" in out[0][0]["error"]
+    assert out[1][0]["ok"] is False
+
+
+# ---------------- 命令增量输出（前端执行中就能看到日志） ----------------
+
+def test_run_command_streams_output_via_sink(tmp_path):
+    import sys
+
+    got = []
+    prev = agent.set_output_sink(got.append)
+    try:
+        code = ("import time\n"
+                "for i in range(3):\n"
+                "    print('L%d' % i, flush=True)\n"
+                "    time.sleep(0.2)\n")
+        text, _err = agent._t_run_command(
+            str(tmp_path), {"argv": [sys.executable, "-c", code], "timeout": 20},
+            unrestricted=True)
+    finally:
+        agent.set_output_sink(prev)
+    assert "结论：成功" in text
+    # 读线程按行回调：执行中就能拿到首行与末行，而不是等进程结束
+    assert any("L0" in c for c in got)
+    assert any("L2" in c for c in got)
+    # 最终结果仍是完整输出（增量推流不影响回灌给模型的内容）
+    assert "L0" in text and "L2" in text
 

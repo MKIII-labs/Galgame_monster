@@ -12,6 +12,9 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from app.config import load_config
+from app import search_rank
+from app import search_cache
+from app.search_evidence import extract_evidence
 
 # 联网搜索服务商（可在「设置 → 联网搜索」里改地址/密钥）
 SEARCH_PROVIDERS = {
@@ -33,12 +36,25 @@ SEARCH_PROVIDERS = {
                "hint": "申请地址：app.tavily.com（面向 AI，每月 1000 次免费额度）"},
 }
 
-MAX_QUERIES = 3        # 单次最多改写几个检索式
+MAX_QUERIES = 5        # 单次最多几个检索式（Query Planner 会控制在 2–5）
 MAX_MERGED = 12        # 合并去重后的结果上限
 FETCH_CHARS = 2500     # 每条正文最多截取多少字
 SCRAPE_TIMEOUT = 30    # 云端抓页（Firecrawl）比本地抓取慢，单独给更长预算
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+# 直连抓页尽量像浏览器：不少站点只按 UA + Accept 头拦人（P1 对齐 Pi 的 browser-like fetch）
+BROWSER_HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+              "image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
 def chat_search_available(cfg=None):
@@ -184,23 +200,49 @@ def search_web(query, provider, url, key, count):
 # 多查询并行检索（合并 + 按 URL 去重）
 # ============================================================
 
-def search_multi(queries, provider, url, key, count, should_stop=None, merged_max=None):
+def search_multi(queries, provider, url, key, count, should_stop=None, merged_max=None,
+                 intent="general", freshness=""):
     """并行执行多个检索式，按 URL 去重后返回；单个查询失败不影响其它。
 
     should_stop()：返回 True 时立即放弃剩余检索（用户点了「停止」）。
     在飞的 HTTP 请求杀不掉，但**不再等它们**，所以停止是即时响应的。
     merged_max：合并后的条数上限；None = MAX_MERGED（研究类任务可放宽）。
+    intent / freshness：交给 search_rank 做权威 / 时效加权。
     """
     queries = [q for q in (queries or []) if str(q).strip()][:MAX_QUERIES]
     if not queries or (should_stop and should_stop()):
         return []
     per = max(3, count)
     results, seen, errors = [], set(), []
+    try:
+        _cfg = load_config()
+        _cache_on = bool(_cfg.get("search_cache_enabled", True))
+        _cache_ttl = search_cache.ttl_for(intent or "general", freshness or "",
+                                          _cfg.get("search_cache_ttl") or 3600)
+    except Exception:                        # noqa: BLE001  缓存配置异常不影响检索
+        _cache_on, _cache_ttl = False, 3600
+
+    def _fetch_query(q):
+        if _cache_on:
+            try:
+                cached = search_cache.get(provider, url, q, per, enabled=True)
+                if cached is not None:
+                    return cached
+            except Exception:                # noqa: BLE001
+                pass
+        items = search_web(q, provider, url, key, per)
+        if _cache_on and items:
+            try:
+                search_cache.put(provider, url, q, per, items, ttl=_cache_ttl)
+            except Exception:                # noqa: BLE001  缓存写失败不影响搜索
+                pass
+        return items
+
     ex = ThreadPoolExecutor(max_workers=min(4, len(queries)))
     stopped = False
     futs = []
     try:
-        futs = [(ex.submit(search_web, q, provider, url, key, per), q) for q in queries]
+        futs = [(ex.submit(_fetch_query, q), q) for q in queries]
         for fut, q in futs:                 # 按检索式顺序收集，保证结果稳定
             items = None
             while True:                     # 轮询等待，保证点「停止」立刻生效
@@ -218,13 +260,14 @@ def search_multi(queries, provider, url, key, count, should_stop=None, merged_ma
                     break
             if stopped:
                 break
-            for it in (items or []):
+            for rank_i, it in enumerate(items or []):
                 u = (it.get("url") or "").strip()
                 mark = u or (it.get("title") or "").strip()
                 if not mark or mark in seen:
                     continue
                 seen.add(mark)
                 it["query"] = q
+                it["_qrank"] = rank_i
                 results.append(it)
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
@@ -236,7 +279,9 @@ def search_multi(queries, provider, url, key, count, should_stop=None, merged_ma
         cap = int(merged_max or 0) or MAX_MERGED
     except (TypeError, ValueError):
         cap = MAX_MERGED
-    return results[:max(1, cap)]
+    # P0 排序：canonical 去重 + 词法 / 权威 / 时效 / 结构 / 域名多样性
+    return search_rank.rank_hits(results, queries, intent=intent or "general",
+                                 freshness=freshness or "", max_items=max(1, cap))
 
 
 # ============================================================
@@ -385,42 +430,149 @@ def _public_get(url, timeout=20, headers=None, max_redirects=3):
     return None
 
 
-def _fetch_one(url, reader="jina", timeout=20, query="", chars=FETCH_CHARS, cloud=None):
-    """抓单个网页正文；失败返回空串。给了 query 就按相关段落截取。
+def _is_pdf_url(url):
+    try:
+        return urlparse(str(url or "")).path.lower().endswith(".pdf")
+    except ValueError:
+        return False
 
-    顺序：云端浏览器（Firecrawl，能渲染 JS 页面）→ r.jina.ai → 直连去标签。
+
+def _github_repo(url):
+    """github.com/{owner}/{repo}（可带末尾斜杠）才走仓库读取，不是普通网页。"""
+    try:
+        p = urlparse(str(url or ""))
+    except ValueError:
+        return None
+    if (p.hostname or "").lower() not in ("github.com", "www.github.com"):
+        return None
+    parts = [x for x in p.path.split("/") if x]
+    if len(parts) != 2:
+        return None
+    return parts[0], parts[1]
+
+
+def _fetch_pdf(url, timeout, query, chars):
+    """PDF 直接取二进制，用 docparse 抽文本（扫描件没有 OCR 时返回空）。"""
+    r = _public_get(url, timeout=timeout, headers=BROWSER_HEADERS)
+    if r is None:
+        return "", []
+    try:
+        r.raise_for_status()
+        raw = r.content
+    except Exception:                        # noqa: BLE001
+        return "", []
+    try:
+        from app.docparse import extract
+        text, _warn = extract("page.pdf", raw)
+    except Exception:                        # noqa: BLE001
+        return "", []
+    if not text:
+        return "", []
+    return extract_evidence(_tidy(text), query, chars)
+
+
+def _fetch_github(owner, repo, timeout, query, chars):
+    """GitHub 仓库读取：仓库元数据 + README + 顶层文件列表（比抓 HTML 更接近真实内容）。"""
+    base = "https://api.github.com/repos/%s/%s" % (owner, repo)
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": UA}
+    meta = _public_get(base, timeout=timeout, headers=headers)
+    if meta is None or meta.status_code != 200:
+        return "", []
+    try:
+        d = meta.json()
+    except Exception:                        # noqa: BLE001
+        return "", []
+    if not isinstance(d, dict):
+        return "", []
+    readme = ""
+    rm = _public_get(base + "/readme", timeout=timeout,
+                     headers={"Accept": "application/vnd.github.raw", "User-Agent": UA})
+    if rm is not None and rm.status_code == 200:
+        readme = rm.text or ""
+    names = []
+    cl = _public_get(base + "/contents/", timeout=timeout, headers=headers)
+    if cl is not None and cl.status_code == 200:
+        try:
+            arr = cl.json()
+        except Exception:                    # noqa: BLE001
+            arr = []
+        if isinstance(arr, list):
+            names = [str(x.get("name") or "") for x in arr[:40] if isinstance(x, dict)]
+    lines = ["# " + str(d.get("full_name") or (owner + "/" + repo))]
+    desc = str(d.get("description") or "").strip()
+    if desc:
+        lines.append(desc)
+    bits = []
+    if d.get("language"):
+        bits.append("语言: " + str(d["language"]))
+    if d.get("stargazers_count"):
+        bits.append("Stars: %s" % d["stargazers_count"])
+    if d.get("license") and isinstance(d["license"], dict):
+        bits.append("License: " + str(d["license"].get("spdx_id") or ""))
+    if d.get("topics"):
+        bits.append("Topics: " + "、".join(str(x) for x in (d["topics"] or [])[:10]))
+    if bits:
+        lines.append(" · ".join(bits))
+    if names:
+        lines.append("顶层文件: " + "、".join(names))
+    if readme:
+        lines.append("\n## README\n" + readme[:max(1200, int(chars or FETCH_CHARS))])
+    return extract_evidence(_tidy("\n".join(lines)), query, chars)
+
+
+def _fetch_doc(url, reader="jina", timeout=20, query="", chars=FETCH_CHARS, cloud=None):
+    """抓单个网页，返回 (content, evidence)。失败返回 ("", [])。
+
+    顺序：PDF / GitHub 仓库直读 → 云端浏览器（Firecrawl，能渲染 JS 页面）
+    → r.jina.ai → 直连（浏览器式请求头）去标签。
     云端那步会把 URL 发给 Firecrawl，所以私网目标直接跳过，只走本地。
     """
     url = (url or "").strip()
     if not url.lower().startswith("http"):
-        return ""
+        return "", []
+    if _is_pdf_url(url):
+        got = _fetch_pdf(url, timeout, query, chars)
+        if got[0]:
+            return got
+    gh = _github_repo(url)
+    if gh:
+        got = _fetch_github(gh[0], gh[1], timeout, query, chars)
+        if got[0]:
+            return got
     if cloud is None:
         cloud = bool(load_config().get("search_fetch_cloud", True))
     if cloud and reader != "direct" and not public_url_error(url):
         from app import search_engines
         md = search_engines.cloud_fetch(url, timeout=max(SCRAPE_TIMEOUT, timeout))
         if md:
-            return _excerpt(_tidy(md), query, chars)
+            return extract_evidence(_tidy(md), query, chars)
     if reader != "direct":
         r = _public_get("https://r.jina.ai/" + url, timeout=timeout,
                         headers={"Accept": "text/plain", "User-Agent": UA})
         if r is not None and r.status_code == 200 and r.text.strip():
-            return _excerpt(_tidy(r.text), query, chars)
-    r = _public_get(url, timeout=timeout, headers={"User-Agent": UA})
+            return extract_evidence(_tidy(r.text), query, chars)
+    r = _public_get(url, timeout=timeout, headers=BROWSER_HEADERS)
     if r is None:
-        return ""
+        return "", []
     try:
         r.raise_for_status()
-        return _excerpt(_tidy(_strip_html(r.text)), query, chars)
+        return extract_evidence(_tidy(_strip_html(r.text)), query, chars)
     except Exception:                            # noqa: BLE001
-        return ""
+        return "", []
+
+
+def _fetch_one(url, reader="jina", timeout=20, query="", chars=FETCH_CHARS, cloud=None):
+    """抓单个网页正文（兼容旧调用）；失败返回空串。"""
+    return _fetch_doc(url, reader=reader, timeout=timeout, query=query,
+                      chars=chars, cloud=cloud)[0]
+
 
 def fetch_text(url, timeout=20, query="", chars=FETCH_CHARS):
     """抓单个网页正文（供 fetch_url 工具用）；失败返回空串。
 
     复用搜索链路的 reader：优先 r.jina.ai（正文干净），失败再直连 + 去标签。
     """
-    return _fetch_one(url, reader="jina", timeout=timeout, query=query, chars=chars)
+    return _fetch_doc(url, reader="jina", timeout=timeout, query=query, chars=chars)[0]
 
 
 def fetch_pages(items, limit=4, reader="jina", on_item=None, should_stop=None,
@@ -431,7 +583,7 @@ def fetch_pages(items, limit=4, reader="jina", on_item=None, should_stop=None,
     供上层实时汇报「正在读取网页」的进度。
     should_stop()：返回 True 时立即放弃剩余抓取（用户点了「停止」），
     不再等在飞的抓取（单个网页最长可能卡到几十秒）。
-    query：用于挑选正文里的相关段落（见 _excerpt）。
+    query：用于挑选正文里的相关段落（passage 级）。
     chars：每条正文最多保留多少字；研究类任务可放宽。
     """
     limit = max(0, min(int(limit or 0), len(items)))
@@ -443,7 +595,7 @@ def fetch_pages(items, limit=4, reader="jina", on_item=None, should_stop=None,
         chars = FETCH_CHARS
     ex = ThreadPoolExecutor(max_workers=min(4, limit))
     try:
-        futs = {ex.submit(_fetch_one, it.get("url"), reader, 20, query, chars): it
+        futs = {ex.submit(_fetch_doc, it.get("url"), reader, 20, query, chars): it
                 for it in items[:limit]}
         pending = list(futs)
         while pending:
@@ -457,11 +609,13 @@ def fetch_pages(items, limit=4, reader="jina", on_item=None, should_stop=None,
                 pending.remove(fut)
                 it = futs[fut]
                 try:
-                    text = fut.result()
+                    text, evidence = fut.result()
                 except Exception:
-                    text = ""
+                    text, evidence = "", []
                 if text:
                     it["content"] = text
+                if evidence:
+                    it["evidence"] = evidence
                 if on_item:
                     try:
                         on_item(it, text)
@@ -474,27 +628,45 @@ def fetch_pages(items, limit=4, reader="jina", on_item=None, should_stop=None,
 
 def slim_items(items):
     """只保留可入库/可展示的字段（正文体积大，不入库）"""
-    keys = ("title", "url", "site", "snippet")
+    keys = ("title", "url", "site", "snippet", "published_at")
     return [{k: (it.get(k) or "") for k in keys} for it in (items or [])]
 
 def build_search_context(query, items, start=1):
-    """把搜索结果拼成给模型看的参考资料（有正文就用正文，否则用摘要）。
+    """把搜索结果拼成给模型看的参考资料（优先逐字引句 + 行号，否则正文 / 摘要）。
 
     条目带 ``n`` 时用它的编号（研究台账的全局编号，跨调用连续且不重复）；
     否则从 start 开始顺排。
     """
     lines = [f"以下是根据用户问题「{query}」联网搜索到的参考资料。",
              "这些资料可能不完整或过时，请结合它们回答，并在引用处用 [1] [2] 标注来源编号。",
+             "引用数字 / 版本号 / 价格时，只写来源原文里出现过的值；找不到就注明「未核实」。",
              "如果资料与问题无关，请忽略并如实说明。", ""]
     for i, it in enumerate(items):
         try:
             n = int(it.get("n") or 0) or (start + i)
         except (TypeError, ValueError):
             n = start + i
-        lines.append(f"[{n}] {it['title']}" + (f" —— {it['site']}" if it.get("site") else ""))
-        body = (it.get("content") or it.get("snippet") or "").strip()
-        if body:
-            lines.append(body)
+        head = f"[{n}] {it['title']}" + (f" —— {it['site']}" if it.get("site") else "")
+        pub = str(it.get("published_at") or "").strip()
+        if pub:
+            head += f"（发布：{pub[:24]}）"
+        lines.append(head)
+        ev = it.get("evidence")
+        if isinstance(ev, list) and ev:
+            for e in ev[:4]:
+                if not isinstance(e, dict):
+                    continue
+                quote = str(e.get("quote") or "").strip()
+                if not quote:
+                    continue
+                a = e.get("line_start")
+                b = e.get("line_end")
+                tag = f"（原文 L{a}–L{b}）" if a else ""
+                lines.append(tag + quote)
+        else:
+            body = (it.get("content") or it.get("snippet") or "").strip()
+            if body:
+                lines.append(body)
         lines.append(f"URL: {it['url']}")
         lines.append("")
     return "\n".join(lines)

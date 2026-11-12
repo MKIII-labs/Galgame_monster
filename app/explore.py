@@ -21,7 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from app import agent
 from app import worktree
 from app import write_guard
-from app.config import effective_think_mode, load_config, thinking_payload
+from app.config import (effective_think_mode, load_config, provider_chain,
+                        thinking_payload)
 from app.context import (TOOL_MSG_PREFIX, estimate_messages_tokens, real_used_tokens,
                          trim_tool_results)
 from app.store import DATA_DIR
@@ -33,6 +34,16 @@ MAX_SUB_ROUNDS = 30            # 兜底轮次（实际取配置 subagent_max_rou
 SUB_TIMEOUT = 180.0            # 单个侦察兵最长多久
 CRITIC_TIMEOUT = 180.0         # 反证者同样给足时间（它要读完别人的结论）
 TOTAL_TIMEOUT = 360.0          # 一批侦察兵最长多久
+# 子代理的容错（对齐主循环）：主对话有重试 + 服务商链，子代理以前一次失败就整批作废。
+SUB_RETRIES = 1                # 同一家服务商最多再试几次（瞬时错误）
+SUB_RETRY_BACKOFF = 1.0        # 首次退避秒数（之后翻倍）
+SUB_MAX_PROVIDERS = 4          # 最多追几家：每多一家就多烧一次整段上下文
+# 链路抖动：同一家重试有意义
+_SUB_RETRY_STATES = frozenset((
+    "idle", "timeout", "network", "eof", "upload", "error",
+    "server", "rate_limit", "http", "empty"))
+# 这家服务商不行：不重试同一家，直接换下一家
+_SUB_SWITCH_STATES = frozenset(("billing", "auth", "not_found", "bad_request"))
 SEARCH_RESULT_CHARS = 9000     # 调研员单次搜索结果的回灌上限（要装得下正文片段）
 FOLLOWUP_TTL = 600             # 子会话内存保留秒数（explore_followup 追问用）；0 = 关闭
 MAX_BATCHES = 32               # 内存里最多保留几批子会话
@@ -607,17 +618,90 @@ def _target_of(name, args):
     return ""
 
 
+def _sub_result(state, error=""):
+    """子代理调用失败的统一返回结构（shape 与 stream_chat 对齐）。"""
+    return {"visible": "", "tool_calls": [], "reasoning": "", "usage": {},
+            "stream_state": state, "error": error}
+
+
+def _sub_chain(ctx):
+    """子代理的尝试顺序：配置里的服务商链，最后兜底当前主服务商。
+
+    只用「配置完整」的项；同一 (key, url) 去重，避免主服务商既在链里又当兜底。
+    结果缓存在 ctx 里：一批子代理并发跑时只读一次配置。
+    """
+    cached = ctx.get("_sub_chain")
+    if cached:
+        return cached
+    out = []
+    try:
+        for name, kind, key, url, model in provider_chain(load_config()) or []:
+            if key and url and (key, url) not in {(x[2], x[3]) for x in out}:
+                out.append((name, kind, key, url, model))
+    except Exception:                   # noqa: BLE001  配置坏了就只用主服务商
+        out = []
+    key, url = str(ctx.get("api_key") or ""), str(ctx.get("api_url") or "")
+    if key and url and (key, url) not in {(x[2], x[3]) for x in out}:
+        out.append(("main", None, key, url, ctx.get("model") or ""))
+    out = out[:SUB_MAX_PROVIDERS]
+    ctx["_sub_chain"] = out
+    return out
+
+
+def _sub_sleep(stop_event, seconds):
+    """退避等待；期间用户点停止就立刻返回 True。"""
+    if stop_event is None:
+        time.sleep(seconds)
+        return False
+    wait = getattr(stop_event, "wait", None)
+    if callable(wait):
+        return bool(wait(seconds))
+    if stop_event.is_set():
+        return True
+    time.sleep(seconds)
+    return bool(stop_event.is_set())
+
+
 def _default_chat(ctx, messages, schemas, stop_event, model=None):
-    """默认用主聊天模型跑子代理；thinking 关掉，省钱也更快。"""
+    """默认用主聊天模型跑子代理；thinking 关掉，省钱也更快。
+
+    容错对齐主循环：链路抖动（断流 / 超时 / 限流 / 5xx）先在同一家重试一次，
+    鉴权 / 余额 / 参数这类「这家不行」直接换下一家。
+    以前子代理一次失败就整批作废，上层只能报「没有得出结论」。
+    """
     from app import llm
-    return llm.stream_chat(
-        ctx["api_key"], ctx["api_url"], model or ctx["model"], messages,
-        think=thinking_payload(effective_think_mode(ctx["api_url"]), False,
-                               ctx.get("think_level") or "high"),
-        stop_event=stop_event, allow_tool=True, tools=schemas,
-        max_tokens=int(ctx.get("sub_max_tokens") or 0),
-        timeout=(10, SUB_TIMEOUT),
-        idle_timeout=0, stall_timeout=0)
+
+    max_tokens = int(ctx.get("sub_max_tokens") or 0)
+    rr = None
+    for pname, pkind, pkey, purl, pmodel in (_sub_chain(ctx) or []):
+        kwargs = {"kind": pkind} if pkind else {}
+        for attempt in range(SUB_RETRIES + 1):
+            if stop_event is not None and stop_event.is_set():
+                return rr or _sub_result("stopped")
+            try:
+                rr = llm.stream_chat(
+                    pkey, purl, model or pmodel or ctx.get("model") or "", messages,
+                    think=thinking_payload(effective_think_mode(purl), False,
+                                           ctx.get("think_level") or "high"),
+                    stop_event=stop_event, allow_tool=True, tools=schemas,
+                    max_tokens=max_tokens, timeout=(10, SUB_TIMEOUT),
+                    idle_timeout=0, stall_timeout=0, **kwargs)
+            except Exception as e:      # noqa: BLE001  统一按链路失败处理
+                rr = _sub_result("error", str(e))
+            st = str((rr or {}).get("stream_state") or "")
+            if st not in _SUB_RETRY_STATES and st not in _SUB_SWITCH_STATES:
+                return rr               # 正常完成 / 用户停止 / 上下文超窗等
+            if (rr.get("visible") or "").strip():
+                return rr               # 已经有正文：重发会重复输出
+            _more = attempt < SUB_RETRIES and st in _SUB_RETRY_STATES
+            print("[子代理] %s 第%d次失败 state=%s，%s"
+                  % (pname, attempt + 1, st, "重试" if _more else "换下一家"))
+            if _more:
+                if _sub_sleep(stop_event, SUB_RETRY_BACKOFF * (2 ** attempt)):
+                    return rr
+                continue
+            break
+    return rr or _sub_result("error", "没有可用的服务商")
 
 
 def _new_batch_id():
@@ -916,6 +1000,7 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
         return okw, out
 
     rounds, used, text, err, told_fallback = 0, [], "", "", False
+    rr = None                   # 最近一次调用结果（收尾时用来给出失败原因）
     tok = 0                     # 这个侦察兵自己烧了多少 token（前端逐行展示）
     board = ctx.get("board")
     last_board = 0
@@ -1126,7 +1211,10 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
     ms = int((time.monotonic() - t0) * 1000)
     text = str(text or "").strip()
     if not text and not err:
-        err = "没有得出结论"
+        # 把上游的失败状态带出来：「没有得出结论」太笼统，排查时分不清是断流、
+        # 限流还是用户停止。
+        _st = str((rr or {}).get("stream_state") or "")
+        err = ("没有得出结论（上游 %s）" % _st) if _st and _st != "done" else "没有得出结论"
     ok = bool(text) and not err
     emit({"type": "subagent_done", "id": q["id"], "role": role, "ok": ok,
           "ms": ms, "rounds": rounds, "tools": len(used), "chars": len(text),

@@ -91,6 +91,7 @@ from .tools_exec import (
     _cmd_script_error, _cmd_secret_hit, _exe_name, _kill_tree, _pipe_plan, _resolve_argv,
     _script_stamp, _shell_idle, _shell_plan, _strip_cmd_noise, _t_run_command,
     _t_run_workflow_script, _t_shell, call_signature, normalize_shell_mode,
+    set_output_sink,
 )
 from .tools_files import (
     _recover_candidates, _t_attachment_read, _t_check_code, _t_code_context, _t_copy_file,

@@ -23,7 +23,7 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_\-]{6,40}$")
 _EXPORT_RE = re.compile(r"^sh_[a-f0-9]{8,16}\.(?:html|png|gmshare)$")
 _TITLE_RE = re.compile(r"<title[^>]*>([\s\S]{0,200}?)</title>", re.I)
 
-APP_VERSION = "3.3"
+APP_VERSION = "3.4"
 
 
 # ---------------- 旧版：本机预览页 ----------------

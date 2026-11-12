@@ -92,7 +92,8 @@ def test_attach_reparse_updates_doc_meta(monkeypatch, tmp_path):
     monkeypatch.setattr(sessions_api, "find_session", lambda d, sid: d["sessions"][0])
     monkeypatch.setattr(sessions_api, "save_sessions", lambda d: None)
     monkeypatch.setattr(sessions_api, "_upload_path", lambda sid, name: str(p))
-    monkeypatch.setattr(sessions_api.docparse, "extract", lambda name, raw, **kw: ("重试后的正文", ""))
+    monkeypatch.setattr(sessions_api.docparse, "extract_pages",
+                        lambda name, raw, **kw: ("重试后的正文", "", []))
 
     h = _H({"session_id": "s1", "index": 0, "doc_index": 0})
     sessions_api._api_attach_reparse(h)

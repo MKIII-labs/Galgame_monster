@@ -492,7 +492,7 @@ def estimate(session_id=""):
     except Exception:                        # noqa: BLE001  画像读失败不影响会话记忆的估算
         pass
     out["profile_inject_limit"] = knowledge.PROFILE_INJECT_LIMIT
-    out["inject_max_tokens"] = knowledge.INJECT_MAX_TOKENS
+    out["inject_max_tokens"] = knowledge.inject_budget()
     return out
 
 

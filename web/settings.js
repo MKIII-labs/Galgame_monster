@@ -51,7 +51,7 @@ const SETTINGS_PAGE_META = {
    密钥与自定义预设不在重置范围内。 */
 const STATIC_RESET_KEYS = {
   profile: { profile: ['manual', 'rules', 'auto_learn_enabled', 'learning_prompt_custom'] },
-  appearance: { config: ['theme', 'ide_theme', 'ide_whitespace'] },
+  appearance: { config: ['theme', 'ide_theme', 'ide_whitespace', 'ui_process_follow'] },
   gal: { config: [
     'gal_theme', 'gal_dialog_max', 'gal_ui_sfx', 'gal_nudge', 'gal_typewriter', 'gal_cps',
     'gal_fx', 'gal_sprite_fx', 'gal_bar_auto', 'gal_bgm_volume', 'gal_seg_mode', 'gal_auto',
@@ -545,6 +545,21 @@ function buildContextPane() {
     hintHtml('压缩边界会对齐到工具调用 / 结果配对；摘要按「请求 / 概念 / 文件 / 错误 / 待办 / '
              + '当前 / 下一步 / 上下文」结构化，并 pin 住最初请求与当前计划。',
              '压缩 边界 摘要 结构 pin 计划') +
+    checkRowHtml('session-memory-enabled',
+      '会话工作记忆（后台轻量摘要，压缩时零 API 复用）',
+      '会话 工作记忆 摘要 零 API 压缩') +
+    hintHtml('开启（默认）：每累计约 6000 token，且工具调用达标或本轮自然停顿时，'
+             + '后台用轻量模型把新增对话合并成一份结构化工作笔记。压缩时若它已覆盖待压区间、'
+             + '没过期且区间没被编辑，就直接当摘要用，省掉一次摘要调用。'
+             + '关闭后只走原有摘要流程；已有笔记仍会自然过期，不再更新。',
+             '会话 工作记忆 摘要 零 API 压缩') +
+    checkRowHtml('microcompact-enabled',
+      '微压缩（60% 预算后摘要单条过大的工具结果）',
+      '微压缩 microcompact 工具结果 摘要') +
+    hintHtml('开启（默认）：上下文到预算 60% 后，对单条 ≥3000 token 的工具结果做一次轻量摘要，'
+             + '只保留错误 / 数值 / 路径 / 命令 / 结论；每次最多 3 条，最近 2 条原文不动。'
+             + '只影响本次请求，会话里的原文和落盘句柄都还在。',
+             '微压缩 microcompact 工具结果 摘要') +
     setGroupHtml('记忆检索', '记忆 检索 挑选 模型 延迟 首字节') +
     checkRowHtml('memory-llm-pick',
       '用模型挑选记忆（更准，但会拖慢首字节）', '记忆 挑选 模型 检索 延迟 首字节') +
@@ -552,6 +567,18 @@ function buildContextPane() {
              '打开后会在「首字节之前」多一次轻量模型往返，实测装配耗时 p90 1.9 秒、最坏 7 秒；' +
              '记忆条目很多、或常问「上次那个」这类模糊指代时再打开。',
              '记忆 挑选 延迟 首字节') +
+    labelHtml('每轮记忆注入预算（tokens，默认 3000）', '记忆 注入 预算 token') +
+    '<input id="memory-inject-tokens" class="field-input" type="number" min="300" max="50000" step="500">' +
+    hintHtml('每轮「相关记忆」整块的 token 上限；单条正文仍截 400 字，命中与邻居合并最多 12 条。'
+             + '调大能多塞几条，但也更费 token；默认 3000。',
+             '记忆 注入 预算 token') +
+    checkRowHtml('memory-index-enabled',
+      '常驻记忆索引（MEMORY.md 式标题清单）',
+      '记忆 索引 MEMORY.md 常驻 标题 清单') +
+    hintHtml('开启（默认）：把可访问的知识库 / 会话记忆渲染成 ≤200 行、≤25KB 的'
+             + '「作用域·分类·标题 — 一行钩子」清单，随系统提示常驻；正文仍按需检索 / memory.search。'
+             + '本地轻量小窗口模型不注入。',
+             '记忆 索引 MEMORY.md 常驻 标题 清单') +
     labelHtml('本会话记忆软上限（条，0 = 不限）', '记忆 上限 整理 合并 去重') +
     '<input id="memory-soft-limit" class="field-input" type="number" min="0" step="10">' +
     hintHtml('超过这个条数时，记忆提示会要求模型先合并同主题重复、删除过时条目、' +
@@ -579,6 +606,11 @@ function buildContextPane() {
   q('compress-summary-tokens').value = cfg.compress_summary_tokens != null
     ? cfg.compress_summary_tokens : 8192;
   q('memory-llm-pick').checked = !!cfg.memory_llm_pick;
+  q('session-memory-enabled').checked = cfg.session_memory_enabled !== false;
+  q('microcompact-enabled').checked = cfg.microcompact_enabled !== false;
+  q('memory-inject-tokens').value = cfg.memory_inject_tokens != null
+    ? cfg.memory_inject_tokens : 3000;
+  q('memory-index-enabled').checked = cfg.memory_index_enabled !== false;
   q('token-profile-balanced').checked = (cfg.token_profile || 'balanced') !== 'quality';
   q('history-working-set').value = cfg.history_working_set_tokens != null
     ? cfg.history_working_set_tokens : 40000;
@@ -649,6 +681,11 @@ function buildContextPane() {
     // 0 是合法值（不传 max_tokens），不能兜底成默认值
     chat_max_tokens: Math.max(0, Math.min(65536, intOr(q('chat-max-tokens').value, 0))),
     memory_llm_pick: !!q('memory-llm-pick').checked,
+    session_memory_enabled: !!q('session-memory-enabled').checked,
+    microcompact_enabled: !!q('microcompact-enabled').checked,
+    memory_inject_tokens: Math.max(300,
+      Math.min(50000, intOr(q('memory-inject-tokens').value, 3000))),
+    memory_index_enabled: !!q('memory-index-enabled').checked,
     chat_auto_context: !!q('chat-auto-context').checked,
     // 0 是合法值（= 不限 / 关闭），不能兜底成默认值
     memory_soft_limit: Math.max(0, intOr(q('memory-soft-limit').value, 60)),
@@ -750,11 +787,12 @@ function buildAgentPane() {
              + 'auto 能自决就自决。auto 也不会执行删除 / 覆盖 / 发布 / 付款 / 改凭据这类不可逆操作，'
              + '而是选可回滚的最小方案。',
              '提问 策略 自动化 自主 决策 不可逆 普通聊天') +
-    setGroupHtml('通知', '通知 提示音 音量 横幅 完成 等待回答 出错') +
+    setGroupHtml('通知', '通知 提示音 音量 横幅 完成 等待回答 审批 操作 出错') +
     checkRowHtml('notify-banner', '显示系统通知横幅', '通知 横幅 系统 弹窗') +
     checkRowHtml('notify-sound', '播放提示音', '通知 提示音 声音') +
     checkRowHtml('notify-done', '任务完成时提醒', '通知 完成 任务') +
-    checkRowHtml('notify-ask', 'AI 等你回答时提醒', '通知 等待回答 提问 待回答') +
+    checkRowHtml('notify-ask', 'AI 等你回答 / 批准 / 动手操作时提醒',
+                 '通知 等待回答 提问 待回答 审批 批准 操作') +
     checkRowHtml('notify-error', '任务失败 / 出错时提醒', '通知 失败 出错 异常 中断') +
     labelHtml('提示音音量', '通知 音量 提示音') +
     '<input id="notify-volume" class="field-input" type="range" min="0" max="100" step="5" value="60">' +
@@ -1587,6 +1625,9 @@ function buildSearchPane() {
     '<label class="check-row"><input type="checkbox" id="search-show-key"> 显示密钥</label>' +
     '</div>' +
     setGroupHtml('检索行为', '检索 条数 抓取') +
+    checkRowHtml('search-research', '深度检索（默认开启：放宽来源条数 / 正文长度，弱结果自动补搜一次）', '深度 研究 检索 补搜') +
+    checkRowHtml('search-cache', '复用检索缓存（同一 provider + 检索式在 TTL 内直接复用）', '缓存 cache 检索') +
+    checkRowHtml('search-cite-nli', '引用语义校验（小模型判断结论是否被原文支持；会增加 5–20s）', '引用 语义 nli 校验 小模型') +
     labelHtml('结果条数（1–20，每个检索式）', '条数 结果 数量 count') +
     '<input id="search-count" class="field-input" type="number" min="1" max="20">' +
     checkRowHtml('search-fetch', '抓取正文（对命中网页取正文，而不是只有摘要）', '抓取 正文 网页') +
@@ -1598,8 +1639,8 @@ function buildSearchPane() {
     '<input id="search-merged-max" class="field-input" type="number" min="1" max="50">' +
     labelHtml('每条正文保留字数（500–20000）', '正文 字数 长度') +
     '<input id="search-fetch-chars" class="field-input" type="number" min="500" max="20000">' +
-    setGroupHtml('研究类任务（复刻 / 还原 / 从零实现）', '研究 复刻 还原 条数 字数') +
-    labelHtml('研究类合并条数（1–50，0 = 用上面的值）', '研究 合并 条数') +
+    setGroupHtml('深度检索上限（默认启用）', '深度 研究 复刻 还原 条数 字数') +
+    labelHtml('深度检索合并条数（1–50，0 = 用上面的值）', '研究 合并 条数') +
     '<input id="search-research-merged" class="field-input" type="number" min="0" max="50">' +
     labelHtml('研究类每条正文字数（500–20000，0 = 用上面的值）', '研究 正文 字数') +
     '<input id="search-research-chars" class="field-input" type="number" min="0" max="20000">' +
@@ -1623,6 +1664,9 @@ function buildSearchPane() {
     q('eon-' + n).checked = ee[n] !== false;
   });
   q('count').value = cfg.search_count || 8;
+  q('research').checked = cfg.search_research_enabled !== false;
+  q('cache').checked = cfg.search_cache_enabled !== false;
+  q('cite-nli').checked = !!cfg.search_cite_nli;
   q('fetch').checked = cfg.search_fetch !== false;
   q('fetch-cloud').checked = cfg.search_fetch_cloud !== false;
   q('fetch-count').value = cfg.search_fetch_count || 4;
@@ -1682,6 +1726,9 @@ function buildSearchPane() {
       youcom: q('eon-youcom').checked,
     },
     search_count: num(q('count').value, 8),
+    search_research_enabled: q('research').checked,
+    search_cache_enabled: q('cache').checked,
+    search_cite_nli: q('cite-nli').checked,
     search_fetch: q('fetch').checked,
     search_fetch_cloud: q('fetch-cloud').checked,
     search_fetch_count: num(q('fetch-count').value, 4),
@@ -2409,6 +2456,7 @@ function fillStaticSettings(cfg, profile) {
   }
   syncIdeThemeGrid();
   if ($('#ide-whitespace')) $('#ide-whitespace').value = c.ide_whitespace || 'all';
+  if ($('#ui-process-follow')) $('#ui-process-follow').checked = c.ui_process_follow !== false;
 
   const gMode = c.gal_seg_mode || 'single';
   const gmr = document.querySelector('input[name="gal-seg-mode"][value="' + gMode + '"]');
@@ -2539,9 +2587,11 @@ function cardStateId(card) {
   return (pane ? pane.dataset.pane : '') + '|' + (card.dataset.card || '');
 }
 
-function setCardCollapsed(card, on, persist) {
+function setCardCollapsed(card, on, persist, animate) {
   if (!card) return;
-  card.classList.toggle('collapsed', !!on);
+  const body = card.querySelector('.set-card-body');
+  if (body && animate !== false) foldTransition(card, body, !on, { cls: 'collapsed' });
+  else card.classList.toggle('collapsed', !!on);
   const btn = card.querySelector('[data-act="collapse-card"]');
   if (btn) {
     btn.setAttribute('aria-expanded', on ? 'false' : 'true');
@@ -2560,7 +2610,7 @@ function syncCardCollapse(pane) {
   pane.querySelectorAll('.set-card').forEach((card) => {
     const id = cardStateId(card);
     const on = id in saved ? !!saved[id] : advanced.indexOf(card.dataset.card) >= 0;
-    setCardCollapsed(card, on, false);
+    setCardCollapsed(card, on, false, false);
   });
 }
 
@@ -3337,14 +3387,14 @@ function setupSettingsSearch() {
       const act = e.target.closest('.set-card-act');
       if (act) {
         if (act.dataset.act === 'collapse-card') {
-          setCardCollapsed(card, !card.classList.contains('collapsed'), true);
+          setCardCollapsed(card, foldIsOpen(card, 'collapsed'), true);
         } else if (act.dataset.act === 'reset-card') {
           resetSettingsCard(card);
         }
         return;
       }
       if (e.target.closest('.set-card-head')) {
-        setCardCollapsed(card, !card.classList.contains('collapsed'), true);
+        setCardCollapsed(card, foldIsOpen(card, 'collapsed'), true);
       }
     });
   }
@@ -3453,6 +3503,7 @@ function collectSettings() {
     cfg.ide_theme = (itr && itr.value) || '';
   }
   if ($('#ide-whitespace')) cfg.ide_whitespace = $('#ide-whitespace').value;
+  if ($('#ui-process-follow')) cfg.ui_process_follow = !!$('#ui-process-follow').checked;
 
   // GAL 演出
   const gtr = document.querySelector('input[name="gal-theme"]:checked');

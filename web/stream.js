@@ -1104,15 +1104,15 @@ async function streamChat(extra, resume, attach) {
         + '<span class="subagent-time"></span>'
         + '<span class="subagent-ico">⋯</span>'
         + '</div>'
-        + '<div class="subagent-detail" hidden>'
+        + '<div class="subagent-detail">'
         + '<div class="subagent-metrics"></div>'
         + '<div class="subagent-result"></div>'
         + '</div>';
       // 点一行展开：看完整问题、指标与结论预览（默认收起，不抢正文）
       r.querySelector('.subagent-top').onclick = () => {
-        const open = r.classList.toggle('open');
         const d = r.querySelector('.subagent-detail');
-        if (d) d.hidden = !open;
+        const next = !foldIsOpen(r, 'open', true);
+        foldTransition(r, d, next, { cls: 'open', positive: true, ms: 180 });
       };
       box.querySelector('.subagent-body').appendChild(r);
       subagentRows[id] = { el: r, done: false, fail: false, t0: Date.now() };
@@ -1267,10 +1267,10 @@ async function streamChat(extra, resume, attach) {
     row._flowCaret = caret;
     const toggle = () => {
       flowToggled = true;
-      const open = flowWrap.classList.contains('collapsed');
-      flowWrap.classList.toggle('collapsed', !open);
-      caret.textContent = open ? '▾' : '▸';
-      head.setAttribute('aria-expanded', open ? 'true' : 'false');
+      const next = !foldIsOpen(flowWrap, 'collapsed');
+      foldTransition(flowWrap, body, next, { cls: 'collapsed' });
+      caret.textContent = next ? '▾' : '▸';
+      head.setAttribute('aria-expanded', next ? 'true' : 'false');
     };
     head.onclick = toggle;
     makeClickable(head, toggle, '展开 / 收起过程');
@@ -1330,7 +1330,15 @@ async function streamChat(extra, resume, attach) {
       const wrap = flowWrap;
       setTimeout(() => {
         if (!wrap || !wrap.isConnected || flowToggled) return;
-        wrap.classList.add('collapsed');
+        // 收起也走统一的高度过渡；高度落定后再补偿贴底，避免视图停在半路
+        foldTransition(wrap, flow, false, {
+          cls: 'collapsed',
+          done: () => {
+            if (_followBottom && typeof isAtBottom === 'function' && isAtBottom(120)) {
+              scrollToBottom(true);
+            }
+          },
+        });
         if (row._flowCaret) row._flowCaret.textContent = '▸';
         if (row._flowHead) row._flowHead.setAttribute('aria-expanded', 'false');
       }, 600);
@@ -1344,7 +1352,7 @@ async function streamChat(extra, resume, attach) {
     const text = thinkBox._body.textContent || '';
     if (!text.trim()) thinkBox.remove();
     else {
-      thinkBox.classList.remove('open');
+      foldTransition(thinkBox, thinkBox._body, false, { cls: 'open', positive: true, ms: 180 });
       const head = thinkLineSummary(text, true);
       const step = thinkBox._step || 1;
       thinkBox._hasSummary = !!head;
@@ -1871,7 +1879,7 @@ async function streamChat(extra, resume, attach) {
           phase = 'think';
           phaseAt = Date.now();
           ensureFlow().appendChild(thinkBox);
-          scrollToBottom();
+          followProcessStep(thinkBox);
         } else if (obj.type === 'subagent_start') {
           const s = subagentRow(obj.id);
           if (s) {
@@ -1889,8 +1897,9 @@ async function streamChat(extra, resume, attach) {
                 ? ('继承上下文 ' + Math.round(obj.prefix_tokens / 1000) + 'k …')
                 : '开始…';
             subagentSummary();
+            if (s && s.el) followProcessStep(s.el);
+            else scrollToBottom();
           }
-          scrollToBottom();
         } else if (obj.type === 'subagent_step') {
           const s = subagentRows[obj.id];
           if (s && s.el) {
@@ -1945,7 +1954,7 @@ async function streamChat(extra, resume, attach) {
           tip.textContent = '自动续跑 ' + obj.n + '/' + (obj.limit < 0 ? '∞' : obj.limit)
             + (obj.why ? ' · ' + obj.why : '');
           ensureFlow().appendChild(tip);
-          scrollToBottom();
+          followProcessStep(tip);
         } else if (obj.type === 'reasoning') {
           retryWait = null;
           if (!thinkBox) {
@@ -1960,7 +1969,7 @@ async function streamChat(extra, resume, attach) {
           refreshThinkLabel(thinkBox, false);   // 标题 / 状态条显示「最近完成段落」的首行
           phase = 'output';          // 思考内容在流，不再需要秒数
           if (state.uiMode === 'gal') { galSetStatus('思考中…'); galThinkAppend(obj.text); }
-          scrollToBottom();
+          followProcessStep(thinkBox);
         } else if (obj.type === 'base') {
           // 接管续写任务时的补帧：续写起点正文（上一轮已写好的部分）先摆出来，
           // 否则新行只显示本次新增的段落，看起来像「上一轮输出丢了」
@@ -2022,7 +2031,9 @@ async function streamChat(extra, resume, attach) {
             if (!text.trim()) {
               thinkBox.remove();
             } else {
-              thinkBox.classList.remove('open');
+              foldTransition(thinkBox, thinkBox._body, false, {
+                cls: 'open', positive: true, ms: 180,
+              });
               const head = thinkLineSummary(text, true);
               thinkBox._hasSummary = !!head;
               thinkBox._label.textContent = '上次尝试（上游中断）'
@@ -2134,11 +2145,10 @@ async function streamChat(extra, resume, attach) {
           setLive('正在生成工具调用 ' + name + ' · ' + fmtBytes(obj.bytes));
           setLiveSec('');
           phase = 'toolgen';
-          scrollToBottom();
+          followProcessStep(toolPending);
         } else if (obj.type === 'script_log') {
           // Code Mode 脚本的实时日志：只更新状态条，不写进正文
           setLive('脚本 · ' + String(obj.text || '').slice(0, 60));
-          scrollToBottom();
         } else if (obj.type === 'tool') {
           clearToolPending();
           const useGal = state.uiMode === 'gal' && galCfg('gal_show_exec', true) !== false;
@@ -2157,6 +2167,9 @@ async function streamChat(extra, resume, attach) {
             $('#gal-tools').appendChild(card);
           } else {
             const g = toolGroup(row);        // 归进「步骤组」，标题实时更新
+            // 新步骤自动展开：上一步收起的组如果又被复用，先展开再放卡片
+            if (g.collapseTimer) { clearTimeout(g.collapseTimer); g.collapseTimer = 0; }
+            if (g.el.classList.contains('collapsed')) setToolGroupOpen(g, true, false);
             g.body.appendChild(card);
             g.pending++;
             // 记下当前步骤，组头显示「正在修改 xxx」而不是笼统的「运行中…」
@@ -2164,6 +2177,7 @@ async function streamChat(extra, resume, attach) {
                           arg: (typeof toolArgText === 'function'
                                 ? toolArgText(obj.name, obj.args) : '') };
             toolGroupTitle(g);
+            markProcessStep(card);           // 当前步骤高亮（并行时多张同时亮）
           }
           row._toolQueue = row._toolQueue || {};
           (row._toolQueue[obj.name] = row._toolQueue[obj.name] || []).push(card);
@@ -2174,7 +2188,15 @@ async function streamChat(extra, resume, attach) {
           phase = 'tool';              // 工具执行期间只有这一步在跑，标题里显示已用秒数
           phaseAt = Date.now();
           if (state.uiMode === 'gal') galSetStatus('稍候…');
-          scrollToBottom();
+          if (useGal) scrollToBottom();
+          else followProcessStep(card);    // 只把新步骤带进视野，不强行贴整条消息底部
+        } else if (obj.type === 'tool_output') {
+          // 命令执行中的增量输出：找当前还在跑的那张卡（同名按队列取最早的）
+          const q = row._toolQueue && row._toolQueue[obj.name];
+          const card = q && q.length ? q[0] : null;
+          if (card && typeof appendToolOutput === 'function') {
+            appendToolOutput(card, obj.text);
+          }
         } else if (obj.type === 'tool_done') {
           const _lq = liveToolQ[obj.name];
           liveToolDone(live, _lq && _lq.length ? _lq.shift() : -1, obj);
@@ -2190,14 +2212,24 @@ async function streamChat(extra, resume, attach) {
             if (obj.ok === false) g.failed++;
             if (obj.write) row._wroteTurn = true;      // 供「回滚本轮」按钮判断
             toolGroupTitle(g);
+            // 这一组都跑完了：延迟收起已完成的步骤（有失败 / 用户手动展开过时
+            // autoCollapseToolGroup 自己会拒绝，错误始终留在视线里）
+            if (g.pending === 0) {
+              if (g.collapseTimer) clearTimeout(g.collapseTimer);
+              g.collapseTimer = setTimeout(() => {
+                g.collapseTimer = 0;
+                if (g.pending === 0) autoCollapseToolGroup(g);
+              }, 1200);
+            }
           }
           // 同一批还有工具在跑就继续计时；全跑完则回到「等模型」
           setLive((row._toolGroup && row._toolGroup.pending > 0) ? '并行执行中' : '继续思考');
           phase = (row._toolGroup && row._toolGroup.pending > 0) ? 'tool' : 'think';
           phaseAt = Date.now();
           if (state.uiMode === 'gal') galSetStatus('思考中…');
-          ideOnToolDone(obj);
-          scrollToBottom();
+          ideOnToolDone(obj, row, sid);
+          if (state.uiMode === 'gal' || !card) scrollToBottom();
+          else followProcessStep(card);
         } else if (obj.type === 'diagram') {
           // archify 产物：对话内嵌一张可交互图卡（URL 免鉴权、仅本机可访问）
           const item = obj.item || {};
@@ -2326,7 +2358,7 @@ async function streamChat(extra, resume, attach) {
             if (row._toolGroup) autoCollapseToolGroup(row._toolGroup);
             if (typeof planAutoCollapse === 'function') planAutoCollapse(row);
             // 变更审阅：把本轮写过的文件一次性交给用户确认（撤销 / 保留）
-            if (typeof ideReviewEndTurn === 'function') ideReviewEndTurn(row);
+            if (typeof ideReviewEndTurn === 'function') ideReviewEndTurn(row, false, sid);
           }
           renderSessions();
           if (obj.context && isCur()) renderContextBar(obj.context);
@@ -2383,7 +2415,9 @@ async function streamChat(extra, resume, attach) {
     if (flow) {
       // 收尾时把还开着的思考块统一折起；只替换默认标题，别误伤思考摘要
       flow.querySelectorAll('.think').forEach((b) => {
-        b.classList.remove('open');
+        foldTransition(b, b.querySelector('.think-body'), false, {
+          cls: 'open', positive: true, ms: 180,
+        });
         const lb = b.querySelector('.think-label');
         if (lb && (/^步骤 \d+ · 思考中…$/.test(lb.textContent)
                    || lb.textContent === '深度思考中…')) {
@@ -2446,9 +2480,20 @@ async function streamChat(extra, resume, attach) {
           c = row._secs[row._secs.length - 1];
           row._content = c;
         } else {
-          c.innerHTML = safeRenderMarkdown(shown);   // 只有过程、没有正文
-          if (typeof enhanceToc === 'function') enhanceToc(c);
-          row._secs = [c];
+          // 没有可展示的正文段。若这一轮的正文全是过场旁白（已收进过程折叠），
+          // 就在答案区留一个空节点；只有真的没有任何正文块时才退回全文。
+          const hadText = (doneBlocks || []).some((x) => x && x.kind === 'text'
+            && String(x.text || '').trim());
+          const empty = document.createElement('div');
+          empty.className = 'content';
+          if (!hadText) {
+            empty.innerHTML = safeRenderMarkdown(shown);
+            if (typeof enhanceToc === 'function') enhanceToc(empty);
+          }
+          put(empty);
+          c = empty;
+          row._content = c;
+          row._secs = [empty];
         }
       } else {
         // 没拿到块（断流 / 旧服务端）：正文合并回第一段，避免同一段文字在多段里重复
@@ -2503,6 +2548,11 @@ async function streamChat(extra, resume, attach) {
       row._wrap.appendChild(buildEndNote(
         endReason, typeof idx === 'number' ? idx : undefined));
     }
+    // 文件改动声明：正文 / 过程折叠 / 操作条都落位之后再摆一次，保持在操作条上方
+    if (!bg && typeof ideReviewCardRefresh === 'function') ideReviewCardRefresh();
+    // 停止 / 断流时收不到 done：本轮已经写过的文件也要结算进审阅队列，
+    // 否则 pending 留到下一轮，会和同一文件的下一次写入合并成一条（baseToken 串轮）。
+    if (!bg && !gotDone && typeof ideReviewEndTurn === 'function') ideReviewEndTurn(row, true, sid);
     // 后台会话：丢掉 live host（结果已落盘，切回去会从消息重建），标未读
     const bgTitle = bg ? ((mine && mine.title) || '新对话') : '';
     unregisterStream(sid, !bg);

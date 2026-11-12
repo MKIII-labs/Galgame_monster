@@ -882,3 +882,156 @@ def test_compress_history_skips_when_stopped():
     ev.set()
     s = {"id": "x", "messages": [{"role": "user", "content": "a"}] * 10}
     assert context.compress_history(s, "", stop_event=ev) is False
+
+
+# ---------------- 流式工具执行：参数流完就回调（对齐 StreamingToolExecutor） ----------------
+
+class _TwoToolCallsUpstream(BaseHTTPRequestHandler):
+    """假上游：先发完 index=0 的完整参数，再开始 index=1。
+
+    这正是「并行读」的形态：index 前进时，前一个调用的参数已经完整，
+    上层可以立刻开始执行，不必等整条消息结束。
+    """
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(n)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        def w(obj):
+            data = ("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode()
+            self.wfile.write(("%X\r\n" % len(data)).encode() + data + b"\r\n")
+            self.wfile.flush()
+
+        try:
+            w({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "c0",
+                 "function": {"name": "read_file",
+                              "arguments": json.dumps({"path": "a.txt"})}}]}}]})
+            time.sleep(0.15)
+            w({"choices": [{"delta": {"tool_calls": [
+                {"index": 1, "id": "c1",
+                 "function": {"name": "read_file", "arguments": ""}}]}}]})
+            w({"choices": [{"delta": {"tool_calls": [
+                {"index": 1,
+                 "function": {"arguments": json.dumps({"path": "b.txt"})}}]}}]})
+            w({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+            d = b"data: [DONE]\n\n"
+            self.wfile.write(("%X\r\n" % len(d)).encode() + d + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except Exception:
+            pass
+
+    def log_message(self, *a):
+        pass
+
+
+def _serve_two_tools():
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _TwoToolCallsUpstream)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+def test_on_tool_ready_fires_when_next_index_starts():
+    """每个调用在参数闭合后就回调；结果仍按声明顺序返回。"""
+    srv, port = _serve_two_tools()
+    seen = []
+    try:
+        r = llm.stream_chat(
+            "k", "http://127.0.0.1:%d/v1/chat/completions" % port, "m",
+            [{"role": "user", "content": "hi"}],
+            tools=[{"type": "function",
+                    "function": {"name": "read_file",
+                                 "parameters": {"type": "object"}}}],
+            on_tool_ready=lambda c: seen.append(c))
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert r["stream_state"] == "done"
+    assert [c["tool"] for c in r["tool_calls"]] == ["read_file", "read_file"]
+    # 两个调用都在流内提前交出（第二个在参数闭合时，不等整条消息结束）
+    assert [c["args"] for c in seen] == [{"path": "a.txt"}, {"path": "b.txt"}]
+
+
+class _EarlyReadyUpstream(BaseHTTPRequestHandler):
+    """假上游：index=0 参数发完后，先等客户端「已提前回调」再发 index=1。
+
+    如果客户端只在「下一个 index 出现」时才交出上一个调用，这里会等到超时；
+    参数一闭合就回调则会立刻放行 —— 用它区分两种实现，不依赖 sleep 计时。
+    """
+    protocol_version = "HTTP/1.1"
+    signal = {}          # {"ready": Event, "timed_out": bool}
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(n)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        def w(obj):
+            data = ("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode()
+            self.wfile.write(("%X\r\n" % len(data)).encode() + data + b"\r\n")
+            self.wfile.flush()
+
+        try:
+            w({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "c0",
+                 "function": {"name": "read_file",
+                              "arguments": json.dumps({"path": "a.txt"})}}]}}]})
+            ev = self.signal.get("ready")
+            self.signal["timed_out"] = not (ev.wait(2.0) if ev is not None else False)
+            w({"choices": [{"delta": {"tool_calls": [
+                {"index": 1, "id": "c1",
+                 "function": {"name": "read_file",
+                              "arguments": json.dumps({"path": "b.txt"})}}]}}]})
+            w({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+            d = b"data: [DONE]\n\n"
+            self.wfile.write(("%X\r\n" % len(d)).encode() + d + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except Exception:
+            pass
+
+    def log_message(self, *a):
+        pass
+
+
+def _serve_early(signal):
+    handler = type("H", (_EarlyReadyUpstream,), {"signal": signal})
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+def test_on_tool_ready_fires_as_soon_as_args_close():
+    """参数一闭合就回调：不必等下一个 index，更不必等整条消息结束。"""
+    ready = threading.Event()
+    signal = {"ready": ready, "timed_out": False}
+    srv, port = _serve_early(signal)
+    seen = []
+    try:
+        r = llm.stream_chat(
+            "k", "http://127.0.0.1:%d/v1/chat/completions" % port, "m",
+            [{"role": "user", "content": "hi"}],
+            tools=[{"type": "function",
+                    "function": {"name": "read_file",
+                                 "parameters": {"type": "object"}}}],
+            idle_timeout=0, stall_timeout=0,
+            on_tool_ready=lambda c: (seen.append(c), ready.set()))
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert signal["timed_out"] is False      # 服务端没等到超时就收到回调
+    assert [c["args"] for c in seen][0] == {"path": "a.txt"}
+    assert [c["tool"] for c in r["tool_calls"]] == ["read_file", "read_file"]

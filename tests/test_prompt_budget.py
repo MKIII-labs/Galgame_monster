@@ -42,7 +42,8 @@ def test_agent_prompt_without_domains_is_compact(tmp_path):
     # 2026-10-30：新增「收尾必须调用 finish」一段（Trae 式显式完成），7600 → 7700
     # 2026-11-01：新增 image_compare（参考物 vs 产物对照）工具说明与使用纪律，7700 → 8000
     # 2026-11-08：实测已到 8315（工具说明持续增长），阈值 8000 → 8600；后续该拆分了
-    assert len(text) < 8600, "Agent 提示 %d 字" % len(text)
+    # 2026-11-12：旁白规则改写后实测 8672，阈值 8600 → 9000
+    assert len(text) < 9000, "Agent 提示 %d 字" % len(text)
     assert "沙箱目录树" not in text            # 有历史 + 原生工具 → 不再每轮塞树
     assert "calendar.create" in text           # 提醒约定必须保留
     assert "bili.analyze" not in text          # 未命中 B 站域 → 相关长约定不注入

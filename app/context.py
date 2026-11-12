@@ -32,7 +32,31 @@ IMAGE_TOKENS = 1600         # 一张图片的保守估算（vision 模式下会�
 COMPRESS_MSG_CHARS = 20000  # 送进摘要的单条消息上限（防止单条超大附件再次撑爆窗口）
 HISTORY_PROCESS_KEEP_TURNS = 2   # 最近几条 assistant 消息保留原文（更早的压成过程摘要）
 HISTORY_PROCESS_DIGEST = 240     # 过程摘要长度：首尾各取一半
+HISTORY_REBUILD_STEP = 4         # 原文保留区的推进粒度（水位线，1 = 每轮推进）
 TOOL_MSG_PREFIX = "工具执行结果如下，请据此继续："   # chat.py 回灌工具结果时的固定开头
+
+# 压缩兜底（对齐 Claude Code）：
+# - 摘要请求自己超长（prompt-too-long）时，按最旧丢一段再试；
+# - 连续失败达到上限后熔断一段时间，避免每轮都白花一次请求。
+COMPRESS_PTL_RETRIES = 3
+COMPRESS_BREAKER_FAILS = 3
+COMPRESS_BREAKER_SECS = 600
+# 微压缩（对齐 CC 的 microcompact）：上下文到 60% 预算后，对单条过大的工具结果
+# 做一次轻量摘要；只影响本次请求，原文仍在会话 / 落盘句柄里。
+MICROCOMPACT_MIN_TOKENS = 3000
+MICROCOMPACT_TRIGGER_RATIO = 0.6
+MICROCOMPACT_KEEP_RECENT = 2
+MICROCOMPACT_MAX_PER_PASS = 3
+MICROCOMPACT_INPUT_CHARS = 12000
+MICROCOMPACT_MAX_CHARS = 1200
+_MICRO_CACHE = {}
+_MICRO_CACHE_MAX = 128
+_MICRO_LOCK = threading.Lock()
+# 会话工作记忆复用的新鲜度上限（秒）：太旧就重新摘要，避免拿过期结论接续。
+SESSION_MEMORY_MAX_AGE = 6 * 3600
+SESSION_MEMORY_MIN_CHARS = 200
+_COMPRESS_FAILS = {}                # sid -> [连续失败次数, 熔断截止时间]
+_COMPRESS_FAILS_LOCK = threading.Lock()
 
 # 压缩摘要的必保项：结构化检查点，避免「摘要太短、接续时丢文件/错误/待办」
 COMPRESS_PROMPT = (
@@ -165,11 +189,20 @@ def request_budget(model="", cfg=None):
 
 def estimate_tokens(text):
     """启发式 token 估算：CJK 0.6 / 英文数字 0.28 / 空白 0.1 / 标点 0.35 / 其他 0.8。
-    真实值仍靠 `usage.prompt` 校准（calibrate_ratio），这里只负责给压缩阈值一个稳定基线。"""
+    真实值仍靠 `usage.prompt` 校准（calibrate_ratio），这里只负责给压缩阈值一个稳定基线。
+
+    带结果缓存：同一个会话的同一批消息每轮会被估算好几次（1255 条消息实测 61ms/次），
+    而字符串是不可变的、Python 还会把 hash 缓存在 str 对象里，重复查询接近 O(1)。
+    缓存按「总字符数」封顶，避免把已经释放的大段工具结果一直拽在内存里。"""
     if not text:
         return 0
+    if not isinstance(text, str):
+        text = str(text)
+    hit = _TOKEN_CACHE.get(text)
+    if hit is not None:
+        return hit
     cjk = alnum = space = punct = other = 0
-    for ch in str(text):
+    for ch in text:
         o = ord(ch)
         if (0x2E80 <= o <= 0x9FFF or 0xAC00 <= o <= 0xD7A3 or
                 0xF900 <= o <= 0xFAFF or 0xFF00 <= o <= 0xFFEF):
@@ -182,8 +215,35 @@ def estimate_tokens(text):
             punct += 1
         else:
             other += 1
-    return round(cjk * 0.6 + alnum * 0.28 + space * 0.1
-                 + punct * 0.35 + other * 0.8)
+    n = round(cjk * 0.6 + alnum * 0.28 + space * 0.1
+              + punct * 0.35 + other * 0.8)
+    _token_cache_put(text, n)
+    return n
+
+
+_TOKEN_CACHE = {}
+_TOKEN_CACHE_LOCK = threading.Lock()
+_TOKEN_CACHE_MAX = 4096
+_TOKEN_CACHE_CHARS = 0
+_TOKEN_CACHE_CHAR_LIMIT = 8 * 1024 * 1024     # 缓存里字符串总长度上限
+
+
+def _token_cache_put(key, val):
+    global _TOKEN_CACHE_CHARS
+    with _TOKEN_CACHE_LOCK:
+        if key in _TOKEN_CACHE:
+            _TOKEN_CACHE[key] = val
+            return
+        if len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
+            for k in list(_TOKEN_CACHE)[: _TOKEN_CACHE_MAX // 4]:
+                _TOKEN_CACHE_CHARS -= len(k)
+                _TOKEN_CACHE.pop(k, None)
+        _TOKEN_CACHE[key] = val
+        _TOKEN_CACHE_CHARS += len(key)
+        while _TOKEN_CACHE_CHARS > _TOKEN_CACHE_CHAR_LIMIT and _TOKEN_CACHE:
+            k = next(iter(_TOKEN_CACHE))
+            _TOKEN_CACHE_CHARS -= len(k)
+            _TOKEN_CACHE.pop(k, None)
 
 
 def tools_tokens(tools):
@@ -270,6 +330,11 @@ def _msg_text(m, refs_handle=False):
     if refs:
         text = (text + "\n" + refs) if text else refs
     return text
+
+
+def message_text(m):
+    """公开给会话工作记忆用的「消息真实文本」（与估算 / 拼装同一口径）。"""
+    return _msg_text(m)
 
 
 def _msg_tokens(m, refs_handle=False):
@@ -603,6 +668,39 @@ def _history_compact_cfg():
     return max(0, keep), max(0, digest)
 
 
+def _history_rebuild_step():
+    """原文保留区的推进粒度（水位线）；读不到配置时用默认 4。"""
+    try:
+        cfg = load_config() or {}
+        return max(1, int(cfg.get("history_rebuild_step") or HISTORY_REBUILD_STEP))
+    except (TypeError, ValueError):
+        return HISTORY_REBUILD_STEP
+
+
+def _assistant_keep_set(msgs, keep_turns, step):
+    """计算「保留原文」的 assistant 消息下标集合（水位线推进）。
+
+    step=1 等于旧行为：每来一条新 assistant 就有一条旧消息被压成摘要，
+    请求前缀每轮都在同一个位置断一次。
+    step>1 时边界只在条数跨过 step 的整数倍时整体前移一次：
+    边界之间只追加新消息、不改写已发出的旧消息，前缀缓存可以连续命中；
+    代价是最多临时多保留 step-1 条 assistant 原文。
+    """
+    asst = [i for i, m in enumerate(msgs or [])
+            if isinstance(m, dict) and m.get("role") == "assistant"]
+    if not asst:
+        return set()
+    try:
+        keep = max(1, int(keep_turns))
+        step = max(1, int(step))
+    except (TypeError, ValueError):
+        return set(asst[-2:])
+    if step == 1:
+        return set(asst[-keep:])
+    boundary = (len(asst) // step) * step
+    return set(asst[max(0, boundary - keep):])
+
+
 def _history_image_msgs(msgs, keep):
     """最近 keep 条「带图片的用户消息」（排除当前回合）。
 
@@ -663,8 +761,8 @@ def build_context_messages(s, system_prompt, image_loader=None, image_keep=0):
     compact_on = keep_turns > 0 and digest > 0      # 任一项为 0 = 关闭
     keep = set()
     if compact_on:
-        asst = [i for i, m in enumerate(msgs) if m.get("role") == "assistant"]
-        keep = set(asst[-keep_turns:])
+        # 水位线推进：边界之间只追加、不改写旧消息（前缀缓存可连续命中）
+        keep = _assistant_keep_set(msgs, keep_turns, _history_rebuild_step())
     # 最近几条带图消息：把图片重新附上（当前回合由调用方单独附图）
     _img_set = set()
     if image_loader and image_keep > 0:
@@ -914,25 +1012,93 @@ def _split_replay_chunks(replay, limit_tokens):
     return chunks
 
 
+def _is_context_overflow_error(e):
+    """压缩请求自己是不是被上游判成「上下文超长」。
+
+    requests 的 HTTPError 默认 `str(e)` 只有状态码，真实原因在 `e.response.text`；
+    两处都拼上看，才能和 llm 里那份 `_looks_like_context_overflow` 对齐。
+    """
+    try:
+        from app import llm
+    except Exception:                    # noqa: BLE001
+        return False
+    text = str(e or "")
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        try:
+            text += "\n" + str(getattr(resp, "text", "") or "")
+        except Exception:                # noqa: BLE001
+            pass
+    return llm._looks_like_context_overflow(text)
+
+
+def _compress_blocked(sid):
+    """该会话是否处于「连续压缩失败」的熔断期。"""
+    sid = str(sid or "")
+    if not sid:
+        return False
+    with _COMPRESS_FAILS_LOCK:
+        rec = _COMPRESS_FAILS.get(sid)
+        if not rec:
+            return False
+        if time.time() < float(rec[1] or 0):
+            return True
+        _COMPRESS_FAILS.pop(sid, None)   # 熔断到期：重新允许尝试
+    return False
+
+
+def _note_compress_result(sid, ok):
+    """记录一次压缩结果：成功清零，连续失败到上限后熔断一段时间。"""
+    sid = str(sid or "")
+    if not sid:
+        return
+    with _COMPRESS_FAILS_LOCK:
+        if ok:
+            _COMPRESS_FAILS.pop(sid, None)
+            return
+        rec = _COMPRESS_FAILS.get(sid) or [0, 0.0]
+        rec[0] = int(rec[0]) + 1
+        if rec[0] >= COMPRESS_BREAKER_FAILS:
+            rec[1] = time.time() + COMPRESS_BREAKER_SECS
+            print(f"[压缩] 连续失败 {rec[0]} 次，熔断 {COMPRESS_BREAKER_SECS}s")
+            rec[0] = 0
+        _COMPRESS_FAILS[sid] = rec
+
+
 def _api_compress(api_key, api_url, api_model, system_prompt, lines, replay,
                   sum_tokens, stop_event, use_light=True):
-    """原有一次性摘要：主模型（或云端轻量模型）。"""
-    req = []
+    """一次性摘要：主模型（或云端轻量模型）。
+
+    对齐 Claude Code 的 PTL retry：摘要请求自己超长时，按最旧丢 20% 回放消息
+    再试，最多 COMPRESS_PTL_RETRIES 次；其它错误不重试。
+    """
+    base = []
     if system_prompt:
-        req.append({"role": "system", "content": system_prompt})
+        base.append({"role": "system", "content": system_prompt})
     if lines:
-        req.append({"role": "user", "content": "\n".join(lines)})
-    req.extend(replay)
-    req.append({"role": "user", "content": COMPRESS_PROMPT})
-    try:
-        from app import llm               # 延迟导入：llm 依赖 agent，避免模块级循环
-        kw = {} if use_light else {"use_light": False}
-        return llm._quick_chat(api_key, api_url, api_model, req,
-                               max_tokens=max(256, sum_tokens), source="summary",
-                               stop_event=stop_event, **kw)
-    except Exception as e:                # noqa: BLE001
-        print(f"[压缩] 失败：{e}")
-        return ""
+        base.append({"role": "user", "content": "\n".join(lines)})
+    work = list(replay or [])
+    last_err = None
+    from app import llm                   # 延迟导入：llm 依赖 agent，避免模块级循环
+    for attempt in range(COMPRESS_PTL_RETRIES + 1):
+        req = list(base) + list(work) + [{"role": "user", "content": COMPRESS_PROMPT}]
+        try:
+            kw = {} if use_light else {"use_light": False}
+            return llm._quick_chat(api_key, api_url, api_model, req,
+                                   max_tokens=max(256, sum_tokens), source="summary",
+                                   stop_event=stop_event, **kw)
+        except Exception as e:            # noqa: BLE001
+            last_err = e
+            if (attempt < COMPRESS_PTL_RETRIES and len(work) > 1
+                    and _is_context_overflow_error(e)):
+                drop = max(1, int(len(work) * 0.2))
+                work = work[drop:]
+                print("[压缩] 摘要请求超长，丢弃最旧 %d 条后重试（%d/%d）"
+                      % (drop, attempt + 1, COMPRESS_PTL_RETRIES))
+                continue
+            break
+    print(f"[压缩] 失败：{last_err}")
+    return ""
 
 
 def _local_compress(api_key, api_url, api_model, lines, replay, cfg, stop_event):
@@ -1006,7 +1172,58 @@ def _merge_local_summaries(api_key, api_url, api_model, parts, sum_tokens, stop_
         return body
 
 
-def compress_history(s, system_prompt="", stop_event=None, prefer_local=True):
+def _session_memory_ready(s, keep_from):
+    """会话工作记忆能否直接当压缩摘要复用。
+
+    条件：非空、覆盖待压区间（upto >= keep_from）、未过期、且被覆盖区间
+    的内容指纹没变（用户编辑 / 撤回后不能拿旧结论接续）。
+    """
+    text = str(s.get("session_memory") or "").strip()
+    if len(text) < SESSION_MEMORY_MIN_CHARS:
+        return ""
+    try:
+        upto = int(s.get("session_memory_upto") or 0)
+        at = float(s.get("session_memory_at") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if upto < int(keep_from or 0) or at <= 0:
+        return ""
+    if time.time() - at > SESSION_MEMORY_MAX_AGE:
+        return ""
+    fp = str(s.get("session_memory_fp") or "")
+    if fp and fp != _range_fp(s.get("messages") or [], upto):
+        print("[压缩] 会话工作记忆已过期（区间被改动），改走重新摘要")
+        return ""
+    return text
+
+
+def _apply_summary(s, summary, keep_from, points, msgs, cut, stage="auto"):
+    """把一份摘要写入会话字段，并补上「历史对话已被压缩」分隔线。"""
+    # 先取旧标记（旧会话没有 compress_marks 时用摘要字段补一条）。
+    # 必须在写 summary_* 之前取：否则 compress_marks_for 会把「本次压缩」
+    # 当成旧摘要再补一条，产生两条 at 相同、位置不同的标记，
+    # 前端按 at 去重后会选中靠前的那条，分隔线就画错位置了。
+    marks = s.get("compress_marks")
+    if not isinstance(marks, list) or not marks:
+        marks = compress_marks_for(s)
+    marks = list(marks)
+    _now = time.time()
+    s["summary"] = summary
+    s["summary_upto"] = keep_from
+    s["summary_at"] = _now
+    s["summary_stage"] = str(stage or "auto")   # collapse / auto，便于排查
+    s["summary_mem"] = points          # 暂存要点，落盘后由 flush_summary_memory 写入记忆
+    # 每次压缩在消息流里的位置：前端据此画「历史对话已被压缩」分隔线
+    marks.append({"at": int(_now * 1000), "index": len(msgs),
+                  "upto": keep_from, "count": max(0, keep_from - cut)})
+    s["compress_marks"] = marks
+    # 统一归一：补 key、按压缩点去重、裁剪到上限（同一压缩点只留一条）
+    trim_compress_marks(s)
+    return True
+
+
+def compress_history(s, system_prompt="", stop_event=None, prefer_local=True,
+                     keep_ratio=None, stage="auto"):
     """把较早的对话总结成摘要，写入 s['summary'] / s['summary_upto']。
     成功返回 True；可压缩消息不足或调用失败返回 False。
     摘要默认用「轻量模型」生成；混合模式下的小区间可由本地模型分块完成。
@@ -1049,6 +1266,12 @@ def compress_history(s, system_prompt="", stop_event=None, prefer_local=True):
     # （否则 40k 工作集会被 25% 的 keep_ratio 再砍成 10k）。
     if working_set_tokens() > 0 and not light_chat_is_local(_cfg):
         _keep_ratio = 1.0
+    # 渐进折叠（L4）：显式传入更宽的保留比例，只压最旧的一段，保留更多近期原文。
+    if keep_ratio is not None:
+        try:
+            _keep_ratio = float(keep_ratio)
+        except (TypeError, ValueError):
+            pass
     keep_from = keep_from_by_tokens(msgs, cut, _input_window, _keep_ratio,
                                     calibrate_ratio(s, system_prompt))
     # 当前回合（最后一条真正的用户消息及其之后）永远保留原文：
@@ -1056,6 +1279,13 @@ def compress_history(s, system_prompt="", stop_event=None, prefer_local=True):
     keep_from = _clamp_keep_from(msgs, cut, keep_from)
     if keep_from <= cut:
         return False                      # 可压缩的旧消息不足
+    # 会话工作记忆已覆盖这段且没过期：直接复用，省掉一次摘要调用（对齐 CC 的零成本压缩）。
+    _sm = _session_memory_ready(s, keep_from)
+    if _sm:
+        print("[压缩] 使用会话工作记忆（零 API）")
+        _ok = _apply_summary(s, _sm, keep_from, [], msgs, cut, stage=stage)
+        _note_compress_result(s.get("id"), bool(_ok))
+        return _ok
     api_key, api_url, api_model = get_api_conf("chat")
     if not api_key:
         return False
@@ -1144,6 +1374,7 @@ def compress_history(s, system_prompt="", stop_event=None, prefer_local=True):
         raw = _local_compress(api_key, api_url, api_model, lines, replay, _cfg, stop_event)
         if raw is None and (light_chat_mode(_cfg)
                             or not bool(_cfg.get("hybrid_fallback_api", True))):
+            _note_compress_result(s.get("id"), False)
             return False
     elif _local_light:
         # 区间太大时本地要串行跑很多块，延迟不可控：改用主模型一次压完（成本仍远小于省下的 prompt）
@@ -1151,43 +1382,30 @@ def compress_history(s, system_prompt="", stop_event=None, prefer_local=True):
               % (_range_tokens, _local_max))
         if light_chat_mode(_cfg):
             # 主对话就是 light，没有别的模型可回退：宁可这一轮不压，也不发必超上下文的请求
+            _note_compress_result(s.get("id"), False)
             return False
     if raw is None:
         raw = _api_compress(api_key, api_url, api_model, system_prompt, lines, replay,
                             _sum_tokens, stop_event, use_light=not _local_light)
     if not raw:
+        _note_compress_result(s.get("id"), False)
         return False
     if stop_event is not None and stop_event.is_set():
         return False
     summary, points = _split_summary(raw)
     if not summary:
+        _note_compress_result(s.get("id"), False)
         return False
     _orig_chars = sum(len(str(m.get("content") or "")) for m in replay
                       if isinstance(m, dict))
     if _orig_chars and len(summary) > _orig_chars:
         print("[压缩] 摘要比原文还长（%d > %d 字），放弃本次压缩"
               % (len(summary), _orig_chars))
+        _note_compress_result(s.get("id"), False)
         return False
-    # 先取旧标记（旧会话没有 compress_marks 时用摘要字段补一条）。
-    # 必须在写 summary_* 之前取：否则 compress_marks_for 会把「本次压缩」
-    # 当成旧摘要再补一条，产生两条 at 相同、位置不同的标记，
-    # 前端按 at 去重后会选中靠前的那条，分隔线就画错位置了。
-    marks = s.get("compress_marks")
-    if not isinstance(marks, list) or not marks:
-        marks = compress_marks_for(s)
-    marks = list(marks)
-    _now = time.time()
-    s["summary"] = summary
-    s["summary_upto"] = keep_from
-    s["summary_at"] = _now
-    s["summary_mem"] = points          # 暂存要点，落盘后由 flush_summary_memory 写入记忆
-    # 每次压缩在消息流里的位置：前端据此画「历史对话已被压缩」分隔线
-    marks.append({"at": int(_now * 1000), "index": len(msgs),
-                  "upto": keep_from, "count": max(0, keep_from - cut)})
-    s["compress_marks"] = marks
-    # 统一归一：补 key、按压缩点去重、裁剪到上限（同一压缩点只留一条）
-    trim_compress_marks(s)
-    return True
+    _ok = _apply_summary(s, summary, keep_from, points, msgs, cut, stage=stage)
+    _note_compress_result(s.get("id"), bool(_ok))
+    return _ok
 
 
 def save_summary(sid, s):
@@ -1195,7 +1413,8 @@ def save_summary(sid, s):
     压缩可能耗时几十秒，期间用户可能又发了消息；直接写回旧 data 会覆盖新消息，
     所以这里重新读盘，只覆盖摘要相关的四个字段。返回合并后的会话（失败为 None）。"""
     fields = {k: s.get(k) for k in
-              ("summary", "summary_upto", "summary_at", "summary_mem")}
+              ("summary", "summary_upto", "summary_at", "summary_stage",
+               "summary_mem")}
     data = load_sessions()
     cur = find_session(data, sid)
     if not cur:
@@ -1327,7 +1546,13 @@ def _range_fp(msgs, upto):
     return h.hexdigest()
 
 
-def maybe_precompress(sid, system_tokens, extra_tokens=0, system_prompt=""):
+def range_fingerprint(msgs, upto):
+    """公开给会话工作记忆用的区间指纹（与压缩校验同一套算法）。"""
+    return _range_fp(msgs, upto)
+
+
+def maybe_precompress(sid, system_tokens, extra_tokens=0, system_prompt="",
+                      background=True):
     """占用达到 `request_budget()` 时在后台压缩；本轮请求不等待。
 
     预算同时受「窗口 * compress_ratio」和「窗口 - 输出上限 - headroom」约束
@@ -1347,15 +1572,42 @@ def maybe_precompress(sid, system_tokens, extra_tokens=0, system_prompt=""):
             s = find_session(data, sid)
             if not s:
                 return
+            if _compress_blocked(sid):      # 连续失败熔断中：本轮不再白花请求
+                return
+            _cfg = load_config() or {}
             budget = request_budget()
             if budget <= 0:          # 不限窗口：不做后台预压缩
                 return
             used = (session_context(s, "")["used"]
                     + int(system_tokens or 0) + int(extra_tokens or 0))
             if used < budget:
-                return
-            if not compress_history(s, system_prompt, stop_event=stop_event):
-                return
+                # 渐进折叠（L4）：到窗口预算的 80% 先轻压一档，保留更多近期原文；
+                # 到 100% 再走完整压缩。只影响窗口预算，不影响 40k 工作集。
+                try:
+                    _cr = float(_cfg.get("history_collapse_ratio") or 0)
+                except (TypeError, ValueError):
+                    _cr = 0.8
+                if _cr <= 0 or used < budget * _cr:
+                    return
+                try:
+                    _kr = float(_cfg.get("history_collapse_keep_ratio") or 0.32)
+                except (TypeError, ValueError):
+                    _kr = 0.32
+                # 折叠后占用仍偏高时别每轮都再叫一次模型：同阶段 10 分钟内只折一次。
+                try:
+                    _last = float(s.get("summary_at") or 0)
+                except (TypeError, ValueError):
+                    _last = 0
+                if (s.get("summary_stage") == "collapse" and _last
+                        and time.time() - _last < 600):
+                    return
+                if not compress_history(s, system_prompt, stop_event=stop_event,
+                                        keep_ratio=_kr, stage="collapse"):
+                    return
+            else:
+                if not compress_history(s, system_prompt, stop_event=stop_event,
+                                        stage="auto"):
+                    return
             cur = save_summary(sid, s)
             if not cur:
                 return
@@ -1377,6 +1629,9 @@ def maybe_precompress(sid, system_tokens, extra_tokens=0, system_prompt=""):
         finally:
             end_compress(sid)
 
+    if not background:
+        work()
+        return True
     threading.Thread(target=work, daemon=True).start()
     try:
         from app import events as events_bus
@@ -1408,6 +1663,8 @@ def maybe_compact_working_set(sid, system_prompt="", stop_event=None):
             data = load_sessions()
             s = find_session(data, sid)
             if not s:
+                return
+            if _compress_blocked(sid):
                 return
             if history_tokens(s) <= ws:
                 return
@@ -1500,19 +1757,40 @@ def real_used_tokens(last_prompt, messages, since=0, calib=1.0):
     return base + int(added * max(1.0, k))
 
 
-def trim_tool_results(messages, budget_tokens, keep_recent=2, fold_chars=240):
+FOLDED_MARK = "（较早的工具结果已折叠）"
+
+
+def trim_tool_results(messages, budget_tokens, keep_recent=2, fold_chars=240,
+                      target_tokens=None, start_index=0, stats=None):
     """把较早的工具结果替换成结构化占位，直到回到预算内。
 
     清理单位是**单条工具结果**（对话里一条以 TOOL_MSG_PREFIX 开头的 user 消息
     就是一个结果，见 chat.py 的回灌），保留最近 `keep_recent` 条，其余折成
     `fold_chars` 以内的摘要；原文仍可通过落盘句柄 read_tool_result 取回。
-    不调用模型、不改会话数据；返回被清理的条数。"""
+    不调用模型、不改会话数据；返回被清理的条数。
+
+    缓存友好的两个参数（前缀缓存「改一个字节、后面全废」，所以折叠**次数**比深度更贵）：
+    - target_tokens：低水位。给值时一次折到低水位，而不是折到刚好卡线；
+      这样下一次触发要等体量再涨 `budget - target`，不会每轮都改历史中段。
+    - start_index：回合内游标，只扫这个下标之后的工具消息，已处理区间不再重复扫。
+      折叠点因此只前进、不回退。
+    - stats：可选 dict；回填 `{"cursor": 最后一条被折消息的下标 + 1}`，供调用方保存游标。
+    """
     def _is_tool(m):
         c = m.get("content") if isinstance(m, dict) else None
         return (isinstance(m, dict) and m.get("role") == "user"
                 and isinstance(c, str) and c.startswith(TOOL_MSG_PREFIX))
 
-    idxs = [i for i, m in enumerate(messages) if _is_tool(m)]
+    def _already(m):
+        # 已经折过一次的占位不要再折：内容不会变，只会白白拉长扫描时间
+        c = m.get("content") if isinstance(m, dict) else ""
+        return isinstance(c, str) and FOLDED_MARK in c[:80]
+
+    try:
+        begin = max(0, int(start_index or 0))
+    except (TypeError, ValueError):
+        begin = 0
+    idxs = [i for i, m in enumerate(messages) if i >= begin and _is_tool(m) and not _already(m)]
     try:
         keep_recent = max(0, int(keep_recent or 0))
     except (TypeError, ValueError):
@@ -1522,17 +1800,133 @@ def trim_tool_results(messages, budget_tokens, keep_recent=2, fold_chars=240):
     total = estimate_messages_tokens(messages)
     if total <= budget_tokens:
         return 0
+    # 低水位缺省 = 高水位（保持老调用方的「折到刚好卡线」语义）
+    target = budget_tokens
+    if target_tokens:
+        try:
+            target = min(int(target_tokens), int(budget_tokens))
+        except (TypeError, ValueError):
+            target = budget_tokens
+    target = max(1, target)
     dropped = 0
+    last_idx = -1
     for i in (idxs[:-keep_recent] if keep_recent else idxs):
-        if total <= budget_tokens:
+        if total <= target:
             break
         text = messages[i].get("content") or ""
-        placeholder = (TOOL_MSG_PREFIX + "\n（较早的工具结果已折叠）"
+        placeholder = (TOOL_MSG_PREFIX + "\n" + FOLDED_MARK
                        + _fold_summary(text, fold_chars))
         total -= estimate_tokens(text) - estimate_tokens(placeholder)
         messages[i] = {"role": "user", "content": placeholder}
         dropped += 1
+        last_idx = i
+    if stats is not None and last_idx >= 0:
+        stats["cursor"] = last_idx + 1
     return dropped
+
+
+def _micro_summarize(text, stop_event=None):
+    """单条工具结果的轻量摘要；按原文 hash 缓存，避免每轮重复调用。"""
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    key = hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()
+    with _MICRO_LOCK:
+        hit = _MICRO_CACHE.get(key)
+    if hit:
+        return hit
+    api_key, api_url, api_model = get_api_conf("chat")
+    if not api_key:
+        return ""
+    prompt = (
+        "把下面这段工具结果压缩成供另一个模型继续工作的摘要。\n"
+        "只保留：错误信息、关键数值、文件路径与行号、执行过的命令、结论。\n"
+        "不要寒暄、不要解释、不要编造；不超过 600 字。\n\n"
+        + raw[:MICROCOMPACT_INPUT_CHARS]
+    )
+    try:
+        from app import llm
+        out = llm._quick_chat(
+            api_key, api_url, api_model,
+            [{"role": "user", "content": prompt}],
+            max_tokens=500, source="microcompact", stop_event=stop_event,
+            timeout=(8, 45), tries=1, use_light=True)
+    except Exception as e:                # noqa: BLE001  失败就保留原文
+        print(f"[微压缩] 摘要失败：{e}")
+        return ""
+    out = str(out or "").strip()
+    if not out or len(out) >= len(raw):
+        return ""
+    if len(out) > MICROCOMPACT_MAX_CHARS:
+        out = out[:MICROCOMPACT_MAX_CHARS] + "…"
+    with _MICRO_LOCK:
+        if len(_MICRO_CACHE) >= _MICRO_CACHE_MAX:
+            _MICRO_CACHE.pop(next(iter(_MICRO_CACHE)))
+        _MICRO_CACHE[key] = out
+    return out
+
+
+def microcompact_messages(messages, budget_tokens, cfg=None, stop_event=None):
+    """对齐 CC 的 microcompact：只压「单条过大的工具结果」，不动其它消息。
+
+    触发条件：当前上下文 >= 预算 * microcompact_trigger_ratio（默认 60%），
+    且单条工具结果 >= microcompact_min_tokens（默认 3k）。每次最多压 3 条，
+    保留最近 2 条工具结果原文；只改本次请求的临时列表，不落库。
+    """
+    cfg = cfg if isinstance(cfg, dict) else (load_config() or {})
+    if cfg.get("microcompact_enabled", True) is False:
+        return messages, 0
+    if light_chat_is_local(cfg):          # 本地小窗口：已有确定性折叠，别再加一次模型调用
+        return messages, 0
+    try:
+        budget = int(budget_tokens or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    if budget <= 0:
+        return messages, 0
+    try:
+        ratio = float(cfg.get("microcompact_trigger_ratio")
+                      or MICROCOMPACT_TRIGGER_RATIO)
+        min_tokens = int(cfg.get("microcompact_min_tokens")
+                         or MICROCOMPACT_MIN_TOKENS)
+    except (TypeError, ValueError):
+        ratio, min_tokens = MICROCOMPACT_TRIGGER_RATIO, MICROCOMPACT_MIN_TOKENS
+    if estimate_messages_tokens(messages) < max(1, int(budget * ratio)):
+        return messages, 0
+
+    idxs = []
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if not isinstance(c, str) or not c.startswith(TOOL_MSG_PREFIX):
+            continue
+        if FOLDED_MARK in c[:80] or "【微压缩】" in c[:120]:
+            continue
+        idxs.append(i)
+    if len(idxs) <= MICROCOMPACT_KEEP_RECENT:
+        return messages, 0
+    cand = []
+    for i in idxs[:-MICROCOMPACT_KEEP_RECENT]:
+        if stop_event is not None and stop_event.is_set():
+            return messages, 0
+        if estimate_tokens(messages[i].get("content") or "") >= min_tokens:
+            cand.append(i)
+    cand = cand[:MICROCOMPACT_MAX_PER_PASS]
+    done = 0
+    for i in cand:
+        if stop_event is not None and stop_event.is_set():
+            break
+        old = messages[i].get("content") or ""
+        new = _micro_summarize(old, stop_event)
+        if not new:
+            continue
+        messages[i] = {**messages[i],
+                       "content": TOOL_MSG_PREFIX + "\n【微压缩】\n" + new}
+        done += 1
+    if done:
+        print("[微压缩] 已摘要 %d 条过大的工具结果" % done)
+    return messages, done
 
 
 def trim_history_to_budget(messages, budget_tokens):
@@ -1569,6 +1963,47 @@ def recover_overflow(messages, budget_tokens, fold_chars=240):
     if estimate_messages_tokens(messages) > budget_tokens:
         messages, dropped = trim_history_to_budget(messages, budget_tokens)
     return messages, folded, dropped
+
+
+def reactive_compact(messages, keep_last=4, stop_event=None, use_light=False):
+    """对齐 CC 的 Reactive Compact：413 / 超窗后保留最后 4 条，其余紧急摘要。
+
+    只作用于本次请求的临时列表，不落库；返回 (新列表, 被替换的条数)。
+    找不到密钥 / 摘要失败 / 没有足够旧消息时原样返回。
+    """
+    msgs = list(messages or [])
+    if len(msgs) <= int(keep_last or 0) + 1:
+        return messages, 0
+    sys_msgs = msgs[:1] if msgs and msgs[0].get("role") == "system" else []
+    body = msgs[len(sys_msgs):]
+    if len(body) <= int(keep_last or 0):
+        return messages, 0
+    cut = len(body) - int(keep_last or 0)
+    # 别把 tool_use / tool_result 拆开：tail 开头若是工具结果，往前带上对应的 assistant。
+    while cut > 0 and _is_tool_msg(body[cut]):
+        cut -= 1
+    if cut <= 0:
+        return messages, 0
+    old, tail = body[:cut], body[cut:]
+    if sum(estimate_tokens(str(m.get("content") or "")) for m in old) < 300:
+        return messages, 0
+    api_key, api_url, api_model = get_api_conf("chat")
+    if not api_key:
+        return messages, 0
+    _sys_text = str((sys_msgs[0].get("content") or "")) if sys_msgs else ""
+    raw = _api_compress(api_key, api_url, api_model, _sys_text, [], old,
+                        max(512, min(2048, len(old) * 8)), stop_event,
+                        use_light=use_light)
+    if not raw:
+        return messages, 0
+    summary, _points = _split_summary(raw)
+    if not summary:
+        return messages, 0
+    note = {"role": "user", "content":
+            "【上下文超窗，已紧急压缩较早的 %d 条消息；原文仍在本地会话里】\n%s"
+            % (len(old), summary[:6000])}
+    print("[压缩] 413 应急压缩：%d 条 → 摘要，保留最后 %d 条" % (len(old), len(tail)))
+    return sys_msgs + [note] + tail, len(old)
 
 
 def summary_info(s):

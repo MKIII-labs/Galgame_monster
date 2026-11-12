@@ -851,6 +851,31 @@ def _t_delete_file(root, args):
     return "已删除文件：" + _rel(root, p), [undo_op]
 
 
+def _parse_page_ranges(spec, total, max_pages=20):
+    """解析 pages="1-5,7" / "3" 这类范围；1-based，最多 max_pages 页。"""
+    out = []
+    for part in str(spec or "").replace("，", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                a, b = part.split("-", 1)
+                lo, hi = int(a), int(b)
+            else:
+                lo = hi = int(part)
+        except (TypeError, ValueError):
+            continue
+        if lo > hi:
+            lo, hi = hi, lo
+        for n in range(max(1, lo), min(int(total), hi) + 1):
+            if n not in out:
+                out.append(n)
+            if len(out) >= max_pages:
+                return out
+    return out
+
+
 def _t_attachment_read(root, args, caps=None):
     """回看本会话里已留存的附件（图片 / 文档）。
 
@@ -888,6 +913,26 @@ def _t_attachment_read(root, args, caps=None):
                 % key), None
 
     if item["kind"] == attachments.DOC:
+        pages_spec = str(args.get("pages") or "").strip()
+        if pages_spec:
+            page_texts = item.get("pages") or []
+            if not page_texts:
+                return ("该附件没有页级数据（不是 PDF，或旧会话没存页）。"
+                        "请改用 offset / limit 分段读。"), None
+            nums = _parse_page_ranges(pages_spec, len(page_texts), 20)
+            if not nums:
+                return ("页码范围无效：本附件共 %d 页，示例 pages=\"1-5\"（每次最多 20 页）。"
+                        % len(page_texts)), None
+            parts = []
+            for n in nums:
+                t = str(page_texts[n - 1] or "").strip()
+                parts.append("【第 %d 页】\n%s"
+                             % (n, t or "（本页没有可提取的文本）"))
+            head = "【附件 %s｜%s｜共 %d 页】" % (
+                item["id"], item["name"], len(page_texts))
+            if len(nums) < len(page_texts):
+                head += "（本次第 %d–%d 页）" % (nums[0], nums[-1])
+            return head + "\n\n" + "\n\n".join(parts), None
         text = item.get("text") or ""
         if not text:
             return ("❌ 附件「%s」没有留存正文（发送时解析失败：%s）。"

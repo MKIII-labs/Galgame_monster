@@ -126,13 +126,13 @@ def test_plan_schema_exposed():
     assert "plan" in names
     assert "read" in names and "code" in names
 
-    # /plan 只读：写 / 命令 / 工作流 schema 都不下发
+    # /plan 不再裁剪 schema：工具目录跨模式固定（对齐 DSH 的 request-cache stability），
+    # 写操作由提示词约束 + 运行时按 PLAN_MODE_TOOLS 拒绝。
     ro = [t["function"]["name"]
           for t in agent.native_tool_schemas(agent_on=True, search_ready=True,
                                              plan_mode=True)]
     assert "plan" in ro and "read" in ro
-    assert "edit" not in ro and "run" not in ro
-    assert "workflow" not in ro
+    assert "edit" in ro and "run" in ro
 
 
 def test_plan_step_ref_roundtrip():

@@ -74,7 +74,7 @@
 
   function stripChrome(root) {
     const kill = '.msg-actions,.usage-line,.live-bar,.end-note .end-act,.tool-undo,' +
-      '.md-toc,.queue-ghost,.queue-ghosts,.typing,.live-text,.ctx-ring,#btn-bottom';
+      '.files-changed,.md-toc,.queue-ghost,.queue-ghosts,.typing,.live-text,.ctx-ring,#btn-bottom';
     root.querySelectorAll(kill).forEach((n) => n.remove());
     root.querySelectorAll('button').forEach((n) => {
       if (!n.closest('.tool-card')) n.remove();
