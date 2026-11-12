@@ -336,6 +336,6 @@ function ideTermInitOnce() {
   new MutationObserver(() => {
     if (ideTermState && ideTermState.term) ideTermState.term.options.theme = ideTermColors();
   }).observe(document.documentElement, {
-    attributes: true, attributeFilter: ['data-theme', 'data-ide-theme'],
+    attributes: true, attributeFilter: ['data-theme'],
   });
 }

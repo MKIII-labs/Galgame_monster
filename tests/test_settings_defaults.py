@@ -21,7 +21,7 @@ def test_default_config_covers_settings_pages():
                 "chat_round_retries", "chat_stream_stall_timeout",
                 "chat_persist_reasoning", "chat_reasoning_keep_chars",
                 "gal_cps", "gal_theme", "speech_polish",
-                "tts_provider", "ide_theme", "agent_max_undo"):
+                "tts_provider", "agent_max_undo"):
         assert key in cfg
 
 

@@ -321,8 +321,9 @@ def _clean_env(bridge, sandbox="", allow_write=False, allow_cmd=False,
                allow_outside=False, extra_allow=()):
     """只传最小环境变量：不把 API key / 配置带进模型生成的代码。
 
-    同时写入安全护栏的运行参数：沙箱根、写 / 命令 / 沙箱外读三个开关，
+    同时写入安全护栏的运行参数：沙箱根、写 / 命令开关、外部读（默认允许），
     以及「永远可读」的路径（桥接目录、脚本临时目录）。
+    allow_outside 仅为兼容旧调用保留：脚本读取已默认允许沙箱外绝对路径。
     """
     keep = ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE",
             "PYTHONIOENCODING", "LANG", "LC_ALL")
@@ -335,7 +336,7 @@ def _clean_env(bridge, sandbox="", allow_write=False, allow_cmd=False,
     env["GM_GUARD_ROOT"] = os.path.realpath(sandbox) if sandbox else ""
     env["GM_GUARD_WRITE"] = "1" if allow_write else "0"
     env["GM_GUARD_CMD"] = "1" if allow_cmd else "0"
-    env["GM_GUARD_OUTSIDE"] = "1" if allow_outside else "0"
+    env["GM_GUARD_OUTSIDE"] = "1"     # 读取默认允许沙箱外绝对路径；写与命令仍看上面两个开关
     allow = [bridge] + [p for p in extra_allow if p]
     env["GM_GUARD_ALLOW"] = os.pathsep.join(
         os.path.realpath(p) for p in allow if p)
@@ -417,9 +418,9 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
     emit(obj) 用来把 script_log 推给前端（可选）。
     """
     emit = emit or (lambda obj: None)
-    # 沙箱外只读：脚本里的工具调用也要拿到同一个开关，否则只有内置 open() 能读
+    # 读取默认允许沙箱外绝对路径：脚本里的工具调用也拿同一个开关
     caps = dict(caps or {})
-    caps["allow_outside"] = bool(allow_outside)
+    caps["allow_outside"] = True
     code = str(code or "")
     if not code.strip():
         return "❌ run_script：code 为空", {"calls": 0}

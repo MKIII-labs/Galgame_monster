@@ -56,16 +56,13 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
     intro = ("你现在可以在上面这个沙箱目录内**自主读写文件**来完成用户的任务。"
              "路径优先用**沙箱内的相对路径**（如 src/main.py，推荐）；"
              "沙箱内的绝对路径也可以。")
-    outside_lines = []
-    if allow_outside:
-        outside_lines = [
-            "⚠ 用户已开启「允许读取沙箱外文件（只读）」：当用户**明确要求**读取沙箱外的某个"
-            "文件或目录时，list_dir / read_file 可用**绝对路径**（如 D:/xxx/yyy.txt）读取沙箱外的"
-            "内容；**不要主动去翻沙箱外的文件**。写入类工具（write_file / edit_file / make_dir / "
-            "move_file / delete_file）**仍然只能在沙箱内**。",
-        ]
-    else:
-        intro += "（越出沙箱的路径会被拒绝）"
+    outside_lines = [
+        "读取可以用**绝对路径**指向沙箱外的文件或目录（如 D:/xxx/yyy.txt），"
+        "与 Trae 一致；但秘密文件（.env / 私钥 / .ssh 等）、本项目 data/ 与 "
+        ".git / .venv / node_modules 等禁止目录仍然拒绝。"
+        "写入类工具（write_file / edit_file / make_dir / move_file / delete_file）"
+        "**仍然只能在沙箱内**。",
+    ]
     if compact:
         # 原生 function calling 已把参数 schema 发给模型；正文只留 action 速查。
         # 高频工具已按 action 合并（旧名仍可调用），这里不再逐个列旧工具。
@@ -108,6 +105,11 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "适合开工前先看骨架",
             "- write_file   {path, content}               覆盖或创建文件（整文件写入）",
             "- edit_file    {path, old, new}              精确替换（old 在文件中必须唯一）",
+            "- multi_edit   {path, edits:[{old,new,replace_all?}]}  "
+            "一次多处替换（原子：任一处失败都不写盘）；适合多 hunk 重构",
+            "- apply_patch  {path, patch}                 应用 unified diff（@@ -a,b +c,d @@ hunk）",
+            "- notebook_edit {path, operation, cell_id?, cell_index?, source?, cell_type?}  "
+            "编辑 .ipynb 单元格：replace / insert / delete",
             "- make_dir     {path}                        创建目录",
             "- move_file    {from, to}                    重命名 / 移动",
             "- copy_file    {from, to, overwrite?}         复制文件；目标已存在时必须 overwrite=true",
@@ -116,13 +118,16 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "argv 是字符串数组（如 [\"python\",\"-m\",\"pytest\",\"-q\"]）。"
             "不支持管道 / 重定向 / 后台常驻进程；只允许 python / node / npm / git / pytest 等白名单程序；"
             "**不允许内联执行**（python -c / node -e），要跑代码请先写成沙箱内的 .py / .js 再执行",
-            "- shell        {action, command?, wait?}      **持久 PowerShell**：同一会话内 cd / 环境变量 / "
-            "后台进程都保留，可以发管道、跑交互式命令、起 dev server 后再接着操作。"
-            "action = run 执行 / read 继续取输出 / interrupt 发 Ctrl+C / close 关闭。"
-            "一次性命令优先用 run_command；shell 走高危审批",
+            "- shell        {action, command?, text?, enter?, wait?}  **持久 PowerShell**：同一会话内 "
+            "cd / 环境变量 / 后台进程都保留，可以发管道、跑交互式命令、起 dev server 后再接着操作。"
+            "action = run 执行 / read 继续取输出 / input 写 stdin / status 查看状态 / "
+            "interrupt 发 Ctrl+C / close 关闭。一次性命令优先用 run_command；shell 走高危审批",
             "- fetch_url    {url, query?, chars?}         抓一个 http(s) 页面的可读正文（文档 / issue / "
             "报错页）。只读 GET，拒绝本机与内网地址；按关键词找多个来源用 web_search",
             "- sleep        {seconds}                     等 0.5–30 秒（起服务 / 等端口），不要代替真正的条件等待",
+            "- open_preview {path?, url?}                在 IDE 预览面板打开页面：path 打开沙箱 HTML；"
+            "url 预览本机 dev server（只允许 localhost / 127.0.0.1，端口 >= 1024，"
+            "经本机代理注入控制台和元素选择）。生成前端结果后用它给用户一个可看的入口",
             "- render_check {path, viewport?, screenshot?}  用**无头浏览器真的打开**沙箱里的 HTML，"
             "回传运行时错误 + 布局问题（溢出 / 遮挡 / 字号 / 对比度 / 零尺寸画布 / 点击区过小）；"
             "screenshot=true 额外截图交给视觉模型描述画面（更慢更贵，判断观感时才开）",
@@ -307,7 +312,8 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
         "13. **图片产物用 see_image 自检**（截图 / 立绘 / 下载的参考图）：你读不了像素，"
         "`read_file` 只处理文本。写完或下载完图片后调 see_image 拿视觉描述，"
         "再判断「是否符合要求」；没有配置视觉密钥时会明确告诉你，不要假装看过。",
-        "14. **改完多处代码用 check_code 体检**：write_file / edit_file 已有单文件写后自检，"
+        "14. **改完多处代码用 check_code 体检**：write_file / edit_file / multi_edit / "
+        "apply_patch 已有单文件写后自检，"
         "跨文件改动后再跑一次 check_code(路径)，不要等用户发现语法错误；"
         "不知道某个函数在哪、谁在调用它时，用 find_symbol 而不是全仓 grep。",
         "15. **有参考物时先量再对照**：参考图 / 设计稿 / 截图 / 已有产物的还原类任务，"
@@ -998,7 +1004,7 @@ def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=No
     # 否则提示词会一直说「这组没挂载」，模型再怎么解锁也仍然看到「不可用」。
     hidden = hidden_tools(allow_groups, unlocked) if native_tools else None
     if agent_on and sandbox:
-        parts = [_full_agent_prompt(sandbox, bool(s.get("allow_outside_read")),
+        parts = [_full_agent_prompt(sandbox,
                                     include_tree=False, compact=bool(native_tools),
                                     hidden=hidden)]
     elif agent_on:

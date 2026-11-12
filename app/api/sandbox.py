@@ -11,7 +11,7 @@ from app.config import get_api_conf
 from app.llm import _quick_chat
 from app.registry import route
 from app.sessions import (ensure_session_kb_fields, find_session, load_sessions, save_sessions)
-from app.vscode import (current_theme_payload, find_vscode_cli, vscode_import_payload)
+from app.vscode import (find_vscode_cli, vscode_import_payload)
 
 def _api_sandbox_pick(h):
         """弹出系统文件夹选择框，返回所选沙箱目录（busy=True 表示已有一个窗口开着）"""
@@ -528,14 +528,6 @@ def _api_vscode_import(h):
             return h._json({"ok": False, "error": str(e)}, 400)
 
 
-def _api_vscode_theme(h):
-        """当前 VS Code 颜色主题：命中内置主题返回预设 id，第三方主题返回映射后的 token 表"""
-        try:
-            return h._json(current_theme_payload())
-        except Exception as e:
-            return h._json({"ok": False, "error": str(e)}, 400)
-
-
 def _api_session_agent(h):
         """设置会话的 Agent 开关与沙箱目录"""
         body = h._body()
@@ -551,8 +543,6 @@ def _api_session_agent(h):
             if val and not os.path.isdir(val):
                 return h._json({"ok": False, "error": "沙箱目录不存在：%s" % val}, 400)
             s["sandbox"] = val
-        if "allow_outside_read" in body:
-            s["allow_outside_read"] = bool(body.get("allow_outside_read"))
         if "approval_mode" in body:
             s["approval_mode"] = agent.normalize_approval(body.get("approval_mode"))
         s["updated_at"] = time.time()

@@ -176,7 +176,6 @@ async function init() {
   _running.forEach((id) => { state.streamingSids[String(id)] = true; });
   applyTheme(state.config.theme);
   galApplyTheme();
-  applyIdeTheme();
   renderSessions();
   renderMessages();
   renderContextBar(data.context);
@@ -385,7 +384,6 @@ async function init() {
   $('#btn-sandbox').onclick = pickSandbox;
   if ($('#btn-sandbox-open')) $('#btn-sandbox-open').onclick = openSandboxFolder;
   $('#btn-sandbox-path').onclick = pickSandboxPath;
-  if ($('#btn-outside-read')) $('#btn-outside-read').onclick = toggleOutsideRead;
   // 写入审批档位：手动 / 自动 / 完全访问 / 自定义
   document.querySelectorAll('#agent-menu .approve-opt').forEach((btn) => {
     btn.onclick = (e) => {
@@ -795,12 +793,22 @@ async function init() {
   // 会话记录：按目录分组 / 平铺切换
   if (typeof bindSessionGroupToggle === 'function') bindSessionGroupToggle();
   // 上次关在剧场时，若当前会话不是剧场会话，就落到大厅，避免会话列表空白
+  const embedCfg = window.__GM_EMBED__ || {};
   let startMode = (state.config && state.config.ui_mode) || 'solo';
-  if (startMode === 'gal') {
-    const cur = (state.sessions.sessions || []).find((s) => s.id === state.sessions.current);
-    if (!cur || (cur.gal_scope || 'main') !== 'gal') startMode = 'hall';
-  }
+  // 嵌入模式用 URL 指定工作区（?mode=ide|hall|work），优先于上次配置
+  if (embedCfg.mode) startMode = embedCfg.mode;
+  // GAL 剧场已从界面下线（入口、设置页签、大厅卡片均已移除）：历史配置里若是 gal，
+  // 统一落到大厅，避免直接打开一个没有入口的页面。后端与 data/gal 保留，需要时可恢复。
+  if (startMode === 'gal') startMode = 'hall';
   applyUiMode(startMode);
+  // ?hall=<id>：嵌入时直接展开某个大厅模块（不等用户再点一次卡片）
+  if (embedCfg.hall && typeof hallOpenFeature === 'function') {
+    try { hallOpenFeature(embedCfg.hall); } catch (e) { /* 模块 id 不存在就留在大厅首页 */ }
+  }
+  // ?settings=<tab>：嵌入时直接落到某个设置页签
+  if (embedCfg.settings) {
+    try { openModal({ tab: embedCfg.settings }); } catch (e) { /* 非法页签忽略 */ }
+  }
   // 右键菜单冷启动：这时 SSE 还没连上，服务端把请求放在 /api/state 里兜底
   if (state.pendingOpen && typeof openPathInApp === 'function') {
     const p = state.pendingOpen;
@@ -871,10 +879,6 @@ async function init() {
   });
 
   // 自主推送：定时提醒 / 主动聊天
-  if ($('#btn-autochat')) {
-    $('#btn-autochat').onclick = () => { toggleAutopilot(); };
-  }
-  apLiveBind();           // 自动化看板：展开 / 收起
   if ($('#remind-add')) $('#remind-add').onclick = addReminder;
   if ($('#autochat-on')) $('#autochat-on').onchange = (e) => toggleAutoChat(e.target.checked);
   if ($('#reminders-enabled') && typeof bindReminderSwitches === 'function') bindReminderSwitches();

@@ -9,6 +9,7 @@ import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
+import gzip as _gzip
 
 
 from app.store import APP_VERSION, WEB_DIR
@@ -54,7 +55,6 @@ from app.api import hall
 from app import orchestrator
 
 from app.api import chat
-from app.api import autopilot as autopilot_api
 from app.api import tasks as tasks_api
 # 以下两个模块通过 @route 自注册（新功能按这个模式加，不用改本文件的路由表）
 from app.api import work as work_api          # noqa: F401
@@ -162,6 +162,38 @@ def _load_static_cached(path, mtime, size):
     with _static_lock:
         _static_cache[path] = (mtime, size, data)
     return data
+
+
+# gzip 缓存：路径 -> (mtime, size, bytes)。压缩一次反复用，
+# 首屏 90 个脚本/样式在国内弱网下体积差 3~4 倍，这点内存很划算。
+_gzip_cache = {}
+_gzip_lock = threading.Lock()
+_GZIP_MIN_BYTES = 1024
+_GZIP_EXTS = (".js", ".css", ".html", ".json", ".svg", ".md", ".txt", ".map", ".xml", ".webmanifest")
+
+
+def accepts_gzip(header):
+    """解析 Accept-Encoding：支持 gzip / *，并尊重 q=0（显式拒绝）。"""
+    for part in str(header or "").split(","):
+        name, _, params = part.strip().partition(";")
+        if name.strip().lower() not in ("gzip", "*"):
+            continue
+        if params.replace(" ", "").lower() in ("q=0", "q=0.0", "q=0.00", "q=0.000"):
+            continue
+        return True
+    return False
+
+
+def _gzip_cached(path, mtime, size):
+    with _gzip_lock:
+        hit = _gzip_cache.get(path)
+        if hit and hit[0] == mtime and hit[1] == size:
+            return hit[2]
+    data = _load_static_cached(path, mtime, size)
+    out = _gzip.compress(data, 6, mtime=0)   # mtime=0：同样的输入永远得到同样的字节
+    with _gzip_lock:
+        _gzip_cache[path] = (mtime, size, out)
+    return out
 
 # ============================================================
 # HTTP 处理
@@ -301,6 +333,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path in ("/legacy", "/legacy/", "/legacy/index.html"):
+            # 兼容旧书签：/legacy 与 / 都指向经典界面
+            return self._static("index.html")
         if path == "/" or path == "/index.html":
             return self._static("index.html")
         if path.startswith("/static/"):
@@ -442,7 +477,6 @@ class Handler(BaseHTTPRequestHandler):
             "/api/chat": chat._api_chat,
             "/api/chat/attach": chat._api_chat_attach,
             "/api/tasks": tasks_api._api_tasks,
-            "/api/autopilot": autopilot_api._api_autopilot,
             "/api/stop": misc._api_stop,
             "/api/workflow/status": orchestrator.api_status,
             "/api/workflow/pause": orchestrator.api_pause,
@@ -549,7 +583,6 @@ class Handler(BaseHTTPRequestHandler):
             "/api/gal/tts/voices": gal_tts._api_gal_tts_voices,
             "/api/gal/session": gal_tts._api_gal_session,
             "/api/vscode/import": sandbox._api_vscode_import,
-            "/api/vscode/theme": sandbox._api_vscode_theme,
             "/api/balance": misc._api_balance,
             "/api/notes/tree": notes._api_notes_tree,
             "/api/notes/get": notes._api_notes_get,
@@ -672,16 +705,19 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith(".html"):
             with open(path, "rb") as f:
                 data = f.read().replace(b"%%TOKEN%%", TOKEN.encode())
-            return self._send(200, data, "text/html; charset=utf-8")
+            headers = {}
+            if len(data) >= _GZIP_MIN_BYTES and accepts_gzip(self.headers.get("Accept-Encoding")):
+                data = _gzip.compress(data, 6, mtime=0)
+                headers["Content-Encoding"] = "gzip"
+                headers["Vary"] = "Accept-Encoding"
+            return self._send(200, data, "text/html; charset=utf-8", extra_headers=headers)
 
         # 其余静态资源：ETag（mtime+size）+ 内存缓存 + 304。
         # 原先固定 no-store，导致每次刷新/重开窗口都全量重下 20+ 个脚本与样式。
         st = os.stat(path)
         etag = '"%x-%x"' % (int(st.st_mtime), st.st_size)
-        if etag in (self.headers.get("If-None-Match") or ""):
-            return self._send(304, b"", "text/plain", cache="no-cache",
-                              extra_headers={"ETag": etag})
-        data = _load_static_cached(path, st.st_mtime, st.st_size)
+        # 手写资源用协商缓存，改完刷新即生效。
+        cache = "no-cache"
         ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
         if path.endswith(".css"):
             ctype = "text/css; charset=utf-8"
@@ -693,7 +729,22 @@ class Handler(BaseHTTPRequestHandler):
             ctype = "font/woff"
         elif path.endswith(".ttf"):
             ctype = "font/ttf"
-        self._send(200, data, ctype, cache="no-cache", extra_headers={"ETag": etag})
+
+        compressible = path.lower().endswith(_GZIP_EXTS)
+        headers = {"ETag": etag}
+        if compressible:
+            headers["Vary"] = "Accept-Encoding"
+        if etag in (self.headers.get("If-None-Match") or ""):
+            return self._send(304, b"", "text/plain", cache=cache, extra_headers=headers)
+
+        use_gzip = (compressible and st.st_size >= _GZIP_MIN_BYTES
+                    and accepts_gzip(self.headers.get("Accept-Encoding")))
+        if use_gzip:
+            data = _gzip_cached(path, st.st_mtime, st.st_size)
+            headers["Content-Encoding"] = "gzip"
+        else:
+            data = _load_static_cached(path, st.st_mtime, st.st_size)
+        self._send(200, data, ctype, cache=cache, extra_headers=headers)
 
     # ---------- API ----------
 
@@ -788,16 +839,6 @@ def create_server(host="127.0.0.1", port=0):
         scheduler.start()
     except Exception as e:
         print(f"[调度] 启动失败：{e}")
-    # 自动化目标：进程重启后把未完成的目标接回线程，并起一个看门狗兜住线程意外退出。
-    # 这一步必须在 HTTP 服务可用之前完成：自动化不走前端请求，没人点也会自己继续。
-    try:
-        from app import autopilot as autopilot_lib
-        n = autopilot_lib.recover()
-        autopilot_lib.start_watchdog()
-        if n:
-            print(f"[自动化] 已自动恢复 {n} 个未完成目标")
-    except Exception as e:
-        print(f"[自动化] 恢复失败：{e}")
     # 记忆索引放在「画像迁移 / 示例素材播种」之后：首次启动也能索引到画像库
     try:
         memory.reindex()

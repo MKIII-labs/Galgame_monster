@@ -106,7 +106,7 @@ DEFAULT_CONFIG = {
     "history_collapse_keep_ratio": 0.32,
     # 省费模式（token_profile）：
     #   balanced = 引用正文只在最后一条用户消息内联、历史轮次只留句柄；
-    #              界面上下文 / 意图提示 / 自动化目标贴到请求末尾，不破坏 system 前缀。
+    #              界面上下文 / 意图提示贴到请求末尾，不破坏 system 前缀。
     #   quality  = 与旧行为逐字节一致（一键回滚，不需要改代码）。
     "token_profile": "balanced",
     # 省费模式的核心：跨回合历史「原文」预算（tokens）。0 = 关闭（回到按窗口压缩）。
@@ -257,9 +257,6 @@ DEFAULT_CONFIG = {
     "reminder_calendar_enabled": True, # 日程到点提醒
     "auto_chat_enabled": True,         # 允许 AI 主动聊天（每个会话仍需单独开启）
     "theme": "light",                # 默认浅色（VS Code Light+）
-    # ---- IDE 编辑器主题（与上面的界面主题完全解耦，两套配置各自独立）----
-    # 空串 = 跟随界面主题；其余取值只在 IDE 模式下生效（见 web/css/ide.css）
-    "ide_theme": "vscode-dark",      # vscode-dark | vscode-light | trae-dark | trae-light | trae-blue | ""
     "ide_whitespace": "all",         # 空白字符可视化：none | selection | trailing | boundary | all
     # ---- GAL 演出模式（见 docs/GAL_MODE_DESIGN.md）----
     "gal_emotion_multi": False,      # 情绪字段是否用多标签数组（默认单值）
@@ -478,23 +475,14 @@ DEFAULT_CONFIG = {
     #              standard（允许 | 与沙箱内重定向，每段仍过白名单）
     #              trusted（额外允许 ; && || 串联，仅建议手动会话使用）
     "agent_shell_mode": "standard",
+    # OS 级命令沙箱（Windows AppContainer）：开启后命令只能读写沙箱目录与已授权的
+    # 工具链目录，越界由内核拒绝；首次授权需要一次管理员确认。
+    "agent_os_sandbox": True,
     # 写后自动格式化：off（默认）| auto（有 ruff / prettier 就用）
     # 只调用本机已安装的工具，不用 npx 临时下载；失败一律保留原文件。
     "agent_formatter": "off",
-    "autopilot_max_turns": 30,       # 自动化：单个目标最多跑几个回合（回合 = 一次完整对话请求）
-    "autopilot_max_minutes": 90,     # 自动化：单个目标最长跑多久（分钟）
-    # 自动化重构后的策略（2026-10-27）：
-    # use_budget = False 时上面两项只作展示，不硬刹；改用「连续无进展」看门狗。
-    "autopilot_use_budget": False,
-    "autopilot_watchdog_turns": 4,   # 连续几回合没有新写入 / 计划变更 / 验收变化就干预；0 = 关闭
-    "autopilot_stall_minutes": 60,   # 多久没有任何进展就暂停（含一直重试）；0 = 关闭
-    "autopilot_retry_max": 0,        # 瞬态错误最多重试几次；0 = 不设上限（仍有 stall 兜底）
-    "autopilot_resume_on_start": True,   # 应用重启后自动接回未完成目标
-    "autopilot_verify": True,        # 没有机检命令时，用独立评审员判定 rubric
     # 遇到提问卡 / 正文决策问句时的策略：auto（一律自决）/ smart（可逆自决、不可逆问人）/ ask（一律问）
-    "autonomy_question_policy": "smart",
-    # 上面这档策略的生效范围：autopilot（仅自动化，默认）/ all（所有对话）
-    "question_policy_scope": "autopilot",
+    "autonomy_question_policy": "ask",
     # 任务 / 提问的通知：横幅、声音、按事件开关、音量（0-100）
     "notify_banner": True,
     "notify_sound": True,

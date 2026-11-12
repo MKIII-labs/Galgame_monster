@@ -491,7 +491,7 @@ def input_breakdown(messages, sys_parts=None, summary_chars=0, schema_chars=0):
 
     sys_parts 是调用方已知的系统提示子块长度：
       rules（规则/画像/记忆说明）、tools_doc（工具说明）、memory（检索记忆/任务状态）；
-    系统提示里剩下的（界面上下文 / 自动化目标 / 时钟 / 研究台账 / GAL 演出提示）
+    系统提示里剩下的（界面上下文 / 时钟 / 研究台账 / GAL 演出提示）
     统一算 other_sys —— 不逐个埋点，避免以后新增块要同步改这里。
     """
     sys_parts = sys_parts or {}

@@ -936,6 +936,10 @@ def _layout_overlay(page_w, page_h, blocks, translations, missing):
         base_px = float(b.get("size") or 10.0)
         if target <= 0:
             target = max(1, int(round(h / max(1.0, base_px) / 1.18)))
+        # 同一视觉行被切成多段时 lines 会偏大（与译页 targetRows 同口径）：
+        # 行距不足字高的 1.6 倍就按字高重估，否则导出字号会被压得比原文小很多。
+        if target > 1 and base_px > 0 and h / target < base_px * 1.6:
+            target = max(1, int(round(h / (base_px * 2.2))))
         lead = h / target
         mult = 2.2 if kind == "heading" else 1.85
         base = max(lead / 1.15, base_px * mult)

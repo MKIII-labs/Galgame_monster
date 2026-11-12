@@ -118,6 +118,21 @@ def test_make_block_records_line_count():
     assert b["lines"] == 3
 
 
+def test_same_visual_row():
+    # 同一视觉行：纵向大面积重叠
+    assert reader._same_visual_row(100, 109, [50, 100.5, 286, 108.8]) is True
+    # 下一行：纵向不重叠
+    assert reader._same_visual_row(100, 109, [50, 110, 286, 119]) is False
+
+
+def test_make_block_uses_visual_rows():
+    # 同一行被切成两段：lines 记 1，而不是 2（否则前端字号会被压到 4px）
+    b = reader._make_block(
+        {"lines": ["abcdef", "ghij"], "rect": [74, 100, 474, 112], "size": 10.0,
+         "rows": 1}, 1, 0, base=10.0)
+    assert b["lines"] == 1
+
+
 def test_normalize_translation_strips_unknown_placeholder_and_restores_number():
     head = {"kind": "heading", "text": "1.2. Contribution", "math": {}}
     # 旧译文把编号当成公式 ⇒ 占位符非法（math 里没有），编号从原文补回

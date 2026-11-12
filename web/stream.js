@@ -1137,6 +1137,9 @@ async function streamChat(extra, resume, attach) {
 
   if (state.uiMode === 'gal') { galSetStatus('思考中…'); galSetTyping(false); galState.skip = false; galState.streamedTurn = false; }   // 新一轮：解除上轮的「跳过朗读」
   let acc = base;
+  // 当前「正文段」在 acc 里的起点：遇到工具调用时把这一段搬进过程折叠，
+  // 答案区只保留最后一次工具之后的正文（与 buildBlocksView 的历史口径一致）。
+  let segStart = base.length;
   let serverFinalText = null;   // 服务端收尾校正后的正文（摘掉裸工具 JSON / 伪标签）
   let textNode = null;          // 流式期间只往这个节点追加，避免每个 chunk 重写整段
   // —— 流式实时 Markdown（NOTE 43.96）：定稿区 + 尾巴区 ——
@@ -1525,6 +1528,41 @@ async function streamChat(extra, resume, attach) {
     if (liveEnabled && liveBox) paintLive();
   };
 
+  /* 一段正文后面紧跟工具调用 → 它不是交付，而是过程结论（「实测已取得…」
+     「第二次 patch 报了…」这类）。流式时就把它搬进过程折叠，答案区只保留
+     最后一次工具之后的正文；收尾时再由 buildBlocksView 按服务端 ans 标记重排。
+     finish / task_done 这类收尾工具不触发搬运，否则最终答案会被折进过程区。 */
+  const isFinishToolName = (name) => {
+    const n = String(name || '');
+    if (n === 'agent_finish') return true;
+    return typeof FINISH_TOOL_NAMES !== 'undefined' && FINISH_TOOL_NAMES.has(n);
+  };
+  const foldSegmentToProcess = (toolName) => {
+    if (state.uiMode === 'gal') return;           // GAL 有自己的逐段演出，不折叠
+    if (!String(toolName || '').trim()) return;   // 名字还没到：等 tool 事件，别误折 finish
+    if (isFinishToolName(toolName)) return;
+    const seg = acc.slice(segStart);
+    if (!seg.trim()) return;                     // 这一段没有正文：无需搬
+    if (paintTimer) { clearTimeout(paintTimer); paintTimer = 0; }
+    flushReveal();                               // 先把已收到的字全部落屏，别漏半个词
+    const d = document.createElement('div');
+    d.className = 'content narration';           // 与历史重建时的旁白同一套样式
+    d.innerHTML = safeRenderMarkdown(seg);
+    if (typeof enhanceToc === 'function') enhanceToc(d);
+    ensureFlow().appendChild(d);
+    // 清空当前正文段：后续 delta 另起一段，答案区不会累积过程旁白。
+    c.textContent = '';
+    c.style.display = '';
+    liveBox = null;
+    tailBox = null;
+    textNode = null;
+    liveRendered = acc.length;
+    revealPos = acc.length;
+    segStart = acc.length;
+    c.appendChild(cur);                          // textContent='' 会把光标一起清掉
+    followProcessStep(d);
+  };
+
   // 增量写入正文（首次调用时把呼吸点换成文本节点）
   const pushText = (t) => {
     keepLiveLast();                 // 状态条常驻在正文下方，直到本轮结束
@@ -1564,6 +1602,7 @@ async function streamChat(extra, resume, attach) {
     tailBox = null;
     textNode = null;
     liveRendered = acc.length;   // 新段只渲染这之后的内容
+    segStart = acc.length;       // 提问卡之前的正文留在原段，不参与后续折叠
     c.appendChild(cur);          // 光标跟到新段
   };
 
@@ -1976,6 +2015,7 @@ async function streamChat(extra, resume, attach) {
           const bt = String(obj.text || '');
           if (!acc && bt) {
             acc = bt;
+            segStart = acc.length;       // 续写起点是上一轮的答案，不能被当成过程旁白折走
             row._raw = bt;
             revealPos = acc.length;      // 续写起点整段直接可见，不做逐字动画
             liveText(live, bt);
@@ -2010,11 +2050,14 @@ async function streamChat(extra, resume, attach) {
           const n = Math.max(0, parseInt(obj.chars, 10) || 0);
           if (n > 0 && acc) {
             acc = acc.slice(0, Math.max(0, acc.length - n));
-            revealPos = Math.min(revealPos, acc.length);
+            if (segStart > acc.length) segStart = acc.length;
+            // 只重绘「当前正文段」：segStart 之前的旁白已经搬进过程折叠，
+            // 从这里重放会把它们又画一遍到正文区。
+            revealPos = Math.min(Math.max(revealPos, segStart), acc.length);
             liveTrim(live, n);
             serverFinalText = null;
             if (liveEnabled && liveBox) {
-              liveRendered = 0;
+              liveRendered = segStart;
               liveBox.innerHTML = '';
               tailBox.innerHTML = '';
               paintLive();
@@ -2133,6 +2176,7 @@ async function streamChat(extra, resume, attach) {
         } else if (obj.type === 'tool_stream') {
           // 原生工具调用参数正在生成：整轮结束前先把名字 / 大小显示出来。
           // 否则界面只有「思考中」或「尚未产出」，用户不知道它在写工具参数。
+          foldSegmentToProcess(obj.name);     // 正文后紧跟工具：先把这段旁白折进过程区
           if (!toolPending) {
             toolPending = document.createElement('div');
             toolPending.className = 'tool-pending';
@@ -2150,6 +2194,7 @@ async function streamChat(extra, resume, attach) {
           // Code Mode 脚本的实时日志：只更新状态条，不写进正文
           setLive('脚本 · ' + String(obj.text || '').slice(0, 60));
         } else if (obj.type === 'tool') {
+          foldSegmentToProcess(obj.name);     // 兜底：没有 tool_stream 的供应商在这里折
           clearToolPending();
           const useGal = state.uiMode === 'gal' && galCfg('gal_show_exec', true) !== false;
           // 普通对话走过程流（工具组直接进 flow），不再需要末尾的 tool-list 容器
@@ -2203,6 +2248,11 @@ async function streamChat(extra, resume, attach) {
           const q = row._toolQueue && row._toolQueue[obj.name];
           const card = q && q.length ? q.shift() : null;
           if (card) finishToolCard(card, obj);
+          // 智能体打开预览：工具结果里带 GM_PREVIEW_URL 时，直接弹出 IDE 预览面板
+          if (isCur() && typeof idePreviewOpenProxy === 'function') {
+            const m = /GM_PREVIEW_URL:(\S+)/.exec(String(obj.result || ''));
+            if (m) idePreviewOpenProxy(m[1]);
+          }
           if (row._toolGroup) {              // 只有普通对话会建这个组
             const g = row._toolGroup;
             g.pending = Math.max(0, g.pending - 1);
@@ -2496,7 +2546,20 @@ async function streamChat(extra, resume, attach) {
           row._secs = [empty];
         }
       } else {
-        // 没拿到块（断流 / 旧服务端）：正文合并回第一段，避免同一段文字在多段里重复
+        // 没拿到块（断流 / 旧服务端）：正文合并回第一段，避免同一段文字在多段里重复。
+        // 流式期间折进过程区的旁白也已经包含在 shown 里，先撤掉，别在正文和过程各显示一遍。
+        if (row._flowWrap) {
+          row._flowWrap.querySelectorAll('.content.narration').forEach((n) => n.remove());
+          if (row._flow && !row._flow.childNodes.length) {
+            row._flowWrap.remove();
+            row._flowWrap = null;
+            row._flow = null;
+            row._flowHead = null;
+            row._flowLabel = null;
+            row._flowMeta = null;
+            row._flowCaret = null;
+          }
+        }
         if ((row._secs || []).length > 1) {
           const first = row._secs[0];
           row._secs.slice(1).forEach((n) => n.remove());

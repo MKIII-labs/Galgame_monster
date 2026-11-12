@@ -21,6 +21,11 @@ TOOLS = [
         "type": "object", "properties": {}}},
 ]
 
+RESOURCES = [
+    {"uri": "mem://doc/1", "name": "doc1", "mimeType": "text/plain",
+     "description": "测试资源一"},
+]
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -33,10 +38,20 @@ for line in sys.stdin:
     rid = msg.get("id")
     params = msg.get("params") or {}
     if method == "initialize":
-        out = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+        out = {"protocolVersion": "2025-06-18",
+               "capabilities": {"tools": {}, "resources": {}},
                "serverInfo": {"name": "fake", "version": "1"}}
     elif method == "tools/list":
         out = {"tools": TOOLS}
+    elif method == "resources/list":
+        out = {"resources": RESOURCES}
+    elif method == "resources/read":
+        uri = params.get("uri")
+        if uri == "mem://doc/1":
+            out = {"contents": [{"uri": uri, "mimeType": "text/plain",
+                                 "text": "资源正文"}]}
+        else:
+            out = {"contents": []}
     elif method == "tools/call":
         name = params.get("name")
         args = params.get("arguments") or {}
@@ -98,13 +113,29 @@ def test_exposed_name_is_safe():
 def test_lazy_injection(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp, "_cfg", lambda: _cfg(tmp_path))
     names = [s["function"]["name"] for s in mcp.tool_schemas()]
-    assert names == ["mcp_list_servers", "mcp_list_tools"]
+    assert names == ["mcp_list_servers", "mcp_list_tools",
+                     "mcp_list_resources", "mcp_read_resource"]
 
     text = mcp.list_tools_text("fs")
     assert "mcp__fs__echo" in text
     names = [s["function"]["name"] for s in mcp.tool_schemas()]
     assert "mcp__fs__echo" in names
     assert "mcp__fs__read_file" in names
+
+
+def test_list_resources_text(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp, "_cfg", lambda: _cfg(tmp_path))
+    text = mcp.list_resources_text("fs")
+    assert "mem://doc/1" in text and "doc1" in text and "text/plain" in text
+    assert "测试资源一" in text
+
+
+def test_read_resource_text(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp, "_cfg", lambda: _cfg(tmp_path))
+    text = mcp.read_resource_text("fs", "mem://doc/1")
+    assert "资源正文" in text and "mem://doc/1" in text
+    assert mcp.read_resource_text("fs", "").startswith("❌")
+    assert mcp.read_resource_text("nope", "mem://doc/1").startswith("❌")
 
 
 def test_schema_reuses_input_schema(tmp_path, monkeypatch):

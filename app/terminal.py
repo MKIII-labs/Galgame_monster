@@ -194,13 +194,44 @@ def _ensure_cleaner():
         _CLEANER.start()
 
 
+def _use_os_sandbox():
+    try:
+        from app import sandbox_win
+        from app.config import load_config
+        return sandbox_win.available() and bool(
+            (load_config() or {}).get("agent_os_sandbox", True))
+    except Exception:                   # noqa: BLE001  沙箱不可用就退回 ConPTY
+        return False
+
+
 def start(sid, sandbox, cols=120, rows=30, force=False, env=None, shell=None):
     """取（或创建）该会话的终端。force=True 时先杀掉旧进程。
 
     env：给子进程的环境变量；None = 继承当前进程（IDE 面板用）。
     shell：启动命令，None = 默认 SHELL。
     Agent 的 shell 工具会传清洗过的 env + SHELL_AGENT，避免把密钥带进终端、也不加载用户 profile。
+    开启 OS 命令沙箱时，Agent 的 shell 改走 AppContainer（IDE 面板仍用 ConPTY）。
     """
+    if shell is not None and list(shell) == list(SHELL_AGENT) and _use_os_sandbox():
+        from app import sandbox_win
+        if not sid or not sandbox or not os.path.isdir(sandbox):
+            raise TerminalError("沙箱目录不可用，请先选择目录")
+        _ensure_cleaner()
+        with _LOCK:
+            old_tid = _BY_SID.get(sid)
+            old = _TERMS.get(old_tid) if old_tid else None
+            if old and old.alive and not force:
+                old.resize(cols, rows)
+                old.last_active = time.time()
+                return old
+            if old:
+                _drop(old)
+            if len(_TERMS) >= MAX_TERMS:
+                raise TerminalError("同时最多打开 %d 个终端，请先关闭一个" % MAX_TERMS)
+            t = sandbox_win.ShellSession(sid, sandbox, env=env, cols=cols, rows=rows)
+            _TERMS[t.tid] = t
+            _BY_SID[sid] = t.tid
+            return t
     if not available():
         raise TerminalError("缺少 pywinpty，请先执行：pip install pywinpty")
     if not sid or not sandbox or not os.path.isdir(sandbox):
@@ -226,6 +257,13 @@ def start(sid, sandbox, cols=120, rows=30, force=False, env=None, shell=None):
 def get(tid):
     with _LOCK:
         return _TERMS.get(str(tid or ""))
+
+
+def get_by_sid(sid):
+    """按会话取终端；不存在返回 None（不创建）。"""
+    with _LOCK:
+        tid = _BY_SID.get(str(sid or ""))
+    return get(tid) if tid else None
 
 
 def drop_by_sid(sid):

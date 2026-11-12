@@ -228,9 +228,9 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
     写 / 命令由开关放行，且写入仍限制在沙箱内。
     """
     emit = emit or (lambda obj: None)
-    # 沙箱外只读：脚本里的工具调用也要拿到同一个开关
+    # 读取默认允许沙箱外绝对路径：脚本里的工具调用也拿同一个开关
     caps = dict(caps or {})
-    caps["allow_outside"] = bool(allow_outside)
+    caps["allow_outside"] = True
     code = str(code or "")
     if not code.strip():
         return "❌ run_workflow_script：code 为空", {"calls": 0, "workflows": 0, "agents": 0}

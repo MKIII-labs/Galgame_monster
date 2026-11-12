@@ -9,12 +9,8 @@ const $$ = (s) => Array.from(document.querySelectorAll(s));
 
 // 主题清单：dark=深色底（用于图表配色 / color-scheme / 应用标题栏）；title=标题栏底色
 const THEME_META = {
-  'light':         { dark: false, title: '#ffffff' },
-  'dark':          { dark: true,  title: '#1a1b1e' },
-  'high-contrast': { dark: true,  title: '#000000' },
-  'midnight':      { dark: true,  title: '#161326' },
-  'forest':        { dark: true,  title: '#0f1a16' },
-  'sepia':         { dark: false, title: '#f4ecd8' },
+  'light': { dark: false, title: '#ffffff' },
+  'dark':  { dark: true,  title: '#1a1b1e' },
 };
 // 当前主题是否深色底（图表 / 图谱等需要按明暗配色的地方统一用这个判断）
 function isDarkTheme() {

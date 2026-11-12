@@ -1,5 +1,144 @@
 # NOTES
 
+## [2026-11-13] 新版界面（Vue）已彻底删除
+
+- 问题/决策：
+  - 用户评估后认为新版界面的可视化与部分交互逻辑不达预期（虽然操作步骤更少），要求删除新版界面。
+  - 经典界面与后端功能全部保持不动；只移除新版入口与产物。
+  - 第一版方案是归档后删除；用户随后确认改为**彻底删除，不留归档**。
+- 解决方案/原因：
+  - 已永久删除：`frontend/`（Vue 源码）、`web/v2/`（构建产物）、
+    `scripts/asset_report.py`、`scripts/perf_probe.mjs`、`scripts/responsive_probe.mjs`、
+    `tests/test_web_v2.py`、`docs/FRONTEND_V2.md`、`docs/UI_REFACTOR_PLAN.md`。
+  - `app/httpd.py`：删除 `GM_WEB_UI` 与 `/v2`、`/v2/` 路由；`/` 与 `/legacy` 都返回经典界面
+    `web/index.html`。保留 gzip 与 ETag/304（经典界面同样受益）；移除 `v2/assets` 的强缓存分支。
+  - `web/index.html`：移除侧栏「切换到新版界面」按钮。`?embed=1` / `?mode=` / `?settings=` / `?hall=`
+    等嵌入参数保留为历史兼容（正常打开不受影响），只更新了注释。
+  - `.gitignore`：移除 `frontend/node_modules` 相关条目。
+  - 下方 2026-11-12 / 11-13 关于 v2 的条目仅作历史记录，其中引用的路径与文件已全部不存在。
+- 相关代码/指令：
+  - 改动文件：`app/httpd.py`、`web/index.html`、`web/init.js`、`web/css/ui.css`、`.gitignore`。
+  - 验证：重启服务后 `/` 返回经典界面，`/v2/` 返回 404；经典界面的会话 / 大厅 / 工作台 / 设置入口不受影响。
+    会话接口回归测试 8 项通过。
+
+## [2026-11-13] W7 原生能力补齐：对话附件 / 设置页 / 学习观测
+
+- 问题/决策：
+  - 目标：继续把 iframe 里的高频页面改成原生 Vue，本轮做三块：① 对话附件（图片 / 文档）；
+    ② 设置页 14 个页签中的 7 个配置型页签；③ 大厅「学习观测」模块。
+  - 设置页不追求 14 个全原生：提醒 / 子代理 / Skill / 画像 / 快捷键 / 功能说明属于列表、预设、
+    改键类结构化编辑，用半个表单改坏数据的风险高于收益，继续嵌经典界面，并在页面上明确标注。
+  - 删除原「对话偏好」快捷卡：同样 4 个开关已并入「模型接入」「上下文与压缩」，避免两个入口各写一份。
+- 解决方案/原因：
+  - 附件契约（后端 `app/api/chat.py`）：发新消息时 `images: [{mime,data}]` ≤4、
+    `docs: [{name,mime,data}]` ≤10；落库后图片 meta 是 `{id,name,mime,size}`（name 即落盘名），
+    文档 meta 是 `{id,name,file,size,mime}`（file 才是落盘名）。取原始字节统一走
+    `POST /api/attach/get {session_id,name}`（GET 不支持，且要用 `name` / `file` 的正确字段）。
+  - 附件前端：大图（>1.5MB 且非 GIF）先用 canvas 缩到长边 1600px 再 base64，避免 JSON 体积过大；
+    发送失败要撤回乐观用户气泡（消息没落库就不该留在界面上），但 AbortError（用户停止）不撤。
+  - 设置表单：字段键名直接对齐 `app/config.py` 的 DEFAULT_CONFIG；`POST /api/config` 是
+    `cfg.update(incoming)` 部分更新，所以可以整页提交。比例类（compress_ratio / compress_keep_ratio）
+    界面按百分数编辑、保存时除以 100，否则用户会填出 0.8%。
+  - 学习观测：`GET /api/observe?days=&subject=&topic=` 直接返回 summary（统计 + groups + items），
+    不需要再读旧 `web/observe.js` 的渲染逻辑；路由必须放在 `/hall/:id` 之前，否则被动态路由吃掉。
+  - 测试：`npm run build` 通过；`npm test` 26 项；`pytest tests/test_web_v2.py tests/test_session_api_contract.py`
+    16 项；`scripts/responsive_probe.mjs` 改为 10 条路由（新增 `#/hall/observe`，移除已下线的 `#/gal`），
+    5 档视口 50 组全部 `overflow=0`。
+  - 实测：#/settings 7 个原生页签切换正常，「上下文与压缩」7 个数值框可编辑；#/hall/observe 渲染
+    4 张统计卡与三档时间切换；两者 console 无未捕获错误。未验证真实发送附件（需要可用模型密钥），
+    但请求体与后端读取代码逐字段核对过。
+- 相关代码/指令：
+  - `frontend/src/lib/attach.js`、`frontend/src/components/MessageAttachments.vue`、
+    `frontend/src/stores/chat.js`（send 支持 images/docs）、`frontend/src/views/ChatView.vue`。
+  - `frontend/src/docs/settings-schema.js`、`frontend/src/components/SettingsConfigPanel.vue`、
+    `frontend/src/views/SettingsView.vue`。
+  - `frontend/src/views/HallObserveView.vue`、`frontend/src/router/index.js`（/hall/observe）、
+    `frontend/src/docs/hall-modules.js`（native 标记）。
+  - 后台验收服务：`.venv\Scripts\python.exe -c "from app.httpd import create_server; s,p=create_server('127.0.0.1',8791); print('READY',p); s.serve_forever()"`。
+
+## [2026-11-13] 新版设置页「完整设置」原生页签验收（#/settings）
+
+- 问题/决策：
+  - 目标：确认 #/settings 的「完整设置」原生页签可用：7 个页签、点「上下文与压缩」出现可编辑数值输入框、console 无未捕获错误。
+  - 结论：PASS。页签 7 个且顺序为 模型接入 / 联网与数据源 / 上下文与压缩 / Agent 执行 / 图片生成 / 语音与朗读 / 数据与高级。
+  - 点「上下文与压缩」后 .panel 下 input[type=number] 共 7 个：上下文窗口 10000000、预留输出 15616、单次输出上限 65536、历史原文预算 40000、预压缩阈值 80、原文保留比例 25、摘要输出上限 8192；全部 disabled=false / readOnly=false / 可见。
+  - 可编辑证据：真实鼠标聚焦「上下文窗口」后 Input.insertText 输入 7，值变为 100000007，底栏变为「有未保存的改动」；未点保存、未落盘。
+  - console：Runtime.exceptionThrown 0、console.error 0、Log error 0、>=400 响应 0。
+- 解决方案/原因：
+  - Trae 浏览器工具在本机仍不可用（browser_lock / browser_tabs 报 does not support browser subagent isolation；本机无 Chrome，external 报 10061）。继续用 Edge headless + CDP：单个 Node 脚本内 spawn msedge（--headless=new --remote-debugging-port=9361）→ /json/new → WebSocket 直连，脚本末尾 Browser.close。
+  - 坑：Edge 实际路径是 C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe（Program Files 下没有）；RunCommand 传 Windows 反斜杠路径容易被吞，用正斜杠写脚本更稳。
+- 相关代码/指令：
+  - frontend/src/views/SettingsView.vue:169-194（「完整设置」GmCard + .tabs / .tab-btn）；frontend/src/docs/settings-schema.js:10-21（NATIVE_TABS 7 项、BRIDGED_TABS 6 项）；frontend/src/components/SettingsConfigPanel.vue:123-133（number 字段 → input[type=number]）。
+  - 取证脚本 %TEMP%/gm_settings_check.cjs；截图 %TEMP%/gm-settings-native.png。
+
+## [2026-11-12] 大厅索引与模块入口验收（#/hall → #/hall/stock）
+
+- 问题/决策：
+  - 目标：验证新原生大厅 7 张模块卡、点「模拟股市」进入模块页（有返回大厅栏 + 内嵌股市 UI、无重复旧侧栏）、返回大厅回 7 卡、无 console error。
+  - 结论：1–3 PASS，4 FAIL（1 条 404），整体 FAIL；问题不在大厅索引本身。
+  - 证据：#/hall 下 .card 共 7 个，均可见（289x91，末卡 289x74），名称依次为 模拟股市/模拟面试/研究道场/数学竞技场/GAL 剧场/图寻游戏/学习观测；点「模拟股市」后 URL 变为 #/hall/stock，顶部 .bar 文本「← 返回大厅 模拟股市 在经典窗口打开」，内嵌 iframe /legacy?mode=hall&hall=stock&embed=1（932x905）显示股市对局页（A 股/币市、历史回放、股票搜索、自选、开始模拟）；iframe 内 .nav-item 为 0，旧侧栏 .sidebar-body 虽存在但 display:flex 且 0x0，未渲染，无重复旧导航；点「← 返回大厅」回到 #/hall，7 卡恢复。
+  - 待确认的冗余：embed 页自身左上还有一个可见的「‹ 返回大厅」（BUTTON.hall-back，83x29），与外壳返回栏重复，建议 embed 模式隐藏。
+- 解决方案/原因：
+  - console 唯一错误：POST /api/attach/get 404（session_id=s_46417c7950e3，图片附件），由 chat.js:2004 attachBlobUrl 渲染历史会话图片触发；直接打开 legacy embed URL 不做任何点击也复现，属历史附件丢失的旧问题，与本轮大厅索引无关，但按「无 console error」严格判 FAIL。
+  - 环境坑：browser_lock / browser_navigate 全部不可用（客户端不支持 browser subagent isolation；Chrome 扩展未启动，browser_setup_plugin 两次被取消）；改用 Edge headless + CDP（方法同本文件 2026-11-12 条目）。新增：Exec 沙箱无 TextEncoder/btoa，需用 encodeURIComponent 生成 UTF-8 字节再手写 base64；RunCommand 会回收子进程，必须在一个 node 脚本内 spawn Edge、跑完 Browser.close。
+- 相关代码/指令（如果有）：
+  - frontend/src/views/HallModuleView.vue:12（iframe src）、:18（返回大厅按钮）；frontend/src/docs/hall-modules.js（7 个模块）。
+  - web/chat.js:2002-2008（attachBlobUrl → /api/attach/get）。
+  - 截图：.tmp_ui_verify/hall_7cards.png、.tmp_ui_verify/hall_stock_module.png。
+
+## [2026-11-12] v2 新外壳验收：导航 / Ctrl+K / 工作区嵌入 / 设置 15 项 / 检查器
+
+- 问题/决策：
+  - 目标：验证 http://127.0.0.1:8791/v2/ 新外壳五项，结论均 PASS：导航 7 项、Ctrl+K 跳转、工作区嵌入旧 IDE 无旧侧栏、设置「更多设置」15 个 chip 且「模型接入」内嵌打开、检查器三 Tab 无 console error。
+  - 导航：.nav-item 顺序为 对话/会话/工作区/大厅/工作台/GAL/设置；点「工作区」后 URL 为 #/workspace，标题「工作区」，导航项处于选中态。
+  - Ctrl+K：.palette 打开，输入框 placeholder「搜索页面、会话或操作…」自动聚焦；键入「工作区」后仅剩「工作区（IDE）」一项；回车跳到 #/workspace。
+  - 工作区：iframe 为 http://127.0.0.1:8791/legacy?mode=ide&embed=1，932x850；iframe 内无 .nav-item，也找不到可点的旧导航（对话/会话/大厅/工作台/GAL/设置 均为空）；可见侧栏只剩 IDE 自带 ide-activity（44px 活动栏）与「资源管理器」（175px），即旧外壳侧栏没有重复渲染。
+  - 设置：#/settings 中 h2「更多设置」下 15 个 button.chip：模型接入 / 联网与数据源 / 上下文与压缩 / 图片生成 / Agent 执行 / 子代理 / Skill / 主动与提醒 / 主题与外观 / GAL 演出 / 语音与朗读 / 用户画像与学习 / 快捷键 / 数据与高级 / 功能说明。点「模型接入」跳到 #/legacy-settings/chat，内嵌 iframe /legacy?settings=chat&embed=1（932x805），左侧「模型接入」选中，正文是「聊天接口 / 接入 / 服务商协议」。
+  - 检查器：按钮 .ibtn[aria-label=检查器] 默认 is-on，面板包含 上下文/工具/用量；点一次关闭（三个 Tab 全消失），再点恢复；点「工具」显示「最近没有工具调用」，点「用量」显示近 7 天汇总。
+  - 控制台：全程监听 Runtime.exceptionThrown、console.error、Log.entryAdded 与 Network 4xx，0 错误、0 失败请求。
+- 解决方案/原因：
+  - 浏览器工具仍不可用（本机无 Chrome，内置浏览器报 does not support browser subagent isolation），继续用 Edge headless + CDP（Node 24 自带 fetch/WebSocket）取证。
+  - 新坑：RunCommand 结束会回收子进程，Edge 随之退出；每个脚本必须自己 Page.navigate，不能依赖上一个脚本留下的页面，否则会连到启动时的 about:blank（表现为 hash/body 全空）。
+  - 坑：「检查器」按钮 innerText 为空（只有图标），按文本找不到，需用 .ibtn 或 aria-label 定位。
+  - 坑：在 Exec 模板串里生成 CDP 脚本时，正则里的 \s 会被吞掉（页面文本出现 Galgame_mon ter），换行处理改用 String.fromCharCode(10)。
+  - 局限：iframe 内 console 属于独立 target，父页面会话监听不到；本次「无错误」仅覆盖主文档。
+- 相关代码/指令（如果有）：
+  - 页面：web/v2（Vue 外壳）、/legacy?embed=1 嵌入模式（mode=ide 或 settings=<tab>）。
+  - 截图：.tmp_ui_verify/01-home.png、03-palette-filtered.png、05-workspace.png、06-settings.png、07-model-embed.png、09-inspector-open.png、10-inspector-tools.png。
+
+
+## [2026-11-12] v2 对话页验收：Markdown 渲染与流式回复
+
+- 问题/决策：
+  - 目标：验证 http://127.0.0.1:8791/v2/#/chat：历史消息 Markdown 渲染、新建会话后输入「只回复两个字：收到」回车流式回复、无 console error。结论 PASS。
+  - 历史消息：现有会话「提示词工程师」60 条消息，md-body 内 h2 x162 / ul x49 / ol x31 / li x248 / pre x51 / table x51（另有 51 个 thead/tbody、417 个 tr）；克隆去掉 pre/code 后逐行检查，无行首 # / 围栏代码块标记 / 表格原始行残留（rawMarkupBlocks 为空）。
+  - 新建会话：下拉从 15 增到 16，新 id s_2bed8c769693，标题「新对话」；逐字键入 9 个字符后回车，0.2s 出现 .live-text「正在思考…」，2.1s 变为「收到」，4.2s live 消失并落库为 assistant 消息「收到」，页面 2 条消息，标题自动变「收到指令确认」。
+  - 控制台：Runtime.exceptionThrown + console.error + Log.entryAdded 全程监听，error 0 条、warning 0 条。
+  - 另有一个同名会话 s_5d5130426308 是本次验收更早一次尝试创建的（内容同样是「只回复两个字：收到」/「收到」）；
+    验收结束后两条测试会话 s_2bed8c769693、s_5d5130426308 都已删除，14 个用户会话与 current 恢复原状。
+- 解决方案/原因：
+  - Trae 浏览器插件在本机不可用：无 Chrome，内置浏览器报 does not support browser subagent isolation，external 报 10061。改用 Edge headless + CDP：Node 24 自带 fetch/WebSocket，脚本自己 spawn msedge 再连 /json/list，无需 puppeteer。
+  - 关键坑：在 Exec 里用模板字符串生成 CDP 脚本时，嵌套引号/反斜杠容易被吞（生成文件出现单引号未转义、换行变真换行），写完必须先 node --check；复杂 page 表达式改用双引号拼接、避免正则与内层模板。
+  - 验证路径：真实鼠标事件点「新建会话」（Input.dispatchMouseEvent 按按钮中心坐标），输入用 Input.insertText 逐字符，回车用 Input.dispatchKeyEvent，流式采样每 250ms 一次。
+- 相关代码/指令（如果有）：
+  - 页面：frontend/src/views/ChatView.vue（.stream .row .md-body / .live-text / .bar-actions）、frontend/src/lib/markdown.js。
+  - 脚本：.tmp_audit/chat_verify.mjs（历史 Markdown / 结构统计 / 截图）、.tmp_audit/chat_phase2.mjs（新建 / 输入 / 流式）。
+  - 截图：.tmp_audit/chat_verify/01-existing-session.png、04-streaming.png、05-final.png、07-markdown-heading.png、08-markdown-table.png。
+
+## [2026-11-12] v2 会话管理页只读验收（SessionsView：列表 / 预览 / 搜索 / 重命名取消）
+
+- 问题/决策：
+  - 目标：只读验证 `http://127.0.0.1:8791/v2/#/sessions`，除开合弹窗外不写任何真实会话，不改设置开关。
+  - 验收结果：PASS。14 个会话全部渲染（标题 + 相对时间/日期 + `· N 条` + `当前`/`置顶` 标签，`当前` 恰好 1 行）；点击「模拟」后右侧标题切到「模拟」、预览 20 条（脚注 `最近 20 条 / 共 140 条`）；搜索「模拟」列表 14→2，再用真实键入「助手」14→1（meta `1 / 14 个会话`）；打开「重命名会话」弹窗（输入框预填原标题）点「取消」后弹窗关闭、14 条标题与 `/api/state` 完全一致；console error 0 条；全程未发出 `new/rename/pin/delete` 请求。
+- 解决方案/原因：
+  - Trae 浏览器工具在本机不可用：无 Chrome，插件连接 `os error 10061`，内置浏览器报 `does not support browser subagent isolation`。改用 Edge headless + CDP（Node 24 自带 `fetch`/`WebSocket`）取证。
+  - 关键坑：RunCommand 结束会回收子进程，分两次调用时 Edge 已被杀，第二次 `json/list` 抛 `no target`。必须把「启动 Edge → 等 4s → node 脚本」放在同一条 RunCommand 里；脚本结束后用 StopCommand 停掉后台任务。
+  - `/api/state` 需要鉴权：令牌在 `/v2/` HTML 中以 `window.__TOKEN__ = "..."` 注入，脚本先抓 HTML 取 token，再带 `X-Auth-Token` 读基线，用于对比取消重命名前后的标题。
+- 相关代码/指令（如果有）：
+  - 页面源码：`frontend/src/views/SessionsView.vue`（`.sessions li .row`、`.detail-pane .dhd`、`.gm-dialog .ft`）、`frontend/src/stores/sessions.js`、`frontend/src/components/ui/GmDialog.vue`。
+  - 启动：`msedge.exe --headless --remote-debugging-port=9333 --remote-allow-origins=* --user-data-dir=C:\gm-edge-cdp --no-first-run --disable-gpu --window-size=1440,900 about:blank`，同一条命令里跑 Node CDP 脚本。
+  - 截图：`%TEMP%\gm-rename-dialog.png`、`%TEMP%\gm-sessions-final.png`；临时脚本 `%TEMP%\gm_ui_check.js`、`%TEMP%\gm_ui_type.js`（均不在项目内）。
+
 ## [2026-11-10] 模拟股市 UI 重构：侧栏标签页 / K 线可读性 / 买卖标记 / 下单便捷
 
 - 问题/决策：
@@ -4944,4 +5083,598 @@
   - `ruff check app scripts tests` 全过；10 个改动的 JS `node --check` 全过；
     `pytest tests` 全量通过；`scripts/dev_check.py` 全绿；`git diff --check` 无尾随空白 / 冲突标记。
 - 注意：工作区里还包含此前几个会话的未提交改动（chat / context / agent / web 等），本次没有拆分提交；
-  `architecture.html`、`STATIC_ANALYSIS.md` 是未跟踪的分析产物，是否入库需单独决定。
+  `architecture.html`、`STATIC_ANALYSIS.md` 两个未跟踪的分析产物已按要求删除（不影响 git 历史）。
+
+## [2026-11-12] PDF 译页：消除遮盖细黑线 + 统一字号
+- 现象（用户截图）：① 译页在原文 / 公式交界处出现细小黑线、短横；② 同一页不同段落字号差异明显，
+  个别段落被压成 4px 小字。
+- 取证（CVPR24 缓存 `data/reader/0e0ea2679d58fc3d`，327 块 / 100 个多行正文 / 169 个有译文块）：
+  - 字号：14/100 个多行块的 `lines` 被高估 —— 同一视觉行被切成多段（段高 / 行数只有字高的
+    0.9~1.5 倍），前端按「段高 / lines」反推行距，字号被压到 7px，DOM 兜底再缩到约 4px。
+    截图里的「总结来说…」正是 9pt 高、记 2 行、字高 4.66 的段落（真实只有 1 行）。
+  - 黑线：`block.rect` 是字形墨迹包围盒，遮盖正好贴在矩形边缘；字形抗锯齿 / 外沿会从外侧
+    露出约 1px。矩形差集切出的多块之间还有亚像素接缝。
+- 决策：`lines` 按「视觉行」记录（后端），前端对旧缓存用字高反推兜底；字号以「全篇正文行距中位数」
+  为基准收拢（正文 ±10%），不再逐块放大 16%；遮盖向外扩 1.1pt（受相邻块空隙限制）+ 0.25pt 接缝重叠。
+- 方案：
+  - `app/reader.py`：新增 `_same_visual_row`；`_blocks_from_segments` 维护 `rows / row_y0 / row_y1`；
+    `_make_block` 的 `lines` 改为视觉行数（同一行多段不再算两行）。
+  - `web/transpage.js`：新增 `targetRows`（行数虚高时按字高 × 2.2 重估）、`sizeBand`（正文 0.9~1.06、
+    标题 ≥1.12、图注 ≤1.0 倍页基准）、`bleedRect`（四边外扩但不超过相邻块）；`layoutOne` 用页基准字号
+    收拢、DOM 兜底最多缩 2 档；遮盖改用 `bleedRect` + `SEAM_PAD`。
+  - `web/reader.js`：`docBodyLead()` 计算全篇正文行距中位数（同一行多段按字高修正），作为 `bodyLead` 传入。
+  - `web/css/reader.css`：`.rd-tblock` 改 `overflow: visible`（文字仍由 `.rd-ttext` 裁切），让遮盖可以外扩。
+  - `app/reader_export.py`：版式导出复用同一行数修正，避免导出字号被压小。
+- 实测（真实译文缓存）：字号 p10/p50/p90 由 8.84/12.15/14.67 → 10.50/11.96/13.66；
+  第 4 页多行正文字号极差 74% → 22%；截图段 7.19px → 11.47px；14 个块的目标行数被修正。
+  翻译内容、块位置、图表 / 公式保留逻辑均未改。
+- 验证：`node scripts/transpage_test.js` 29/29（新增 11 项）、`pytest tests/test_reader.py` 45 项、
+  `tests/test_api_handlers_smoke.py`、`node --check web/transpage.js web/reader.js`、`ruff`、
+  `scripts/dev_check.py` 全绿。**未做浏览器截图验证**（需要真实打开 PDF 译页逐页目检）。
+- 相关代码：`app/reader.py`（`_same_visual_row` / `_make_block`）、`web/transpage.js`（`targetRows` /
+  `sizeBand` / `bleedRect` / `layoutOne`）、`web/reader.js`（`docBodyLead`）、
+  `web/css/reader.css`（`.rd-tblock`）、`app/reader_export.py`、`scripts/transpage_test.js`、`tests/test_reader.py`。
+
+## [2026-11-12] Trae CN 内置工具（阅读/编辑/终端/预览/联网搜索）源码级梳理
+- 问题/决策：查清设置里「工具 - 内置」这 5 项到底是什么、管哪些能力。Trae 未开源，按安装包内的
+  编译产物取证（版本 1.107.1，commit `d654d29`，2026-11-09）。
+- 结论：
+  - 前端定义在 `D:\Tools\Trae CN\resources\app\out\vs\workbench\workbench.desktop.main.js`
+    （搜索 `codicon-icube-GlassesRead` 可定位）：`value` 分别是 `readonly / edit / terminal /
+    web_search / preview`；`iICubeAgentService.getBuiltInToolList(agentType)` 决定每个智能体显示哪几项：
+    `chat` → readonly+preview+web_search；`code_reviewer / code_review_summary` → readonly+web_search；
+    其他（builder / custom / solo 等）→ 全部 5 项。它不是全局开关，而是写到该智能体的
+    `built_in_tool_list`（新字段 `builtin_tool_list`）。
+  - 后端枚举在 `modules\ai-agent\harness.dll`（搜 `BuiltInToolGroup`）：
+    `readonly / edit / file_system / terminal / preview / system / web_search / browser_use / un_grouped`
+    —— UI 只暴露其中 5 组，`file_system / system / browser_use / un_grouped` 不单独给开关。
+  - 工具实现（DLL 保留的编译期源码路径，可直接 `strings`/字节搜到）：
+    `harness\tools\src\read\*`、`ls.rs`、`glob.rs`、`grep.rs`、`view_files`、`view_image`、
+    `search_codebase.rs`、`web_fetch.rs`（阅读）；`write`、`edit.rs`、`multi_edit.rs`、
+    `apply_patch\*`、`delete_file.rs`、`notebook_edit.rs`、`search_replace.rs`（编辑）；
+    `exec\*` + `toolhost\src\tools\terminal.rs`（终端）；`open_preview.rs` +
+    `toolhost\src\icube\browser\open_preview\console.rs` + `services\preview-proxy`（预览，CDP 抓 console，
+    端口 <1024 拒绝、双端口 + auth token）；`web_search`、`web_fetch`、`web_crawler` +
+    `ai_agent::domain::web_search::strategy`（远端抓取失败回落本地 crawler，域名 allow/block 配置）。
+  - 工具 prompt/描述走服务端 i18n 键 `toolcall_<name>_description`（`ai_agent.dll`），本地只有键名，
+    具体描述由云端下发。
+- 相关代码/指令：`workbench.desktop.main.js`（`getBuiltInToolList` / `BuiltInToolItem`）、
+  `resources\app\modules\ai-agent\{harness.dll,toolhost.dll,ai_agent.dll}`；
+  复核可用 `node` 读字节搜字符串（`fs.readFileSync(...,'latin1')`），不必反编译。
+
+## [2026-11-12] 流式过程旁白即时折叠（不再先堆在正文）
+- 问题/决策：工具之间的过程结论（「实测已取得…」「第二次 patch 报了…」）在流式期间全写在
+  正文区，直到 done 才按 blocks 重排折进过程区，观感是「先当正文、结束才消失」。改为以
+  「这段正文后面是否紧跟工具调用」为界：工具事件到来时，把当前正文段即时搬进过程折叠；
+  答案区只保留最后一次工具之后的正文。`finish / task_done` 等收尾工具不触发，避免最终答案
+  被折走；收尾仍沿用 `buildBlocksView` 的 `ans` 标记重排，所以「流式时像正文、结束才折叠」
+  的段落保持原语义。
+- 方案：`web/stream.js` 新增 `segStart` / `foldSegmentToProcess()`；在 `tool_stream`、`tool`
+  分支调用（前者让参数生成阶段就开始折，后者兜底无 tool_stream 的供应商）；`base` /
+  `splitAtAsk` 维护段起点；`rewind` 只重绘当前段（`segStart` 之前已折叠，不能从 0 重放）；
+  无 `doneBlocks` 的降级路径先移除过程区里的 `.narration`，避免正文/过程各显示一遍。
+- 相关代码：`web/stream.js`（`foldSegmentToProcess` / `segStart` / `rewind` / `tool` /
+  `tool_stream`）。
+- 验证：`node --check web/stream.js web/chat.js`；`pytest tests/test_chat_blocks.py
+  tests/test_stream_stop.py` 全过；`scripts/dev_check.py` 全绿（前端 62 个 JS 语法、
+  Markdown 回归、译页 29/29）。**未做真实流式浏览器目检**，需要一条带多次工具调用的回合确认。
+
+## [2026-11-12] 工具能力对齐 Trae：编辑 / 终端 / 阅读补齐
+- 背景/决策：五维对比后确定「保持本项目强项（搜索流水线、PDF 阅读流、视觉验收、撤销恢复、
+  审批审计），只补 Trae 有而本项目缺的工具」。本轮落编辑、终端、阅读三项；预览 dev server
+  代理另起一批。
+- 新增：
+  - `multi_edit`：一次多处原子替换，`replace_all` 可选；任一处失败不写盘（工具层
+    `app/agent/tools_files.py::_t_multi_edit`，元层 `edit` 的 `multi` action）。
+  - `apply_patch`：单文件 unified diff（`@@ -a,b +c,d @@`），从下往上应用，上下文在目标行
+    附近匹配，失败不写盘（`_t_apply_patch`，元层 `edit.apply`）。
+  - `notebook_edit`：`.ipynb` 单元格 replace / insert / delete，支持 `cell_id` / `cell_index`
+    （`_t_notebook_edit`，元层 `edit.notebook`）。
+  - `shell` 增加 `input`（stdin 写入，默认补回车）与 `status`（存活 / 工作目录 / 缓冲偏移 /
+    最近输出）；元层 `run` 的 `op` 同步扩展（`app/agent/tools_exec.py::_t_shell`）。
+  - `mcp_list_resources` / `mcp_read_resource`：MCP `resources/list` + `resources/read`，
+    支持分页、文本 / 二进制占位；元层 `read` 的 `mcp_list` / `mcp_read` action
+    （`app/mcp.py`、`app/agent/tools_mcp.py`）。
+- 注册位置（新增工具时容易漏）：`app/agent/groups.py` 的 `TOOLS` / `WRITE_TOOLS` /
+  `FILE_TOOLS` / `_REQUIRED_ARGS` / `PLAN_MODE_TOOLS`、`app/agent/dispatch.py` 的
+  `_HANDLERS`、`app/agent/schemas.py` 的 native schema、`app/tool_meta.py` 的 action 表；
+  写前读检查 `_READ_BEFORE_WRITE` 也要加，否则新工具绕过「先读后写」。
+- 验证：新增 `tests/test_tool_edit_parity.py`（multi_edit 原子性 / replace_all / apply_patch
+  多 hunk 与失败不写盘 / notebook 三种操作 / shell input+status）；扩展 `tests/test_mcp.py`
+  资源用例与元层 schema 断言；`pytest` 相关文件全过，`ruff`、`scripts/dev_check.py` 全绿。
+
+## [2026-11-12] 预览对齐 Trae：本机 dev server 反向代理 + open_preview
+- 背景/决策：本项目静态预览已有注入桥（控制台 / 元素选择），但直接 iframe 打开
+  `http://localhost:5173` 时拿不到桥；Trae 的 preview-proxy 支持 localhost 端口 + auth token
+  + WebSocket。本轮补「dev server 代理」，静态预览与视觉 QA 保持不动。
+- 实现（`app/preview.py`）：
+  - `start_dev(url)`：只允许 localhost / 127.0.0.1 / ::1，端口 >= 1024；先探端口，未起服务
+    直接报「dev server 未运行或不可达」。代理监听 127.0.0.1 随机端口，URL 带随机 token；
+    无 token / token 错误一律 403。
+  - HTTP 转发：剥 token、改 Host / Origin / Referer、请求 `Accept-Encoding: identity`；
+    HTML 响应注入预览桥、把 target origin 与 `ws(s)://target` 改写成代理地址；Location
+    头也改写；去掉 X-Frame-Options，避免 dev server 阻止 iframe。
+  - WebSocket / HMR：握手直通后 `select` 双向字节隧道（Vite HMR 可用）。
+  - `start()` 静态模式与 `start_dev()` 互斥，`stop()` 统一清理；模式与 target 记录在
+    `_MODE / _DEV_TARGET / _DEV_TOKEN`。
+- 接口 / 前端：`/api/ide/preview/start` 新增 `url` 分支，返回 `{base,url,mode:"dev"}`；
+  `gal-ide.js` 的 `idePreviewOpen` 对本机 URL 改走代理（不再 iframe 直连），新增
+  `idePreviewOpenProxy(url)` 供智能体工具直接弹面板；已代理地址重复点「打开」不会二次代理。
+- 智能体工具：新增 `open_preview {path? | url?}`（`app/agent/tools_preview.py`），返回
+  `GM_PREVIEW_URL:<代理地址>`；`web/stream.js` 的 `tool_done` 检测到该标记且是当前会话时
+  调用 `idePreviewOpenProxy` 自动打开面板。元层并入 `read` 的 `preview` action，避免顶层
+  schema 数量膨胀（`test_core_tools_are_consolidated` 仍为 15）。
+- 验证：`tests/test_ide_preview.py` 新增 dev 代理注入 / 资源透传 / token 403 / 非本机与
+  低端口拒绝 / open_preview 静态与 dev 两种入口；WebSocket 隧道用临时 socket 服务实测
+  `101` + echo 通过；`ruff`、`node --check web/gal/gal-ide.js web/stream.js` 通过。
+  **未做真实 Vite/Webpack 页面目检**，需要用户起一个 dev server 后确认 HMR 与面板交互。
+
+## [2026-11-12] 删除自动化（Autopilot）功能：保留提问策略，默认改为一律问
+- 问题/决策：用户要求整体移除「自动化」目标循环（老板-员工-裁判、验收、看门狗、断点续跑）。
+  范围确认为 A2（代码 + 前端 + 配置 + 测试彻底清理）；提问卡策略保留，`autonomy_question_policy`
+  默认从 `smart` 改为 `ask`，并删除「作用范围」`question_policy_scope`（自动化没了只剩普通聊天）。
+- 解决方案/原因：
+  - 后端：删除 `app/autopilot.py`、`app/api/autopilot.py`、`tests/test_autopilot.py`；
+    `httpd.py` 去掉路由与启动时的 `recover()/start_watchdog()`；`config.py` 删除 8 个
+    `autopilot_*` 键与 `question_policy_scope`。
+  - `app/api/chat.py`：删除 `_AUTO_TAIL / _autopilot_end_reason / _decision_text /
+    _record_autopilot_decision / _mark_autopilot_needs_human`，以及请求头 `autopilot_on /
+    goal_brief / goal_id`、正文决策代答、ask_user 自动化分支、审批自动化分支、
+    `autopilot_pause` 收尾、`interactive=not autopilot_on`、`approval_mode` 强制 full、
+    `_apply_worktree` 自动化分支。普通聊天/审批/自动续跑/计划/workflow 行为不变。
+  - 前端：删除 `#ap-live` 看板、`#btn-autochat`、`auto.js` 的 `AUTO.live` 与 `ap*` 全组、
+    `toggleAutopilot / syncAutopilotPill / syncAutoChatFromSession`、`init.js` 绑定、
+    `chat.js` 的切换会话同步、`settings.js`「自动化（Autopilot）」设置组与范围选项、
+    `base.css` 的 `.autochat-* / .ap-live-*`、帮助页自动化章节与索引。
+  - 保留：定时提醒、主动聊天（`#autochat-on` 等设置项仍属提醒/主动聊天）、自动续跑、工作流。
+- 相关代码/指令：`data/goals.json` 是历史目标数据，代码已不再读写；未自动删除，确认不需要
+  历史记录后可手动删。
+- 验证：`py_compile` 四个改动模块通过；`node --check web/auto.js init.js chat.js settings.js`
+  通过；`ruff check` 通过；`pytest tests/test_ask_card.py tests/test_tool_meta.py
+  tests/test_chat_blocks.py tests/test_chat_plan.py tests/test_chat_parallel.py
+  tests/test_chat_refs.py tests/test_autonomy_policy.py tests/test_settings_defaults.py
+  tests/test_api_handlers_smoke.py` 全通过。未做浏览器目检（前端为纯删除，保留元素均有判空）。
+
+## [2026-11-12] Trae（源码级）AI 可读文件范围：三套边界，不是一份白名单
+- 问题/决策：研究 Trae 到底把 AI 可读文件限制在哪，解释“感觉什么都能看，但不知道隐私边界”。
+- 解决方案/原因（结论：按工具分三套边界）：
+  1. **显式读文件无 workspace 白名单**。`ai_agent.dll` 内嵌源码路径
+     `apps\icube_server_rs\modules\ai-agent\src\domain\toolcall\tools\base_util.rs`，其中只有
+     相对路径解析规则：`no workspace folder is available. Use an absolute path.` /
+     `multiple workspace folders are open. Use an absolute path.`；绝对路径原样透传。
+     `toolhost.dll` 的 `toolhost\src\icube\file\read.rs` 只做编码探测与“Not a regular file”
+     校验，没有 workspace 边界判断；`icube.common.commands.tooling.readFile` 的
+     `struct ReadFileParam with 1 element`（只有路径）。系统提示 `<user_uploaded_files>`
+     也明确写 “do not say a file is absent only because it is outside the workspace”。
+  2. **搜索 / 列目录 / 索引绑定 workspace**。`toolhost\services\file-finder` 有
+     `workspace_binding`、`PATH_OUTSIDE_WORKSPACE`、`path is outside the authorized workspace:`、
+     `ListCursor{version, workspace_binding, parent_relative_path, ...}`；搜索另有
+     `filePattern must be inside searchDir`、`pruned_directories`、`max_depth`、`result_limit`。
+     默认忽略：`.git`、`node_modules`、`.trae`、`__pycache__`、`target`、`dist`、`build`、
+     `.DS_Store`、`Thumbs.db`，并读 `.gitignore` 与 `.git/info/exclude`（ignore 规则有字节/条数上限）。
+  3. **终端全盘可读、写入才授权**。`~/.trae-cn/permission/global.json` 的
+     `filesystem.default = "read_only"`、`resourceAuthorization.filesystem.readWrite = []`；
+     会话级 `~/.trae-cn/permission/tasks/<session>.json` 记录本次被临时授权的 readWrite 路径。
+     沙箱路径类别为 `workspace/work/tmp/cache/lang_deps/other`，权限枚举 `read_write/read_only`。
+- 隐私要点：
+  - 本地二进制字符串层面**没有发现** `.env` / `id_rsa` / `*.pem` 之类的敏感文件黑名单；
+    `.gitignore` 只作用于遍历与索引，**不拦截显式 read_file**。
+  - `.trae`、`.git` 只在默认遍历忽略列表里，显式绝对路径仍可读。
+  - `~/.trae-cn`（含 `trae-jwt-token`、会话库、memory、插件）在 workspace 外，按 1 的结论理论可读。
+  - 读入即进入模型上下文并随请求上云；CKG 索引另有 `isPrivacyMode`、
+    `ckg_indexing_enabled` / `ckg_automatic_indexing_enabled` 开关（`CkgSetPrivacyModeParams`）。
+  - 规则文件由 `toolhost\src\icube\config\rules\project.rs` 扫描：`AGENTS.md`、`CLAUDE.md`、
+    `CLAUDE.local.md`、`.claude`。
+- 相关代码/指令：Trae 安装目录 `D:\Tools\Trae CN\resources\app\modules\ai-agent\`
+  （`ai_agent.dll` / `toolhost.dll` 为 Rust 编译产物，可用字符串窗口扫描源码路径与错误文案）；
+  权限配置在 `C:\Users\MKIII\.trae-cn\permission\`；`ModularData\ai-agent\database.db`
+  非 sqlite（`file is not a database`），`*.alaudalog` 为 AALG 压缩二进制，均不可直接解析。
+- 未验证：read.rs 是否还有上层（服务端 permission profile）附加校验；云端是否另做敏感内容过滤。
+  验证方式：让模型在 workspace 外做一次显式读，看是否返回 `PATH_OUTSIDE_WORKSPACE` 或走审批。
+
+## [2026-11-12] 读取放开：AI 可显式读沙箱外文件（对齐 Trae）
+- 问题/决策：用户要求删除「沙箱外」限制，像 Trae 一样允许 AI 用绝对路径显式读文件。
+  决策：保留三项硬拦截（秘密文件 / 本项目 `data/` / `BLOCKED_SEGMENTS`），删除会话开关与 UI；
+  写类工具不变，仍然只能在沙箱内。
+- 解决方案/原因：
+  - `app/agent/sandbox.py`：`resolve_path` 在 `for_read=True` 时放行沙箱外绝对路径；
+    相对路径仍只在沙箱内解析；写类（`for_read=False`）越界仍抛 `SandboxError`。
+    `allow_outside` 参数仅为兼容保留，不再影响读类边界。
+  - `app/agent/dispatch.py`：`OUTSIDE_READ_TOOLS` 分支不再看 `allow_outside`，一律传 `True`；
+    读后登记 `_remember_read` / `_note_seen` 改用 `for_read=True`。
+  - `app/agent/tools_files.py`：秘密文件判断改用绝对路径 `is_secret_path(p)`。
+  - `app/agent/prompt.py` / `app/explore.py`：边界文案改为「读取可用绝对路径，写入仍限沙箱内」，
+    子代理提示不再依赖 `ctx["allow_outside"]`。
+  - `app/code_mode.py` / `app/workflow_script.py`：`GM_GUARD_OUTSIDE` 固定为 `1`，
+    脚本读取同样放开；写与命令仍分别由 `GM_GUARD_WRITE` / `GM_GUARD_CMD` 控制。
+  - `app/api/chat.py`：所有 `allow_outside` 传值改为 `True`，`caps["allow_outside"] = True`。
+  - `app/sessions.py` / `app/api/sandbox.py`：删除 `allow_outside_read` 字段与接口入参。
+  - 前端：删除 `#btn-outside-read`、`toggleOutsideRead`、`init.js` 绑定；帮助页与 `readme.md`
+    文案改为「读可用绝对路径，写仍限沙箱内」。
+- 相关代码/指令：`tests/test_outside_read.py` 重写为默认允许外部读，并新增
+  「写外部仍拒 / 外部 .env 仍拒 / data 仍拒」；`tests/test_code_mode.py` 两条旧断言改为默认可读；
+  `tests/test_explore.py` 自定义角色断言改为 `startswith`（边界提示改为无条件追加）。
+- 验证：`py_compile`、`node --check web/init.js web/settings.js`、`ruff check` 全部通过；
+  相关回归 12 个文件全通过（test_outside_read / test_code_mode / test_explore /
+  test_workflow_script_agents / test_orchestrator / test_webprobe / test_prefetch /
+  test_tool_protocol / test_agent_tool_format / test_artifact_preview /
+  test_api_handlers_smoke / test_settings_defaults）。全量 pytest 跑到 99% 超时，
+  仅 `tests/test_archify.py` 两个 finalize 用例失败（依赖本地 archify runtime / 浏览器，
+  单独运行也异常退出，与本改动无关）。
+
+## [2026-11-12] OS 级命令沙箱（Windows AppContainer）
+- 问题/决策：用户要求命令隔离对齐 Trae——命令受沙箱限制，出沙箱需要授权。
+  实测 AppContainer 可用后，选择内核级隔离，接受首次 UAC 与工具链调试成本。
+- 实现：
+  - 新增 `app/sandbox_win.py`：固定 profile `GalgameMonster.Agent`；
+    `ensure_acls()` 给沙箱根授读写、给 Python / Node / venv 等工具链授读执行
+    （`icacls /grant ... /T`，当前权限不够时用一次 UAC 提权，失败结果缓存）；
+    `run_direct()` 用 `STARTUPINFOEX` + `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
+    创建 AppContainer 进程，stdout/stderr 直通；`run()` 由 launcher 代理执行；
+    `grant_extra()` 供「越界授权」后续调用。
+  - 新增 `app/sandbox_launcher.py`：主进程用最小环境启动它，它再创建 AppContainer
+    子进程，避免 API key 等父进程环境进入沙箱。
+  - `app/agent/tools_exec.py` 的 `_t_run_command`：`agent_os_sandbox` 开启且
+    `sandbox_win.available()` 时走沙箱，否则退回原 `subprocess.Popen`。
+  - `app/config.py` 新增 `agent_os_sandbox`（默认 True）。
+  - 网络：显式授予 `internetClient`（`S-1-15-3-1`）capability。
+- 实测结论：
+  - 沙箱内 `cmd /c echo` 读写成功；读 `C:\Users\MKIII\...` / `C:\Users\Public\...`
+    与写沙箱外均为 `Access is denied`；`C:\Windows\win.ini` 默认可读。
+  - `curl https://example.com` 在沙箱内返回 200，网络 capability 生效。
+  - pytest 下 `available()` 返回 False（避免弹 UAC）；命令相关 134 项回归通过。
+- 踩坑记录：
+  - AppContainer 下 `CreateProcessW` 传自定义环境块稳定返回 203
+    （ERROR_ENVVAR_NOT_FOUND），改用 launcher 继承最小环境绕过。
+  - stdout 管道必须 `msvcrt.open_osfhandle` 转 fd 再 `os.read`，不能直接读 HANDLE。
+  - `hStdInput` 必须是可继承的 NUL 句柄，否则进程以 `0xC0000142` 退出。
+  - `CreateAppContainerProfile` 已存在时返回 HRESULT `0x800700B7`，
+    判断要用 `rc & 0xFFFF == 183`。
+- 持久 shell：`terminal.start` 在 OS 沙箱开启且是 Agent shell 时返回
+  `sandbox_win.ShellSession`（launcher + PowerShell 管道，不是 ConPTY）；
+  接口对齐 `snapshot / write / interrupt / kill`，实测 `echo SHELLOK`、`cd C:\Windows`
+  正常。IDE 面板的手工终端仍走 ConPTY，不受影响。
+- 越界授权：`outside_paths()` 扫描 argv / shell 文本里的绝对路径与 `..`；
+  `judge_command` 命中越界返回 `ask`（优先于 custom 的 allow 规则）；
+  `chat.py` 在审批通过后调用 `sandbox_win.grant_extra()` 临时授权。
+  `_cmd_script_error` 对越界脚本不再直接 deny，交给审批层。
+- 验证：`tests/test_os_sandbox.py` 新增 6 项（越界识别 / 开关默认值 / pytest 下关闭）；
+  命令、终端、聊天相关回归 188 项通过。
+- 剩余限制：首次运行仍需 UAC 递归授权工具链（`.venv` 约 3.8 万文件，耗时较长）；
+  shell 是管道模式，没有 PTY 的 ANSI 全屏，`interrupt` 实际是杀进程后重建。
+
+## [2026-11-12] 删除 IDE 独立主题，主题系统统一为单一来源
+- 问题/决策：IDE 原先有一整套与界面主题完全解耦的主题（`ide_theme` 配置、
+  `html[data-ide-theme]` 色板、Monaco 的 VSCode/Trae 预设、「跟随 VS Code」轮询）。
+  用户要求删除这套独立设置，IDE 跟随界面主题。
+- 解决方案：
+  - 配置：`app/config.py` 删除 `ide_theme`。
+  - 设置页：`web/index.html` 删除「IDE 编辑器主题」整块（开关 + 9 张预览卡 + 说明）；
+    `web/settings.js` 删除 `applyIdeTheme` / `IDE_THEME_IDS` / `IDE_VSCODE_CURRENT` /
+    `syncIdeThemeGrid`、回填与保存逻辑、`appearance` 的配置键；`web/init.js` 去掉调用。
+  - 样式：`web/css/ide.css` 删除末尾全部 `html[data-ide-theme=…]` 覆盖块，
+    只保留 `--ide-*` 默认映射（它们引用全局 `--bg/--text/--border` 等）；
+    `web/css/base.css` 删除 `.ide-theme-grid` / `.itc-*` 预览卡样式。
+  - Monaco：`web/gal/gal-ide.js` 删除 `IDE_MONACO_THEMES`（VSCode / Trae 预设）、
+    `IDE_MONACO_PREFIX`、`IDE_VSCODE_VARS`、跟随 VS Code 的 token 映射与 5 秒轮询；
+    `ideMonacoThemeName()` 简化为 `isDarkTheme() ? 'vs-dark' : 'vs'`。
+  - 后端：删除 `app/vscode.py` 的 `current_theme_payload` / `_TOKEN_MAP` / 主题文件扫描，
+    删除 `/api/vscode/theme` 路由与 handler；保留 `/api/vscode/import`。
+  - 文档：`readme.md` 与帮助页「主题与外观」「IDE」条目改为「IDE 跟随界面主题」。
+- 结果：主题只有一个来源 `html[data-theme]`；IDE 界面、Monaco 语法色、xterm 配色
+  全部跟随，不再有第二套色板。约删掉 130 行 Monaco 预设、160 行 CSS 覆盖、
+  180 行后端主题映射。
+- 验证：`py_compile`、`ruff`、`node --check` 全部通过；
+  `pytest tests/test_settings_defaults.py tests/test_api_handlers_smoke.py tests/test_terminal.py`
+  29 项通过；全项目 grep 无 `ide_theme` / `data-ide-theme` / `IDE_MONACO` 残留。
+  未做浏览器目检（改动为删除与跟随全局变量，建议换主题时目检 IDE 面板）。
+
+## [2026-11-12] 对话渲染重构：Markdown 能力 / 排版 / 增量重排
+- 问题/决策：用户要求重构对话渲染，方向全选（视觉排版、Markdown 能力、渲染性能、
+  结构拆分），并坚持零第三方依赖。
+- 解决方案：
+  - `web/markdown.js`：块级解析改为 `renderBlocks()`，支持**嵌套列表**、
+    **任务列表** `- [ ]` / `- [x]`、**表格对齐**（`:---` / `---:` / `:---:`）与
+    `.table-wrap` 横向滚动；`inlineFmt` 增加裸 URL 自动链接（先保护已生成的
+    `a` / `img`，避免二次匹配）；整段只有代码块 / 块级公式占位符时不再包 `<p>`
+    （修掉 `<p><div class="code-block">` 的非法嵌套）。
+  - `web/css/base.css`：正文行高 1.72、标题/段落/列表/引用/行内代码间距；
+    表格斑马纹与 `.table-wrap`；代码块头加分隔线、语言标签与复制按钮 hover。
+  - 性能：新增 `web/render.js` 的 `GM_RENDER.messagesSignature()`；
+    `renderMessages` 在「窗口 + 每条消息内容签名」未变时直接返回，保留现有 DOM
+    与滚动位置，避免后台事件（保存、审批、提醒等）触发整块重排；
+    有 live 数据但还没有 DOM 时仍会重建，保证流式行能插入。
+  - 结构：渲染辅助从 `chat.js` 拆到独立 `web/render.js`，
+    `index.html` 在 `markdown.js` 之后、`chat.js` 之前引入。
+- 未拆分：`buildAiRow` / `buildUserRow` 仍留在 `chat.js`（依赖大量会话内 helper，
+  强行搬迁风险高于收益），后续可在此基础上逐步迁移。
+- 验证：`node --check web/markdown.js web/render.js web/chat.js` 通过；
+  Node 用例覆盖嵌套列表 / 任务列表 / 表格对齐 / 自动链接 / 代码块输出；
+  `pytest tests/test_chat_blocks.py tests/test_api_handlers_smoke.py` 47 项通过。
+  未做浏览器目检，建议重点看长回答的列表、表格、代码块与切会话滚动位置。
+
+## [2026-11-12] 前端 v2：Vite + Vue 骨架、/v2 托管、gzip 与设计令牌抽离
+- 问题/决策：前端需要系统性重构（性能 / 多端 / 可扩展 GUI）。全量重写旧前端不现实，
+  定为「新老并存、按路由逐步迁移」：新版挂 `/v2/`，旧版 `/` 不动，随时可回退。
+  技术栈拍板 Vite + Vue 3（兼容基线 Safari 14+），允许引入依赖。
+- 解决方案：
+  - `frontend/`：Vite 7 + Vue 3.5 + Pinia 3 + Vue Router 4（**hash 路由**，
+    Electron 直接加载 `/v2/` 时不需要服务端 SPA fallback）。构建 `base=/static/v2/`，
+    `outDir=../web/v2`，产物入库，离线也能开。
+  - 路由级懒加载 + `manualChunks.vendor`：首屏只加载当前视图的 chunk。
+  - 设计令牌单一来源：把 `web/css/base.css` 顶部令牌段（` :root` + 6 个
+    `html[data-theme]` 块）抽成 `web/css/tokens.css`，`base.css` 首行 `@import`；
+    新版通过 Vite 别名 `@tokens` 引用同一文件。改配色只动一处。
+  - `app/httpd.py`：新增 `/v2`、`/v2/` → `v2/index.html`；静态资源 gzip
+    （`accepts_gzip` 解析 + 压缩结果按 mtime/size 缓存 + `Vary: Accept-Encoding`）；
+    `/static/v2/assets/*` 返回 `immutable` 强缓存，其余仍 `no-cache` + ETag/304；
+    HTML 保持 `no-store`（每次注入 `%%TOKEN%%`）。
+  - 设计系统首版 9 个组件（GmButton/GmInput/GmSelect/GmSwitch/GmCard/GmTag/
+    GmTable/GmDialog/GmToast）+ 演示页 `#/design`；`useToast` 模块级单例。
+  - 工程封装：`lib/http.js`（鉴权头/JSON/ApiError）、`lib/stream.js`（SSE 解析、
+    POST 流式、常驻通道重连，stop 必须被调用）、`lib/desktop.js`（`gmWin` 降级：
+    浏览器里窗口操作空转、通知退 Notification、全屏退 Fullscreen API）。
+  - 采集工具：`scripts/asset_report.py`（资源体积/gzip 统计）、
+    `scripts/perf_probe.mjs`（CDP 驱动本机 Edge，采 FCP/LCP/TBT/CLS + 控制台报错，
+    零 npm 依赖；注意 `longtask` 的 buffered 选项在部分浏览器会抛错，需退回普通注册）。
+- 实测（Edge 157 headless，CPU 4× + 1.6Mbps/150ms RTT，冷缓存）：
+  旧版 `/` FCP 4700–4792ms / LCP 4896–4996ms / CLS 0.003–0.008 / load ≈20s；
+  新版 `/v2/` FCP 764ms / LCP 1204ms / TBT 104ms / CLS 0 / load 900ms，无控制台报错。
+  首屏同步资源 gzip 1044.1 KB → 约 60 KB，请求 90 → 7。
+- 相关文件：`frontend/`、`web/v2/`、`web/css/tokens.css`、`app/httpd.py`、
+  `scripts/asset_report.py`、`scripts/perf_probe.mjs`、`docs/FRONTEND_V2.md`、
+  `tests/test_web_v2.py`。
+- 验证：`npm run build` 通过；`pytest tests/test_web_v2.py tests/test_web_hardening.py
+  tests/test_assets.py tests/test_registry.py` 全部通过；`ruff check app/httpd.py
+  scripts/asset_report.py` 通过；curl 验证 `/v2/` 注入令牌、gzip 生效、
+  immutable 头、`If-None-Match` → 304（注意 PowerShell 传引号会丢 header，用 Python 客户端复测）。
+- 两个坑：① dev server 的入口在 base 下（`/static/v2/`），且不能把整个 `/static`
+  代理给后端，否则会和 dev 自己的资源路径打架（只代理 `/api`、`/share`、`/static/icons`）；
+  ② `vite.config.js` 的 `devTokenPlugin()` 注入令牌时要用**全局替换**
+  （注释里也出现过占位符字样，`replace('%%TOKEN%%', …)` 只会换掉注释那一处）。
+- 待办：P3 首屏瘦身；P4 旧浏览器 legacy 兜底；P5 主题可视化配置（P2 已完成，见下条）。
+
+## [2026-11-12] 前端 v2 · P2：会话管理页 + 设置页配置读写（样板迁移）
+- 问题/决策：全量迁移聊天渲染风险太高，先用「会话管理」做样板，把
+  API 封装 / 状态分层 / SSE 联动 / 弹窗交互 / 配置写回整条链路跑通；
+  消息只做**只读纯文本预览**，Markdown 渲染与发送留给 P3。
+- 解决方案：
+  - `stores/sessions.js`：会话列表单一数据源（`list/current/loaded/query/preview*`），
+    `apply()` 兼容 `/api/state` 与 `/api/session/*` 两种外层；`mutate()` 统一拦
+    `ok:false`（后端拒绝时不会把原始整库当列表应用）。
+  - `stores/app.js`：`refresh()` 把 `/api/state` 的会话灌进 sessions store（不再各存一份）；
+    新增 `onEvent(fn)` 订阅器，常驻 SSE 事件分发给业务模块。
+  - `views/SessionsView.vue`：搜索（本地按标题）、新建、重命名、置顶、删除（确认弹窗）、
+    只读预览（最近 20 条 / 共 N 条）；收到 `auto_msg` / `session_pending` / `notify`
+    后 800ms 防抖刷新列表。
+  - `views/SettingsView.vue`：新增「对话偏好」四个开关（`chat_auto_context`、
+    `session_memory_enabled`、`microcompact_enabled`、`chat_native_tools`），
+    走 `POST /api/config` **只提交改动的键**（后端是 `cfg.update(incoming)` 部分更新）。
+  - `lib/format.js`：相对时间 / 完整时间 / 消息纯文本提取（content 可能是字符串或多模态数组）。
+- 关键设计：选中会话 ≠ 切换当前会话 —— 点列表只拉预览（`/api/session/messages`
+  不动 `current`），真正切换要显式点「设为当前」，避免新界面顺手改掉旧界面正在用的会话。
+- 坑：
+  ① `slim_sessions()` 里非当前会话的 `messages` 是 `null`，预览必须另拉接口；
+  ② 仅剩一个会话时 `/api/session/delete` 返回 `{"ok": false, "sessions": <原始整库>}`，
+     前端必须先看 `ok` 再决定要不要 apply，否则会把几十 MB 原始数据当精简列表；
+  ③ 新建会话会顺带把 `current` 指过去，自动化验证结束要记得把 current 切回原值。
+- 验证：
+  - `tests/test_session_api_contract.py` 8 项：slim 结构、新建/改名/置顶/切换/删除、
+    消息分页、404、搜索 scope（全部用内存数据 + monkeypatch，不碰 data/）。
+  - 真实服务 E2E：新建 → 改名 → 置顶（排到首位）→ 预览 → 恢复 current → 删除 →
+    再次恢复，14 个会话数量与 current 均复原。
+  - 浏览器只读验收 5 项 PASS：14 条列表与 `/api/state` 一致、`当前` 标签唯一、
+    点行切预览（140 条会话显示最近 20 条）、搜索 14→1、重命名弹窗取消后标题不变，无 console error。
+  - `npm run build` 通过（新增 SessionsView chunk 7.57 KB / gzip 3.15 KB）。
+- 相关文件：`frontend/src/stores/sessions.js`、`frontend/src/stores/app.js`、
+  `frontend/src/views/SessionsView.vue`、`frontend/src/views/SettingsView.vue`、
+  `frontend/src/lib/format.js`、`tests/test_session_api_contract.py`。
+- 待办：P4 旧浏览器 legacy 兜底；P5 主题可视化配置。
+
+## [2026-11-12] 前端 v2 · P3：对话页 / Markdown 渲染 / 流式发送
+- 问题/决策：P3 要把「日常对话」搬进新版，同时守住首屏指标。聊天只在进入对话页时加载，
+  Markdown 渲染器沿用旧版实现（同一份逻辑，避免两套行为分叉），流式期间用纯文本、收尾后再渲染 Markdown
+  （逐 token 重排 Markdown 既卡又闪）。
+- 解决方案：
+  - `lib/markdown.js`：把 `web/markdown.js` 原样迁成 ESM（只改三处：去掉 'use strict'、
+    `window` 换成 `win` 兜底、导出 `renderMarkdown/safeRenderMarkdown/escapeHtml`），
+    保留嵌套列表 / 任务列表 / 表格对齐 / 自动链接 / 工具调用文本清理；hljs / katex 未加载时自动降级为纯文本。
+  - `styles/markdown.css`：用设计令牌重写 `.md-body` 排版（标题/列表/表格/引用/代码块/折叠/复制按钮），
+    不引入旧界面的 base.css。
+  - `stores/chat.js`：历史走 `/api/session/messages` 分页（`before` 游标 + 「加载更早」）；
+    发送走 `/api/chat` SSE，事件只处理 `delta/reasoning/tool/tool_done/plan/warn/error/session/done`；
+    `done` 里带回的 `sessions` 直接灌回 sessions store，不再额外拉 `/api/state`。
+  - `views/ChatView.vue`：会话下拉、新建会话、停止、加载更早、代码块复制/展开（事件委托）、
+    IME 组词保护（Enter 不误发）、靠近底部才自动跟随滚动、移动端 16px 输入框。
+  - `lib/stream.js`：`postStream` 先把非 2xx 的 JSON 错误体翻译成中文（busy / compressing），
+    避免用户只看到「HTTP 409」。
+  - 首屏：ChatView 与 markdown 都在懒加载 chunk 里（ChatView 20.07 KB / gzip 8.28 KB），首屏未变大。
+- 测试：
+  - `frontend/tests/markdown_test.mjs` 12 项（标题 / 行内 / 嵌套列表 / 任务列表 / 表格对齐 / 代码块转义 /
+    原始 HTML 与 javascript: 链接拦截 / 裸 URL / 缓存）；
+  - `frontend/tests/sse_test.mjs` 7 项（分帧、跨 chunk、多帧、心跳注释、坏 JSON、半帧、非 200）；
+    `npm test` 一条命令跑完。
+  - 浏览器实测：历史会话 60 条消息渲染出 h2×162 / ul×49 / table×51 / pre×51 等真实标签，无原始 Markdown 残留；
+    新建会话逐字输入后回车，0.2s 出现「正在思考…」、2.1s 流式文本、4.2s 落库为正式消息，console 0 error。
+  - 验证用的两条临时会话已清理，14 个用户会话与 current 复原。
+- 相关文件：`frontend/src/lib/markdown.js`、`frontend/src/styles/markdown.css`、
+  `frontend/src/stores/chat.js`、`frontend/src/views/ChatView.vue`、
+  `frontend/tests/*.mjs`、`frontend/package.json`（新增 `npm test`）。
+- 待办：P4 多端与旧浏览器兜底；P5 主题可视化配置与组件文档站。
+
+
+## [2026-11-12] v2 设置页外观微调与设计系统组件 API 验收
+
+- 问题/决策：
+  - 目标：验证 /v2/#/settings 外观微调（翠绿强调色、刷新持久化、恢复默认）与 /v2/#/design 组件 API（9 个 Gm* 组件 + prop 表），要求 console 无错误，结束后恢复默认。结论 PASS。
+  - 基线（light 主题）--accent = #3b57e0；点击「翠绿」后 computed --accent = #10b981，gm.ui custom.accent = #10b981；Page.reload 后仍为 #10b981，swatch 保持 is-on。
+  - 点击「恢复默认」后 --accent 回到 #3b57e0，custom.accent 变回空，按钮 disabled，toast 显示「已恢复默认外观」。
+  - /v2/#/design 的「组件 API」卡存在，9 个组件：GmButton / GmInput / GmSelect / GmSwitch / GmCard / GmTag / GmDialog / GmTable / GmToast；每个都有 属性/类型/默认/说明 表，行数 6/6/5/3/3/3/4/5/1。
+  - console error / exception / log error 全程 0；warning 0。
+- 解决方案/原因：
+  - 本机无 Chrome，Trae 浏览器插件不可用（browser_lock 报 client 不支持 isolation，external 报 10061），继续用 Edge headless + CDP（Node 24 内置 fetch/WebSocket）验收。
+  - 用真实鼠标事件点击 swatch/按钮；用 getComputedStyle(document.documentElement).getPropertyValue('--accent') 读实际值；用 localStorage gm.ui 验证持久化；Page.reload 后复查。
+- 相关代码/指令（如果有）：
+  - 页面：frontend/src/views/SettingsView.vue、frontend/src/views/DesignSystemView.vue、frontend/src/lib/theme-vars.js、frontend/src/docs/components.js。
+  - 脚本：.tmp_audit/theme_verify.mjs；结果：.tmp_audit/theme_verify/result.json；截图：01-green.png、02-reload.png、03-reset.png、04-design-api.png。
+
+## [2026-11-12] 前端 v2 · P4/P5：多端适配、旧浏览器回退、外观微调与组件文档
+- 问题/决策：
+  - 多端要覆盖手机/平板/桌面/大屏；旧浏览器要「基础可用」；设计体系要能可视化定制且文档齐全。
+  - **旧浏览器不做 legacy 产物**：试装 `@vitejs/plugin-legacy@7` 后发现它会引入 SystemJS + core-js
+    和第二套产物，而低版本浏览器在旧界面（`/`，经典脚本）功能更完整。最终改为一行能力检测
+    （`noModule` / `fetch` / `AbortController`）不满足就 `location.replace('/')`，并把插件卸掉。
+- 解决方案：
+  - 断点 4 档：手机 ≤640、平板 641–900、桌面 901–1440、大屏 >1440；≤900 抽屉侧栏，
+    ≤640 对话页头部改两行、设置页横排转竖排；`pointer: coarse` 下可点元素 ≥36px；
+    `#app` 用 `100dvh`（`@supports` 兜底）、输入区叠加安全区。
+  - `lib/theme-vars.js`：纯函数把「强调色 / 圆角 / 字号 / 密度」换算成 CSS 变量；
+    强调色留空 = 跟随主题；亮色强调色（亮度 >0.3，白字对比 <3:1）自动切近黑文字。
+  - `stores/theme.js`：覆盖层写 `documentElement.style`，持久化 `localStorage.gm.ui`（含算好的 vars），
+    `index.html` 开屏脚本首帧前应用，避免闪默认配色；`applyThemeVars` 先清旧变量再写，切回「跟随主题」不残留。
+  - 设置页「外观微调」：6 个强调色预设 + 自定义取色、圆角/字号/密度各三档、恢复默认。
+  - 设计系统页「组件 API」：9 个 Gm* 的 props/events/slots/示例，数据源 `src/docs/components.js`。
+- 测试/验证：
+  - `frontend/tests/theme_test.mjs` 7 项（默认不覆盖强调色、派生值、亮底换黑字、深浅 hover 方向、
+    圆角/字号/密度换算、非法输入回退、旧变量清理）；`npm test` 共 26 项全过（12 + 7 + 7）。
+  - 新增 `scripts/responsive_probe.mjs`：5 档视口 × 5 路由 = 25 组，判定 `scrollWidth-innerWidth<=1`，**25/25 通过**。
+  - 浏览器实测：翠绿强调色即时生效（computed `--accent=#10b981`）、刷新后保持、恢复默认回到 `#3b57e0`；
+    组件 API 9 个组件齐全，console 0 error。
+  - 后端回归 26 项 + ruff 通过。
+  - 性能（4× CPU / 1.6Mbps，3 次中位数）：FCP 848ms / LCP 1369ms / TBT 210ms / CLS 0；
+    TBT 在 190–260ms 波动，已到 Good 上限附近（P3 时为 119ms，差异主要来自测量波动与首屏包略微增大）。
+- 坑：
+  - `responsive_probe` 里切 hash **不会**触发 `Page.loadEventFired`，等待 load 会一直超时；
+    正确做法是整页导航一次，之后用 `location.hash` + 固定 settle 时间。
+  - `perf_probe` 的 TBT 单次波动很大（104–260ms），报告要取多次中位数，别拿单次数字下结论。
+- 相关文件：`frontend/src/lib/theme-vars.js`、`frontend/src/stores/theme.js`、
+  `frontend/src/views/SettingsView.vue`、`frontend/src/views/DesignSystemView.vue`、
+  `frontend/src/docs/components.js`、`frontend/src/styles/base.css`、`frontend/index.html`、
+  `scripts/responsive_probe.mjs`、`frontend/tests/theme_test.mjs`、`docs/FRONTEND_V2.md`。
+- 待办：Firefox / Safari 真机与 iOS 键盘遮挡未实测；对话页仍缺图片/文档/引用/审批卡；
+  若要把 TBT 压回 200ms 以内，需要进一步拆 vendor 或延后首屏统计水合。
+
+## [2026-11-12] 界面重构整体方案（UI_REFACTOR_PLAN，待确认）
+- 问题/决策：用户要求对完整界面做系统性重构，先出方案再落地。方案不是再换框架，
+  而是在 v2（Vite + Vue + 令牌 + 组件库）基础上重排信息架构、收敛密度。
+- 现状证据（`web/index.html` 实测）：3007 行 / 228 KB / 850 个 id / 354 个 button /
+  147 个 input / 25 个 select / 16 个 textarea；一级入口 4 个模式 + 大厅 8 个模块 +
+  设置 15 个页签；输入区常驻 20+ 控件；主题有 3 个入口、用量/轨迹/上下文分散在 4 个弹窗。
+- 方案要点：
+  - 全局壳层 = 顶栏（工作区 / ⌘K / 运行状态）+ 左侧导航（240/64/抽屉）+ 主区 + 右侧检查器（320，可收起）；
+  - 检查器合并「用量 / 轨迹 / 上下文 / 文件改动 / 工具调用」，这是减少弹窗的关键；
+  - 输入区保留 6 个高频动作，其余进「更多」与命令面板；设置 15 页签收敛为 5 组；
+  - 大厅首屏 4 主卡 + 更多模块；IDE 保留 Monaco，把终端/预览/控制台收成底部 Tab 组；
+  - 新增仅两项辅助能力：⌘K 命令面板、顶栏运行状态指示器；
+  - 密度三档并有默认档（IDE 紧凑 / 对话舒适 / GAL 大厅宽松）；同屏可见按钮 ≤12、主按钮 =1；
+  - 分 R0–R6 七阶段，旧界面在 R6 前始终可用，每阶段有验收门与回退方式。
+- 相关文件：`docs/UI_REFACTOR_PLAN.md`。
+- 待确认：迁移优先级（对话/IDE/大厅）、默认入口切换时机、默认密度。
+
+## [2026-11-12] 界面重构落地（W0–W6）：统一壳层 / 命令面板 / 检查器 / 工作区嵌入 / 默认入口切换
+- 问题/决策：按 `docs/UI_REFACTOR_PLAN.md` 一口气落地。用户选择「全量并行 + 舒适密度 + 等功能齐了再切」。
+  关键取舍：**IDE / 大厅 / 工作台 / GAL 不重写**，用 iframe 嵌入经典界面
+  （`/legacy?mode=…&embed=1`），先做到「入口统一、功能零损失」；设置 15 页签同理
+  （`/legacy?settings=<tab>&embed=1`，壳层内 `#/legacy-settings/:tab`）。
+- 解决方案：
+  - 壳层（`App.vue`）：左侧 7 个工作区（对话/会话/工作区/大厅/工作台/GAL/设置）+ 顶栏
+    （标题 / ⌘K / 连接状态 / 检查器开关）+ 右侧检查器；≤900 抽屉。
+  - 命令面板（`components/CommandPalette.vue`）：路由跳转、最近会话、切主题、新建会话、
+    打开检查器/经典界面；↑↓/Enter/Esc，Ctrl/⌘ K 全局呼出。
+  - 检查器（`components/InspectorPanel.vue`）：上下文（用量/上限/构成）、工具（live + 最近一条）、
+    用量（`/api/usage?mode=day&span=7` 汇总 + 7 日柱状）；替代原用量/轨迹/上下文弹窗。
+  - 对话页输入区收敛为「发送/停止 + 更多」；附件/语音/联网/思考在「更多」里直达经典对话。
+  - 经典界面新增 URL 参数：`?mode=` 指定工作区、`?embed=1` 隐藏标题栏/侧栏/模式切换
+    （`html.embed` 样式在 ui.css 末尾）、`?settings=<tab>` 打开指定设置页签；
+    `web/init.js` 在 applyUiMode 后按参数覆盖并调用 `openModal({tab})`。
+  - 默认入口：`httpd._WEB_UI_DEFAULT` 默认 `v2`，`/legacy` 永远指经典界面；
+    新版能力检测回退改成 `/legacy`（否则默认 v2 后会 `/` → 新版 → 又检测失败 → 死循环）。
+- 验证：
+  - 浏览器实测（Edge headless + CDP）：7 个导航项、⌘K 搜索「工作区」跳转、工作区 iframe 内
+    无重复侧栏（只剩 IDE 自己的活动栏）、15 个设置 chip、`模型接入` 内嵌页、检查器三页签，全部 PASS，主文档 console 0 error。
+  - `responsive_probe` 10 路由 × 3 视口 = 30 组，横向溢出 0。
+  - 默认入口：`/` 返回 v2、`/legacy` 返回经典（含 `id="sidebar"`）。
+  - 性能（默认 `/`，3 次中位数）：FCP 907ms / LCP 1424ms / TBT 123ms / CLS 0.001。
+  - 前端 26 项、后端 27 项（新增 `test_root_follows_default_ui`）、ruff 全通过。
+- 坑：
+  - iframe 内的 console 错误不会冒泡到父页面，排查工作区问题要单独打开 `/legacy?...`；
+  - 嵌入页在窄屏/宽屏都要检查：壳层 `.view.is-full` 必须去掉内边距与 1080 最大宽度；
+  - 经典界面的 `#modal` 位置不确定，`html.embed-settings` 不要直接 `visibility:hidden` 主区，否则可能把设置弹窗一起藏掉。
+- 相关文件：`frontend/src/App.vue`、`components/CommandPalette.vue`、`components/InspectorPanel.vue`、
+  `components/EmbedFrame.vue`、`views/*View.vue`、`docs/settings-tabs.js`、`web/index.html`、
+  `web/init.js`、`web/css/ui.css`、`app/httpd.py`、`scripts/responsive_probe.mjs`、`tests/test_web_v2.py`。
+- 回滚：`set GM_WEB_UI=legacy` 重启；或始终用 `/legacy`；嵌入参数与样式都是加法，可单独去掉。
+
+## [2026-11-12] 大厅首页原生重写（去 iframe 第一步）
+- 问题/决策：用户要求「不要害怕风险，都重构完」。大厅整块 iframe 换成原生卡片墙，
+  iframe 的粒度从「整个大厅」缩小到「单个模块」，为后续逐模块重写铺路。
+- 实现：
+  - `views/HallView.vue`：原生 7 张卡片（股市/面试/道场/数学/GAL/图寻/观测），数据在 `docs/hall-modules.js`；
+  - `views/HallModuleView.vue` + 路由 `/hall/:id`：只嵌 `/legacy?mode=hall&hall=<id>&embed=1`；
+  - 经典界面新增 `?hall=<id>` 参数：`init.js` 在 `applyUiMode` 后调用 `hallOpenFeature(id)`；
+  - `html.embed` 额外隐藏 `#hall-back`（避免与外壳「返回大厅」重复）。
+- 验证：7 张卡片、点股市进入模块页（iframe 内旧侧栏尺寸 0x0）、返回大厅往返，均 PASS。
+- 已知噪声：进入模块页时 legacy 的 chat.js 会为历史会话拉一次缺失附件，产生 1 条 404
+  （既有数据问题，与本次改动无关；embed 下界面不可见）。
+- 相关文件：`frontend/src/views/HallView.vue`、`HallModuleView.vue`、`docs/hall-modules.js`、
+  `web/init.js`、`web/index.html`、`web/css/ui.css`、`frontend/src/router/index.js`。
+- 下一步：按模块替换 iframe（先大厅各模块，再工作台、设置页签、IDE、GAL/阅读器）。
+
+## [2026-11-12] 下线 GAL 剧场（仅界面与入口，后端与数据保留）
+- 决策：用户要求删除 GAL 剧场。选择「移除界面与入口」范围：后端 `/api/gal/*` 与 `data/gal` 不动，
+  随时可恢复；不删会话里的 `gal_scope` 字段。
+- 改动：
+  - 新版：删 `views/GalView.vue` 与 `/gal` 路由；左栏去掉 GAL；命令面板去掉 GAL；
+    `docs/hall-modules.js` 去掉 `gal` 卡片（6 个模块）；`docs/settings-tabs.js` 去掉 `gal` 页签（14 个）。
+  - 经典界面：`index.html` 去掉 `hall-gal.js` 的 `<script>`（大厅不再注册 GAL 卡片）、
+    去掉设置侧栏「GAL 演出」按钮（`data-pane="gal"` 保留，避免 settings.js 取空节点报错）；
+    帮助文案里「GAL 剧场例外」一条删除；`init.js` 把历史 `ui_mode=gal` 统一落到 `hall`。
+  - 保留：`web/gal/`、`#gal-panel`、`hall-gal.js` 文件本身、后端 gal 模块与 data/gal（均无入口）。
+- 验证：`hall-gal.js` 里定义的函数在其它脚本中无引用（逐个函数名 grep 确认）；
+  `npm run build` / 前端 26 项测试通过；大厅 6 卡片、设置 14 入口需浏览器目检。
+- 回滚：恢复 `hall-gal.js` script 标签、设置按钮、`hall-modules.js` 的 gal 条目、路由与导航项，
+  并去掉 init.js 的 `gal → hall` 兜底即可。
+- 相关文件：`frontend/src/App.vue`、`router/index.js`、`docs/hall-modules.js`、
+  `docs/settings-tabs.js`、`components/CommandPalette.vue`、`web/index.html`、`web/init.js`。
+
+## [2026-11-12] 主题收敛为浅色 / 深色
+- 决策：只保留 light / dark，其余（高对比、暗夜紫、深林绿、护眼纸白）删除。
+- 改动：
+  - `web/css/tokens.css`：删掉 4 个 `html[data-theme=…]` 令牌块（约 3.4 KB），只剩深浅两套；
+  - `web/core.js` 的 `THEME_META`、`web/index.html` 与 `frontend/index.html` 的开屏脚本 `known` 表只留 light/dark；
+  - 经典设置「主题与外观」只保留两个 radio，帮助文案同步；
+  - 新版 `stores/theme.js` 的 `THEMES` 只留两项（主题切换按钮变成深浅互切）；
+  - 旧配置里若是被删主题：`applyTheme()` 会回退 light 并写回 localStorage，无需手动迁移。
+- 验证（2026-11-12 复核，Edge headless + CDP，`node .tmp_ui_verify/theme_check.mjs`）：
+  - v2 `/#/settings`「外观」卡：`.theme-row` 共 2 项（浅色 light / 深色 dark），无第 3 项；
+  - 点「深色」后 `html[data-theme]=dark`、`data-theme-mode=dark`、`localStorage.gm.theme=dark`；强刷后仍为 dark 且「深色」为当前项；
+  - legacy `/legacy` → 设置 →「主题与外观」：`input[name=theme]` 共 2 个（light/dark），
+    该 pane / 整个设置弹窗 / 页面正文均不含「高对比 / 暗夜紫 / 深林绿 / 护眼纸白」；
+  - 控制台：主题相关 0 错误；唯一一条是 legacy 历史消息图片懒加载 `POST /api/attach/get` 404
+    （附件文件已不存在，`app/api/sessions.py:381-383` 按设计返 404），与主题无关，
+    单独只开 /legacy 也必现（`set LEGACY_ONLY=1&&node .tmp_ui_verify/theme_check.mjs` 复现）。
+  - 补充：legacy 「主题」单选的回填走 `/api/config` 的 `theme`，不读 `gm.theme`，
+    所以 v2 切深色后 legacy 仍显示浅色选中——两套界面主题来源不同，本次未改。
+- 回滚：从 git 恢复 4 个主题块与对应 META/选项即可。
+
+## [2026-11-13] 经典界面增加「切换到新版界面」入口
+- 问题/决策：默认入口已切到新版，但用户仍可能停留在 `/legacy`，需要一键回到新版。
+- 方案：侧栏底部（刷新页面下方、主题/设置上方）加一个全宽链接
+  `#btn-new-ui → /v2/`，用强调色描边与普通按钮区分；embed 模式下侧栏本身隐藏，不会出现重复入口。
+- 验证：`/legacy` 返回的 HTML 含 `id="btn-new-ui"` 与 `href="/v2/"`；`base.css` 的
+  `.side-foot a.ghost` 规则已生效。
+- 相关文件：`web/index.html`、`web/css/base.css`。
+
+## [2026-11-12] GAL 剧场移除验收（导航 / 大厅 / legacy 设置）
+
+- 问题/决策：
+  - 目标：确认 GAL 剧场从前端 UI 移除，四项判定：v2 左导航 6 项无 GAL、大厅 6 卡无 GAL 剧场、legacy 大厅无 GAL 卡且设置侧栏无「GAL 演出」、无 console error。结论：PASS。
+- 解决方案/原因（证据）：
+  - v2 (/): aside.side nav.nav a.nav-item 共 6：对话/会话/工作区/大厅/工作台/设置，galEntry=false；#/hall 下 .grid button.card 共 6：模拟股市/模拟面试/研究道场/数学竞技场/图寻游戏/学习观测，body 无「GAL 剧场」。
+  - /legacy?mode=hall: #hall-panel 可见，#hall-body .hall-card 共 6（图寻游戏/模拟股市/数学竞技场/研究道场/学习观测/模拟面试），无 GAL；点 #btn-settings 后 .snav-btn 共 14 项，无「GAL 演出」，.settings-nav 文本也不含 GAL/演出。
+  - 控制台：最后两轮监听 Runtime.exceptionThrown + console.error + Log.entryAdded(error) + Network 4xx，全为 0。
+  - 首轮曾出现一次 POST /api/attach/get 404（历史会话图片附件丢失，app/api/sessions.py:378 对缺失文件返回 404），与 GAL 无关，后续两轮未复现；同一问题在本文档「大厅索引与模块入口验收」条目已记录。
+- 相关代码/指令（如果有）：
+  - 导航清单 frontend/src/App.vue:16-23；大厅模块 frontend/src/docs/hall-modules.js；legacy 设置侧栏 web/index.html:1319-1341；legacy 大厅脚本 web/index.html:2999-3007（未加载 hall-gal.js）。
+  - 复现：node .tmp_ui_verify/gal_removed_check.mjs（Edge headless + CDP）。
+  - 环境：browser_lock / browser_navigate 不可用（客户端不支持 subagent isolation；Chrome 扩展未启动，browser_setup_plugin 被取消），改用 Edge headless + CDP。

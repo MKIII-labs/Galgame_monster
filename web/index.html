@@ -17,7 +17,7 @@
   (function () {
     try {
       var t = localStorage.getItem('gm.theme') || '';
-      var known = { light: 0, dark: 1, 'high-contrast': 1, midnight: 1, forest: 1, sepia: 0 };
+      var known = { light: 0, dark: 1 };
       if (Object.prototype.hasOwnProperty.call(known, t)) {
         var dark = !!known[t];
         document.documentElement.setAttribute('data-theme', t);
@@ -27,6 +27,24 @@
         if (tc) tc.setAttribute('content', dark ? '#14161a' : '#f7f8fa');
       }
     } catch (e) { /* 隐私模式禁用 localStorage：退回 media query */ }
+  })();
+  /* 嵌入模式（历史兼容）：外部页面把经典界面的某个工作区 iframe 进来时用这些参数：
+       ?mode=ide|hall|work|plugins     直接进入对应工作区
+       ?embed=1                          隐藏标题栏、侧栏与模式切换（只留工作区本体）
+       ?settings=<tab>&embed=1           直接打开设置到指定页签
+     参数只影响本次加载，不写入配置。 */
+  (function () {
+    var cfg = { embed: false, mode: '', settings: '', hall: '' };
+    try {
+      var qs = new URLSearchParams(location.search);
+      cfg.embed = qs.get('embed') === '1';
+      cfg.mode = qs.get('mode') || '';
+      cfg.settings = qs.get('settings') || '';
+      cfg.hall = qs.get('hall') || '';
+      if (cfg.embed) document.documentElement.classList.add('embed');
+      if (cfg.settings) document.documentElement.classList.add('embed-settings');
+    } catch (e) { /* 老浏览器没有 URLSearchParams：按默认加载 */ }
+    window.__GM_EMBED__ = cfg;
   })();
 </script>
 <!-- 样式按功能拆分，按顺序加载（顺序即层叠顺序，等价于原来的单文件） -->
@@ -224,7 +242,7 @@
     <div class="sidebar-body">
     <div class="side-top">
       <button id="btn-new" class="new-chat"><svg class="ic"><use href="#i-plus"/></svg>新建对话</button>
-      <div id="mode-switch" class="mode-switch" title="在「Solo 对话」「IDE 工作区」「GAL 演出」「功能大厅」之间切换">
+      <div id="mode-switch" class="mode-switch" title="在「Solo 对话」「IDE 工作区」「功能大厅」「工作台」之间切换">
         <button class="ms-btn active" data-mode="solo" title="Solo 对话" aria-label="Solo 对话"><svg class="ic"><use href="#i-chat"/></svg><span>Solo</span></button>
         <button class="ms-btn" data-mode="ide" title="IDE 工作区" aria-label="IDE 工作区"><svg class="ic"><use href="#i-code"/></svg><span>IDE</span></button>
         <button class="ms-btn" data-mode="hall" title="功能大厅" aria-label="功能大厅"><svg class="ic"><use href="#i-grid"/></svg><span>大厅</span></button>
@@ -1068,22 +1086,6 @@
     <!-- 提问标记：Solo 模式下右侧悬浮按钮，点一下跳回被标记的关键提问 -->
     <div id="qmarks" class="qmarks hidden" aria-label="提问标记"></div>
 
-    <!-- 自动化看板：回合跑在服务端，这里显示实时阶段 / 工具 / 验收进度 -->
-    <div id="ap-live" class="ap-live hidden" aria-label="自动化运行看板">
-      <div class="ap-live-bar">
-        <button id="ap-live-head" class="ap-live-main" type="button" aria-expanded="false"
-                title="展开自动化看板：完成定义、计划、最近回合">
-          <span class="ap-live-dot"></span>
-          <span id="ap-live-phase" class="ap-live-phase">自动化</span>
-          <span id="ap-live-act" class="ap-live-act"></span>
-          <span class="ap-live-gap"></span>
-          <span id="ap-live-meta" class="ap-live-meta"></span>
-          <span id="ap-live-chev" class="ap-live-chev">▴</span>
-        </button>
-        <button id="ap-live-x" class="ap-live-x" type="button" title="收起看板">✕</button>
-      </div>
-      <div id="ap-live-body" class="ap-live-body hidden"></div>
-    </div>
     <!-- 后台任务仍在跑（刷新 / 重开 / 断线后本地没有流）：一键把实时输出接回这个会话 -->
     <div id="resume-bar" class="resume-bar hidden" role="status" aria-live="polite">
       <span class="resume-dot" aria-hidden="true"></span>
@@ -1177,7 +1179,7 @@
                 <svg class="ic"><use href="#i-terminal"/></svg>Agent
               </button>
               <button id="btn-agent-more" class="agent-more hidden" type="button"
-                      title="Agent 设置：沙箱目录 / 沙箱外只读" aria-label="Agent 设置" aria-expanded="false">
+                      title="Agent 设置：沙箱目录 / 写入与命令审批" aria-label="Agent 设置" aria-expanded="false">
                 <svg class="ic"><use href="#i-chevron"/></svg>
               </button>
               <div id="agent-menu" class="agent-menu hidden">
@@ -1191,9 +1193,6 @@
                   </button>
                 </div>
                 <button id="btn-sandbox-path" class="pill hidden" title="直接输入 / 粘贴沙箱目录路径（路径不存在会提示）">路径</button>
-                <button id="btn-outside-read" class="pill hidden" title="允许 Agent 读取沙箱外的文件（只读）：开启后，只有当你明确要求时才会读沙箱外的绝对路径；写入仍只能在沙箱内">
-                  <svg class="ic"><use href="#i-upload"/></svg>沙箱外
-                </button>
                 <div class="agent-approval">
                   <div class="agent-approval-cap">写入与命令审批</div>
                   <button class="approve-opt" type="button" data-mode="ask" title="每次写入 / 执行命令前都让你确认">
@@ -1242,11 +1241,6 @@
                 </div>
               </div>
             </span>
-            <button id="btn-autochat" class="autochat-toggle" aria-pressed="false"
-                    title="自动化：输入框写目标后点这里。它会自己规划、执行、验收；中断会自动续跑。运行中再点一次暂停；显示「需要你 / 已暂停」时点此恢复">
-              <span class="autochat-dot"></span><svg class="ic"><use href="#i-refresh"/></svg>
-              <span class="autochat-text">自动化</span>
-            </button>
           </div>
           <div class="toolbar-right">
             <button id="btn-more" class="icon" title="更多输入选项" aria-label="更多输入选项">⋯</button>
@@ -1338,7 +1332,6 @@
           <div class="snav-group-title">用户与外观</div>
           <button class="snav-btn" data-tab="profile" data-search="画像 偏好 记忆 自动记录 学习 指令 预设 记录准则"><svg class="ic"><use href="#i-brain"/></svg>用户画像与学习</button>
           <button class="snav-btn" data-tab="appearance" data-search="主题 深色 浅色 外观"><svg class="ic"><use href="#i-theme"/></svg>主题与外观</button>
-          <button class="snav-btn" data-tab="gal" data-search="gal 演出 立绘 打字机 tts 剧本 特效"><svg class="ic"><use href="#i-film"/></svg>GAL 演出</button>
           <button class="snav-btn" data-tab="speech" data-search="语音 识别 朗读 tts 音色 降噪"><svg class="ic"><use href="#i-volume"/></svg>语音与朗读</button>
         </div>
         <div class="snav-group">
@@ -1638,80 +1631,14 @@
           <div class="radio-row">
             <label><input type="radio" name="theme" value="light"> 浅色</label>
             <label><input type="radio" name="theme" value="dark"> 深色</label>
-            <label><input type="radio" name="theme" value="high-contrast"> 高对比暗</label>
-            <label><input type="radio" name="theme" value="midnight"> 暗夜紫</label>
-            <label><input type="radio" name="theme" value="forest"> 深林绿</label>
-            <label><input type="radio" name="theme" value="sepia"> 护眼纸白</label>
           </div>
-          <p class="hint">切换界面明暗；应用窗口的标题栏也会跟随。GAL 演出主题（樱粉 / 夜蓝 / 和风纸 / 极简黑白 / 霓虹夜景 / 像素复古）在「GAL 演出」里单独设置，进入 GAL 模式时它会覆盖配色。详见「功能说明 → 主题与外观」。</p>
+          <p class="hint">切换界面明暗；应用窗口的标题栏也会跟随。</p>
 
           <h4 class="set-group" data-search="过程 步骤 自动跟随 滚动 暂停 高亮">对话过程</h4>
           <label class="check-row" data-search="过程 步骤 自动跟随 滚动 暂停 当前步骤">
             <input type="checkbox" id="ui-process-follow"> 过程步骤自动跟随（滚到当前步骤；用户上翻时暂停）
           </label>
           <p class="hint">开启后，过程折叠区里每出现一个新步骤会自动带进视野，但不强行拉到整条消息底部；你往上翻立即暂停，回到底部或点右下「回到底部」恢复。关闭后只更新「N 步」统计，不再自动滚动（当前步骤高亮与已完成步骤的自动收起仍然生效）。</p>
-
-          <h4 class="set-group" data-search="ide 编辑器 主题 vscode trae 配色 独立 解耦 语法高亮">IDE 编辑器主题</h4>
-          <label class="check-row" data-search="ide 独立主题 深色 默认 开关 跟随界面主题">
-            <input type="checkbox" id="ide-theme-enabled"> 为 IDE 单独设置主题（关闭则跟随界面主题）
-          </label>
-          <div class="ide-theme-grid" data-search="vscode trae 深色 浅色 深蓝 dark+ light+ 编辑器 配色">
-            <label class="ide-theme-card">
-              <input type="radio" name="ide-theme" value="">
-              <span class="itc-prev" data-t="inherit"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
-              <span class="itc-name">跟随界面主题</span>
-              <span class="itc-sub">不独立</span>
-            </label>
-            <label class="ide-theme-card">
-              <input type="radio" name="ide-theme" value="vscode-current">
-              <span class="itc-prev" data-t="vscode-current"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
-              <span class="itc-name">跟随 VS Code</span>
-              <span class="itc-sub">读本机当前主题</span>
-            </label>
-            <label class="ide-theme-card">
-              <input type="radio" name="ide-theme" value="vscode-modern-dark">
-              <span class="itc-prev" data-t="vscode-modern-dark"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
-              <span class="itc-name">VSCode Dark Modern</span>
-              <span class="itc-sub">深色 · 当前默认</span>
-            </label>
-            <label class="ide-theme-card">
-              <input type="radio" name="ide-theme" value="vscode-modern-light">
-              <span class="itc-prev" data-t="vscode-modern-light"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
-              <span class="itc-name">VSCode Light Modern</span>
-              <span class="itc-sub">浅色 · 当前默认</span>
-            </label>
-            <label class="ide-theme-card">
-              <input type="radio" name="ide-theme" value="vscode-dark">
-              <span class="itc-prev" data-t="vscode-dark"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
-              <span class="itc-name">VSCode Dark+</span>
-              <span class="itc-sub">深色 · 传统</span>
-            </label>
-            <label class="ide-theme-card">
-              <input type="radio" name="ide-theme" value="vscode-light">
-              <span class="itc-prev" data-t="vscode-light"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
-              <span class="itc-name">VSCode Light+</span>
-              <span class="itc-sub">浅色 · 传统</span>
-            </label>
-            <label class="ide-theme-card">
-              <input type="radio" name="ide-theme" value="trae-dark">
-              <span class="itc-prev" data-t="trae-dark"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
-              <span class="itc-name">Trae Dark</span>
-              <span class="itc-sub">深色</span>
-            </label>
-            <label class="ide-theme-card">
-              <input type="radio" name="ide-theme" value="trae-light">
-              <span class="itc-prev" data-t="trae-light"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
-              <span class="itc-name">Trae Light</span>
-              <span class="itc-sub">浅色</span>
-            </label>
-            <label class="ide-theme-card">
-              <input type="radio" name="ide-theme" value="trae-blue">
-              <span class="itc-prev" data-t="trae-blue"><i class="itc-act"></i><i class="itc-body"><i class="itc-tab"></i><i class="itc-l"></i><i class="itc-l"></i><i class="itc-l"></i></i></span>
-              <span class="itc-name">Trae Deep Blue</span>
-              <span class="itc-sub">深色 · 蔚蓝</span>
-            </label>
-          </div>
-          <p class="hint">只在 IDE 模式生效，退出 IDE 立刻恢复界面主题；与上方「主题」各存各的，互不干扰。<strong>VSCode Dark Modern / Light Modern</strong> 是 VS Code 现在的出厂默认主题（Dark+ / Light+ 是更早的「传统」默认）。<strong>跟随 VS Code</strong> 会读取本机 <code>settings.json</code> 里的 <code>workbench.colorTheme</code> 并在约 5 秒内跟随切换：官方内置主题直接套用上面的预设，第三方主题则按其配色映射（映射是有损的，缺项会回落到界面主题）；<strong>语法高亮不跟随</strong>，仍用与明暗匹配的 Dark+ / Light+。</p>
 
           <h4 class="set-group" data-search="空白 空格 中点 whitespace 可视化 制表符 缩进">空白字符</h4>
           <select id="ide-whitespace" class="field-input" data-search="空白 空格 中点 全部 选区内 尾随 边界 关闭">
@@ -2006,7 +1933,7 @@
           <div class="help-body">
             <p>设置 →「上下文与压缩 → 省费模式」。它只改变<strong>发给模型的历史</strong>，本地原文一条都不删。</p>
             <ul>
-              <li><strong>省费模式</strong>（默认开启）：@文件 / @目录 的正文只在当轮内联；更早轮次只留「路径:行号」句柄，需要时模型用 <code>read_file</code> 按需取回。界面状态、意图、自动化目标改贴到请求末尾，避免整段历史每轮失去前缀缓存。关闭后回到旧行为（<code>quality</code>，装配结果与旧版一致）。</li>
+              <li><strong>省费模式</strong>（默认开启）：@文件 / @目录 的正文只在当轮内联；更早轮次只留「路径:行号」句柄，需要时模型用 <code>read_file</code> 按需取回。界面状态、意图提示改贴到请求末尾，避免整段历史每轮失去前缀缓存。关闭后回到旧行为（<code>quality</code>，装配结果与旧版一致）。</li>
               <li><strong>历史原文预算</strong>（默认 40000 tokens）：每轮最多重发多少历史原文，超出部分压进结构化摘要；<strong>当前回合始终保留原文</strong>。调大更保守也更费钱；调小更省，但更依赖模型按需重读文件。</li>
               <li><strong>单回合输入预算</strong>（默认 3000 万 tokens）：一个回合累计输入超过它就先收尾，并保留「继续任务」，只拦病态长跑。</li>
               <li><strong>历史附图保留条数</strong>（默认 2）：把最近几条带图消息重新作为图片附上（每条最多 2 张）。设为 0 时历史里只留「可回看附件」一行，模型可能要求你重新发图。</li>
@@ -2092,41 +2019,13 @@
 
         <h4 class="set-group">外观与演出</h4>
 
-        <details class="help-sec" data-search="主题 深色 浅色 外观 标题栏 高对比 暗夜紫 深林绿 护眼 ide vscode trae 编辑器 空白字符 空格">
-          <summary>主题与外观（界面主题 / IDE 主题 / GAL 主题）</summary>
+        <details class="help-sec" data-search="主题 深色 浅色 外观 标题栏 空白字符 空格">
+          <summary>主题与外观</summary>
           <div class="help-body">
             <ul>
-              <li><strong>界面主题</strong>（设置 →「主题与外观」）：浅色 / 深色 / 高对比暗 / 暗夜紫 / 深林绿 / 护眼纸白，切换后界面与应用窗口标题栏一起变。看不清字时可换「高对比暗」或「护眼纸白」。</li>
-              <li><strong>IDE 主题</strong>（同页「IDE 编辑器主题」）：跟随界面主题 / VSCode Dark+ / VSCode Light+ / Trae Dark / Trae Light / Trae Deep Blue。它是<strong>完全独立</strong>的一套配置，只在 IDE 模式下覆盖整个 IDE 界面（含左侧会话栏与右侧对话区），退出 IDE 立即恢复界面主题；选「跟随界面主题」即两套合一。</li>
+              <li><strong>界面主题</strong>（设置 →「主题与外观」）：浅色 / 深色，切换后界面与应用窗口标题栏一起变。</li>
               <li><strong>空白字符可视化</strong>（同页「空白字符」）：关闭 / 仅选区内 / 仅行尾 / 词之间 / 全部。空格显示为浅灰中点 <code>·</code>、制表符显示为 <code>→</code>，颜色采用 VS Code 标准值，与主题无关。</li>
-              <li><strong>GAL 演出主题</strong>（设置 →「GAL 演出」）：樱粉 / 夜蓝 / 和风纸（衬线）/ 极简黑白 / 霓虹夜景 / 像素复古，决定对白框、名字牌与选项的观感。</li>
-              <li><strong>覆盖关系</strong>：进入 GAL 模式时，GAL 主题会<strong>覆盖到全部 UI</strong>（含设置弹窗、提示、弹窗等）；IDE 模式下由 IDE 主题覆盖主界面与左栏（设置弹窗除外）。退出对应模式即恢复界面主题。三者各存各的配置，互不干扰。</li>
-            </ul>
-          </div>
-        </details>
-
-        <details class="help-sec" data-search="gal 演出 主题 打字机 特效 立绘 对白框">
-          <summary>GAL 演出：主题 / 打字机 / 特效 / 立绘</summary>
-          <div class="help-body">
-            <ul>
-              <li><strong>演出主题</strong>：六套配色（樱粉 / 夜蓝 / 和风纸 / 极简黑白 / 霓虹夜景 / 像素复古），作用于对白框、说话人名牌与选项按钮。</li>
-              <li><strong>对白框最大高度</strong>：占舞台高度的百分比（30–70）；对白框是浮在立绘之上的半透明层，立绘会自动避让。</li>
-              <li><strong>打字机</strong>：「逐字显示对白」开关 + 速度（8–120 字/秒，线性生效）。关闭即整句直接出现。</li>
-              <li><strong>关键词特效</strong>：在台词里写 <code>*关键词*</code> 或 <code>【关键词】</code> 触发（不会被朗读）。可自定义关键词、CSS 效果与音效——编辑 <code>data/gal/effects/effects.json</code>，音效放 <code>data/gal/effects/</code>；<code>mode</code> 支持 before / after / loop / stop（loop、stop 用于循环音效）。</li>
-              <li><strong>立绘过渡</strong>：换人或进出场时的淡入淡出动画；工具条还可设为「沉浸式淡出」（鼠标移入才实显）。</li>
-            </ul>
-          </div>
-        </details>
-
-        <details class="help-sec" data-search="gal 推进 自动播放 剧本 幕 轮数 大纲">
-          <summary>GAL 推进与自动写剧本</summary>
-          <div class="help-body">
-            <ul>
-              <li><strong>对白展示</strong>：「逐段追加（可回看）」会把一轮话累积显示；「单行推进」一次只显示一句，点一下出下一句。</li>
-              <li><strong>自动播放</strong>：单行推进时，语音播完自动切下一句（快捷键 <code>A</code>）；「每句最短展示」控制切换的最短间隔。</li>
-              <li><strong>AI 自动写剧本</strong>：打开后由 AI 依据「角色设定 + 用户画像」先写一份<strong>分幕大纲</strong>，再<strong>逐幕展开</strong>推进剧情，最后一幕自动收束为结局。</li>
-              <li><strong>总幕数 / 每幕轮数</strong>：控制大纲的规模与每幕的对话长度。</li>
-              <li><strong>剧本按会话独立保存</strong>；可在 GAL 工具条 <code>⋯ → 剧本</code> 查看大纲或重新生成。</li>
+              <li><strong>覆盖关系</strong>：IDE 模式跟随界面主题（Monaco 语法色随明暗切换）。</li>
             </ul>
           </div>
         </details>
@@ -2170,7 +2069,7 @@
               <li><strong>IDE</strong>：VS Code 风格布局 —— 最左<strong>活动栏</strong>（资源管理器 / 搜索 / 在 VS Code 打开）、<strong>侧边栏文件树</strong>、中间<strong>多标签编辑器</strong>、底部<strong>状态栏</strong>（路径 / 编码 / 行列 / 语言），右侧仍是窄栏对话。工作区根目录 = <strong>当前会话的沙箱</strong>，切会话会自动换。</li>
               <li><strong>编辑器</strong>：内置 <strong>Monaco</strong>（VS Code 同款，<strong>本地内置、离线可用</strong>）——语法高亮、多光标、查找替换、MiniMap、代码折叠。</li>
               <li><strong>AI Tab 补全</strong>：在编辑器里停一下，模型会在光标处给出补全；<code>Tab</code> 采纳、<code>Esc</code> 收起、<code>Alt+\</code> 手动触发。默认开启，但需要先在「模型接入 → 轻量任务的模型」填一个模型才会真正请求（避免用主模型高频烧 token）；一次最多 8 行、不跨文件。</li>
-              <li><strong>编辑器主题</strong>：设置 →「主题与外观」里的 <strong>IDE 主题</strong>是独立于界面主题的一套配置（<strong>跟随 VS Code</strong> / VSCode Dark Modern / Light Modern / Dark+ / Light+、Trae Dark / Light / Deep Blue，或「跟随界面主题」），只在 IDE 模式生效，界面与编辑器配色一起换。</li>
+              <li><strong>编辑器主题</strong>：跟随界面主题（浅色 / 深色），IDE 界面与 Monaco 语法色一起切换，不再单独配置。</li>
               <li><strong>空白字符</strong>：同页「空白字符可视化」可选 关闭 / 仅选区内 / 仅行尾 / 词之间 / 全部（默认「全部」）；空格显示为浅灰中点 <code>·</code>、制表符为 <code>→</code>。</li>
               <li><strong>文件管理区收起</strong>：点活动栏里<strong>当前已激活</strong>的图标即可收起右侧的视图区（再点任意图标展开），或按 <code>Ctrl+B</code> 切换；收起状态会被记住。命令面板里也有「收起 / 展开文件管理区」。</li>
               <li><strong>快捷键</strong>：<code>Ctrl+S</code> 保存、<code>Ctrl+P</code> 快速打开文件、<code>Ctrl+Shift+P</code> 命令面板、<code>Ctrl+B</code> 收起 / 展开文件管理区、<code>Ctrl+`</code> 终端；完整清单见左侧「快捷键」。</li>
@@ -2198,14 +2097,14 @@
               <li><strong>画面自检（render_check）</strong>：写完网页 / 小游戏 / UI，模型可以用<strong>无头浏览器真的打开</strong>这个 HTML，拿回运行时错误、零尺寸画布、元素遮挡、字号过小、对比度不足、点击区过小等结论；需要判断配色观感时可加 <code>screenshot</code>，由视觉模型描述画面（优先聊天模型，不支持图片时自动换视觉 API）。只接受沙箱内的 <code>.html / .htm</code>，不联网。<strong>手感、动效仍需你自己看。</strong></li>
               <li><strong>声音自检（audio_probe）</strong>：写完音效 / BGM 后，模型可以真的读一遍音频（WAV / FLAC / OGG / MP3），拿回响度包络、起音、RT60 混响、频谱质心、事件密度等<strong>可复算的测量值</strong>，以及「冲击 / 压迫 / 空间 / 清晰」四个<strong>代理</strong>分数；改前改后用 <code>audio_compare</code> 对比（会先抵消整体响度差，避免「只是变响」被当成变好）。<strong>它听不出好不好听</strong>——那一步仍需你的耳朵。</li>
               <li><strong>改动可撤回</strong>：每次写操作生成一张工具卡片，点卡片上的「撤回」即可恢复该次改动。</li>
-              <li><strong>读沙箱外</strong>：输入框的「沙箱外」开关（仅 Agent 开启时显示）可让 AI 在你<strong>明确要求</strong>时读取沙箱外的文件——<strong>只读，写入仍只在沙箱内</strong>。</li>
+              <li><strong>读沙箱外</strong>：可以直接用<strong>绝对路径</strong>读取沙箱外的文件（与 Trae 一致）；秘密文件、本项目 <code>data/</code> 与禁止目录仍会被拒绝，<strong>写入仍只在沙箱内</strong>。</li>
               <li><strong>中途提问</strong>：需要你决策时，AI 会在对话里弹出一张<strong>提问卡</strong>（可点选项或自己输入），你回答后它会<strong>原地继续</strong>，不用重新发消息。<strong>提问与 Agent 无关，不选沙箱也能用</strong>。</li>
-              <li><strong>相关设置</strong>：轮次、重复拦截、自动续跑次数、命令超时在「设置 → Agent 执行」；自动化的提问策略、重启恢复、看门狗在「设置 → Agent → 自动化（Autopilot）」。</li>
+              <li><strong>相关设置</strong>：轮次、重复拦截、自动续跑次数、命令超时在「设置 → Agent 执行」。</li>
             </ul>
           </div>
         </details>
 
-        <details class="help-sec" data-search="computer use 浏览器 操作 网页 点击 输入 截图 白名单 站点 自动化 扩展 canvas 桌面">
+        <details class="help-sec" data-search="computer use 浏览器 操作 网页 点击 输入 截图 白名单 站点 扩展 canvas 桌面">
           <summary>Computer Use（浏览器与桌面操作）</summary>
           <div class="help-body">
             <ul>
@@ -2243,25 +2142,9 @@
           </div>
         </details>
 
-        <details class="help-sec" data-search="自动化 autopilot 自主规划 完成定义 验收 独立评审 断点续跑 提问策略 auto smart ask 看门狗 需要你">
-          <summary>自动化：自主规划到完成、断了自己续、提问按策略处理</summary>
-          <div class="help-body">
-            <p>在输入框写目标，点「自动化」。它不会只做一轮：先立项（完成定义 + 粗计划），再自己执行、机检、独立评审，直到验收全部通过或需要你介入。</p>
-            <ul>
-              <li><strong>完成判定</strong>：能跑命令就跑命令（构建 / 测试 / lint / 启动检查 / HTTP 探活）；没有可机检项时，由新上下文的独立评审员只看证据判分。判定不了的项不算通过，不会靠「我觉得做完了」收工。</li>
-              <li><strong>不会交半成品</strong>：计划与验收全过才算完成；长时间没有实际进展或预算耗尽时转「需要你」，不会把半成品标成完成。</li>
-              <li><strong>断点续跑</strong>：网络 / 超时 / 空回合会自动退避重试；进程重启后会把未完成目标接回来。断点里包含上次改过的文件、上次验收，以及「执行到一半结果未知」的工具，续跑会先核对现状再动手。</li>
-              <li><strong>提问策略</strong>：设置 → Agent → 自动化里三档——<strong>auto</strong> 一律自决；<strong>smart</strong> 可逆自决、删除 / 覆盖 / 发布 / 付款 / 改凭据 / 缺外部信息时暂停问你；<strong>ask</strong> 一律问。自动化里不弹交互卡，问题会写进正文和目标，回答后点「自动化」恢复。</li>
-              <li><strong>状态与恢复</strong>：按钮显示「运行中 / 重试中 / 需要你 / 已暂停」；点「需要你 / 已暂停」会恢复原目标，不会拿输入框新建一个。</li>
-              <li><strong>无进展看门狗</strong>：连续多回合没有新的写入 / 验收变化会强制重规划，仍无进展就暂停等你。默认不设固定回合上限；需要严格控制成本时，在设置里打开「硬上限」。</li>
-            </ul>
-          </div>
-        </details>
-
         <details class="help-sec" data-search="自动续跑 继续 继续输出 收尾 要不要 上限 次数">
           <summary>自动续跑：什么时候自己继续、什么时候会停</summary>
           <div class="help-body">
-            <p><strong>这一节是普通对话的自动续跑</strong>；目标级自动化（立项 / 验收 / 断点续跑）见上一条。</p>
             <p>模型有时会在其实没做完的时候收尾，等你再说一遍「继续」。自动续跑就是省掉这一步：它想收尾时先检查一遍，没做完就自己推它往下做，过程流里留一条「自动续跑 1/3」的浅提示，你能看出不是卡住了。</p>
             <ul>
               <li><strong>三种触发</strong>：① 计划里还有没做完的步骤；② 没有计划，但结尾在问「要不要 / 需要我」；③ 是开发型任务、既没建计划也没动手，催一次让它先列计划。</li>
@@ -2283,7 +2166,6 @@
               <li><strong>停止按钮只停当前会话</strong>：别的会话在后台照常跑。</li>
               <li><strong>排队只在同一个会话里生效</strong>：当前会话正在生成时，Enter 的内容会排队；别的会话空闲就可以直接发。</li>
               <li><strong>生成中的会话不能删</strong>：避免收尾时又把它写回来；先点停止再删。</li>
-              <li><strong>GAL 剧场例外</strong>：舞台、配音、选项都是单实例，切会话仍会停止。</li>
               <li><strong>后台完成会发系统通知</strong>（需要通知权限）；审批卡 / 提问卡 / 等你动手的操作也会在你没看那个会话时发通知，点通知直接跳回去处理。</li>
             </ul>
           </div>
@@ -3042,6 +2924,7 @@
 <!-- 前端逻辑按功能拆分，按顺序加载（普通脚本，共享全局作用域；最后一个负责启动 init） -->
 <script src="/static/core.js"></script>
 <script src="/static/markdown.js"></script>
+<script src="/static/render.js"></script>
 <script src="/static/mdlint.js"></script>
 <script src="/static/rich-media.js"></script>
 <script src="/static/chat.js"></script>
@@ -3088,7 +2971,6 @@
 <script src="/static/hall-math-archive.js"></script>
 <script src="/static/hall-math-exam.js"></script>
 <script src="/static/hall-dojo.js"></script>
-<script src="/static/hall-gal.js"></script>
 <script src="/static/hall-observe.js"></script>
 <script src="/static/hall-interview.js"></script>
 <script src="/static/hall-plugins.js"></script>

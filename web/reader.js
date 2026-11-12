@@ -1746,6 +1746,33 @@
     return { all: all, obstacles: obstacles };
   }
 
+  /* 全篇正文行距（PDF pt）：译页字号以它为基准，避免逐块拟合导致同页字号忽大忽小。
+     只取多行正文块的中位数；行数被高估时（同一行切成多段）用字高反推真实行数。
+     结果缓存在 doc 上：切页 / 重排都复用。 */
+  function docBodyLead() {
+    var doc = RD.doc;
+    if (!doc) return 0;
+    if (doc._bodyLead != null) return doc._bodyLead;
+    var leads = [];
+    (doc.blocks || []).forEach(function (b) {
+      if (!b || (b.kind !== 'text' && b.kind !== 'list')) return;
+      if (!b.rect || b.rect.length !== 4) return;
+      var n = Number(b.lines) || 0;
+      if (n < 2) return;
+      var h = b.rect[3] - b.rect[1];
+      var glyph = Number(b.size) || 0;
+      if (glyph > 0 && h / n < glyph * 1.6) {
+        n = Math.max(1, Math.round(h / (glyph * 2.2)));
+      }
+      if (n < 2) return;
+      var lead = h / n;
+      if (lead > 2 && lead < 60) leads.push(lead);
+    });
+    leads.sort(function (a, b) { return a - b; });
+    doc._bodyLead = leads.length ? leads[Math.floor(leads.length / 2)] : 0;
+    return doc._bodyLead;
+  }
+
   function renderTransOverlay(pageNo) {
     var st = RD.tpages[pageNo];
     if (!st || !st.rendered || !window.RDTransPage) return;
@@ -1773,6 +1800,7 @@
     window.RDTransPage.render(st.layer, {
       pageNo: pageNo, size: pageSize(pageNo), canvas: st.canvas,
       items: items, obstacles: geo.obstacles, pageRects: geo.all,
+      bodyLead: docBodyLead(),
       formatInline: formatInline,
       onReady: function (els) {
         RD.tblockEls[pageNo] = els || {};

@@ -1649,71 +1649,6 @@ def _pending_plan_end_reason(plan, text, has_calls=False, gal_mode=False,
             "action": "continue"}
 
 
-_AUTO_TAIL = " 自动化会继续处理，不需要手动点继续。"
-
-
-def _autopilot_end_reason(reason):
-    """自动化模式下改写收尾提示：不再让用户点「继续输出 / 重试」。
-
-    手动停止保持原样；余额不足改成「充值 / 换服务商后点自动化恢复」，
-    因为这两种确实需要人处理，只是动作不是「重试这一条」。
-    """
-    if not isinstance(reason, dict):
-        return reason
-    kind = str(reason.get("kind") or "")
-    if kind == "stopped":
-        return reason
-    if kind == "billing":
-        # 余额不足仍然要人处理，但动作是「充值 / 换服务商后点自动化恢复」，
-        # 不是普通聊天的「重试这一条」。
-        r = dict(reason)
-        t = str(r.get("text") or "")
-        t = re.sub(r"点「重试」[^。；\n]*[。；]?", "", t)
-        r["text"] = (t.strip().rstrip("。；")
-                     + " 充值或切换服务商后，点「自动化」恢复即可继续。").strip()
-        r["action"] = ""
-        r["autopilot"] = True
-        return r
-    r = dict(reason)
-    t = str(r.get("text") or "")
-    t = re.sub(r"(?:需要接着做就)?点「继续输出」[^。；\n]*[。；]?", "", t)
-    t = re.sub(r"可点「继续」[^。；\n]*[。；]?", "", t)
-    t = re.sub(r"点「重试」[^。；\n]*[。；]?", "", t)
-    t = re.sub(r"\s*需要接着做就\s*$", "", t)
-    r["text"] = (t.strip().rstrip("。；") + _AUTO_TAIL).strip()
-    r["action"] = ""
-    r["autopilot"] = True
-    return r
-
-
-def _decision_text(text, width=500):
-    """取正文末尾几行作为「老板/策略」要处理的决策问句。"""
-    lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
-    if not lines:
-        return ""
-    return "\n".join(lines[-6:])[-width:]
-
-
-def _record_autopilot_decision(gid, question, answer, why="", risk="low"):
-    if not gid:
-        return
-    try:
-        from app import autopilot as _ap
-        _ap.record_decision(gid, question, answer, why, risk)
-    except Exception:
-        pass
-
-
-def _mark_autopilot_needs_human(gid, reason, questions=None):
-    if not gid:
-        return
-    try:
-        from app import autopilot as _ap
-        _ap.mark_needs_human(gid, reason, questions)
-    except Exception:
-        pass
-
-
 def _acceptance_status_text(s):
     criteria = _acceptance_criteria(s)
     if not criteria:
@@ -2227,24 +2162,19 @@ def _wf_exec_node(node, env):
         decision = "allow"
         grant = env.get("grant") or [False]
         if agent.writes_files(name, args):
-            if env.get("autopilot_on") and name in ("delete_file", "move_file"):
-                decision, why = "deny", "自动化模式不允许删除 / 移动文件"
-            else:
-                decision, why = agent.judge_write(sandbox, name, args,
-                                                  env.get("approval_mode") or "ask")
+            decision, why = agent.judge_write(sandbox, name, args,
+                                              env.get("approval_mode") or "ask")
             if decision != "deny" and grant[0]:
                 decision = "allow"
         elif name in agent.RUN_TOOLS:
             decision, why = agent.judge_command(
                 sandbox, args, env.get("approval_mode") or "ask",
                 caps.get("shell_mode") or agent.SHELL_DEFAULT,
-                unrestricted=bool(env.get("unrestricted")),
-                interactive=not bool(env.get("autopilot_on")))
+                unrestricted=bool(env.get("unrestricted")))
         elif name in agent.SHELL_TOOLS:
             decision, why = agent.judge_shell(
                 env.get("approval_mode") or "ask",
-                unrestricted=bool(env.get("unrestricted")),
-                interactive=not bool(env.get("autopilot_on")))
+                unrestricted=bool(env.get("unrestricted")))
         elif name in agent.GIT_WRITE_TOOLS:
             decision, why = agent.judge_git_commit(
                 (env.get("cfg") or {}).get("git_commit_mode"),
@@ -2262,6 +2192,17 @@ def _wf_exec_node(node, env):
              "reason": why})
         if agent.wait_approval(aid, stop_event=ev) is not True:
             return {"ok": False, "error": "用户未允许执行", "no_retry": True}
+        if name in ("run_command", "shell"):
+            try:
+                from app import sandbox_win
+                from app.agent.tools_exec import outside_paths as _op
+                _paths = (_op(sandbox, args) if name == "run_command"
+                          else _op(sandbox, {}, text=str(
+                              (args or {}).get("command") or "")))
+                if _paths:
+                    sandbox_win.grant_extra(_paths)
+            except Exception:              # noqa: BLE001  授权失败不影响命令本身
+                pass
         if agent.approval_remember(aid):
             grant[0] = True
     if agent.writes_files(name, args):
@@ -3353,22 +3294,10 @@ def _api_chat(h):
             return h._json({"ok": False, "error": "busy", "reason": "compressing",
                             "message": "该会话正在压缩较早的历史，消息会稍后自动发出。"}, 409)
         content = (body.get("content") or "").strip()
-        # 自动化（app/autopilot.py 驱动）：这个标记只由「老板」的驱动器设置，
-        # 作用是关掉回合内自动续跑、跳过提问卡阻塞、放开写入审批。
-        autopilot_on = bool(body.get("autopilot"))
-        goal_brief = str(body.get("goal") or "").strip() if autopilot_on else ""
-        goal_id = str(body.get("goal_id") or "").strip() if autopilot_on else ""
-        # 自动化提问策略：auto / smart / ask。
-        # question_policy_scope = all 时同一套策略也作用于普通聊天（默认仅自动化，
-        # 保持普通聊天「一律问」的原有行为）。
+        # 提问策略：auto / smart / ask，默认 ask（一律弹卡，等用户回答）。
         _cfg0 = load_config() or {}
-        _scope = str(_cfg0.get("question_policy_scope") or "autopilot").strip().lower()
-        question_policy = "ask"
-        if autopilot_on or _scope == "all":
-            _qp = str(body.get("question_policy") or "").strip().lower()
-            if _qp not in ("auto", "smart", "ask"):
-                _qp = str(_cfg0.get("autonomy_question_policy") or "smart").strip().lower()
-            question_policy = _qp if _qp in ("auto", "smart", "ask") else "smart"
+        _qp = str(_cfg0.get("autonomy_question_policy") or "ask").strip().lower()
+        question_policy = _qp if _qp in ("auto", "smart", "ask") else "ask"
         # 提问卡不限时：0 = 永不超时，一直等到用户回答 / 点停止 / 让 AI 自己决定
         _ask_timeout = 0
         # /plan 规划模式：只读研究 + 产出计划卡，不执行。前端会先剥掉前缀；
@@ -3379,8 +3308,6 @@ def _api_chat(h):
             content = re.sub(r"^/plan\s*", "", content, count=1, flags=re.I).strip()
             if not content:
                 content = "请先规划当前任务：读必要上下文，给出里程碑计划，然后等我确认。"
-        if plan_mode and autopilot_on:
-            plan_mode = False          # 自动化任务需要真正执行，规划轮没有意义
         resend = body.get("resend") if isinstance(body.get("resend"), dict) else None
         resume_req = bool(body.get("resume"))        # 「继续任务」：进程重启后的断点续跑
         cont_req = bool(body.get("continue")) or resume_req   # 「继续输出」：从断点续写，不新开消息
@@ -4467,7 +4394,7 @@ def _api_chat(h):
             if _cap_hint:
                 _cap_hint = _cap_domains_with_skills(_cap_hint, bool(skills_text))
         cap_domains = None
-        # 省费模式：轮级动态块（界面 / 意图 / 自动化目标）不再拼进 system ——
+        # 省费模式：轮级动态块（界面 / 意图）不再拼进 system ——
         # system 里每变一次，它后面的整段历史都会 miss 前缀缓存；贴到请求末尾只影响自己。
         # quality 模式保持旧行为，可一键回滚。
         _balanced = str((_cfg.get("token_profile") or "balanced")).lower() != "quality"
@@ -4530,16 +4457,6 @@ def _api_chat(h):
                           "本轮先输出一个 JSON 对象（以 { 开头、以 } 结尾），不要代码围栏、不要任何解释文字；"
                           "如需记录记忆，可在 JSON **之后**另起一段追加 ```memory 块（用户看不到）。")
                     break
-
-        # 自动化目标：每回合固定注入。只塞进对话历史是不够的 —— 长跑之后
-        # 上下文压缩会把目标细节压掉，第 10 回合就「忘了要做什么」。
-        if goal_brief:
-            if _balanced and not gal_mode:
-                _late_blocks.append(goal_brief)
-            elif messages and messages[0].get("role") == "system":
-                messages[0]["content"] += "\n\n" + goal_brief
-            else:
-                messages.insert(0, {"role": "system", "content": goal_brief})
 
         # 研究台账放在系统提示最末尾。_sys_core 是不含台账的固定部分：
         # 循环里每轮用「_sys_core + 最新台账」重拼，后来登记的缺口 / 新来源
@@ -4646,8 +4563,8 @@ def _api_chat(h):
         plan_state = None            # update_plan 的最新计划（落库后供历史回显）
         # 计划审批（Claude 式 plan mode）：第一份计划出现后先挂起，等用户
         # 批准 / 提意见 / 逐条改步骤，然后再执行；批准之后的计划微调不再打断。
-        # 自动化、GAL、非 Agent 会话不打断（那里没有「等人拍板」的时机）。
-        plan_approved = bool(gal_mode or autopilot_on or not agent_on)
+        # GAL、非 Agent 会话不打断（那里没有「等人拍板」的时机）。
+        plan_approved = bool(gal_mode or not agent_on)
         # 跨轮继承：用户说「继续 / 接着 / 进度怎么样」时，把上一版计划装回来，
         # 这样 plan_patch 才能继续改同一份计划（否则每轮都从零重发整份）。
         # 非 Agent 会话不继承：那里没有文件 / 命令能力，计划只是笔记，
@@ -4675,12 +4592,9 @@ def _api_chat(h):
         # 回合内折叠游标：前缀缓存「改一个字节后面全废」，所以折叠点只允许前进。
         # 列表被压缩 / 溢出恢复重建时必须归零（下标会整体错位）。
         _fold_cursor = 0
-        # 自动化模式下没有人守着审批：档位强制 full，删除 / 移动另由下面的硬禁止兜住。
-        approval_mode = ("full" if autopilot_on
-                         else agent.normalize_approval(s.get("approval_mode")))
-        # 完全放权：只对「用户手动选了 full」的会话生效。自动化任务无人值守，
-        # 仍保留命令白名单等边界 —— 半夜自己跑出沙箱改坏项目没人能拦。
-        _unrestricted = (approval_mode == "full" and not autopilot_on)
+        approval_mode = agent.normalize_approval(s.get("approval_mode"))
+        # 完全放权：只在用户手动选了 full 的会话生效。
+        _unrestricted = (approval_mode == "full")
         approval_granted = False     # 用户点了「本轮都允许」后，本轮剩余写入不再问
         turn_writes = 0              # 本轮已执行的写入次数（用于计划提示 / 自动续跑判断）
         repeat_state = {"sig": "", "n": 0}   # 同一工具 + 同一参数连续调用计数（doom loop 守卫）
@@ -4736,8 +4650,6 @@ def _api_chat(h):
                 _research_min = 0
         nudged_pseudo = False       # 把「（调用工具）」占位文本当正文 → 已提醒过一次
         pseudo_stop = False         # 占位文本再次出现 → 直接收尾（记为没有结论）
-        autopilot_pause = False     # 自动化提问策略要求暂停 → 本轮收尾，等用户回来
-        decision_auto = 0           # 自动化下「正文决策问句」已被系统代答几次
         auto_continues = 0          # 已自动续跑几次（模型想收尾但任务没做完）
         break_continues = 0         # 异常中断后自动「继续输出」的次数（每回合最多 1 次）
         auto_idle = 0               # 连续「续跑但一个新工具都没执行」的次数（只用于加强提示）
@@ -4753,9 +4665,7 @@ def _api_chat(h):
         sync_hint_seen = ""         # 上次发出的「计划回标」提示（相同内容不重复刷）
         reached_round_limit = False  # 工具轮数用完且还在要工具（stop_incomplete）
         # 0 = 关闭，1–10 = 次数，-1 = 无上限（见 agent.normalize_auto_continue）
-        # 自动化模式下回合内不续跑：续跑交给「老板」控制。否则两套续跑叠加，
-        # 一个回合能跑几十次模型调用，老板要到很晚才介入。
-        auto_continue_limit = 0 if autopilot_on else agent.normalize_auto_continue(
+        auto_continue_limit = agent.normalize_auto_continue(
             _cfg.get("agent_auto_continue", 3))
         # 其余 Agent 上限（轮次 / 重复拦截 / 审批阈值 / 命令超时）在这里定一次，
         # 循环里用局部变量，避免用户中途改设置导致同一次请求前后判定不一致
@@ -4769,8 +4679,8 @@ def _api_chat(h):
         caps["agent_on"] = bool(agent_on)
         caps["emit"] = sse
         caps["stop_event"] = ev
-        # 沙箱外只读授权：Code Mode / 脚本化工作流的护栏按它决定能否读沙箱外
-        caps["allow_outside"] = bool(s.get("allow_outside_read"))
+        # 读取默认允许沙箱外绝对路径；Code Mode / 脚本化工作流的护栏按它放行读取
+        caps["allow_outside"] = True
         # tool_search 解锁的工具组：本轮内有效（下一轮请求重建 schema 时带上）
         caps["tool_unlock"] = set()
         # 脚本编排：一段 run_workflow_script 最多调用几次子代理（0 = 不限）
@@ -4860,7 +4770,7 @@ def _api_chat(h):
             nonlocal plan_state, plan_approved, plan_mode, plan_dirty
             nonlocal plan_updated_round, turn_finished, appr_review_seen
             nonlocal _tool_unlock_sig
-            if plan_approved or gal_mode or autopilot_on or not plan_state:
+            if plan_approved or gal_mode or not plan_state:
                 return ""
             steps = plan_state.get("steps") or []
             if not steps:
@@ -4957,8 +4867,8 @@ def _api_chat(h):
             return {
                 "sandbox": sandbox or "", "sid": sid, "sse": sse, "ev": ev,
                 "caps": caps, "approval_mode": approval_mode,
-                "autopilot_on": autopilot_on, "unrestricted": _unrestricted,
-                "allow_outside": bool(s.get("allow_outside_read")),
+                "unrestricted": _unrestricted,
+                "allow_outside": True,
                 "grant": [approval_granted], "writes": [turn_writes],
                 "api_key": api_key, "api_url": api_url, "model": api_model,
                 "think_level": _cfg.get("chat_think_level") or "high",
@@ -5008,23 +4918,18 @@ def _api_chat(h):
                         "error": "主沙箱在子代理运行期间被改过：%s" % cerr,
                         "reason": "冲突，未回写；补丁已保留在 %s" % patch_path}
             if approval_mode != "full":
-                if autopilot_on and question_policy != "auto":
+                _aid = agent.new_approval(
+                    sid, "apply_worktree",
+                    {"agent": who, "summary": summary,
+                     "files": paths[:20], "patch": patch_path})
+                sse({"type": "approval", "aid": _aid, "name": "apply_worktree",
+                     "args": {"agent": who, "summary": summary,
+                              "files": paths[:20], "patch": patch_path},
+                     "reason": "子代理 %s 在隔离工作区里改了 %s，是否回写到主沙箱？"
+                               % (who, summary)})
+                if agent.wait_approval(_aid, stop_event=ev) is not True:
                     return {"ok": True, "applied": False,
-                            "reason": "自动化模式下不自动回写隔离改动；补丁已保留在 %s"
-                                      % patch_path}
-                if not autopilot_on:
-                    _aid = agent.new_approval(
-                        sid, "apply_worktree",
-                        {"agent": who, "summary": summary,
-                         "files": paths[:20], "patch": patch_path})
-                    sse({"type": "approval", "aid": _aid, "name": "apply_worktree",
-                         "args": {"agent": who, "summary": summary,
-                                  "files": paths[:20], "patch": patch_path},
-                         "reason": "子代理 %s 在隔离工作区里改了 %s，是否回写到主沙箱？"
-                                   % (who, summary)})
-                    if agent.wait_approval(_aid, stop_event=ev) is not True:
-                        return {"ok": True, "applied": False,
-                                "reason": "你拒绝了回写；补丁已保留在 %s" % patch_path}
+                            "reason": "你拒绝了回写；补丁已保留在 %s" % patch_path}
             # 回写前拍快照：每个文件一条撤销记录（与「查看变更 / 撤销」一致），
             # 另加一条覆盖整批的，供审批卡上的「撤回」一次退回全部。
             pairs = []
@@ -5152,7 +5057,7 @@ def _api_chat(h):
                 "think_level": _c.get("chat_think_level") or "high",
                 "user_goal": _goal or "",
                 "session_id": sid,
-                "allow_outside": bool(s.get("allow_outside_read")),
+                "allow_outside": True,
                 "fork_prefix": _fork,
                 "fork_tokens": _fork_used,
                 "search_fn": _search,
@@ -5321,7 +5226,7 @@ def _api_chat(h):
         # 自动派发（auto-plan）：动手前先让 planner 出一份计划，注入本轮上下文。
         # 只在「像任务」的第一轮跑；计划已继承（继续 / 接着）或已经有计划时跳过。
         if (not gal_mode and not plan_mode and not plan_state
-                and agent_on and sandbox and not autopilot_on
+                and agent_on and sandbox
                 and bool(_cfg.get("agent_auto_plan", True))
                 and bool(_cfg.get("agent_explore_enabled", True))):
             try:
@@ -5696,7 +5601,7 @@ def _api_chat(h):
             if agent_on:
                 _sp_on_ready, _sp_drain = _stream_prefetch_sink(
                     sandbox=sandbox,
-                    allow_outside=bool(s.get("allow_outside_read")),
+                    allow_outside=True,
                     caps=caps, stop_event=ev, enabled=True)
             while True:
                 rr = None
@@ -6332,8 +6237,7 @@ def _api_chat(h):
                         continue
                 # 收尾时用正文问句提问、却没调 ask_user → 让它改用提问卡（只提醒一次）。
                 # 放在自动续跑之后：本该「继续做」的话已经在上一步被推走了，这里只剩真的在等用户拍板。
-                # 自动化模式下不催「改用提问卡」：那边没人回答，催了只会变成死循环。
-                if (not gal_mode and not autopilot_on and not rr["stopped"]
+                if (not gal_mode and not rr["stopped"]
                         and not (rr.get("tool_block") or rr.get("pseudo_tool_tag"))
                         and _needs_ask_nudge(
                             rr.get("visible") or "",
@@ -6389,36 +6293,6 @@ def _api_chat(h):
                           "2. 真的做完了 → 调用 `finish`（summary 写清交付了什么）收尾；"
                           "做不了 / 需要我拍板的，写进 `incomplete` 再调 finish。"})
                     continue
-                # 自动化下的「正文决策问句」：按提问策略自决或暂停。
-                # 模型经常不用 ask_user，而是在结尾写「你希望用 A 还是 B」；
-                # 自动化没人回答，这里必须替它做决定，否则任务就停在这句话上。
-                if (autopilot_on and not gal_mode and not rr["stopped"]
-                        and decision_auto < 3
-                        and stepctx._pending_decision(rr.get("visible") or "")):
-                    from app import autonomy_policy as _qpolicy
-                    _qtext = _decision_text(rr.get("visible") or "")
-                    _d = _qpolicy.decide(_qtext, [], context=goal_brief,
-                                         mode=question_policy,
-                                         goal=(content if not cont else ""))
-                    if _d.get("action") == "auto":
-                        decision_auto += 1
-                        _ans = str(_d.get("answer") or "").strip()
-                        _record_autopilot_decision(
-                            goal_id, _qtext, _ans, _d.get("why"), _d.get("risk"))
-                        if rr["visible"]:
-                            messages.append({"role": "assistant",
-                                             "content": rr["visible"]})
-                        messages.append({"role": "user", "content":
-                            "【系统按自动化策略代答】%s\n依据：%s\n"
-                            "请直接按这个决定继续执行，不要再等用户确认。"
-                            % (_ans or "按目标继续", _d.get("why") or "")})
-                        continue
-                    # smart 判定为不可逆 / 缺外部信息：暂停目标，等用户回来
-                    _mark_autopilot_needs_human(
-                        goal_id, "需要你拍板：" + _qtext[:160])
-                    text_parts.append(
-                        "\n\n（自动化暂停：需要你决定 ——\n" + _qtext + "）")
-                    break
                 # Stop hook 收尾闸门（对齐 Claude Code 的 stop_hook_blocking）：
                 # 以前这个钩子在 done 之后才跑，返回的 decision=block 没人读，
                 # 等于「声明了 Stop 却不会拦」。现在收尾前问一次：hook 说没做完
@@ -6521,7 +6395,7 @@ def _api_chat(h):
             _prefetched = dict(_stream_results) if agent_on else {}
             if agent_on:
                 _prefetched.update(_prefetch_reads(
-                    rr["tool_calls"], sandbox, bool(s.get("allow_outside_read")),
+                    rr["tool_calls"], sandbox, True,
                     caps, ev, skip=set(_prefetched)))
             _precomputed = {}
             _ex_batch = {}           # idx -> (explore 结果, 起始时刻)：同一批只读子代理
@@ -6554,8 +6428,7 @@ def _api_chat(h):
                     _d, _ = agent.judge_command(
                         sandbox, _args, approval_mode,
                         (caps or {}).get("shell_mode") or agent.SHELL_DEFAULT,
-                        unrestricted=_unrestricted,
-                        interactive=not autopilot_on)
+                        unrestricted=_unrestricted)
                 except Exception:            # noqa: BLE001  判不出来就当不安全
                     return False
                 return _d == "allow"
@@ -6573,7 +6446,7 @@ def _api_chat(h):
                         not in ("false", "0", "no", "off")):
                     _vt0 = time.time()
                     _vimgs, _verr = agent.vision_attachments(
-                        sandbox, cargs, bool(s.get("allow_outside_read")))
+                        sandbox, cargs, True)
                     if _verr:
                         results.append("【see_image】" + _verr)
                         continue
@@ -6688,7 +6561,7 @@ def _api_chat(h):
                     if _end - _ci >= 2:
                         _precomputed.update(_run_read_batch(
                             rr["tool_calls"][_ci:_end], _ci, sandbox,
-                            bool(s.get("allow_outside_read")), caps, ev,
+                            True, caps, ev,
                             _par_workers, _prefetched,
                             unrestricted=_unrestricted))
                         _skip_read_until = _end
@@ -6815,92 +6688,6 @@ def _api_chat(h):
                                    % (item["name"], a, b, total, item["text"][a:b]))
                     continue
                 if name == "ask_user":
-                    if autopilot_on:
-                        # 自动化：按 question_policy 决定「系统代答」还是「暂停等人」。
-                        # auto = 一律自决（不可逆也只选自可回滚的方案）；
-                        # smart = 可逆自决、不可逆 / 缺外部信息暂停；
-                        # ask = 一律弹卡原地等（等不到就暂停目标）。
-                        if ask_group_done:
-                            continue
-                        ask_group_done = True
-                        qs = []
-                        for c2 in ask_calls:
-                            a2 = c2.get("args") or {}
-                            lst = a2.get("questions")
-                            if isinstance(lst, list) and lst:
-                                qs.extend(lst)
-                            else:                  # 兼容旧的 {question, options} 写法
-                                qs.append({"question": a2.get("question"),
-                                           "options": a2.get("options")})
-                        qs = [q for q in qs if isinstance(q, dict)
-                              and str(q.get("question") or "").strip()]
-                        if not qs:
-                            results.append("【ask_user】缺少问题内容")
-                            continue
-                        from app import autonomy_policy as _qpolicy
-                        _auto_lines, _ask_qs, _ask_meta = [], [], []
-                        _asked_log = []
-                        for it in qs:
-                            _q = str(it.get("question") or "").strip()
-                            _opts_raw = it.get("options") if isinstance(it.get("options"), list) else []
-                            # 选项可能是 {label, desc, recommended}，策略层只吃标题
-                            _opts = [o.get("label") if isinstance(o, dict) else str(o)
-                                     for o in _opts_raw]
-                            _opts = [x for x in _opts if x]
-                            if it.get("action"):
-                                # 「等待用户操作」：只能在用户本机亲手完成，任何自动化策略都不代做
-                                _ask_qs.append(it)
-                                _ask_meta.append((_q, {"action": "ask",
-                                                       "why": "需要你在本机亲手操作"}))
-                                continue
-                            _d = _qpolicy.decide(
-                                _q, _opts, context=goal_brief,
-                                mode=question_policy,
-                                goal=(content if not cont else ""))
-                            if _d.get("action") == "auto":
-                                _ans = str(_d.get("answer") or "").strip()
-                                _auto_lines.append("%s → %s（系统自决：%s）" % (
-                                    _q, _ans or "（按目标继续）", _d.get("why") or ""))
-                                _asked_log.append({"question": _q, "options": _opts,
-                                                   "answer": _ans, "auto": True})
-                                _record_autopilot_decision(
-                                    goal_id, _q, _ans, _d.get("why"), _d.get("risk"))
-                            else:
-                                _ask_qs.append(it)
-                                _ask_meta.append((_q, _d))
-                        _lines = []
-                        if _auto_lines:
-                            _lines.append("【系统按自动化策略代答】\n"
-                                          + "\n".join(_auto_lines))
-                        if _ask_qs:
-                            # 自动化线程用的是假 handler，弹卡事件到不了前端；
-                            # 这里改成「暂停 + 把问题写进正文 / 目标」，用户回答后点恢复即可。
-                            _qs_txt = "；".join(x[0][:120] for x in _ask_meta)
-                            _mark_autopilot_needs_human(
-                                goal_id, "需要你拍板：" + _qs_txt[:200])
-                            _lines.append("需要你回答：")
-                            for it, (_q, _d) in zip(_ask_qs, _ask_meta):
-                                _opts = [o.get("label") if isinstance(o, dict) else str(o)
-                                         for o in (it.get("options") or [])]
-                                _opts = [x for x in _opts if x]
-                                _lines.append(
-                                    "- " + _q
-                                    + (("（选项：" + " / ".join(_opts) + "）")
-                                       if _opts else ""))
-                                _asked_log.append({
-                                    "question": _q,
-                                    "options": it.get("options") or [],
-                                    "answer": "", "auto": False})
-                            text_parts.append(
-                                "\n\n（自动化暂停：需要你回答 ——\n"
-                                + "\n".join("- " + x[0][:300] for x in _ask_meta)
-                                + "\n回答后点「自动化」恢复即可继续。）")
-                            autopilot_pause = True
-                        _log_tool({"tool": "ask_user", "asks": _asked_log})
-                        results.append("【ask_user】\n" + "\n".join(_lines))
-                        if autopilot_pause:
-                            break
-                        continue
                     if ask_group_done:
                         continue                       # 已并入上一组提问
                     ask_group_done = True
@@ -6918,9 +6705,9 @@ def _api_chat(h):
                         results.append("【ask_user】缺少问题内容")
                         continue
                     # 提问策略：smart/auto 下能自决的先代答，只把真正需要拍板的摆出来。
-                    # 默认范围仅自动化，普通聊天 question_policy 恒为 ask，行为不变。
+                    # 默认 ask（一律弹卡），与旧行为一致。
                     _auto_lines, _ask_qs, _auto_logged = _ask_policy_split(
-                        qs, question_policy, context=goal_brief, goal=content)
+                        qs, question_policy, context="", goal=content)
                     if _auto_logged:
                         _log_tool({"tool": "ask_user", "asks": _auto_logged})
                     if _auto_lines:
@@ -7200,7 +6987,7 @@ def _api_chat(h):
                         "think_level": _ex_cfg.get("chat_think_level") or "high",
                         "user_goal": content or "",
                         "session_id": sid,
-                        "allow_outside": bool(s.get("allow_outside_read")),
+                        "allow_outside": True,
                         "fork_prefix": _fork_msgs,
                         "fork_tokens": _fork_used,
                         "parent_brief": "" if _fork_msgs else _parent_brief(messages),
@@ -7347,7 +7134,7 @@ def _api_chat(h):
                         "api_key": api_key, "api_url": api_url,
                         "model": (_fu_cfg.get("agent_explore_model") or api_model),
                         "think_level": _fu_cfg.get("chat_think_level") or "high",
-                        "allow_outside": bool(s.get("allow_outside_read")),
+                        "allow_outside": True,
                         "budget": _fu_cfg.get("agent_explore_budget") or 0,
                         "ttl": _fu_cfg.get("agent_explore_ttl"),
                         "search_fn": _wf_search, "web_urls": set(),
@@ -7631,12 +7418,8 @@ def _api_chat(h):
                 if not decision:
                     decision = "allow"
                     if agent.writes_files(name, cargs):
-                        # 自动化模式：删除 / 移动不可逆，代码层直接拒绝（不是「问一下」）。
-                        if autopilot_on and name in ("delete_file", "move_file"):
-                            decision, why = "deny", "自动化模式不允许删除 / 移动文件"
-                        else:
-                            decision, why = agent.judge_write(
-                                sandbox, name, cargs, approval_mode)
+                        decision, why = agent.judge_write(
+                            sandbox, name, cargs, approval_mode)
                         # 规则里的 deny 永远生效：即便用户点过「本轮都允许」也不能绕过
                         if decision != "deny" and approval_granted:
                             decision = "allow"
@@ -7644,12 +7427,10 @@ def _api_chat(h):
                         decision, why = agent.judge_command(
                             sandbox, cargs, approval_mode,
                             (caps or {}).get("shell_mode") or agent.SHELL_DEFAULT,
-                            unrestricted=_unrestricted,
-                            interactive=not autopilot_on)
+                            unrestricted=_unrestricted)
                     elif name in agent.SHELL_TOOLS:
                         decision, why = agent.judge_shell(
-                            approval_mode, unrestricted=_unrestricted,
-                            interactive=not autopilot_on)
+                            approval_mode, unrestricted=_unrestricted)
                     elif name in agent.GIT_WRITE_TOOLS:
                         # 提交不改文件内容，改 Git 历史；策略在设置里单独一档
                         decision, why = agent.judge_git_commit(
@@ -7664,56 +7445,35 @@ def _api_chat(h):
                                    % (name, why))
                     continue
                 if decision == "ask":
-                    if autopilot_on:
-                        # 自动化下不能无限等审批卡（假 handler 弹不到前端）。
-                        # auto = 直接放行；smart = 不碰需要审批的外部工具，换别的做法；
-                        # ask = 暂停目标，等你回来处理 / 改策略。
-                        if question_policy == "auto":
-                            _record_autopilot_decision(
-                                goal_id, "批准工具 %s" % name, "allow",
-                                "auto 策略：自动化模式下自动放行", "low")
-                            if name in agent.COMPUTER_TOOLS and _comp_host:
-                                computer.grant_session(_comp_host)
-                        elif question_policy == "smart":
-                            results.append(
-                                "【审批】自动化 smart 策略不自动批准 %s（%s）。"
-                                "换一种不需要审批的做法；确实必须用它，"
-                                "就在设置里把「遇到提问卡」改成 auto。"
-                                % (name, why or "需要确认"))
-                            _record_autopilot_decision(
-                                goal_id, "拒绝工具 %s" % name, "deny",
-                                why or "需要人工审批", "high")
-                            continue
-                        else:
-                            _mark_autopilot_needs_human(
-                                goal_id, "需要你批准工具：%s" % name)
-                            results.append(
-                                "【审批】自动化已暂停，等待用户批准 %s（%s）。"
-                                % (name, why or "需要确认"))
-                            text_parts.append(
-                                "\n\n（自动化暂停：需要你批准工具 %s，参数：%s）"
-                                % (name, json.dumps(cargs, ensure_ascii=False)[:500]))
-                            autopilot_pause = True
-                            break
-                    else:
-                        aid = agent.new_approval(sid, name, cargs)
-                        sse({"type": "approval", "aid": aid, "name": name,
-                             "args": cargs, "reason": why})
-                        if agent.wait_approval(aid, stop_event=ev) is not True:
-                            results.append(
-                                "【审批】用户未允许 %s 的执行。不要重试；"
-                                "请说明原本打算改什么，并询问下一步。"
-                                % name)
-                            continue
-                        if agent.approval_remember(aid):
-                            approval_granted = True
-                        if name in agent.COMPUTER_TOOLS and _comp_host:
-                            # 站点授权只活在本次进程里：卡片上的「允许」等于「本会话可用这个站点」
-                            computer.grant_session(_comp_host)
+                    aid = agent.new_approval(sid, name, cargs)
+                    sse({"type": "approval", "aid": aid, "name": name,
+                         "args": cargs, "reason": why})
+                    if agent.wait_approval(aid, stop_event=ev) is not True:
+                        results.append(
+                            "【审批】用户未允许 %s 的执行。不要重试；"
+                            "请说明原本打算改什么，并询问下一步。"
+                            % name)
+                        continue
+                    if name in ("run_command", "shell"):
+                        try:
+                            from app import sandbox_win
+                            from app.agent.tools_exec import outside_paths as _op
+                            _paths = (_op(sandbox, cargs) if name == "run_command"
+                                      else _op(sandbox, {}, text=str(
+                                          (cargs or {}).get("command") or "")))
+                            if _paths:
+                                sandbox_win.grant_extra(_paths)
+                        except Exception:      # noqa: BLE001
+                            pass
+                    if agent.approval_remember(aid):
+                        approval_granted = True
+                    if name in agent.COMPUTER_TOOLS and _comp_host:
+                        # 站点授权只活在本次进程里：卡片上的「允许」等于「本会话可用这个站点」
+                        computer.grant_session(_comp_host)
                 if name in agent.WRITE_TOOLS:
                     turn_writes += 1
                 sse({"type": "tool", "name": name, "args": cargs})
-                allow_out = bool(s.get("allow_outside_read"))
+                allow_out = True
                 # 命中并发预取就直接用结果；_ms 是它真实的执行耗时
                 _pkey = (name, json.dumps(cargs, ensure_ascii=False, sort_keys=True))
                 # 工具执行日志：先记 intent，执行完再记 outcome。进程如果在中间
@@ -7875,10 +7635,6 @@ def _api_chat(h):
                     if _hint:
                         _rtext += "\n\n" + _hint
                 results.append("【%s】\n%s" % (name, _rtext))
-            if autopilot_pause:
-                # 自动化提问策略要求暂停：不再进入下一轮模型调用，直接收尾。
-                # 目标状态已由 autopilot.mark_needs_human 置位，等用户回答后恢复。
-                break
             if _rd is not None:             # 把本轮实际执行的工具耗时补进埋点
                 _new_tl = tool_log[_tl_before:]
                 _rd["tools"] = len(_new_tl)
@@ -8280,10 +8036,6 @@ def _api_chat(h):
                               "action": "retry"}
         except Exception as e:                       # noqa: BLE001
             print(f"[收尾] 计算结束原因失败：{e}")
-
-        if autopilot_on and end_reason:
-            # 自动化下不再让用户点「继续输出 / 重试」：监督线程会接着跑。
-            end_reason = _autopilot_end_reason(end_reason)
 
         if end_reason:
             sse({"type": "end_reason", "reason": end_reason})

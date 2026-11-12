@@ -249,19 +249,29 @@ def _api_ide_preview_start(h):
     s, sb, err = h._sb_guard(body)
     if err:
         return err
+    target = str(body.get("url") or "").strip()
+    from app import preview
+    if target:
+        try:
+            base = preview.start_dev(target)
+        except ValueError as e:
+            return h._json({"ok": False, "error": str(e)}, 400)
+        except OSError as e:
+            return h._json({"ok": False, "error": "预览代理启动失败：%s" % e}, 500)
+        return h._json({"ok": True, "base": base, "url": base,
+                        "mode": "dev", "target": target})
     rel = str(body.get("path") or "").strip()
     if rel:
         try:
             rel = _preview_rel(sb, rel)
         except agent.SandboxError as e:
             return h._json({"ok": False, "error": str(e)}, 400)
-    from app import preview
     try:
         base = preview.start(sb)
     except OSError as e:
         return h._json({"ok": False, "error": "预览服务启动失败：%s" % e}, 500)
     url = (base + urllib.parse.quote(rel, safe="/")) if rel else base
-    return h._json({"ok": True, "base": base, "url": url})
+    return h._json({"ok": True, "base": base, "url": url, "mode": "static"})
 
 
 @route("/api/ide/preview/stop")

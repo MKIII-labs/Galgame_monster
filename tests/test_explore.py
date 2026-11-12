@@ -532,7 +532,7 @@ def test_custom_role_tools_prompt_and_model(tmp_path):
                             "model": "small-model", "max_turns": 2}},
     }
     res = explore.run({"goal": "审一下", "agents": [{"agent": "myrev", "task": "看 a.py"}]}, ctx)
-    assert seen["system"] == "自定义提示词"
+    assert seen["system"].startswith("自定义提示词")
     assert seen["tools"] == ["read"]
     read_schema = next(s for s in seen["schemas"]
                        if s["function"]["name"] == "read")

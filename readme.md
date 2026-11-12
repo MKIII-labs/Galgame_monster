@@ -69,7 +69,7 @@ Galgame_monster 是一个**纯本地**的个人 AI 工作台：界面用原生 W
 | 模块 | 能力 | 关键点 |
 | --- | --- | --- |
 | Solo 对话 | 多会话、流式输出、停止 / 继续、上下文压缩、token 用量核算、轨迹回放 | 支持 Markdown / KaTeX、附件、联网搜索、语音输入与旁注提问 |
-| 文件 Agent | 沙箱内读写与执行、计划驱动多轮、子代理、变更审阅与撤回 | 写操作按审批档位执行；沙箱外访问需显式开启且只读 |
+| 文件 Agent | 沙箱内读写与执行、计划驱动多轮、子代理、变更审阅与撤回 | 写操作按审批档位执行；读取可用绝对路径访问沙箱外 |
 | IDE 工作区 | Monaco 编辑器、文件树、多标签、终端、Git、Python 调试、语义索引、AI Tab 补全 | 内置 Monaco，离线可用；编码按原文件自动识别 |
 | 文档阅读与翻译 | PDF / Word / PPT 沉浸式阅读、按章节翻译、术语表、公式与图表裁图、译文导出 | 左栏原页 + 右栏重排阅读流；导出仅译文 / 双语 PDF / Markdown |
 | 记忆与知识 | 用户画像、知识图谱、会话记忆、笔记库、统一记忆索引 | 知识图谱可视化编辑；笔记为普通 Markdown 文件 |
@@ -77,7 +77,7 @@ Galgame_monster 是一个**纯本地**的个人 AI 工作台：界面用原生 W
 | 图片生成 | 通过本机 ComfyUI + FLUX 工作流出图，结果登记为工作台产物 | 默认关闭，不影响其它功能 |
 | GAL 剧场 | 角色 / 立绘 / 剧本 / 配音 / 舞台状态，独立会话 | 逐段对白、打字机、选项、掷骰、关键词特效 |
 | 功能大厅 | 图寻、数学竞技场、模拟股市、模拟面试、研究道场、学习观测、GAL 剧场 | 各模块自行注册；数据独立存储 |
-| 工作台 | 日程、任务拆解与执行、产物归档、工作流、自动化看板、专注计时 | 任务与步骤实时落盘，重启可恢复 |
+| 工作台 | 日程、任务拆解与执行、产物归档、工作流、专注计时 | 任务与步骤实时落盘，重启可恢复 |
 | 插件与 MCP | Python 工具插件、MCP 服务器、内置安装源与 DSH 索引 | 默认关闭；安装 / 启用需确认，重启后加载 |
 | 可观测 | 轨迹面板记录系统提示 / 上下文 / 思考 / 工具 / 耗时；旁注提问不打断主对话 | 只读旁路，不进入模型上下文 |
 
@@ -183,7 +183,7 @@ python scripts/fetch_embed_model.py
 | --- | --- |
 | 开启与沙箱 | 点输入区上方「Agent」，选择沙箱目录；设置按会话保存 |
 | 工具分组 | **读取** list / file / files / search / semantic / map；**编辑** write / patch / mkdir / move / copy / delete；**执行** exec / terminal；**代码** diagnostics / definition / references / hover / symbols / implementation / calls / rename / check / find / impact / context；**Git** status / diff / log / commit / split；**计划** update / patch；**子代理** delegate / explore / followup / status / result / cancel；**联网** search / fetch / note；**历史** list / undo / redo / recover；**视觉** render / qa / views / geometry / scene；**图片** see / compare / analyze；**素材** scan / convert / atlas / inline / validate / mesh；**音频** probe / compare；**工作流** run / script / status / resume / cancel；**其他** sleep / reminder，以及 `calendar.*` / `task.*` / `memory.*` / `note.*` / `bili.*` / `stock.*` |
-| 安全边界 | 只接受沙箱内路径；`.git` / `.venv` / `node_modules` / `__pycache__` 与本项目 `data/` 永久禁止访问；「读沙箱外」需明确开启且只读 |
+| 安全边界 | 写入只接受沙箱内路径，读取可用绝对路径访问沙箱外；`.git` / `.venv` / `node_modules` / `__pycache__` 与本项目 `data/` 永久禁止访问；秘密文件默认拒读 |
 | 审批档位 | `ask` 手动审批 / `ai` 智能审批（默认；只读与普通命令放行，安装、联网、改历史类才问）/ `full` 完全自动 / `custom` 自定义规则（沙箱内 `.gm/agent-rules.json`） |
 | Shell 自由度 | `standard`（默认，允许 `\|` 与沙箱内重定向，每段仍过白名单）/ `strict`（禁用管道与重定向）/ `trusted`（额外允许 `;` `&&` `\|\|`） |
 | 变更审阅 | 变更卡显示文件名、完整路径、增删行数；支持单栏 inline diff、全部撤销 / 全部保留；`Ctrl+Backspace` / `Ctrl+Enter` |
@@ -201,7 +201,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | --- | --- |
 | 基础编辑 | `Ctrl+S` 保存、`Ctrl+P` 快速打开、`Ctrl+Shift+P` 命令面板；沙箱内搜索；UTF-8 / GBK 自动识别并按原编码写回 |
 | 布局 | 文件管理区可收起（`Ctrl+B`）；右侧聊天栏可拖拽调宽，双击还原 |
-| 主题 | 跟随界面主题 / 跟随 VS Code / Dark Modern / Light Modern / Dark+ / Light+ / Trae Dark / Trae Light / Trae Deep Blue |
+| 主题 | 跟随界面主题（浅色 / 深色 / 高对比暗 / 暗夜紫 / 深林绿 / 护眼纸白），IDE 与编辑器语法色一起跟随 |
 | 空白字符 | 关闭 / 仅选区内 / 仅行尾 / 词之间 / 全部 |
 | 侧边栏 | 资源管理器 / 沙箱内搜索 / 源代码管理 / 运行和调试 / 批注 / 文献库 |
 | 终端 | 内置终端面板（`Ctrl+\``） |
@@ -307,7 +307,6 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 断点恢复 | 任务与步骤实时落盘；进程重启后在跑的任务转为「已暂停」，不自动重跑 |
 | 产物归档 | 任务写出的文件登记到产物栏，可在线预览文本 / 图片 |
 | 工作流 | 触发器（手动 / 定时 / 事件）→ 动作（建任务、发通知、建日程、发消息、本机朗读、调用能力） |
-| 自动化 | 自动化运行看板显示阶段、工具、验收进度；任务在服务端执行，可恢复 |
 | 图片生成 | 调用本机 ComfyUI 生成图片并登记为产物 |
 | 场景包 | 通用 / 办公 / 学习 / 生活四种场景，影响系统提示的场景纪律与能力展示顺序 |
 
@@ -513,9 +512,10 @@ python api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
 
 ### 文件访问
 
-- 所有文件工具只接受**沙箱内**路径，越界直接拒绝。
+- **写入类**文件工具只接受**沙箱内**路径，越界直接拒绝。
+- **读取类**工具可用**绝对路径**读取沙箱外文件（与 Trae 一致）；相对路径仍只在沙箱内解析。
 - `.git` / `.venv` / `node_modules` / `__pycache__` 与本项目 `data/` 永久禁止访问。
-- 「读沙箱外」是显式、只读、按会话保存的开关，默认关闭。
+- 秘密文件（`.env` / 私钥 / `.ssh` 等）默认拒读，可在 `.gm/agent-rules.json` 的 allow 里显式放行。
 
 ### 写入与命令审批
 
@@ -683,7 +683,7 @@ KaTeX 已内置在 `web/vendor/katex`；代码高亮依赖 CDN 加载 highlight.
 「总输入」是整回合累计：每个工具轮都会把完整上下文重发一次。明细表里的逐轮数字是单次调用，计费只按未命中缓存的部分计算。
 
 **Q：Agent 说无法读取 / 写入文件**
-先确认已开启 Agent 并选好沙箱目录；AI 只能访问沙箱内路径（越界、`.git` / `.venv` / `data/` 会被拒绝）。若仍不行，重启服务并 `Ctrl+F5` 强刷。
+先确认已开启 Agent 并选好沙箱目录；**写入**只能落在沙箱内，**读取**可用绝对路径访问外部（`.git` / `.venv` / `data/` 与秘密文件会被拒绝）。若仍不行，重启服务并 `Ctrl+F5` 强刷。
 
 **Q：AI 改了文件，去哪里看它到底改了什么**
 看助手回复下方的变更卡：文件名、完整路径、增删行数；点文件名打开 inline diff，可撤销或保留。快捷键 `Ctrl+Backspace` / `Ctrl+Enter`。重启程序后快照失效。

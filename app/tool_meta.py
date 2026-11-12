@@ -15,7 +15,8 @@ import copy
 META = {
     "read": {
         "desc": "读取与检索。action=list 列目录 / file 读文件 / files 批量读 / "
-                "search 正则搜 / semantic 语义搜 / map 仓库结构。",
+                "search 正则搜 / semantic 语义搜 / map 仓库结构 / "
+                "mcp_list 列 MCP 资源 / mcp_read 读 MCP 资源 / preview 打开网页预览。",
         "params": {
             "path": {"type": "string", "description": "文件或目录（沙箱内相对路径）"},
             "paths": {"type": "array", "items": {"type": "string"},
@@ -30,6 +31,10 @@ META = {
             "count_only": {"type": "boolean", "description": "只统计命中数量"},
             "query": {"type": "string", "description": "semantic 的自然语言查询"},
             "max_files": {"type": "integer", "description": "map 最多列多少个文件"},
+            "server": {"type": "string", "description": "MCP server 名；不填则列全部"},
+            "uri": {"type": "string", "description": "mcp_read 的资源 URI"},
+            "url": {"type": "string",
+                    "description": "preview 的本机 dev server，如 http://localhost:5173"},
         },
         "actions": {
             "list": ("list_dir", ["path"], None),
@@ -38,16 +43,30 @@ META = {
             "search": ("search_files", ["pattern"], None),
             "semantic": ("search_code", ["query"], None),
             "map": ("repo_map", [], None),
+            "mcp_list": ("mcp_list_resources", [], None),
+            "mcp_read": ("mcp_read_resource", ["uri"], None),
+            "preview": ("open_preview", [], None),
         },
     },
     "edit": {
-        "desc": "写文件。action=write 覆盖/新建 / patch 精确替换 / mkdir 建目录 / "
+        "desc": "写文件。action=write 覆盖/新建 / patch 精确替换 / multi 多处原子替换 / "
+                "apply 应用 unified diff / notebook 编辑 .ipynb 单元格 / mkdir 建目录 / "
                 "move 移动 / copy 复制 / delete 删除。写前必须先 read。",
         "params": {
             "path": {"type": "string", "description": "目标文件或目录"},
             "content": {"type": "string", "description": "write 的完整内容"},
             "old": {"type": "string", "description": "patch 要替换的原文（必须唯一）"},
             "new": {"type": "string", "description": "patch 的新文本"},
+            "edits": {"type": "array", "items": {"type": "object"},
+                      "description": "multi 的多处修改：每项 {old, new, replace_all?}"},
+            "patch": {"type": "string",
+                      "description": "apply 的 unified diff（@@ -a,b +c,d @@ hunk）"},
+            "operation": {"type": "string", "enum": ["replace", "insert", "delete"],
+                          "description": "notebook 的子操作"},
+            "cell_id": {"type": "string", "description": "notebook 单元格 id"},
+            "cell_index": {"type": "integer", "description": "notebook 单元格下标（0 起）"},
+            "source": {"type": "string", "description": "notebook 单元格内容"},
+            "cell_type": {"type": "string", "description": "notebook 插入时的单元格类型"},
             "from": {"type": "string", "description": "move / copy 的源路径"},
             "to": {"type": "string", "description": "move / copy 的目标路径"},
             "overwrite": {"type": "boolean", "description": "copy 时是否覆盖，默认 false"},
@@ -55,6 +74,9 @@ META = {
         "actions": {
             "write": ("write_file", ["path", "content"], None),
             "patch": ("edit_file", ["path", "old", "new"], None),
+            "multi": ("multi_edit", ["path", "edits"], None),
+            "apply": ("apply_patch", ["path", "patch"], None),
+            "notebook": ("notebook_edit", ["path", "operation"], None),
             "mkdir": ("make_dir", ["path"], None),
             "move": ("move_file", ["from", "to"], None),
             "copy": ("copy_file", ["from", "to"], None),
@@ -63,16 +85,19 @@ META = {
     },
     "run": {
         "desc": "执行命令。action=exec 一次性命令（argv 数组，无管道）/ "
-                "terminal 持久终端（PowerShell，支持管道 / 后台 / 交互）。",
+                "terminal 持久终端（PowerShell，op=run/read/input/status/interrupt/close）。",
         "params": {
             "argv": {"type": "array", "items": {"type": "string"},
                      "description": "exec 的命令与参数，如 [\"go\",\"test\",\"./...\"]"},
             "cwd": {"type": "string", "description": "工作目录，默认沙箱根"},
             "timeout": {"type": "integer", "description": "超时秒数，默认 60，最大 600"},
             "command": {"type": "string", "description": "terminal 的整条命令行"},
+            "text": {"type": "string", "description": "terminal input 要写入的内容"},
+            "enter": {"type": "boolean", "description": "input 后是否补回车，默认 true"},
             "wait": {"type": "integer", "description": "terminal 等待输出秒数，默认 8"},
-            "op": {"type": "string", "enum": ["run", "read", "interrupt", "close"],
-                   "description": "terminal 子操作，默认 run"},
+            "op": {"type": "string",
+                   "enum": ["run", "read", "interrupt", "close", "input", "status"],
+                   "description": "terminal 子操作，默认 run；status 查看存活/目录/最近输出"},
         },
         "actions": {
             "exec": ("run_command", ["argv"], None),

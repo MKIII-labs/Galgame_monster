@@ -132,10 +132,10 @@ def test_script_must_be_inside_sandbox(tmp_path):
     (tmp_path / "x.txt").write_text("x", encoding="utf-8")
     assert agent.judge_command(root, {"argv": ["python", "ok.py"]}, "ai")[0] == "allow"
     assert agent.judge_command(root, {"argv": ["node", "a.js"]}, "ai")[0] == "allow"
-    # 越界 / 不存在 / 扩展名不对 / 不给脚本：都拒绝
-    assert agent.judge_command(root, {"argv": ["python", "../evil.py"]}, "ai")[0] == "deny"
+    # 越界脚本改为「授权后可执行」；不存在 / 扩展名不对仍拒绝
+    assert agent.judge_command(root, {"argv": ["python", "../evil.py"]}, "ai")[0] == "ask"
     assert agent.judge_command(root, {"argv": ["python", "C:/Windows/evil.py"]},
-                               "ai")[0] == "deny"
+                               "ai")[0] == "ask"
     assert agent.judge_command(root, {"argv": ["python", "missing.py"]}, "ai")[0] == "deny"
     assert agent.judge_command(root, {"argv": ["python", "x.txt"]}, "ai")[0] == "deny"
     assert agent.judge_command(root, {"argv": ["python"]}, "ai")[0] == "deny"

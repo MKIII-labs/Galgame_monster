@@ -79,7 +79,6 @@ function applyUiMode(mode) {
   const pb = $('#btn-plugins');
   if (pb) pb.classList.toggle('active', m === 'plugins');
   galApplyTheme();                     // GAL 主题随模式进入/退出切换
-  applyIdeTheme();                     // IDE 主题同理（属性只在 IDE 模式存在，别的模式零影响）
   if (m !== 'gal') {
     galToggleReview(false); galToggleScript(false);   // 离开 GAL 模式时收起浮层
     galStopAudioAll({ bgm: true });                   // 并停掉朗读 / BGM / 特效音，别在别的模式里继续响
@@ -245,7 +244,6 @@ function ideInitOnce() {
     if (!m) return;                 // Monaco 加载失败则继续用内置 textarea，功能不受影响
     state.ideMonaco = m;
     ideRegisterLatexLanguage(m);     // 必须在建 model 之前：否则 tex 会先被当成 plaintext
-    ideRegisterMonacoThemes(m);
     ideApplyEditorKeybindings();     // 用户改过的编辑器快捷键（没改过则一条都不下发）
     ideEnsureEditor(m);
     if (state.ideOpen) ideActivate(state.ideOpen);
@@ -744,196 +742,10 @@ function ideSyncMonacoTheme() {
      与原生一致的浅灰中点「·」、制表符渲染成「→」。
    ============================================================ */
 const IDE_WS_MODES = ['none', 'selection', 'trailing', 'boundary', 'all'];
-const IDE_MONACO_PREFIX = 'gal-ide-';        // 注册名加前缀，避免与内置主题重名
 
-// Trae 三套共用的语法色（深色系：dark_vs + dark_plus）
-const TRAE_DARK_RULES = [
-  { token: 'comment', foreground: '737780' },
-  { token: 'constant', foreground: '80BBFF' },
-  { token: 'constant.numeric', foreground: 'F48CCA' },
-  { token: 'number', foreground: 'F48CCA' },
-  { token: 'string', foreground: '82D99F' },
-  { token: 'regexp', foreground: '82D99F' },
-  { token: 'keyword', foreground: 'B38CFF' },
-  { token: 'keyword.operator', foreground: 'D5D8E0' },
-  { token: 'storage', foreground: 'B38CFF' },
-  { token: 'type', foreground: '81CFE0' },
-  { token: 'namespace', foreground: '81CFE0' },
-  { token: 'function', foreground: 'F29D79' },
-  { token: 'variable', foreground: 'DED47E' },
-  { token: 'variable.predefined', foreground: '80BBFF' },
-  { token: 'key', foreground: 'E0E3EE' },
-  { token: 'tag', foreground: 'F2858C' },
-  { token: 'attribute.name', foreground: 'DED47E' },
-  { token: 'attribute.value', foreground: '82D99F' },
-  { token: 'delimiter', foreground: 'D5D8E0' },
-  { token: 'operator', foreground: 'D5D8E0' },
-  { token: 'identifier', foreground: 'D1D3DB' },
-];
-
-const IDE_MONACO_THEMES = {
-  /* 与 Dark+ / Light+ 语法色相同，只是编辑器面层换成了「当前默认」的现代主题值
-     （Default Dark Modern / Light Modern 的 tokenColors 就是 dark_plus / light_plus） */
-  'vscode-modern-dark': {
-    base: 'vs-dark',
-    rules: [],
-    colors: {
-      'editor.background': '#1F1F1F',
-      'editor.foreground': '#CCCCCC',
-      'editorLineNumber.foreground': '#6E7681',
-      'editorLineNumber.activeForeground': '#CCCCCC',
-      'editorIndentGuide.background1': '#404040',
-      'editorIndentGuide.activeBackground1': '#707070',
-      'editorWidget.background': '#202020',
-      'editorWidget.border': '#313131',
-      'editorSuggestWidget.background': '#202020',
-      'editorHoverWidget.background': '#202020',
-      'scrollbarSlider.background': '#79797966',
-      'scrollbarSlider.hoverBackground': '#BFBFBF66',
-      'scrollbarSlider.activeBackground': '#BFBFBF66',
-    },
-  },
-  'vscode-modern-light': {
-    base: 'vs',
-    rules: [],
-    colors: {
-      'editor.background': '#FFFFFF',
-      'editor.foreground': '#3B3B3B',
-      'editorLineNumber.foreground': '#6E7681',
-      'editorLineNumber.activeForeground': '#171184',
-      'editorIndentGuide.background1': '#D3D3D3',
-      'editorIndentGuide.activeBackground1': '#939393',
-      'editorWidget.background': '#F8F8F8',
-      'editorWidget.border': '#E5E5E5',
-      'editorSuggestWidget.background': '#F8F8F8',
-      'editorHoverWidget.background': '#F8F8F8',
-      'scrollbarSlider.background': '#64646466',
-      'scrollbarSlider.hoverBackground': '#00000099',
-      'scrollbarSlider.activeBackground': '#00000099',
-    },
-  },
-  'trae-dark': {
-    base: 'vs-dark',
-    rules: TRAE_DARK_RULES,
-    colors: {
-      'editor.background': '#1A1B1D',
-      'editor.foreground': '#D1D3DB',
-      'editorCursor.foreground': '#FFFFFF',
-      'editorLineNumber.foreground': '#979AA4',
-      'editorLineNumber.activeForeground': '#E0E3EE',
-      'editor.selectionBackground': '#3579FF47',
-      'editor.lineHighlightBackground': '#292c34',
-      'editorIndentGuide.background1': '#E0E2F217',
-      'editorIndentGuide.activeBackground1': '#E0E2F22E',
-      'editorWidget.background': '#2A2D31',
-      'editorWidget.border': '#E0E2F221',
-      'editorSuggestWidget.background': '#2A2D31',
-      'editorSuggestWidget.selectedBackground': '#E0E2F214',
-      'editorHoverWidget.background': '#2A2D31',
-      'scrollbarSlider.background': '#DDE2E940',
-      'scrollbarSlider.hoverBackground': '#DDE2E959',
-      'scrollbarSlider.activeBackground': '#DDE2E959',
-    },
-  },
-  'trae-light': {
-    base: 'vs',
-    rules: [
-      { token: 'comment', foreground: '8393A3' },
-      { token: 'constant', foreground: '175CE6' },
-      { token: 'constant.numeric', foreground: 'E54595' },
-      { token: 'number', foreground: 'E54595' },
-      { token: 'string', foreground: '4DA621' },
-      { token: 'regexp', foreground: '4DA621' },
-      { token: 'keyword', foreground: '5F36B2' },
-      { token: 'keyword.operator', foreground: '000000' },
-      { token: 'storage', foreground: '5F36B2' },
-      { token: 'type', foreground: 'B15EF2' },
-      { token: 'namespace', foreground: 'B15EF2' },
-      { token: 'function', foreground: '4078F2' },
-      { token: 'variable', foreground: 'C99100' },
-      { token: 'variable.predefined', foreground: '175CE6' },
-      { token: 'key', foreground: '17181A' },
-      { token: 'tag', foreground: 'E24864' },
-      { token: 'attribute.name', foreground: '17181A' },
-      { token: 'attribute.value', foreground: '4DA621' },
-      { token: 'delimiter', foreground: '000000' },
-      { token: 'operator', foreground: '000000' },
-      { token: 'identifier', foreground: '31353A' },
-    ],
-    colors: {
-      'editor.background': '#FFFFFF',
-      'editor.foreground': '#000000',
-      'editorCursor.foreground': '#000000',
-      'editorLineNumber.foreground': '#72767B',
-      'editorLineNumber.activeForeground': '#111214',
-      'editor.selectionBackground': '#2F74FF2e',
-      'editor.lineHighlightBackground': '#72767B14',
-      'editorIndentGuide.background1': '#4D6B9917',
-      'editorIndentGuide.activeBackground1': '#4D6B995c',
-      'editorWidget.background': '#FFFFFF',
-      'editorWidget.border': '#4D6B9917',
-      'editorSuggestWidget.background': '#F8F9FA',
-      'editorSuggestWidget.selectedBackground': '#5663771C',
-      'editorHoverWidget.background': '#FFFFFF',
-      'scrollbarSlider.background': '#DDE2E9',
-      'scrollbarSlider.hoverBackground': '#C1C3CD',
-      'scrollbarSlider.activeBackground': '#C1C3CD',
-    },
-  },
-  'trae-blue': {
-    base: 'vs-dark',
-    rules: TRAE_DARK_RULES,
-    colors: {
-      'editor.background': '#171B26',
-      'editor.foreground': '#DADDE5',
-      'editorCursor.foreground': '#FFFFFF',
-      'editorLineNumber.foreground': '#979AA4',
-      'editorLineNumber.activeForeground': '#E0E3EE',
-      'editor.selectionBackground': '#3579FF47',
-      'editor.lineHighlightBackground': '#282B3A',
-      'editorIndentGuide.background1': '#AABCF214',
-      'editorIndentGuide.activeBackground1': '#AABCF23D',
-      'editorWidget.background': '#252A38',
-      'editorWidget.border': '#AABCF229',
-      'editorSuggestWidget.background': '#252A38',
-      'editorSuggestWidget.selectedBackground': '#AABCF233',
-      'editorHoverWidget.background': '#252A38',
-      'scrollbarSlider.background': '#DDE2E940',
-      'scrollbarSlider.hoverBackground': '#DDE2E959',
-      'scrollbarSlider.activeBackground': '#DDE2E959',
-    },
-  },
-};
-
-// 注册自定义主题（每次进入 IDE 只跑一次；重复注册同 id 也没问题）
-function ideRegisterMonacoThemes(m) {
-  Object.keys(IDE_MONACO_THEMES).forEach((k) => {
-    const d = IDE_MONACO_THEMES[k];
-    try {
-      m.editor.defineTheme(IDE_MONACO_PREFIX + k, {
-        base: d.base, inherit: true, rules: d.rules, colors: d.colors,
-      });
-    } catch (e) { /* 忽略：Monaco 版本差异不至于让编辑器整体不可用 */ }
-  });
-}
-
-// 当前该用哪个 Monaco 主题
+// Monaco 主题跟随界面明暗（IDE 不再有独立主题）
 function ideMonacoThemeName() {
-  const t = String((state.config && state.config.ide_theme) || '');
-  if (state.uiMode === 'ide') {
-    if (t === IDE_VSCODE_CURRENT) {          // 跟随：用解析出来的预设/临时主题
-      const p = _vscodeCur.preset;
-      if (p === 'vscode-dark') return 'vs-dark';
-      if (p === 'vscode-light') return 'vs';
-      if (p && IDE_MONACO_THEMES[p]) return IDE_MONACO_PREFIX + p;
-      if (_vscodeCur.editor) return IDE_MONACO_PREFIX + IDE_VSCODE_CURRENT;
-      return _vscodeCur.dark ? 'vs-dark' : 'vs';
-    }
-    if (t === 'vscode-dark') return 'vs-dark';
-    if (t === 'vscode-light') return 'vs';
-    if (IDE_MONACO_THEMES[t]) return IDE_MONACO_PREFIX + t;
-  }
-  return isDarkTheme() ? 'vs-dark' : 'vs';   // 空值 / 非 IDE 模式 = 跟随界面明暗
+  return isDarkTheme() ? 'vs-dark' : 'vs';
 }
 
 // 空白字符可视化档位（默认「全部」＝能看见每一个空格）
@@ -1009,98 +821,6 @@ function ideApplyEditorKeybindings() {
   catch (e) { console.warn('[IDE] 应用编辑器自定义快捷键失败', e); }
 }
 
-/* ============================================================
-   「跟随 VS Code 当前主题」
-   ------------------------------------------------------------
-   · VS Code 是另一个进程，订阅不到它的切换事件 → 只能读它落盘的 settings.json
-     并**周期性轮询**（本实现 5s）。所以是"近似实时"，不是事件驱动。
-   · 命中官方内置主题（Dark+ / Light+ / Dark Modern / Light Modern）时后端直接回
-     预设 id，前端套用已有整套 CSS 预设 + Monaco 主题 —— **零色值重复**。
-   · 第三方主题才回 token 表，这里把它们写成 #main / #sidebar 上的内联 CSS 变量。
-     映射是**有损的**（我们只用到约 24 个 token，主题里有几百个），缺项会继承界面主题，
-     所以这是"近似跟随"，不是逐像素等同。
-   · **语法高亮不跟随**：任意主题的 TextMate scope 到 Monaco token 的转换必然失真，
-     编辑器语法色仍用与明暗匹配的内置 Dark+ / Light+。 */
-// 与后端 app/vscode.py 的 _TOKEN_MAP 键保持一致（最后一项 --accent-soft 是本地派生）
-const IDE_VSCODE_VARS = ['--bg', '--bg-side', '--bg-hover', '--bg-active', '--bg-input', '--text',
-  '--text-dim', '--border', '--border-strong', '--accent', '--accent-hover', '--on-accent',
-  '--bubble-user', '--bubble-user-text', '--code-bg', '--code-head', '--inline-bg', '--quote-bar',
-  '--ide-activity-bg', '--ide-activity-fg', '--ide-activity-fg-dim', '--ide-tab-bg',
-  '--ide-status-bg', '--ide-status-fg',
-  '--ide-side-fg', '--ide-sel-fg', '--ide-tab-fg', '--ide-tab-fg-dim', '--accent-soft'];
-
-// 尚未取回 VS Code 主题时保持空值（跟随界面），不要预置深色，否则会闪一下深色
-let _vscodeCur = { preset: '', tokens: null, editor: null, dark: false, stamp: '', name: '' };
-let _vscodeCurTimer = null;
-
-function ideVscodeCurrent() {
-  return state.uiMode === 'ide'
-    && String((state.config && state.config.ide_theme) || '') === IDE_VSCODE_CURRENT;
-}
-// 供 settings.js 的 applyIdeTheme 读取（避免跨文件直接碰 _vscodeCur）
-function ideVscodePreset() { return _vscodeCur.preset || ''; }
-
-// 把 token 表写成内联变量（仅第三方主题走这里；内置预设走 CSS）
-function ideApplyVscodeVars() {
-  [$('#main'), $('#sidebar')].forEach((el) => {
-    if (!el) return;
-    IDE_VSCODE_VARS.forEach((k) => el.style.removeProperty(k));
-    el.style.removeProperty('color-scheme');
-    if (!ideVscodeCurrent() || _vscodeCur.preset) return;
-    const tk = _vscodeCur.tokens || {};
-    Object.keys(tk).forEach((k) => el.style.setProperty(k, tk[k]));
-    // VS Code 没有 --accent-soft 这个 token，而我们的 CSS 大量用到 → 由 accent 派生
-    if (!tk['--accent-soft'] && tk['--accent']) {
-      const m = /^#([0-9a-fA-F]{6})$/.exec(String(tk['--accent']).trim());
-      if (m) {
-        const n = parseInt(m[1], 16);
-        el.style.setProperty('--accent-soft', 'rgba(' + ((n >> 16) & 255) + ','
-          + ((n >> 8) & 255) + ',' + (n & 255) + ',.18)');
-      }
-    }
-    el.style.colorScheme = _vscodeCur.dark ? 'dark' : 'light';
-  });
-}
-
-// 第三方主题下临时注册一个 Monaco 主题（内置预设有各自的主题，不用这个）
-function ideRegisterVscodeCurrentMonaco() {
-  const m = state.ideMonaco;
-  if (!m || _vscodeCur.preset || !_vscodeCur.editor) return;
-  try {
-    m.editor.defineTheme(IDE_MONACO_PREFIX + IDE_VSCODE_CURRENT, {
-      base: _vscodeCur.dark ? 'vs-dark' : 'vs',
-      inherit: true, rules: [], colors: _vscodeCur.editor,
-    });
-  } catch (e) { /* 忽略 */ }
-}
-
-async function ideRefreshVscodeCurrent() {
-  if (!ideVscodeCurrent()) return;
-  let r = null;
-  try { r = await api('/api/vscode/theme', {}); } catch (e) { return; }   // 失败则沿用上一次结果
-  if (!r || !r.ok) return;
-  _vscodeCur = {
-    preset: String(r.preset || ''),
-    tokens: r.tokens || {},
-    editor: r.editor || {},
-    dark: !!r.dark,
-    stamp: String(r.stamp || ''),
-    name: String(r.name || ''),
-  };
-  document.documentElement.setAttribute('data-ide-theme', _vscodeCur.preset || IDE_VSCODE_CURRENT);
-  ideApplyVscodeVars();
-  ideRegisterVscodeCurrentMonaco();
-  ideSyncMonacoTheme();
-}
-
-function ideStartVscodeThemePoll() {
-  if (_vscodeCurTimer) return;
-  _vscodeCurTimer = setInterval(() => { ideRefreshVscodeCurrent(); }, 5000);
-}
-function ideStopVscodeThemePoll() {
-  clearInterval(_vscodeCurTimer);
-  _vscodeCurTimer = null;
-}
 
 function syncIdeRoot() {
   const s = curSession();
@@ -2735,10 +2455,10 @@ function ideInlineAsk() {
    也可以直接填自己的 dev server 地址。关掉面板就把临时服务停掉。 */
 let idePreviewBase = '';
 
-/* 预览桥：app/preview.py 会往沙箱内的 HTML 注入一段脚本，负责
+/* 预览桥：app/preview.py 会往沙箱 HTML 和本机 dev server 代理的 HTML 注入脚本，负责
    ① 元素选择（悬停高亮 + 点击回传选择器 / 样式 / HTML）
    ② console.error / warn / onerror / 未处理 Promise 的收集
-   外部 dev server 没有这段脚本，两个按钮保持禁用并在 title 里说明。 */
+   公网 URL 是 iframe 直连，无法注入，两个按钮保持禁用并在 title 里说明。 */
 let idePreviewBridge = false;
 let idePreviewPicking = false;
 let idePreviewLogs = [];
@@ -2766,14 +2486,14 @@ function idePreviewSyncControls() {
     pick.classList.toggle('active', idePreviewPicking);
     pick.title = idePreviewBridge
       ? (idePreviewPicking ? '取消选择元素（Esc）' : '选择元素并发送到对话')
-      : '当前页面不支持元素选择（只有沙箱内的 HTML 会注入预览桥）';
+      : '当前页面不支持元素选择（只有沙箱 HTML 和本机 dev server 代理会注入预览桥）';
   }
   const con = $('#ide-preview-console-btn');
   if (con) {
     con.disabled = !idePreviewBridge;
     con.title = idePreviewBridge
       ? ('控制台（' + idePreviewLogs.length + ' 条）')
-      : '当前页面不支持控制台采集（只有沙箱内的 HTML 会注入预览桥）';
+      : '当前页面不支持控制台采集（只有沙箱 HTML 和本机 dev server 代理会注入预览桥）';
   }
   const badge = $('#ide-preview-console-badge');
   if (badge) {
@@ -2860,7 +2580,7 @@ function idePreviewClearLogs() {
 }
 
 function idePreviewTogglePick(force) {
-  if (!idePreviewBridge) return toast('当前页面不支持元素选择：只有沙箱内的 HTML 会注入预览桥');
+  if (!idePreviewBridge) return toast('当前页面不支持元素选择：只有沙箱 HTML 和本机 dev server 代理会注入预览桥');
   const on = (typeof force === 'boolean') ? force : !idePreviewPicking;
   idePreviewPicking = on;                 // 先反馈 UI，页面回报 pick-state 再校正
   idePreviewSyncControls();
@@ -2955,6 +2675,25 @@ async function idePreviewOpen() {
     v = 'http://' + v;
     inp.value = v;
   }
+  // 已经是代理地址（智能体打开 / 重复点「打开」）：不要再套一层代理
+  if (idePreviewBase && v.indexOf(idePreviewBase) === 0) {
+    idePreviewResetBridge();
+    frame.src = v;
+    return;
+  }
+  // 本机 dev server：走后端反向代理，才能注入预览桥（控制台 / 元素选择）
+  const isLocalDev = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(v);
+  if (isLocalDev) {
+    let r = null;
+    try {
+      r = await api('/api/ide/preview/start', { session_id: state.sessions.current, url: v });
+    } catch (e) { return toast('预览代理启动失败：' + e); }
+    if (!r || !r.ok) return toast((r && r.error) || '预览代理启动失败');
+    idePreviewBase = r.base || '';
+    idePreviewResetBridge();
+    frame.src = r.url;
+    return;
+  }
   if (/^https?:\/\//i.test(v)) {
     idePreviewResetBridge();
     frame.src = v;
@@ -2968,6 +2707,19 @@ async function idePreviewOpen() {
   idePreviewBase = r.base || '';
   idePreviewResetBridge();
   frame.src = r.url;
+}
+
+/* 智能体 open_preview 工具返回代理地址后，由对话流直接打开预览面板。 */
+function idePreviewOpenProxy(url) {
+  const box = $('#ide-preview');
+  const frame = $('#ide-preview-frame');
+  if (!box || !frame) return;
+  box.classList.remove('hidden');
+  const inp = $('#ide-preview-url');
+  if (inp) inp.value = url;
+  idePreviewBase = url;
+  idePreviewResetBridge();
+  frame.src = url;
 }
 
 function idePreviewReload() {

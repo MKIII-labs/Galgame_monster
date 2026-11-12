@@ -139,15 +139,14 @@ def test_raw_write_is_denied_by_default(tmp_path):
     assert not os.path.exists(os.path.join(box, "evil.txt"))
 
 
-def test_raw_read_outside_sandbox_is_denied(tmp_path):
+def test_raw_read_outside_sandbox_is_allowed(tmp_path):
     box = os.path.join(str(tmp_path), "box")
     os.makedirs(box)
-    secret = tmp_path / "outside.txt"
-    secret.write_text("TOPSECRET", encoding="utf-8")
-    code = "print(open(%r, encoding='utf-8').read())\n" % str(secret)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("TOPSECRET", encoding="utf-8")
+    code = "print(open(%r, encoding='utf-8').read())\n" % str(outside)
     text, _ = code_mode.run(box, code, timeout=20)
-    assert "TOPSECRET" not in text
-    assert "只能读沙箱内的文件" in text
+    assert "TOPSECRET" in text
 
 
 def test_raw_read_inside_sandbox_is_allowed(tmp_path):
@@ -197,7 +196,7 @@ def test_outside_read_allowed_when_permitted(tmp_path):
 
 
 def test_script_tool_call_outside_read_allowed(tmp_path):
-    """脚本里 gm.call('read_file') 也要拿到 allow_outside，不能只有内置 open() 放行。"""
+    """脚本里 gm.call('read_file') 与内置 open() 都默认允许沙箱外绝对路径。"""
     box = os.path.join(str(tmp_path), "box")
     os.makedirs(box)
     outside = tmp_path / "outside.txt"
@@ -206,7 +205,7 @@ def test_script_tool_call_outside_read_allowed(tmp_path):
     text, _ = code_mode.run(box, code, timeout=20, allow_outside=True)
     assert "TOOL_READABLE" in text
     text2, _ = code_mode.run(box, code, timeout=20)
-    assert "TOOL_READABLE" not in text2
+    assert "TOOL_READABLE" in text2
 
 
 def test_script_cannot_read_data_dir(tmp_path, monkeypatch):

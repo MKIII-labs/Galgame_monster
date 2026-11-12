@@ -355,7 +355,8 @@ def judge_command(sandbox, args, mode, shell_mode="strict", unrestricted=False,
     interactive=False（无人值守）：高危 git 命令直接拒绝，而不是弹一个没人看的审批。
     """
     from .rules import load_effective_rules
-    from .tools_exec import (_cmd_kind, _cmd_plan, _cmd_plan_unrestricted)
+    from .tools_exec import (_cmd_kind, _cmd_plan, _cmd_plan_unrestricted,
+                             outside_paths)
     from .tools_git import _dangerous_git
     mode = normalize_approval(mode)
     if unrestricted or mode == "full":
@@ -383,6 +384,10 @@ def judge_command(sandbox, args, mode, shell_mode="strict", unrestricted=False,
         return "deny", "规则禁止：%s" % pat
     if hit == "ask":
         return "ask", "规则要求确认：%s" % pat
+    outside = outside_paths(sandbox, args, plan, shell_mode)
+    if outside:
+        return "ask", "命令要访问沙箱外路径：%s（允许后会临时授权）" % "、".join(
+            outside[:3])
     if hit == "allow":
         return "allow", ""
     if mode == "custom":

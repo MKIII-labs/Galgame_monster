@@ -11,11 +11,12 @@ from app.mem_tool import _loads_loose
 from .base import _t_split_commit
 from .tools_computer import (_t_computer_act, _t_computer_open, _t_computer_read, _t_computer_see, _t_computer_shot, _t_computer_windows)
 from .tools_exec import (_t_run_command, _t_run_workflow_script, _t_shell)
-from .tools_files import (_t_attachment_read, _t_check_code, _t_code_context, _t_copy_file, _t_delete_file, _t_edit_file, _t_find_symbol, _t_impact, _t_list_dir, _t_list_steps, _t_make_dir, _t_move_file, _t_read_file, _t_read_files, _t_read_tool_result, _t_recover_file, _t_redo_step, _t_repo_map, _t_search_code, _t_search_files, _t_sleep, _t_undo_step, _t_write_file)
+from .tools_files import (_t_apply_patch, _t_attachment_read, _t_check_code, _t_code_context, _t_copy_file, _t_delete_file, _t_edit_file, _t_find_symbol, _t_impact, _t_list_dir, _t_list_steps, _t_make_dir, _t_move_file, _t_multi_edit, _t_notebook_edit, _t_read_file, _t_read_files, _t_read_tool_result, _t_recover_file, _t_redo_step, _t_repo_map, _t_search_code, _t_search_files, _t_sleep, _t_undo_step, _t_write_file)
 from .tools_git import (_t_git_commit, _t_git_diff, _t_git_log, _t_git_status)
 from .tools_lsp import (_t_lsp_calls, _t_lsp_definition, _t_lsp_diagnostics, _t_lsp_hover, _t_lsp_implementation, _t_lsp_references, _t_lsp_rename, _t_lsp_symbols)
-from .tools_mcp import (_t_mcp_list_servers, _t_mcp_list_tools)
+from .tools_mcp import (_t_mcp_list_resources, _t_mcp_list_servers, _t_mcp_list_tools, _t_mcp_read_resource)
 from .tools_media import (_t_archify, _t_asset_atlas, _t_asset_convert, _t_asset_inline, _t_asset_scan, _t_asset_validate, _t_audio_compare, _t_audio_probe, _t_geometry_compare, _t_image_analyze, _t_image_compare, _t_mesh_inspect, _t_render_check, _t_render_views, _t_scene_assert, _t_see_image, _t_visual_check)
+from .tools_preview import _t_open_preview
 from .tools_web import _t_fetch_url
 
 
@@ -28,7 +29,8 @@ def normalize_tool_name(name):
     if raw.lower().startswith("mcp__"):
         # MCP 工具名由索引表精确匹配，不能被点号 / 下划线规则改写
         return raw
-    if raw.lower() in ("mcp_list_servers", "mcp_list_tools"):
+    if raw.lower() in ("mcp_list_servers", "mcp_list_tools",
+                       "mcp_list_resources", "mcp_read_resource"):
         return raw.lower()
     low = raw.lower().replace("-", "_").replace(" ", "_")
     if low in TOOL_ALIASES:
@@ -168,6 +170,14 @@ def normalize_call(item, default_tool=""):
             tool = "calendar.delete"
         else:
             tool = "delete_file"
+    elif (low_tool in ("patch", "apply_patch")
+          and isinstance(args_obj, dict) and "patch" in args_obj):
+        tool = "apply_patch"            # Trae 风格：patch 参数是 unified diff
+    elif (low_tool in ("multi_edit", "multi")
+          and isinstance(args_obj, dict) and "edits" in args_obj):
+        tool = "multi_edit"
+    elif low_tool in ("notebook_edit", "notebook"):
+        tool = "notebook_edit"
     tool = normalize_tool_name(tool)
     return {"tool": tool, "args": normalize_args(tool, args)}
 
@@ -229,9 +239,13 @@ _HANDLERS = {
     "impact": _t_impact,
     "write_file": _t_write_file,
     "edit_file": _t_edit_file,
+    "multi_edit": _t_multi_edit,
+    "apply_patch": _t_apply_patch,
+    "notebook_edit": _t_notebook_edit,
     "make_dir": _t_make_dir,
     "move_file": _t_move_file,
     "delete_file": _t_delete_file,
+    "open_preview": _t_open_preview,
     "render_check": _t_render_check,
     "visual_check": _t_visual_check,
     "render_views": _t_render_views,
@@ -279,6 +293,8 @@ _HANDLERS = {
     "computer_windows": _t_computer_windows,
     "mcp_list_servers": _t_mcp_list_servers,
     "mcp_list_tools": _t_mcp_list_tools,
+    "mcp_list_resources": _t_mcp_list_resources,
+    "mcp_read_resource": _t_mcp_read_resource,
 }
 
 
@@ -289,6 +305,12 @@ def _validate_args(name, args):
         if not (args.get("argv") or args.get("command")):
             return tool_protocol.error(
                 tool_protocol.INVALID_ARG, "缺少必填参数：argv（或 command）",
+                name=name, args=args)
+        return ""
+    if name == "open_preview":
+        if not (args.get("url") or args.get("path")):
+            return tool_protocol.error(
+                tool_protocol.INVALID_ARG, "缺少必填参数：path（HTML）或 url（本机 dev server）",
                 name=name, args=args)
         return ""
     code, msg = tool_protocol.validate(name, args, _REQUIRED_ARGS.get(name))
@@ -355,7 +377,8 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
                    unrestricted=False):
     """（内部）执行一个工具。返回 (结果文本, 撤销操作列表或 None, 是否写操作)
 
-    allow_outside=True 时，读取类工具（list_dir / read_file）可用绝对路径读取沙箱外文件。
+    allow_outside 仅为兼容旧调用保留：读类工具（OUTSIDE_READ_TOOLS）现在一律允许
+    用绝对路径读取沙箱外文件，写类工具仍然只在沙箱内。
     caps 是 limits() 的结果：给 run_command 补默认超时，require_read 决定是否强制写前读。
     stop_event 只影响 run_command：用户点停止时立刻结束正在跑的命令。
     """
@@ -462,7 +485,8 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
                       "attachment_read", "run_workflow_script", "archify"):
             # 这几个要拿会话 id / caps 才能定位写后快照、视觉产物、对话附件或工作流执行器
             text, undo_ops = _HANDLERS[name](sandbox, args, caps)
-        elif allow_outside and name in OUTSIDE_READ_TOOLS:
+        elif name in OUTSIDE_READ_TOOLS:
+            # 读类工具默认允许沙箱外的绝对路径（与 Trae 一致）；写类仍只在沙箱内。
             text, undo_ops = _HANDLERS[name](sandbox, args, True)
         else:
             text, undo_ops = _HANDLERS[name](sandbox, args)
@@ -492,7 +516,8 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
         invalidate_tree(sandbox)             # 结构可能变了，下次读树重新遍历
     # 写后自检：语法错误直接回灌给模型（成功时零额外 token）
     target = ""
-    if undo_ops and name in ("write_file", "edit_file", "move_file"):
+    if undo_ops and name in ("write_file", "edit_file", "multi_edit",
+                             "apply_patch", "notebook_edit", "move_file"):
         rel = args.get("to") if name == "move_file" else args.get("path")
         if rel:
             try:
@@ -502,7 +527,7 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
         err = post_write_check(target)
         if err:
             text += "\n\n【自检】文件存在语法错误，请修正后重试：\n" + err
-        elif target and name in ("write_file", "edit_file"):
+        elif target and name in ("write_file", "edit_file", "multi_edit", "apply_patch"):
             # 语法没问题才格式化：格式化器可能把坏文件改得更坏
             try:
                 from app import formatter
@@ -522,7 +547,7 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
         _remember_read(sandbox, target)
     elif name == "read_file" and not tool_protocol.is_error(text):
         try:
-            _rp = resolve_path(sandbox, args.get("path"), allow_outside)
+            _rp = resolve_path(sandbox, args.get("path"), for_read=True)
             _remember_read(sandbox, _rp)
             # 只有「整篇正文给过」才算 seen；分段读和大纲都不算
             if (not (args.get("start") or args.get("limit") or args.get("raw"))
@@ -537,7 +562,7 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
             _paths = [_paths]
         for _p in list(_paths or [])[:8]:
             try:
-                _remember_read(sandbox, resolve_path(sandbox, _p, allow_outside))
+                _remember_read(sandbox, resolve_path(sandbox, _p, for_read=True))
             except SandboxError:
                 pass
     return text, undo_ops, (writes_files(name, args) or name in GIT_WRITE_TOOLS)
@@ -601,7 +626,8 @@ def needs_sandbox(name):
     """
     from .groups import COMPUTER_TOOLS
     n = str(name or "").strip()
-    if n.startswith("mcp__") or n in ("mcp_list_servers", "mcp_list_tools"):
+    if n.startswith("mcp__") or n in ("mcp_list_servers", "mcp_list_tools",
+                                      "mcp_list_resources", "mcp_read_resource"):
         return False
     # 这几个不碰沙箱：抓网页 / 等待 / 画图（archify 落 data/archify/<sid>/）、
     # 工具组的元工具（非 Agent 模式也要能用 tool_search 解锁），没开 Agent 也能用

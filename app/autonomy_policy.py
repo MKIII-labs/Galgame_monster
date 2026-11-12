@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""自动化提问策略：遇到提问卡 / 正文决策问句时，按三档策略处理。
+"""提问策略：遇到提问卡 / 正文决策问句时，按三档策略处理。
 
 三档（对齐 OpenHands 的 confirmation policy、Cline 的 auto-approve）：
 
@@ -7,10 +7,10 @@
   选一个可回滚的最小方案，并在正文里说明假设。
 - ``smart`` ：可逆 / 低风险自决；不可逆（删除、覆盖、发布、付款、改凭据）
   或确实缺少外部信息时，停下来等用户。
-- ``ask``   ：一律把问题摆给用户，保留原来的提问卡行为。
+- ``ask``   ：一律把问题摆给用户，保留原来的提问卡行为（默认）。
 
-这里是纯策略层：只做分类与「替用户回答」，不碰会话、不碰目标状态。
-调用方（app/api/chat.py、app/autopilot.py）负责把决策写进目标记录。
+这里是纯策略层：只做分类与「替用户回答」，不碰会话。
+调用方（app/api/chat.py）负责决定如何回灌答案。
 """
 import json
 import re
@@ -116,7 +116,7 @@ def _llm_answer(question, options, context, goal, constraints):
     ctx = str(context or "")[-3000:]
     cons = [str(x) for x in (constraints or []) if str(x).strip()][:8]
     prompt = "\n".join([
-        "你在代替用户回答一个自动化任务里的问题。只输出 JSON，不要解释。",
+        "你在代替用户回答一个无人值守任务里的问题。只输出 JSON，不要解释。",
         "",
         "## 目标",
         str(goal or "").strip() or "（见上下文）",

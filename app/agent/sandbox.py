@@ -91,14 +91,14 @@ def _assert_not_blocked(target, for_read=False):
 
 
 def resolve_path(sandbox, rel, allow_outside=False, for_read=False):
-    """把沙箱内路径解析成绝对路径。
+    """把路径解析成绝对路径。
 
-    只接受**沙箱内**的路径：相对路径（推荐）与沙箱内的绝对路径都行（模型常直接引用
-    提示里给出的沙箱绝对路径）；越界、命中禁止目录、或落在本项目 data/ 下时抛 SandboxError。
+    读类工具（for_read=True）默认允许用**绝对路径**读取沙箱外的文件，与 Trae 一致；
+    但命中 BLOCKED_SEGMENTS 或落在本项目 data/ 下时仍然抛 SandboxError。
+    写类工具（for_read=False）只接受**沙箱内**路径，越界直接拒绝。
 
-    allow_outside=True（用户已明确授权「读取沙箱外文件」）时：**绝对路径**可越过沙箱边界，
-    但仍禁止 BLOCKED_SEGMENTS 与本项目 data/；相对路径依旧只在沙箱内解析。
-    for_read=True（读类工具）：node_modules / .venv 等目录可读，写入类工具仍按 BLOCKED_SEGMENTS 拒绝。
+    相对路径一律只在沙箱内解析（越出沙箱请用绝对路径）。
+    allow_outside 仅为兼容旧调用保留，不再影响读类工具的边界。
     """
     from .groups import (BLOCKED_SEGMENTS, READ_ONLY_SEGMENTS)
     sandbox = clean_sandbox(sandbox)
@@ -111,9 +111,9 @@ def resolve_path(sandbox, rel, allow_outside=False, for_read=False):
     if os.path.isabs(raw) or (len(raw) > 1 and raw[1] == ":"):
         target = _real(raw)                      # 绝对路径
         if target != root and not target.startswith(root + os.sep):
-            if not allow_outside:
+            if not for_read:
                 raise SandboxError("路径越出沙箱范围：" + raw)
-            _assert_not_blocked(target, for_read)   # 沙箱外：仅放行「读」，硬性拦截不变
+            _assert_not_blocked(target, for_read)   # 沙箱外读取：硬性拦截不变
             return target
     else:
         norm = _norm_rel(raw)
@@ -122,11 +122,9 @@ def resolve_path(sandbox, rel, allow_outside=False, for_read=False):
             norm = norm[len(base):].lstrip("/")   # 容忍模型带上沙箱目录名
         target = _real(os.path.join(root, norm))
         if target != root and not target.startswith(root + os.sep):
-            if allow_outside:
-                raise SandboxError(
-                    "路径越出沙箱范围：%s（沙箱外读取需要用绝对路径，"
-                    "相对路径（含 ../）只在沙箱内解析）" % raw)
-            raise SandboxError("路径越出沙箱范围：" + raw)
+            raise SandboxError(
+                "路径越出沙箱范围：%s（相对路径只在沙箱内解析，"
+                "沙箱外请用绝对路径）" % raw)
     parts = os.path.relpath(target, root).replace("\\", "/").split("/")
     for seg in parts:
         if seg in BLOCKED_SEGMENTS and not (for_read and seg in READ_ONLY_SEGMENTS):

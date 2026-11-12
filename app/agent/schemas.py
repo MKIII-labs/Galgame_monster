@@ -105,6 +105,40 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      {"path": {"type": "string"}, "old": {"type": "string"},
                       "new": {"type": "string"}},
                      ["path", "old", "new"]),
+            _fn_tool("multi_edit",
+                     "一次替换文件中的多处文本（原子：任一处失败都不写盘）。"
+                     "适合多 hunk 重构；old 仍须唯一，重复内容用 replace_all=true",
+                     {"path": {"type": "string"},
+                      "edits": {"type": "array", "items": {
+                          "type": "object",
+                          "properties": {
+                              "old": {"type": "string"},
+                              "new": {"type": "string"},
+                              "replace_all": {"type": "boolean"}},
+                          "required": ["old", "new"]}},
+                      },
+                     ["path", "edits"]),
+            _fn_tool("apply_patch",
+                     "应用 unified diff 补丁（单文件，@@ -a,b +c,d @@ hunk 形式）。"
+                     "补丁上下文在目标行附近匹配，任一 hunk 失败都不写盘",
+                     {"path": {"type": "string"},
+                      "patch": {"type": "string",
+                                "description": "unified diff 文本，可含多个 @@ hunk"}},
+                     ["path", "patch"]),
+            _fn_tool("notebook_edit",
+                     "编辑 .ipynb 的一个单元格：替换 / 插入 / 删除（按 cell_id 或 0 起下标定位）",
+                     {"path": {"type": "string"},
+                      "operation": {"type": "string",
+                                    "enum": ["replace", "insert", "delete"]},
+                      "cell_id": {"type": "string",
+                                  "description": "notebook 单元格 id（优先于 cell_index）"},
+                      "cell_index": {"type": "integer",
+                                     "description": "0 起下标；负数从末尾算"},
+                      "source": {"type": "string",
+                                 "description": "替换 / 插入的单元格内容"},
+                      "cell_type": {"type": "string",
+                                    "description": "insert 时的类型，默认 code"}},
+                     ["path", "operation"]),
             _fn_tool("make_dir", "创建目录", {"path": {"type": "string"}}, ["path"]),
             _fn_tool("move_file", "重命名或移动文件",
                      {"from": {"type": "string"}, "to": {"type": "string"}},
@@ -130,14 +164,28 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      "持久终端（PowerShell）：同一会话内 cd / 环境变量 / 后台进程都会保留。"
                      "适合管道、交互式命令、起 dev server 后再继续操作；"
                      "一次性命令优先用 run_command（更快、输出更干净）。"
-                     "run 在 wait 秒内收集输出；命令还没结束就用 read 继续取，"
-                     "interrupt 发 Ctrl+C，close 关闭终端",
+                     "run 在 wait 秒内收集输出；命令还没结束就用 read 继续取；"
+                     "input 向交互式命令写 stdin；status 查看存活状态 / 工作目录 / 最近输出；"
+                     "interrupt 发 Ctrl+C；close 关闭终端",
                      {"action": {"type": "string",
-                                 "enum": ["run", "read", "interrupt", "close"],
+                                 "enum": ["run", "read", "interrupt", "close",
+                                          "input", "status"],
                                  "description": "默认 run"},
                       "command": {"type": "string", "description": "run 时必填，整条命令行（可含管道）"},
+                      "text": {"type": "string", "description": "input 时写入终端的内容"},
+                      "enter": {"type": "boolean",
+                                "description": "input 后是否补回车，默认 true"},
                       "wait": {"type": "integer", "description": "run 等待输出秒数，默认 8，最大 60"}},
                      ["action"]),
+            _fn_tool("open_preview",
+                     "在 IDE 预览面板打开页面：path 打开沙箱内 HTML；url 预览本机 dev server"
+                     "（只允许 localhost / 127.0.0.1，端口 >= 1024，经本机代理注入控制台和元素选择）。"
+                     "生成前端结果后用它给用户一个直接可看的入口",
+                     {"path": {"type": "string",
+                               "description": "沙箱内 .html / .htm（与 url 二选一）"},
+                      "url": {"type": "string",
+                              "description": "本机 dev server，如 http://localhost:5173（与 path 二选一）"}},
+                     []),
             _fn_tool("render_check",
                      "用无头浏览器真的打开一个 HTML，回传运行时错误与布局问题"
                      "（溢出、遮挡、字号过小、对比度、零尺寸画布、点击区过小）。"

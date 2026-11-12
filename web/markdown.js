@@ -99,6 +99,21 @@ function inlineFmt(s) {
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
     (m, label, href) => '<a href="' + safeHref(href)
       + '" target="_blank" rel="noreferrer">' + label + '</a>');
+  // 裸 URL 自动链接：先把已生成的 a / img 保护起来，避免二次匹配
+  const _keep = [];
+  s = s.replace(/<a\b[\s\S]*?<\/a>|<img\b[^>]*>/g, (m) => {
+    _keep.push(m);
+    return '\u0000H' + (_keep.length - 1) + '\u0000';
+  });
+  s = s.replace(/(^|[\s(（])(https?:\/\/[^\s<>"'）)]+)/g, (m, lead, url) => {
+    let tail = '';
+    let href = url;
+    const mm = url.match(/^(.+?)([.,;:!?，。；：！？]+)$/);
+    if (mm) { href = mm[1]; tail = mm[2]; }
+    return lead + '<a href="' + safeHref(href)
+      + '" target="_blank" rel="noreferrer">' + href + '</a>' + tail;
+  });
+  s = s.replace(/\u0000H(\d+)\u0000/g, (m, i) => _keep[+i] || '');
   return s;
 }
 
@@ -325,6 +340,133 @@ function _stripBareCallBlocks(s) {
   out += s.slice(pos);
   return out;
 }
+/* 列表项识别：返回 {indent, ordered, text}；缩进按空格折算（tab=4） */
+function _listItem(line) {
+  const m = String(line).match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+  if (!m) return null;
+  return {
+    indent: m[1].replace(/\t/g, '    ').length,
+    ordered: /^\d+\./.test(m[2]),
+    text: m[3],
+  };
+}
+
+/* 块级列表：支持任意层级嵌套与 - [ ] 任务项 */
+function _renderList(lines, start, baseIndent) {
+  const first = _listItem(lines[start]);
+  const ordered = !!(first && first.ordered);
+  let html = ordered ? '<ol>' : '<ul>';
+  let i = start;
+  while (i < lines.length) {
+    const it = _listItem(lines[i]);
+    if (!it || it.indent < baseIndent) break;
+    if (it.indent > baseIndent) {
+      const [sub, next] = _renderList(lines, i, it.indent);
+      html = html.replace(/<\/li>$/, sub + '</li>');
+      i = next;
+      continue;
+    }
+    if (it.ordered !== ordered) break;     // 同层级换列表类型：交给外层重新开一个
+    let text = it.text;
+    let task = null;
+    const tm = text.match(/^\[([ xX])\]\s+(.*)$/);
+    if (tm) { task = tm[1].toLowerCase() === 'x'; text = tm[2]; }
+    html += '<li' + (task !== null ? ' class="task"' : '') + '>';
+    if (task !== null) {
+      html += '<input type="checkbox" disabled' + (task ? ' checked' : '') + '> ';
+    }
+    html += inlineFmt(text) + '</li>';
+    i++;
+  }
+  html += ordered ? '</ol>' : '</ul>';
+  return [html, i];
+}
+
+function _tableAlign(sep) {
+  return String(sep).replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => {
+    const s = c.trim();
+    const l = s.startsWith(':');
+    const r = s.endsWith(':');
+    if (l && r) return 'center';
+    if (r) return 'right';
+    if (l) return 'left';
+    return '';
+  });
+}
+
+function renderBlocks(lines) {
+  let html = '';
+  let i = 0;
+  const isBlank = (l) => /^\s*$/.test(l);
+  while (i < lines.length) {
+    const line = lines[i];
+    if (isBlank(line)) { i++; continue; }
+
+    let m = line.match(/^(#{1,6})\s+(.*)$/);
+    if (m) {
+      const lv = Math.min(m[1].length, 6);
+      html += '<h' + lv + '>' + inlineFmt(m[2]) + '</h' + lv + '>';
+      i++; continue;
+    }
+
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { html += '<hr>'; i++; continue; }
+
+    if (/^\s*&gt;\s?/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*&gt;\s?/.test(lines[i])) {
+        buf.push(lines[i].replace(/^\s*&gt;\s?/, ''));
+        i++;
+      }
+      html += '<blockquote>' + inlineFmt(buf.join('<br>')) + '</blockquote>';
+      continue;
+    }
+
+    if (line.indexOf('|') >= 0 && i + 1 < lines.length &&
+        /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])) {
+      const splitRow = (r) => r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
+      const head = splitRow(line);
+      const align = _tableAlign(lines[i + 1]);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].indexOf('|') >= 0 && !isBlank(lines[i])) {
+        rows.push(splitRow(lines[i])); i++;
+      }
+      const cell = (tag, text, k) => '<' + tag +
+        (align[k] ? ' style="text-align:' + align[k] + '"' : '') + '>' +
+        inlineFmt(text) + '</' + tag + '>';
+      html += '<div class="table-wrap"><table><thead><tr>' +
+        head.map((c, k) => cell('th', c, k)).join('') +
+        '</tr></thead><tbody>' +
+        rows.map((r) => '<tr>' + head.map((_, k) => cell('td', r[k] || '', k)).join('') + '</tr>').join('') +
+        '</tbody></table></div>';
+      continue;
+    }
+
+    if (_listItem(line)) {
+      const [listHtml, next] = _renderList(lines, i, _listItem(line).indent);
+      html += listHtml;
+      i = next;
+      continue;
+    }
+
+    const para = [];
+    while (i < lines.length && !isBlank(lines[i]) &&
+           !/^(#{1,6})\s+/.test(lines[i]) &&
+           !/^\s*&gt;\s?/.test(lines[i]) &&
+           !_listItem(lines[i]) &&
+           !/^\s*([-*_])(\s*\1){2,}\s*$/.test(lines[i])) {
+      para.push(lines[i]); i++;
+      if (i < lines.length && lines[i].indexOf('|') >= 0 &&
+          /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i] || '')) break;
+    }
+    const body = inlineFmt(para.join('<br>'));
+    // 整段只有代码块 / 块级公式占位符时不要包 <p>，否则浏览器会把 div 拆出段落
+    const onlyBlock = /^\s*(?:\u0000[CM]\d+\u0000\s*)+$/.test(para.join('\n'));
+    html += onlyBlock ? body : '<p>' + body + '</p>';
+  }
+  return html;
+}
+
 
 function _renderMarkdown(src) {
   if (!src) return '';
@@ -375,81 +517,9 @@ function _renderMarkdown(src) {
   // 3) 转义剩余文本
   text = escapeHtml(text);
 
-  // 4) 块级解析
+  // 4) 块级解析（列表支持嵌套 / 任务项；表格支持对齐）
   const lines = text.split('\n');
-  let html = '';
-  let i = 0;
-  const isBlank = (l) => /^\s*$/.test(l);
-
-  while (i < lines.length) {
-    let line = lines[i];
-
-    if (isBlank(line)) { i++; continue; }
-
-    // 标题
-    let m = line.match(/^(#{1,6})\s+(.*)$/);
-    if (m) {
-      const lv = Math.min(m[1].length, 6);
-      html += '<h' + lv + '>' + inlineFmt(m[2]) + '</h' + lv + '>';
-      i++; continue;
-    }
-
-    // 分割线
-    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { html += '<hr>'; i++; continue; }
-
-    // 引用
-    if (/^\s*&gt;\s?/.test(line)) {
-      const buf = [];
-      while (i < lines.length && /^\s*&gt;\s?/.test(lines[i])) {
-        buf.push(lines[i].replace(/^\s*&gt;\s?/, ''));
-        i++;
-      }
-      html += '<blockquote>' + inlineFmt(buf.join('<br>')) + '</blockquote>';
-      continue;
-    }
-
-    // 表格
-    if (line.indexOf('|') >= 0 && i + 1 < lines.length &&
-        /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])) {
-      const splitRow = (r) => r.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
-      const head = splitRow(line);
-      i += 2;
-      const rows = [];
-      while (i < lines.length && lines[i].indexOf('|') >= 0 && !isBlank(lines[i])) {
-        rows.push(splitRow(lines[i])); i++;
-      }
-      html += '<table><thead><tr>' + head.map((c) => '<th>' + inlineFmt(c) + '</th>').join('') +
-        '</tr></thead><tbody>' +
-        rows.map((r) => '<tr>' + head.map((_, k) => '<td>' + inlineFmt(r[k] || '') + '</td>').join('') + '</tr>').join('') +
-        '</tbody></table>';
-      continue;
-    }
-
-    // 列表
-    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
-      const ordered = /^\s*\d+\.\s+/.test(line);
-      const items = [];
-      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ''));
-        i++;
-      }
-      const tag = ordered ? 'ol' : 'ul';
-      html += '<' + tag + '>' + items.map((t) => '<li>' + inlineFmt(t) + '</li>').join('') + '</' + tag + '>';
-      continue;
-    }
-
-    // 段落
-    const para = [];
-    while (i < lines.length && !isBlank(lines[i]) &&
-           !/^(#{1,6})\s+/.test(lines[i]) &&
-           !/^\s*&gt;\s?/.test(lines[i]) &&
-           !/^\s*([-*+]|\d+\.)\s+/.test(lines[i]) &&
-           !/^\s*([-*_])(\s*\1){2,}\s*$/.test(lines[i])) {
-      para.push(lines[i]); i++;
-      if (i < lines.length && lines[i].indexOf('|') >= 0 && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i] || '')) break;
-    }
-    html += '<p>' + inlineFmt(para.join('<br>')) + '</p>';
-  }
+  let html = renderBlocks(lines);
 
   // 5) 还原行内代码、代码块与公式
   html = html.replace(/\u0000I(\d+)\u0000/g, (m, idx) => {

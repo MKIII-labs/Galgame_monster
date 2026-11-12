@@ -541,6 +541,19 @@ def _band_rows(rows, boundary, page_w):
     return [b for b in bands if b[1]]
 
 
+def _same_visual_row(row_y0, row_y1, rect):
+    """两段文字是不是同一视觉行（纵向大面积重叠）。
+
+    同一行可能被切成多段（词间大间距 / 栏内空隙）：它们会并进同一个段落块，
+    但**不是两行**。旧实现按段数记 `lines`，导致 9pt 高的单行被记成 2 行，
+    前端按「原段行数」排字号时只能把译文压到 4px（真实数据 100 个多行块里 14 个）。
+    """
+    rh = max(0.5, float(rect[3]) - float(rect[1]))
+    ph = max(0.5, float(row_y1) - float(row_y0))
+    overlap = min(float(row_y1), float(rect[3])) - max(float(row_y0), float(rect[1]))
+    return overlap > 0.45 * min(rh, ph)
+
+
 def _blocks_from_segments(segs, boundary, page_w, page_no):
     """视觉行 → 段落块。带内先左栏后右栏，再按行距/字号合并。"""
     out = []
@@ -584,7 +597,8 @@ def _blocks_from_segments(segs, boundary, page_w, page_no):
                     continue
                 if cur is None:
                     cur = {"lines": [text], "rect": list(r["rect"]), "last_x1": r["rect"][2],
-                           "size": r["size"]}
+                           "size": r["size"], "rows": 1,
+                           "row_y0": r["rect"][1], "row_y1": r["rect"][3]}
                     continue
                 gap = r["rect"][1] - cur["rect"][3]
                 # 缩进要相对「当前段落」的左边界判断：整段都在缩进时（如摘要块），
@@ -612,6 +626,13 @@ def _blocks_from_segments(segs, boundary, page_w, page_no):
                         and _line_is_mathy(text)):
                     same_para = True
                 if same_para:
+                    if _same_visual_row(cur["row_y0"], cur["row_y1"], r["rect"]):
+                        # 同一行被切成多段：只扩行带，不算新行
+                        cur["row_y0"] = min(cur["row_y0"], r["rect"][1])
+                        cur["row_y1"] = max(cur["row_y1"], r["rect"][3])
+                    else:
+                        cur["rows"] = cur.get("rows", 1) + 1
+                        cur["row_y0"], cur["row_y1"] = r["rect"][1], r["rect"][3]
                     cur["lines"].append(text)
                     cur["rect"] = [min(cur["rect"][0], r["rect"][0]), min(cur["rect"][1], r["rect"][1]),
                                    max(cur["rect"][2], r["rect"][2]),
@@ -621,7 +642,8 @@ def _blocks_from_segments(segs, boundary, page_w, page_no):
                 else:
                     out.append(_make_block(cur, page_no, col, page_base))
                     cur = {"lines": [text], "rect": list(r["rect"]), "last_x1": r["rect"][2],
-                           "size": r["size"]}
+                           "size": r["size"], "rows": 1,
+                           "row_y0": r["rect"][1], "row_y1": r["rect"][3]}
             if cur:
                 out.append(_make_block(cur, page_no, col, page_base))
     return out
@@ -719,7 +741,9 @@ def _make_block(cur, page_no, col, base=None):
     # 不能只靠字号判断；先把它们从 bullet 里排除，再单独认成 heading。
     numbered = bool(re.match(r"^\d+(?:\.\d+)*\.?\s+[A-Z]", text)) and len(text) <= 70
     bullet = bool(re.match(r"^\s*([•·\-–—*]|\(?\d+[.)])\s", text)) and not numbered
-    lines_n = len(cur["lines"])
+    # 行数按「视觉行」算，不是段数：同一行的多段（词间大间距）不能当成两行，
+    # 否则前端按行数反推行距时字号会被压得极小（见 _same_visual_row）。
+    lines_n = int(cur.get("rows") or len(cur["lines"]))
     height = (float(rect[3]) - float(rect[1])) if len(rect) == 4 else 0.0
     # 标题：相对正文字号判断。PDF 里的字号单位各不相同（这篇正文 4.9、
     # 标题 6.6），旧的绝对阈值 15 会让所有标题都漏掉。
@@ -785,7 +809,7 @@ def _make_block(cur, page_no, col, base=None):
     key = hashlib.sha1(("%d|%s|%s" % (page_no, rect, text[:40])).encode("utf-8")).hexdigest()[:10]
     out = {"id": "p%db%s" % (page_no, key), "page": page_no, "kind": kind, "col": col,
            "role": role, "rect": rect, "text": text, "ttext": ttext, "size": round(cur["size"], 2),
-           "lines": len(cur["lines"]),
+           "lines": lines_n,
            "math": math, "parts": [{"page": page_no, "rect": rect}]}
     if kind == "heading":
         # 1 = 论文大标题，2 = 章节标题（前端按级别给字号）

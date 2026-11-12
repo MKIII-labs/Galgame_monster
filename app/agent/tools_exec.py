@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from app import winproc
@@ -177,7 +178,10 @@ def _cmd_script_error(exe, rest, root):
         return "请给出要执行的脚本（不支持交互式解释器）"
     try:
         p = resolve_path(root, script)
-    except SandboxError:
+    except SandboxError as e:
+        if "越出沙箱" in str(e):
+            # 越界脚本交给审批层（outside_paths）决定是否授权；执行时由 AppContainer 兜底
+            return ""
         return "只能执行沙箱内的脚本：%s" % script
     if not os.path.isfile(p):
         return "脚本不存在：%s" % script
@@ -527,6 +531,66 @@ def _cmd_secret_hit(root, args):
     return ""
 
 
+def _path_token(tok):
+    """从单个参数里取出「可能是路径」的值（支持 --out=path 形式）。"""
+    s = str(tok or "").strip().strip('"\'')
+    if not s:
+        return ""
+    if "=" in s and not s.startswith(("\\\\", "/")) \
+            and not re.match(r"^[A-Za-z]:[\\/]", s):
+        s = s.split("=", 1)[1].strip('"\'')
+    if not s or len(s) > 400:
+        return ""
+    if re.match(r"^[A-Za-z]:[\\/]", s) or s.startswith("\\\\"):
+        return s
+    if s.startswith("..") or "/.." in s or "\\.." in s:
+        return s
+    return ""
+
+
+def outside_paths(sandbox, args, plan=None, shell_mode="standard", text=None):
+    """命令参数里指向沙箱外的路径（供「越界需要授权」使用）。"""
+    from .sandbox import SandboxError, _real, resolve_path
+    a = args if isinstance(args, dict) else {}
+    tokens = []
+    if text is not None:
+        try:
+            tokens = shlex.split(str(text), posix=False)
+        except ValueError:
+            tokens = []
+    else:
+        if plan is None:
+            plan, err = _cmd_plan(a, sandbox, shell_mode)
+            if err:
+                return []
+        if plan.get("shell"):
+            for seg in plan.get("segments") or []:
+                tokens.extend(seg.get("argv") or [])
+            if plan.get("cmd"):
+                try:
+                    tokens.extend(shlex.split(plan["cmd"], posix=False))
+                except ValueError:
+                    pass
+        else:
+            tokens.extend(plan.get("argv") or [])
+    root = _real(sandbox)
+    out = []
+    for tok in tokens:
+        val = _path_token(tok)
+        if not val:
+            continue
+        try:
+            resolve_path(sandbox, val)
+            continue
+        except SandboxError as e:
+            if "越出沙箱" not in str(e):
+                continue
+        p = os.path.realpath(val if os.path.isabs(val) else os.path.join(root, val))
+        if p not in out:
+            out.append(p)
+    return out
+
+
 def _t_run_command(root, args, stop_event=None, shell_mode="strict",
                    unrestricted=False):
     """在沙箱内执行一条前台命令，返回（退出码 + 输出, None）。
@@ -566,6 +630,32 @@ def _t_run_command(root, args, stop_event=None, shell_mode="strict",
     else:
         timeout = min(timeout, CMD_MAX_TIMEOUT)
     t0 = time.time()
+    # OS 级沙箱：把命令关进 AppContainer（工具链授权失败时退回普通子进程）
+    try:
+        from app import sandbox_win
+        from app.config import load_config
+        if (sandbox_win.available()
+                and bool((load_config() or {}).get("agent_os_sandbox", True))):
+            _ok, _why = sandbox_win.ensure_acls(root)
+            if _ok:
+                _sink = getattr(_OUTPUT_SINK, "fn", None)
+                try:
+                    _code, _body = sandbox_win.run(
+                        list(plan.get("argv") or []) if not plan["shell"] else [],
+                        workdir, env=_cmd_env(), timeout=timeout,
+                        stop_event=stop_event, on_line=_sink,
+                        shell_cmd=display if plan["shell"] else None)
+                except sandbox_win.SandboxError as _e:
+                    return "❌ " + str(_e), None
+                _out = _clean_output(_body)
+                if _code:
+                    _out += "\n（退出码 %d）" % _code
+                return _out, None
+            if not getattr(_t_run_command, "_osb_warned", False):
+                _t_run_command._osb_warned = True
+                sys.stderr.write("[sandbox] OS 沙箱未启用：%s\n" % _why)
+    except Exception as _e:                # noqa: BLE001  沙箱故障不能拖垮命令本身
+        sys.stderr.write("[sandbox] OS 沙箱初始化失败，退回普通执行：%s\n" % _e)
     try:
         if plan["shell"]:
             proc = subprocess.Popen(display, cwd=workdir, env=_cmd_env(), shell=True,
@@ -726,8 +816,19 @@ def _t_shell(root, args, caps=None, stop_event=None):
             _SHELL_OFF.pop(key, None)
         terminal.drop_by_sid(key)
         return "已关闭 shell", None
-    if action not in ("run", "read", "interrupt"):
-        return "❌ action 只能是 run / read / interrupt / close", None
+    if action == "status":
+        t = terminal.get_by_sid(key)
+        if t is None:
+            return "终端未启动（还没有执行过 run）", None
+        snap = t.snapshot(0)
+        tail = _clean_output((snap.get("text") or "")[-4000:])[-1200:]
+        return ("终端状态：%s\n工作目录：%s\n缓冲偏移：%d%s\n最近输出：\n%s"
+                % ("运行中" if snap.get("alive") else "已退出",
+                   snap.get("cwd") or root, int(snap.get("off") or 0),
+                   "（缓冲区已滚动，以下为当前全部）" if snap.get("truncated") else "",
+                   tail or "（空）")), None
+    if action not in ("run", "read", "interrupt", "input"):
+        return ("❌ action 只能是 run / read / interrupt / close / input / status"), None
     try:
         t = terminal.start(key, root, env=_cmd_env(), shell=terminal.SHELL_AGENT)
     except terminal.TerminalError as e:
@@ -754,6 +855,16 @@ def _t_shell(root, args, caps=None, stop_event=None):
         with _SHELL_LOCK:
             _SHELL_OFF[key] = snap["off"]
         return (_clean_output(snap["text"]) or "（没有新输出）"), None
+    if action == "input":
+        text = str((args or {}).get("text") or "")
+        if not text:
+            return "❌ input 需要 text（要写入终端的字符）", None
+        if bool((args or {}).get("enter", True)) and not text.endswith(("\r", "\n")):
+            text += "\r"
+        if not t.write(text):
+            return "❌ 写入终端失败（进程可能已退出，请重新 run）", None
+        return ("已向终端写入 %d 个字符%s。用 read 或 status 查看输出。"
+                % (len(text), "（含回车）" if text.endswith("\r") else "")), None
     command = str((args or {}).get("command") or "").strip()
     if not command:
         return "❌ run 需要 command", None

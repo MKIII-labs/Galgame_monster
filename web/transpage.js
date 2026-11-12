@@ -18,8 +18,11 @@
 
   var LINE_MIN = 1.05;      // 行距 / 字号 的下限（再低就压字）
   var LINE_MAX = 1.9;       // 上限（避免「两行撑满整段」那种夸张行距）
-  var GROW_MAX = 1.16;      // 相对原字号最多放大 16%（中文比英文略需要空间）
   var FONT_MIN = 4.2;       // 绝对下限（css px）
+  var COVER_BLEED = 1.1;    // 遮盖向外扩（PDF pt）：吃掉字形抗锯齿边缘，消掉细黑线
+  var SEAM_PAD = 0.25;      // 相邻遮盖块的重叠，消掉矩形差集留下的接缝
+  var BODY_MIN_RATIO = 0.9;   // 正文字号下限 = 页正文基准字号 × 0.9
+  var BODY_MAX_RATIO = 1.06;  // 正文字号上限（不再逐块放大 16%，否则同页字号乱跳）
   var DEFAULT_STACK = '"MiSans", "Microsoft YaHei", "PingFang SC", sans-serif';
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -167,6 +170,60 @@
     };
   }
 
+  /* ---------------- 行数 / 字号基准 / 遮盖外扩 ---------------- */
+
+  /* 修正「段数 ≠ 行数」：同一视觉行被切成多段时 lines 会偏大，
+     按它反推的行距只有字高的一倍多，字号会被压到极小
+     （真实数据：100 个多行块里 14 个，最小被压到 4px）。
+     判据：段高 / 行数 < 字高 × 1.6 → 用字高 × 2.2（论文正文行距）重估行数。 */
+  function targetRows(block, rect) {
+    var n = Math.max(1, Number((block || {}).lines) || 1);
+    var h = rect ? (rect[3] - rect[1]) : 0;
+    var glyph = Number((block || {}).size) || 0;
+    if (n > 1 && h > 0 && glyph > 0 && h / n < glyph * 1.6) {
+      return Math.max(1, Math.round(h / (glyph * 2.2)));
+    }
+    return n;
+  }
+
+  /* 字号区间：正文向「页正文基准字号」收拢，标题保持更大，图注允许更小。
+     docPx = 0（旧数据没有基准）时返回 null，退回逐块估算。 */
+  function sizeBand(docPx, block, target) {
+    if (!docPx) return null;
+    var b = block || {};
+    if (b.kind === 'heading') return { min: docPx * 1.12, max: docPx * 1.9 };
+    if (b.role === 'caption') return { min: docPx * 0.72, max: docPx };
+    if ((Number(target) || 1) >= 2) {
+      return { min: docPx * BODY_MIN_RATIO, max: docPx * BODY_MAX_RATIO };
+    }
+    // 单行正文（可能是脚注 / 短段）：允许更小，但不至于缩成一条线
+    return { min: docPx * 0.8, max: docPx * BODY_MAX_RATIO };
+  }
+
+  /* 遮盖向外扩，但每个方向都不越过相邻块（只吃空隙），
+     避免为了消黑线反而盖住上一段文字的下缘。 */
+  function bleedRect(rect, pageRects) {
+    var bt = COVER_BLEED, bb = COVER_BLEED, bl = COVER_BLEED, br = COVER_BLEED;
+    (pageRects || []).forEach(function (r) {
+      if (!r || r.length !== 4) return;
+      if (Math.min(rect[2], r[2]) - Math.max(rect[0], r[0]) > 1) {
+        if (r[3] <= rect[1] + 0.5) {
+          bt = Math.min(bt, Math.max(0, rect[1] - r[3] - 0.25));
+        } else if (r[1] >= rect[3] - 0.5) {
+          bb = Math.min(bb, Math.max(0, r[1] - rect[3] - 0.25));
+        }
+      }
+      if (Math.min(rect[3], r[3]) - Math.max(rect[1], r[1]) > 1) {
+        if (r[2] <= rect[0] + 0.5) {
+          bl = Math.min(bl, Math.max(0, rect[0] - r[2] - 0.25));
+        } else if (r[0] >= rect[2] - 0.5) {
+          br = Math.min(br, Math.max(0, r[0] - rect[2] - 0.25));
+        }
+      }
+    });
+    return [rect[0] - bl, rect[1] - bt, rect[2] + br, rect[3] + bb];
+  }
+
   /* ---------------- 遮盖与取色 ---------------- */
 
   function overlap(a, b) {
@@ -253,6 +310,7 @@
     var measure = makeMeasurer(o.fontStack || DEFAULT_STACK);
     var obstacles = o.obstacles || [];
     var pageRects = o.pageRects || obstacles;
+    var docLead = Number(o.bodyLead) || 0;
     var made = [];
     var els = {};
 
@@ -281,15 +339,23 @@
       box.style.width = pct(bw, size.w);
       box.style.height = pct(bh, size.h);
 
-      coverPieces(rect, obstacles).forEach(function (p) {
+      // 遮盖向外扩 COVER_BLEED：原文的 -1px 边缘 / 字形抗锯齿会从矩形外侧露出来，
+      // 在译页上表现为细黑线；只扩到相邻块的空隙，不盖别人的文字。
+      // 每块再叠 SEAM_PAD：矩形差集切出来的几块之间可能有亚像素接缝，同色重叠看不出来。
+      var coverArea = bleedRect(rect, pageRects);
+      coverPieces(coverArea, obstacles).forEach(function (p) {
         var cover = document.createElement('div');
         cover.className = 'rd-tcover';
         // 用 px 定位而不是百分比：单行块会向下加高 textbox，百分比会跟着被拉伸
-        cover.style.left = ((p[0] - rect[0]) * scale) + 'px';
-        cover.style.top = ((p[1] - rect[1]) * scale) + 'px';
-        cover.style.width = ((p[2] - p[0]) * scale) + 'px';
-        cover.style.height = ((p[3] - p[1]) * scale) + 'px';
-        cover.style.background = sampleColor(cv, p, size.w, size.h);
+        cover.style.left = ((p[0] - rect[0]) * scale - SEAM_PAD) + 'px';
+        cover.style.top = ((p[1] - rect[1]) * scale - SEAM_PAD) + 'px';
+        cover.style.width = ((p[2] - p[0]) * scale + SEAM_PAD * 2) + 'px';
+        cover.style.height = ((p[3] - p[1]) * scale + SEAM_PAD * 2) + 'px';
+        // 取色只看原段落范围内的那部分：外扩区域可能已经压到邻行文字，取到深色
+        var sp = [Math.max(p[0], rect[0]), Math.max(p[1], rect[1]),
+                  Math.min(p[2], rect[2]), Math.min(p[3], rect[3])];
+        if (sp[2] <= sp[0] || sp[3] <= sp[1]) sp = p;
+        cover.style.background = sampleColor(cv, sp, size.w, size.h);
         box.appendChild(cover);
       });
 
@@ -320,7 +386,7 @@
     });
 
     global.requestAnimationFrame(function () {
-      made.forEach(function (m) { layoutOne(m, scale, size, measure, pageRects); });
+      made.forEach(function (m) { layoutOne(m, scale, size, measure, pageRects, docLead); });
       // 排版完成后再回调：批注角标/高亮需要按最终位置贴
       if (typeof o.onReady === 'function') {
         try { o.onReady(els); } catch (e) { /* 批注渲染失败不影响正文 */ }
@@ -329,19 +395,22 @@
     return els;
   }
 
-  function layoutOne(m, scale, size, measure, pageRects) {
+  function layoutOne(m, scale, size, measure, pageRects, docLead) {
     var b = m.block, rect = m.rect;
-    // 原文字号不能直接用 b.size：解析拿到的是字形高度（≈0.45em），
-    // 真实字号要从「段高 / 行数 = 行距」反推（论文正文行距 ≈ 1.11 倍字号）。
-    // 单行块（标题 / 图注）没有行距可用，退回 size × 1.85 的经验值。
-    var target = Number(b.lines) ||
-      Math.max(1, Math.round((rect[3] - rect[1]) / Math.max(1, Number(b.size) || 10) / 1.18));
+    // 原文字号不能直接用 b.size：解析拿到的是字高（≈0.45–0.7em），
+    // 真实字号要从「段高 / 视觉行数 = 行距」反推（论文正文行距 ≈ 2.2 倍字高）。
+    // targetRows 会先修正「同一行被切成多段」导致的行数虚高。
+    var target = targetRows(b, rect);
     var leadPt = (rect[3] - rect[1]) / Math.max(1, target);
-    // 单行块（标题 / 图注 / 表格标签）没有行距可用：字形高度 ≈ 0.45em，标题再放大一点
+    // 单行块（标题 / 图注 / 表格标签）没有行距可用：字高 × 经验倍数
     var mult = b.kind === 'heading' ? 2.2 : 1.85;
-    var basePx = Math.max(leadPt / 1.15, (Number(b.size) || 10) * mult) * scale;
-    var maxPx = basePx * GROW_MAX;
-    var minPx = Math.max(FONT_MIN, basePx * 0.62);
+    var ownPx = Math.max(leadPt / 1.15, (Number(b.size) || 10) * mult) * scale;
+    // 页正文基准字号：同一页的正文都向它收拢，避免逐块拟合把字号拉开
+    var docPx = docLead > 0 ? (docLead / 1.15) * scale : 0;
+    var band = sizeBand(docPx, b, target);
+    var basePx = band ? clamp(ownPx, band.min, band.max) : ownPx;
+    var maxPx = basePx * (b.kind === 'heading' ? 1.04 : 1.03);
+    var minPx = Math.max(FONT_MIN, basePx * (b.kind === 'heading' ? 0.92 : 0.9));
     var boxW = m.box.clientWidth || (rect[2] - rect[0]) * scale;
     var boxH = m.box.clientHeight || (rect[3] - rect[1]) * scale;
     // 单行块的矩形只是「字形墨迹」高度，装不下一个正常行框：
@@ -383,7 +452,9 @@
              m.textEl.scrollWidth > m.textEl.clientWidth + 1;
     };
     var guard = 0;
-    while (over() && guard < 6) {
+    // 最多再缩 2 档（≈0.88）：字号已经收在页正文基准附近，不能再为了塞下而压成小字；
+    // 放不下就标 overflow（虚线提示），而不是把同页字号拉出断层。
+    while (over() && guard < 2) {
       guard += 1;
       lay.fontSize = Math.max(FONT_MIN, lay.fontSize * 0.94);
       lay.lineHeight = Math.max(lay.fontSize * LINE_MIN,
@@ -410,6 +481,9 @@
     coverPieces: coverPieces,
     normalize: normalize,
     sanitize: sanitize,
+    targetRows: targetRows,
+    sizeBand: sizeBand,
+    bleedRect: bleedRect,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = global.RDTransPage;
 })(typeof window !== 'undefined' ? window : globalThis);

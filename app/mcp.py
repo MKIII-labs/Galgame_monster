@@ -441,6 +441,24 @@ class Server:
         return link.request("tools/call", {"name": tool, "arguments": args or {}},
                             timeout=self.timeout())
 
+    def list_resources(self):
+        """列出 MCP 资源（resources/list，支持 cursor 分页）。"""
+        link = self.ensure()
+        out, cursor = [], None
+        for _ in range(20):
+            res = link.request("resources/list", {"cursor": cursor} if cursor else {},
+                               timeout=self.timeout())
+            out.extend([r for r in (res.get("resources") or []) if isinstance(r, dict)])
+            cursor = res.get("nextCursor")
+            if not cursor:
+                break
+        return out
+
+    def read_resource(self, uri):
+        """读取一个 MCP 资源（resources/read）。"""
+        link = self.ensure()
+        return link.request("resources/read", {"uri": uri}, timeout=self.timeout())
+
     def note(self, ok, err=""):
         """成功清零、失败累加；连续失败到阈值就熔断，避免每轮都卡超时。"""
         if ok:
@@ -535,6 +553,24 @@ def tool_schemas():
                            "properties": {"server": {"type": "string",
                                                     "description": "server 名称"}},
                            "required": ["server"], "additionalProperties": False}}},
+        {"type": "function", "function": {
+            "name": "mcp_list_resources",
+            "description": ("列出 MCP server 提供的资源（resources/list）。"
+                            "不传 server 时列出所有可用 server 的资源"),
+            "parameters": {"type": "object",
+                           "properties": {"server": {"type": "string",
+                                                    "description": "可选：server 名称"}},
+                           "additionalProperties": False}}},
+        {"type": "function", "function": {
+            "name": "mcp_read_resource",
+            "description": "读取一个 MCP 资源（resources/read），返回文本内容",
+            "parameters": {"type": "object",
+                           "properties": {"server": {"type": "string",
+                                                    "description": "server 名称"},
+                                         "uri": {"type": "string",
+                                                 "description": "资源 URI"}},
+                           "required": ["server", "uri"],
+                           "additionalProperties": False}}},
     ]
     mode = tool_mode()
     for nm, (sname, real) in _index().items():
@@ -699,6 +735,81 @@ def list_tools_text(server):
         lines.append("- %s → %s\n  %s" % (exposed_name(sname, real), real, d))
     return ("MCP server「%s」的工具（已解锁，下一轮可直接调用）：\n%s"
             % (sname, "\n".join(lines)))
+
+
+def list_resources_text(server=None):
+    """列出 MCP 资源；server 为空时遍历所有可用 server。"""
+    sname = str(server or "").strip()
+    if sname:
+        if spec(sname) is None:
+            return "❌ 没有名为「%s」的 MCP server（用 mcp_list_servers 查看）" % sname
+        targets = [sname]
+    else:
+        targets = [s["name"] for s in servers()]
+        if not targets:
+            return "MCP 已启用，但还没有可用的 server"
+    lines = []
+    for name in targets:
+        try:
+            srv = _server(name)
+            items = srv.list_resources()
+            srv.note(True)
+        except Exception as e:                # noqa: BLE001
+            _server(name).note(False)
+            lines.append("## %s\n❌ 读取资源列表失败：%s" % (name, e))
+            continue
+        if not items:
+            lines.append("## %s\n（没有资源）" % name)
+            continue
+        rows = []
+        for r in items:
+            uri = str(r.get("uri") or "")
+            nm = str(r.get("name") or "")
+            mime = str(r.get("mimeType") or "")
+            desc = " ".join(str(r.get("description") or "").split())[:160]
+            rows.append("- %s%s%s%s" % (
+                (nm + " · ") if nm else "", uri,
+                (" · " + mime) if mime else "",
+                ("\n  " + desc) if desc else ""))
+        lines.append("## %s\n%s" % (name, "\n".join(rows)))
+    return "MCP 资源：\n" + "\n\n".join(lines)
+
+
+def read_resource_text(server, uri):
+    """读取一个 MCP 资源，返回纯文本（二进制给占位说明）。"""
+    sname = str(server or "").strip()
+    target = str(uri or "").strip()
+    if not sname:
+        return "❌ 需要 server 名称（用 mcp_list_resources 查看）"
+    if not target:
+        return "❌ 需要资源 uri"
+    if spec(sname) is None:
+        return "❌ 没有名为「%s」的 MCP server" % sname
+    try:
+        srv = _server(sname)
+        res = srv.read_resource(target)
+        srv.note(True)
+    except Exception as e:                    # noqa: BLE001
+        _server(sname).note(False)
+        return "❌ 读取 MCP 资源失败（%s）：%s" % (sname, e)
+    parts = []
+    for item in (res or {}).get("contents") or []:
+        if not isinstance(item, dict):
+            continue
+        u = str(item.get("uri") or target)
+        mime = str(item.get("mimeType") or "")
+        text = item.get("text")
+        if text is not None:
+            parts.append("【%s%s】\n%s" % (u, (" · " + mime) if mime else "",
+                                          str(text)))
+        elif item.get("blob") is not None:
+            blob_len = len(str(item.get("blob") or ""))
+            parts.append("【%s%s】\n[二进制内容约 %d bytes，未内联]"
+                         % (u, (" · " + mime) if mime else "",
+                            (blob_len * 3) // 4))
+        else:
+            parts.append("【%s】\n（无内容）" % u)
+    return "\n\n".join(parts) if parts else "（该资源没有返回内容）"
 
 
 def test_server(sp):

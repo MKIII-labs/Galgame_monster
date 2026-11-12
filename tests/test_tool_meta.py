@@ -66,6 +66,19 @@ def test_allowed_tools_limits_actions():
     assert enum == ["file"]
 
 
+def test_edit_meta_exposes_trae_parity_actions():
+    schemas = _core()
+    edit = next(s for s in schemas if s["function"]["name"] == "edit")
+    enum = edit["function"]["parameters"]["properties"]["action"]["enum"]
+    assert {"multi", "apply", "notebook"} <= set(enum)
+    read = next(s for s in schemas if s["function"]["name"] == "read")
+    enum = read["function"]["parameters"]["properties"]["action"]["enum"]
+    assert "preview" in enum
+    run = next(s for s in schemas if s["function"]["name"] == "run")
+    ops = run["function"]["parameters"]["properties"]["op"]["enum"]
+    assert {"input", "status"} <= set(ops)
+
+
 def test_lazy_group_unlocked_builds_meta():
     schemas = agent.native_tool_schemas(
         agent_on=True, search_ready=False, cap_domains=set(),
@@ -90,6 +103,18 @@ def test_tool_search_reports_meta_actions():
     text = agent._t_tool_search({"query": "图片"}, caps)
     assert "image" in caps.get("tool_unlock", set())
     assert "see" in text and "compare" in text
+
+
+def test_trae_style_tool_names_disambiguate():
+    assert agent.normalize_call(
+        {"tool": "patch", "args": {"path": "a.py", "patch": "@@ -1 +1 @@"}}
+    )["tool"] == "apply_patch"
+    assert agent.normalize_call(
+        {"tool": "multi_edit", "args": {"path": "a.py", "edits": []}}
+    )["tool"] == "multi_edit"
+    assert agent.normalize_call(
+        {"tool": "notebook", "args": {"path": "a.ipynb", "operation": "replace"}}
+    )["tool"] == "notebook_edit"
 
 
 def test_legacy_map_is_reverse_of_meta_actions():

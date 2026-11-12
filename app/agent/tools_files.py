@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import base64
+import json
 import os
 import re
 import shutil
@@ -96,7 +97,7 @@ def _t_read_file(root, args, allow_outside=False):
     if not os.path.isfile(p):
         return "文件不存在：" + _rel(root, p), None
     _relp = _rel(root, p)
-    _sec = is_secret_path(_relp if not allow_outside else p)
+    _sec = is_secret_path(p)
     if _sec and not _secret_allowed(root, [_relp]):
         return _secret_deny_text(_sec), None
     ext = os.path.splitext(p)[1].lower()
@@ -792,6 +793,266 @@ def _t_edit_file(root, args):
     add = len(new.splitlines())
     dele = len(old.splitlines())
     return ("已修改 %s（−%d 行 / +%d 行）" % (_rel(root, p), dele, add)), [undo_op]
+
+
+def _t_multi_edit(root, args):
+    """一次替换多处文本（原子）：任何一处失败都不写盘。
+
+    对齐 Trae 的 MultiEdit：模型一次给出多组 old/new，减少「读一次改一处」的
+    往返；old 仍需唯一（除非显式 replace_all=true）。
+    """
+    from .io_utils import _read_text_file
+    from .sandbox import (_rel, resolve_path)
+    from .undo import _snap
+    args = args if isinstance(args, dict) else {}
+    p = resolve_path(root, args.get("path"))
+    if not os.path.isfile(p):
+        return "文件不存在：" + _rel(root, p), None
+    edits = args.get("edits")
+    if not isinstance(edits, (list, tuple)) or not edits:
+        return "❌ multi_edit 需要 edits 数组（每项 {old, new, replace_all?}）", None
+    if len(edits) > 50:
+        return "❌ 一次最多 50 处修改（当前 %d 处），请分批" % len(edits), None
+    text, enc, _size, _tr = _read_text_file(p, limit=0)
+    if text is None:
+        return "❌ 读取失败：" + _rel(root, p), None
+    out = text
+    rows = []
+    for i, e in enumerate(edits, 1):
+        if not isinstance(e, dict):
+            return "❌ 第 %d 处不是对象（需要 {old, new}）" % i, None
+        if "old" not in e or "new" not in e:
+            return "❌ 第 %d 处缺少 old / new" % i, None
+        old, new = str(e.get("old")), str(e.get("new"))
+        if not old:
+            return ("❌ 第 %d 处 old 为空；要插入内容请把它并进相邻的 old/new"
+                    % i), None
+        cnt = out.count(old)
+        if cnt == 0:
+            return ("❌ 第 %d 处未找到要替换的内容（old 必须是原文，且不含行号前缀）：\n%s"
+                    % (i, old[:200])), None
+        if cnt > 1 and not bool(e.get("replace_all")):
+            return ("❌ 第 %d 处 old 出现 %d 次；请给出更长的唯一片段，"
+                    "或显式传 replace_all=true" % (i, cnt)), None
+        if bool(e.get("replace_all")):
+            out = out.replace(old, new)
+            n = cnt
+        else:
+            out = out.replace(old, new, 1)
+            n = 1
+        rows.append("第 %d 处：%d 处替换，−%d 行 / +%d 行"
+                    % (i, n, len(old.splitlines()), len(new.splitlines())))
+    if out == text:
+        return "文件内容没有变化：%s" % _rel(root, p), None
+    undo_op = _snap(p)
+    write_enc = enc if enc in ("utf-8", "utf-8-sig", "gb18030") else "utf-8"
+    with open(p, "w", encoding=write_enc, newline="") as f:
+        f.write(out)
+    return ("已修改 %s（%d 处）\n%s"
+            % (_rel(root, p), len(rows), "\n".join(rows))), [undo_op]
+
+
+_PATCH_HUNK_RE = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
+
+
+def _parse_patch_hunks(patch):
+    """解析 unified diff 的 @@ hunk；返回 [(old_start, new_start, old, new)]。"""
+    lines = str(patch or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    hunks, i = [], 0
+    while i < len(lines):
+        m = _PATCH_HUNK_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        old_start = int(m.group(1))
+        new_start = int(m.group(3))
+        i += 1
+        old, new = [], []
+        while i < len(lines):
+            line = lines[i]
+            if _PATCH_HUNK_RE.match(line):
+                break
+            if line.startswith("\\ No newline"):
+                i += 1
+                continue
+            if not line:
+                # 标准 diff 的空上下文行会写成单个空格；空行多半是 hunk 间分隔。
+                break
+            tag = line[0]
+            if tag == " ":
+                old.append(line[1:])
+                new.append(line[1:])
+            elif tag == "-":
+                old.append(line[1:])
+            elif tag == "+":
+                new.append(line[1:])
+            else:
+                break
+            i += 1
+        if not old and not new:
+            raise ValueError("第 %d 行起的 hunk 没有内容" % (i + 1))
+        hunks.append((old_start, new_start, old, new))
+    if not hunks:
+        raise ValueError("没有找到 @@ -a,b +c,d @@ 形式的 hunk")
+    return hunks
+
+
+def _find_patch_block(lines, block, hint):
+    """在 hint 附近优先找上下文；找不到再全文件唯一匹配。返回 -1 表示没有。"""
+    n = len(block)
+    if n == 0:
+        return max(0, min(hint, len(lines)))
+    lo = max(0, hint - 80)
+    hi = min(len(lines) - n, hint + 80)
+    for start in range(lo, hi + 1):
+        if lines[start:start + n] == block:
+            return start
+    hits = [i for i in range(0, len(lines) - n + 1) if lines[i:i + n] == block]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        raise ValueError("补丁上下文匹配到 %d 处，无法确定位置" % len(hits))
+    return -1
+
+
+def _t_apply_patch(root, args):
+    """应用 unified diff（单文件，@@ hunk 形式）。任一 hunk 失败都不写盘。"""
+    from .io_utils import _read_text_file
+    from .sandbox import (_rel, resolve_path)
+    from .undo import _snap
+    args = args if isinstance(args, dict) else {}
+    p = resolve_path(root, args.get("path"))
+    if not os.path.isfile(p):
+        return "文件不存在：" + _rel(root, p), None
+    patch = str(args.get("patch") or "")
+    if not patch.strip():
+        return "❌ apply_patch 需要 patch（unified diff，含 @@ hunk）", None
+    try:
+        hunks = _parse_patch_hunks(patch)
+    except ValueError as e:
+        return "❌ 补丁解析失败：%s" % e, None
+    text, enc, _size, _tr = _read_text_file(p, limit=0)
+    if text is None:
+        return "❌ 读取失败：" + _rel(root, p), None
+    norm = text.replace("\r\n", "\n").replace("\r", "\n")
+    trailing = norm.endswith("\n")
+    lines = norm.split("\n")
+    if trailing:
+        lines = lines[:-1]
+    try:
+        # 从下往上应用：后面的 hunk 不会改变前面 hunk 的行号
+        for old_start, _new_start, old, new in reversed(hunks):
+            idx = _find_patch_block(lines, old, max(0, old_start - 1))
+            if idx < 0:
+                raise ValueError("第 %d 行附近找不到 hunk 的上下文" % old_start)
+            lines[idx:idx + len(old)] = new
+    except ValueError as e:
+        return "❌ 补丁未应用（文件未改动）：%s" % e, None
+    out = "\n".join(lines) + ("\n" if trailing else "")
+    if "\r\n" in text:
+        out = out.replace("\n", "\r\n")
+    if out == text:
+        return "文件内容没有变化：%s" % _rel(root, p), None
+    undo_op = _snap(p)
+    write_enc = enc if enc in ("utf-8", "utf-8-sig", "gb18030") else "utf-8"
+    with open(p, "w", encoding=write_enc, newline="") as f:
+        f.write(out)
+    return ("已应用补丁：%s（%d 个 hunk）" % (_rel(root, p), len(hunks))), [undo_op]
+
+
+def _t_notebook_edit(root, args):
+    """编辑 .ipynb 的单个单元格（replace / insert / delete）。"""
+    from .io_utils import _read_text_file
+    from .sandbox import (_rel, resolve_path)
+    from .undo import _snap
+    args = args if isinstance(args, dict) else {}
+    p = resolve_path(root, args.get("path"))
+    if not os.path.isfile(p):
+        return "文件不存在：" + _rel(root, p), None
+    if not str(p).lower().endswith(".ipynb"):
+        return "❌ notebook_edit 只支持 .ipynb 文件", None
+    op = str(args.get("operation") or args.get("action") or "").strip().lower()
+    if op not in ("replace", "insert", "delete"):
+        return "❌ operation 只能是 replace / insert / delete", None
+    raw, enc, _size, _tr = _read_text_file(p, limit=0)
+    if raw is None:
+        return "❌ 读取失败：" + _rel(root, p), None
+    try:
+        nb = json.loads(raw)
+    except ValueError as e:
+        return "❌ notebook JSON 解析失败：%s" % e, None
+    cells = nb.get("cells") if isinstance(nb, dict) else None
+    if not isinstance(cells, list):
+        return "❌ 不是合法的 notebook：缺少 cells 数组", None
+
+    idx = -1
+    cell_id = str(args.get("cell_id") or "").strip()
+    if cell_id:
+        for k, c in enumerate(cells):
+            if isinstance(c, dict) and str(c.get("id") or "") == cell_id:
+                idx = k
+                break
+        if idx < 0:
+            return "❌ 找不到 cell_id=%s 的单元格" % cell_id, None
+    else:
+        ci = args.get("cell_index")
+        if ci is not None:
+            try:
+                idx = int(ci)
+            except (TypeError, ValueError):
+                return "❌ cell_index 必须是整数", None
+            if idx < 0:
+                idx += len(cells)
+            if not (0 <= idx < len(cells)):
+                return ("❌ cell_index 越界：当前共 %d 个单元格（0–%d）"
+                        % (len(cells), len(cells) - 1)), None
+
+    if op in ("replace", "delete") and idx < 0:
+        return "❌ %s 需要 cell_id 或 cell_index" % op, None
+    if op == "delete":
+        removed = cells.pop(idx)
+        ctype = removed.get("cell_type") if isinstance(removed, dict) else ""
+        what = "第 %d 个单元格（%s）" % (idx, ctype or "unknown")
+    elif op == "replace":
+        src = args.get("source")
+        if not isinstance(src, (str, list)):
+            return "❌ replace 需要 source（字符串或字符串数组）", None
+        if isinstance(src, list) and any(not isinstance(x, str) for x in src):
+            return "❌ source 数组里的每一项都必须是字符串", None
+        cells[idx]["source"] = src
+        if args.get("cell_type"):
+            cells[idx]["cell_type"] = str(args.get("cell_type"))
+        what = "第 %d 个单元格" % idx
+    else:
+        src = args.get("source")
+        if src is None:
+            src = ""
+        if not isinstance(src, (str, list)):
+            return "❌ insert 的 source 必须是字符串或字符串数组", None
+        ctype = str(args.get("cell_type") or "code").strip() or "code"
+        cell = {"cell_type": ctype, "metadata": {}, "source": src}
+        if ctype == "code":
+            cell["execution_count"] = None
+            cell["outputs"] = []
+        if cell_id:
+            pos = idx + 1
+        elif args.get("cell_index") is not None:
+            pos = max(0, min(idx, len(cells)))
+        else:
+            pos = len(cells)
+        cells.insert(pos, cell)
+        what = "第 %d 个位置（%s）" % (pos, ctype)
+
+    out = json.dumps(nb, ensure_ascii=False, indent=1)
+    if raw.endswith("\n"):
+        out += "\n"
+    undo_op = _snap(p)
+    write_enc = enc if enc in ("utf-8", "utf-8-sig", "gb18030") else "utf-8"
+    with open(p, "w", encoding=write_enc, newline="") as f:
+        f.write(out)
+    return ("已%s %s 的 %s（当前共 %d 个单元格）"
+            % ({"replace": "修改", "insert": "插入", "delete": "删除"}[op],
+               _rel(root, p), what, len(cells))), [undo_op]
 
 
 def _t_make_dir(root, args):

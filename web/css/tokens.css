@@ -1,0 +1,251 @@
+/* ============================================================
+   设计令牌（Design Tokens）—— 全站唯一来源
+   ------------------------------------------------------------
+   旧前端 base.css 与新版 frontend/ 共用本文件：改配色只动这里，
+   两套界面同时生效。业务样式一律引用语义层变量，禁止写死色值。
+   ------------------------------------------------------------
+   分两层：
+   1) 原始值（primitive）：只允许在主题块里出现十六进制，业务样式一律引用语义层；
+   2) 语义层（semantic）：表面 / 描边 / 文字 / 层级 / 动效，全站只认这些名字。
+   改配色只动主题块，改观感只动语义层，组件样式不用跟着动。
+   ============================================================ */
+:root {
+  /* ── 字体 ─────────────────────────────────────────────── */
+  --font: "MiSans", "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --mono: "Cascadia Code", Consolas, "SFMono-Regular", Menlo, monospace;
+
+  /* 字号刻度：11 / 12 / 13 / 14 / 15 / 17 / 20 / 24 —— 只用这八档 */
+  --fs-2xs: 11px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs: 15px;
+  --fs-lg: 17px;
+  --fs-xl: 20px;
+  --fs-2xl: 24px;
+  /* 行高：紧凑（标题 / 单行）· 正文 · 长文 */
+  --lh-tight: 1.35;
+  --lh: 1.6;
+  --lh-loose: 1.75;
+  --fw-normal: 400;
+  /* 本机 MiSans 只有 Regular：请求 600 会被浏览器合成加粗、笔画发糊，
+     所以「加粗」统一用 500，只有等宽/数字场景才偶尔用 600 */
+  --fw-medium: 500;
+  --fw-bold: 600;
+  --ls-wide: .04em;          /* 仅全大写小标签用 */
+
+  /* ── 圆角：控件 / 卡片 / 大容器（收敛成三档 + 药丸）────── */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius: 10px;             /* 兼容既有引用 */
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-pill: 999px;
+
+  /* ── 间距：4 的倍数，只用这几档 ───────────────────────── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* ── 控件尺寸 ─────────────────────────────────────────── */
+  --ctl-h-sm: 28px;
+  --ctl-h: 34px;
+  --ctl-h-lg: 40px;
+  --row-h: 32px;
+
+  /* ── 层级：页内阶梯 + 全屏浮层阶梯 ──────────────────────
+     数值沿用改造前的实际层级，换名不换次序；新增浮层请挑一档，别再写魔数 */
+  --z-base: 1;
+  --z-raised: 10;
+  --z-sticky: 40;
+  --z-modal: 50;            /* 弹窗遮罩 */
+  --z-pop: 60;              /* 浮在页面上的面板 / 悬浮按钮 / 输入弹窗 */
+  --z-tip: 70;              /* 悬停提示 */
+  --z-cover: 80;            /* 页内全屏覆盖层（工作台 / 道场 / Electron 标题栏） */
+  --z-cover-2: 85;
+  --z-lightbox: 90;         /* 图片查看 / 轨迹浮层 */
+  --z-lightbox-2: 95;
+  /* 全屏浮层：和页内层级彻底分开，避免互相打架 */
+  --z-float: 9400;          /* 阅读器浮层 */
+  --z-float-2: 9500;
+  --z-float-3: 9600;
+  --z-float-4: 9700;
+  --z-selbar: 9800;         /* 划词工具条 */
+  --z-selbar-menu: 9810;
+  --z-menu-float: 9999;     /* 文件树右键菜单 */
+  --z-toast: 10000;
+  --z-top: 10001;           /* 批注弹层：能压住 toast */
+
+  --sidebar-w: 268px;
+
+  /* ── 品牌强调色：只用于选中 / 主操作 / 焦点，不做大面积铺底 ── */
+  --accent: #4d6bfe;
+  --accent-hover: #3f5cf0;
+  --accent-soft: rgba(77, 107, 254, .12);   /* 弱化强调底色（替代整块铺满） */
+  --on-accent: #fff;          /* 实心强调色底上的文字色。IDE 主题里 Trae 品牌绿需要配近黑字，
+                                 所以凡是「背景 var(--accent) + 文字」的地方都要走这个 token */
+
+  /* ── 遮罩：弹窗 / 抽屉背后的压暗层 ─────────────────────── */
+  --overlay: rgba(0, 0, 0, .45);
+
+  /* ── 语义色：每色三档（文字/图标 · 实色底 · 描边）─────── */
+  --danger: #f14c4c;             /* 危险 / 失败 —— 文字与图标 */
+  --danger-strong: #a83b3b;
+  --danger-line: rgba(241, 76, 76, .5);
+  --ok: #4aa96c;                 /* 成功 / 通过 —— 文字与图标 */
+  --ok-strong: #1f7a4d;          /* 实色底（配白字） */
+  --ok-line: rgba(74, 169, 108, .45);
+  --warn: #c98a12;               /* 警告 / 注意 —— 文字与图标 */
+  --warn-line: rgba(201, 138, 18, .55);
+
+  /* ── 语义底色：标签 / 行内提示的低透明度色块 ───────────── */
+  --ok-soft: rgba(74, 169, 108, .14);
+  --warn-soft: rgba(201, 138, 18, .14);
+  --danger-soft: rgba(241, 76, 76, .14);
+  --accent-line: rgba(77, 107, 254, .35);   /* 强调色描边（输入框 / 选中行） */
+  --accent-faint: rgba(77, 107, 254, .06);  /* 极弱强调底（选中项背景） */
+
+  /* ── 数据分类色：固定不随主题变，保证同一类别永远同色 ──── */
+  --cat-1: #6b8afd;   /* 规则 */
+  --cat-2: #8b5cf6;   /* 记忆 */
+  --cat-3: #94a3b8;   /* 其他系统提示 */
+  --cat-4: #14b8a6;   /* 回复 */
+  --cat-5: #ef4444;   /* 工具结果 */
+  --cat-6: #0ea5e9;   /* 工具说明 */
+  --cat-7: #d946ef;   /* schema */
+
+  /* ── 压暗层：三档，局部浮层用 soft，全屏遮罩用 overlay ───── */
+  --scrim-soft: rgba(0, 0, 0, .28);
+  --scrim: rgba(0, 0, 0, .45);
+  --scrim-strong: rgba(0, 0, 0, .75);
+  --overlay-solid: rgba(8, 9, 12, .95);     /* 深底实色浮层（图片查看 / 命令面板） */
+  --overlay-strong: rgba(8, 9, 12, .84);    /* 深底半透明浮层（地图标注 / 浮动提示） */
+
+  /* ── 批注高亮：荧光笔黄色，固定不随主题变 ──────────────── */
+  --mark-bg: rgba(255, 206, 84, .45);
+  --mark-bg-hover: rgba(255, 206, 84, .7);
+  --mark-line: rgba(224, 168, 0, .8);
+
+  /* ── 图片查看器：与主题无关的固定暗底（照片需要稳定的深色背景）── */
+  --lightbox-bg: #0d0e11;
+  --lightbox-fg: #e7e9ee;
+  --lightbox-fg-dim: #b9bec9;
+  --lightbox-fg-weak: #8f949f;
+  --lightbox-line: rgba(255, 255, 255, .24);
+  --lightbox-line-strong: rgba(255, 255, 255, .3);
+  --lightbox-hover: rgba(255, 255, 255, .16);
+
+  /* ── 表面色阶：0 画布 · 1 面板 · 2 控件 · 3 浮层 ────────
+     层级优先靠「表面色差 + 阴影」，而不是给每块都描一圈边 */
+  --surface-0: var(--bg);
+  --surface-1: var(--bg-side);
+  --surface-2: var(--bg-input);
+  --surface-3: var(--bg-elevated);
+  --surface-hover: var(--bg-hover);
+  --surface-active: var(--bg-active);
+
+  /* ── 描边：subtle 内部分隔 · border 常规 · strong 强调 ── */
+  --line-subtle: var(--border-subtle);
+  --line: var(--border);
+  --line-strong: var(--border-strong);
+
+  /* ── 文字：正文 · 次要 · 弱提示（占位符 / 时间戳）─────── */
+  --text-weak: var(--text-mute);
+
+  /* ── 阴影：xs 静置 · sm 微浮 · md 卡片 · lg 弹窗 ──────── */
+  --shadow-xs: 0 1px 1px rgba(15, 20, 40, .04);
+  --shadow-sm: 0 1px 2px rgba(15, 20, 40, .06);
+  --shadow-md: 0 2px 10px rgba(15, 20, 40, .08);
+  --shadow: var(--shadow-md);
+  --shadow-lg: 0 16px 44px rgba(15, 20, 40, .20);
+  --ring: 0 0 0 3px var(--accent-soft);
+
+  /* ── 动效令牌：统一缓动与时长，避免各处各写一套 ────────── */
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+  --ease-in-out: cubic-bezier(.4, 0, .2, 1);
+  --t-press: .09s;
+  --t-fast: .13s;
+  --t: .17s;
+  --t-slow: .23s;
+  --t-slower: .32s;
+
+  /* 图谱配色（知识库 / 笔记 / GAL 关系图共用）：
+     节点填充必须明显区别于画布，否则默认节点会"融进"背景。
+     每个主题在下面各自覆盖一次，JS 通过 getComputedStyle 读取。 */
+  --kb-graph-bg: #eef0f4;
+  --kb-graph-dot: #d5d9e0;
+  --kb-node-bg: #dbe2ed;          /* 浅色下默认节点用浅灰蓝实心，纯白会和画布糊在一起 */
+  --kb-node-border: #7f8b9e;
+  --kb-node-shadow: rgba(15, 20, 40, .18);
+  --kb-edge: #8b8f99;
+  --kb-label-bg: #eef0f4;
+}
+
+/* 浅色：VS Code Light+ 镜像（提高文字与边框对比度） */
+html[data-theme="light"] {
+  color-scheme: light;        /* 原生控件 / 滚动条跟随浅色 */
+  --accent: #3b57e0; --accent-hover: #2f49c9; --accent-soft: rgba(59, 87, 224, .12);
+  --bg: #ffffff;
+  --bg-side: #f6f7f9;
+  --bg-hover: #eef0f3;
+  --bg-active: #e3e6eb;
+  --bg-input: #f7f8fa;
+  --bg-elevated: #ffffff;
+  --overlay: rgba(15, 20, 40, .3);
+  --text: #1b1e23;
+  --text-dim: #5b6169;
+  --text-mute: #8b9199;
+  --border-subtle: #eff1f4;
+  --border: #e1e4e9;
+  --border-strong: #c3c8cf;
+  --bubble-user: #3b57e0;
+  --bubble-user-text: #ffffff;
+  --code-bg: #f7f8fa;
+  --code-head: #eef0f3;
+  --inline-bg: #eef0f3;
+  --quote-bar: #c3c8cf;
+  --scroll: #d3d7dc;
+  --scroll-hover: #b7bcc4;
+}
+
+/* 深色：VS Code Dark+ 镜像（提高文字与边框对比度） */
+html[data-theme="dark"] {
+  color-scheme: dark;         /* 原生控件 / 滚动条跟随深色 */
+  --accent: #6b86ff; --accent-hover: #7d95ff; --accent-soft: rgba(107, 134, 255, .18);
+  --bg: #17181b;              /* 编辑器 / 主区背景 */
+  --bg-side: #1c1e21;         /* 侧边栏 */
+  --bg-hover: #25282c;        /* 列表悬停 */
+  --bg-active: #2d3136;       /* 列表选中 */
+  --bg-input: #22252a;        /* 输入框底色 */
+  --bg-elevated: #24272b;     /* 浮层（菜单 / 弹窗 / 气泡） */
+  --overlay: rgba(0, 0, 0, .45);
+  --text: #e6e8ea;
+  --text-dim: #9ba1a8;
+  --text-mute: #6f757c;
+  --border-subtle: #24272b;   /* 内部分隔：几乎只靠色差，不抢视觉 */
+  --border: #2e3238;
+  --border-strong: #42474e;
+  --bubble-user: #3b57e0;
+  --bubble-user-text: #ffffff;
+  --code-bg: #131417;
+  --code-head: #1b1d20;
+  --inline-bg: #24272b;
+  --quote-bar: #42474e;
+  --scroll: #35383d;
+  --scroll-hover: #4a4e54;
+  --kb-graph-bg: #131417;
+  --kb-graph-dot: #292c31;
+  --kb-node-bg: #34383f;
+  --kb-node-border: #5b626c;
+  --kb-node-shadow: rgba(0, 0, 0, .55);
+  --kb-edge: #8b919b;
+  --kb-label-bg: #131417;
+}
+

@@ -288,7 +288,9 @@ body.rd-resizing { user-select: none; cursor: col-resize; }
 }
 .rd-tpage canvas { display: block; width: 100%; height: auto; }
 .rd-tlayer { position: absolute; inset: 0; z-index: 2; }
-.rd-tblock { position: absolute; overflow: hidden; }
+/* 遮盖块要允许向外扩 1pt 吃掉原文字形的抗锯齿边缘（见 transpage.js 的 COVER_BLEED），
+   否则译页上会留下细黑线；文字本身仍由 .rd-ttext 的 overflow:hidden 裁在框内。 */
+.rd-tblock { position: absolute; overflow: visible; }
 .rd-tcover { position: absolute; }
 .rd-ttext {
   position: absolute; inset: 0; color: #111;

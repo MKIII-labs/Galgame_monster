@@ -117,6 +117,6 @@ def test_ask_notice_text(monkeypatch):
 
 def test_defaults_include_ask_and_notify():
     cfg = default_config()
-    assert cfg["question_policy_scope"] == "autopilot"
+    assert cfg["autonomy_question_policy"] == "ask"
     assert cfg["notify_banner"] is True
     assert cfg["notify_volume"] == 60

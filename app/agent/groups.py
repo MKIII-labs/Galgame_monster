@@ -19,6 +19,7 @@ PLAN_MODE_TOOLS = frozenset((
     "acceptance", "update_plan", "plan_patch", "research_note",
     "explore", "explore_followup", "explore_status", "explore_result",
     "explore_cancel", "ask_user", "mcp_list_servers", "mcp_list_tools",
+    "mcp_list_resources", "mcp_read_resource",
     "sleep",
 ))
 
@@ -39,9 +40,10 @@ SEE_MAX_TOTAL = 24 * 1024 * 1024      # 多图合计上限
 
 
 TOOLS = ("list_dir", "read_file", "read_files", "search_files", "search_code", "repo_map", "write_file", "edit_file",
+         "multi_edit", "apply_patch", "notebook_edit",
          "code_context", "impact",
          "make_dir", "move_file", "copy_file", "delete_file", "run_command", "shell",
-         "fetch_url", "sleep", "render_check",
+         "fetch_url", "sleep", "open_preview", "render_check",
          "visual_check", "render_views", "scene_assert", "geometry_compare",
          "asset_scan", "asset_convert", "asset_atlas", "asset_inline", "asset_validate",
          "mesh_inspect",
@@ -63,7 +65,8 @@ TOOLS = ("list_dir", "read_file", "read_files", "search_files", "search_code", "
          "ask_user",
          "computer_open", "computer_see", "computer_act", "computer_read", "computer_shot",
          "computer_windows",
-         "mcp_list_servers", "mcp_list_tools")
+         "mcp_list_servers", "mcp_list_tools",
+         "mcp_list_resources", "mcp_read_resource")
 
 
 TOOLS = TOOLS + tuple(tool_meta.META)
@@ -72,7 +75,8 @@ TOOLS = TOOLS + tuple(tool_meta.META)
 COMPUTER_TOOLS = computer.TOOLS
 
 
-WRITE_TOOLS = ("write_file", "edit_file", "make_dir", "move_file", "copy_file", "delete_file",
+WRITE_TOOLS = ("write_file", "edit_file", "multi_edit", "apply_patch", "notebook_edit",
+               "make_dir", "move_file", "copy_file", "delete_file",
                "lsp_rename", "recover_file",
                "asset_convert", "asset_atlas", "asset_inline")
 
@@ -100,7 +104,7 @@ RUN_TOOLS = ("run_command",)          # 执行类：不走写入审批，走 jud
 
 
 GIT_WRITE_TOOLS = ("git_commit", "split_commit")
-# 允许「读取沙箱外文件」的工具（仅在用户开启授权后生效；写入类工具永远只在沙箱内）
+# 读取类工具：默认允许用绝对路径读取沙箱外文件（写入类工具永远只在沙箱内）
 
 
 OUTSIDE_READ_TOOLS = ("list_dir", "read_file", "read_files", "see_image",
@@ -115,14 +119,15 @@ _PLUGIN_TOOLS_LOCK = threading.Lock()
 
 FILE_TOOLS = {"list_dir", "read_file", "read_files", "search_files", "search_code", "repo_map",
               "code_context", "impact", "write_file",
-              "edit_file", "make_dir", "move_file", "copy_file", "delete_file",
+              "edit_file", "multi_edit", "apply_patch", "notebook_edit",
+              "make_dir", "move_file", "copy_file", "delete_file",
               # 下面这些同样以沙箱为根，归到同一类：normalize_tool_name 与
               # 「没开 Agent 就不能用」的判定都靠它
               "lsp_diagnostics", "lsp_definition", "lsp_references", "lsp_rename",
               "lsp_hover", "lsp_symbols", "lsp_implementation", "lsp_calls",
                "git_status", "git_diff", "git_log", "git_commit", "split_commit",
               "list_steps", "undo_step", "redo_step", "recover_file",
-              "visual_check", "asset_scan", "asset_convert", "asset_atlas",
+              "open_preview", "visual_check", "asset_scan", "asset_convert", "asset_atlas",
               "asset_inline", "asset_validate", "run_workflow_script"}
 
 # 模型常见的「同义词 / 简写 / OpenAI 风格下划线名」→ 本项目工具名。
@@ -176,6 +181,10 @@ TOOL_ALIASES = {
     "browser_snapshot": "computer_see", "browser_act": "computer_act",
     "browser_click": "computer_act", "browser_type": "computer_act",
     "browser_read": "computer_read", "browser_screenshot": "computer_shot",
+    "read_mcp_resource": "mcp_read_resource",
+    "list_mcp_resources": "mcp_list_resources",
+    "multiedit": "multi_edit", "applypatch": "apply_patch",
+    "notebookedit": "notebook_edit",
     "plan": "update_plan", "todo": "update_plan", "update_todo": "update_plan",
     "plan_patch": "plan_patch", "patch_plan": "plan_patch", "plan_update": "plan_patch",
     "todo_patch": "plan_patch",
@@ -336,10 +345,14 @@ _REQUIRED_ARGS = {
     "read_files": ("paths",),
     "write_file": ("path", "content"),
     "edit_file": ("path", "old", "new"),
+    "multi_edit": ("path", "edits"),
+    "apply_patch": ("path", "patch"),
+    "notebook_edit": ("path", "operation"),
     "make_dir": ("path",),
     "move_file": ("from", "to"),
     "copy_file": ("from", "to"),
     "delete_file": ("path",),
     "fetch_url": ("url",),
+    "mcp_read_resource": ("uri",),
     "sleep": ("seconds",),
 }

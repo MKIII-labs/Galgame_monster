@@ -105,6 +105,28 @@ truthy('差集：每一块都不再与障碍物相交',
 eq('差集：没有障碍物时原样返回', T.coverPieces(rect, []), [rect]);
 eq('差集：障碍物在外侧时原样返回', T.coverPieces(rect, [[200, 200, 300, 300]]), [rect]);
 
+/* ---------------- 5. 行数修正 / 字号基准 / 遮盖外扩 ---------------- */
+
+// 同一视觉行被切成多段：9pt 高、记 2 行、字高 4.66 → 实际 1 行（截图里的 4px 小字）
+eq('行数：同一行切成多段时按字高重估', T.targetRows({ lines: 2, size: 4.66 }, [50, 100, 286, 109]), 1);
+eq('行数：正常两行不误伤', T.targetRows({ lines: 2, size: 4.67 }, [50, 447, 286, 468]), 2);
+eq('行数：3 段只有 2 行', T.targetRows({ lines: 3, size: 4.67 }, [50, 374, 286, 395]), 2);
+
+const bodyBand = T.sizeBand(10, { kind: 'text' }, 3);
+truthy('字号：正文下限 = 基准 90%', bodyBand.min === 9, bodyBand);
+truthy('字号：正文上限 = 基准 106%', Math.abs(bodyBand.max - 10.6) < 0.01, bodyBand);
+truthy('字号：标题至少比正文大 12%', T.sizeBand(10, { kind: 'heading' }, 1).min >= 11.2);
+truthy('字号：图注不超过正文', T.sizeBand(10, { role: 'caption' }, 1).max <= 10);
+truthy('字号：没有基准时退回逐块估算', T.sizeBand(0, { kind: 'text' }, 2) === null);
+
+const noNeighbor = T.bleedRect([50, 100, 250, 120], []);
+truthy('遮盖：无相邻块时四边各外扩 1.1pt',
+  Math.abs(noNeighbor[0] - 48.9) < 0.01 && Math.abs(noNeighbor[3] - 121.1) < 0.01, noNeighbor);
+const withAbove = T.bleedRect([50, 100, 250, 120], [[50, 80, 250, 99.4]]);
+truthy('遮盖：不越过上方相邻块（只吃 0.35pt 空隙）', Math.abs(withAbove[1] - 99.65) < 0.01, withAbove);
+const withBelow = T.bleedRect([50, 100, 250, 120], [[50, 120.4, 250, 140]]);
+truthy('遮盖：不越过下方相邻块', Math.abs(withBelow[3] - 120.15) < 0.01, withBelow);
+
 /* ---------------- 汇总 ---------------- */
 
 if (fails.length) {

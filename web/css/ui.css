@@ -293,3 +293,21 @@
   .composer-hint-row { gap: var(--sp-2); }
   .ctx-meter { max-width: 58%; font-size: var(--fs-2xs); }
 }
+
+/* ============================================================
+   嵌入模式（URL 带 ?embed=1，历史兼容）
+   只隐藏「壳」：标题栏 / 侧栏 / 模式切换；工作区本体保持原样。
+   正常打开（不带参数）完全不受影响。
+   ============================================================ */
+html.embed #titlebar,
+html.embed #sidebar,
+html.embed #sidebar-toggle,
+html.embed #sidebar-expand,
+html.embed .sidebar-expand,
+html.embed #mode-switch,
+html.embed #mode-float,
+html.embed #hall-back {
+  display: none !important;
+}
+html.embed #app { height: 100vh; height: 100dvh; }
+html.embed #main { min-width: 0; }

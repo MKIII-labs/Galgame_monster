@@ -26,7 +26,8 @@ _read_lock = threading.Lock()
 # 只有「覆盖已有内容」才需要先读；新建文件、建目录、删除都不拦（与 dsh 一致）
 
 
-_READ_BEFORE_WRITE = ("write_file", "edit_file")
+_READ_BEFORE_WRITE = ("write_file", "edit_file", "multi_edit", "apply_patch",
+                      "notebook_edit")
 
 # 插件注册的工具（data/plugins/*.py 用 @agent_tool 注册）：name -> 元数据。
 # 与内置工具分开存，TOOLS 仍是一份稳定的元组，插件加载失败不会影响内置工具。

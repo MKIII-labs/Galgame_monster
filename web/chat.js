@@ -503,7 +503,6 @@ function renderSessions() {
   updateStatusLine();
   syncAgentUI();
   if (typeof renderKbBadge === 'function') renderKbBadge();   // 侧栏知识库「未绑定」角标
-  if (typeof syncAutoChatFromSession === 'function') syncAutoChatFromSession();
 }
 
 /* ---------------- 会话搜索浮层 ---------------- */
@@ -5693,6 +5692,13 @@ function renderMessages(fromIndex, forceWindow, opts) {
   } else if (_liveData) {
     _skipIdx = (_lastMsg && _lastMsg.role === 'assistant') ? total - 1 : -1;
   }
+  // 窗口与内容都没变（例如后台事件只改了别的字段）：保留现有 DOM 与滚动位置
+  const _sig = (window.GM_RENDER && GM_RENDER.messagesSignature)
+    ? GM_RENDER.messagesSignature(msgs, start, total) : '';
+  if (!expanding && !forceWindow && _sig && chat._renderSig === _sig
+      && !(_liveData && !_liveRow) && chat.querySelector('.msg')) {
+    return;
+  }
   // 实时 host 先摘下来再放回：innerHTML 会连它一起清掉，重挂时内容会闪一下
   const _keepHost = (_st && _st.host) || null;
   if (_keepHost && _keepHost.parentNode) _keepHost.parentNode.removeChild(_keepHost);
@@ -5738,6 +5744,7 @@ function renderMessages(fromIndex, forceWindow, opts) {
   }
   // 重排会把「排队中」的幽灵气泡冲掉：重建一次，保证它们始终在对话末尾
   if (typeof renderQueueGhosts === 'function') renderQueueGhosts();
+  chat._renderSig = _sig;
 }
 
 function bindChips() {

@@ -40,7 +40,6 @@ def ensure_session_kb_fields(s):
     s.setdefault("use_memory", True)           # 本会话是否读取会话记忆 / 绑定知识库（默认开）
     s.setdefault("agent_enabled", False)   # 是否开启「文件 Agent」模式
     s.setdefault("sandbox", "")            # Agent 的沙箱目录（绝对路径）
-    s.setdefault("allow_outside_read", False)  # 允许 Agent 读取沙箱外的文件（只读）
     s.setdefault("auto_chat", False)           # 主动聊天：AI 隔一段时间主动发消息
     s.setdefault("scene", "general")           # 场景包：general | office | study | life
     # ---- GAL 演出模式（见 docs/GAL_MODE_DESIGN.md）----
@@ -664,7 +663,6 @@ def slim_sessions(data, msg_limit=None):
         item["agent_enabled"] = s.get("agent_enabled", False)
         item["sandbox"] = s.get("sandbox", "")
         item["sandbox_key"], item["sandbox_name"] = sandbox_group(s.get("sandbox"))
-        item["allow_outside_read"] = s.get("allow_outside_read", False)
         # 审批档位必须回传：否则前端 applySessions 后读不到，会永远显示「手动审批」
         item["approval_mode"] = s.get("approval_mode", "ai")
         item["auto_chat"] = s.get("auto_chat", False)

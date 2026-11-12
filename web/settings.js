@@ -51,7 +51,7 @@ const SETTINGS_PAGE_META = {
    密钥与自定义预设不在重置范围内。 */
 const STATIC_RESET_KEYS = {
   profile: { profile: ['manual', 'rules', 'auto_learn_enabled', 'learning_prompt_custom'] },
-  appearance: { config: ['theme', 'ide_theme', 'ide_whitespace', 'ui_process_follow'] },
+  appearance: { config: ['theme', 'ide_whitespace', 'ui_process_follow'] },
   gal: { config: [
     'gal_theme', 'gal_dialog_max', 'gal_ui_sfx', 'gal_nudge', 'gal_typewriter', 'gal_cps',
     'gal_fx', 'gal_sprite_fx', 'gal_bar_auto', 'gal_bgm_volume', 'gal_seg_mode', 'gal_auto',
@@ -487,7 +487,7 @@ function buildContextPane() {
       '省费模式：历史引用只留句柄、动态块贴到请求末尾',
       '省费 token 引用 句柄 前缀 缓存') +
     hintHtml('关闭（quality）时装配结果与旧版逐字节一致。打开后：@文件 / @目录 的正文只在当轮内联，'
-             + '更早轮次只留「路径:行号」由模型按需读取；界面 / 意图 / 自动化目标贴到请求末尾，'
+             + '更早轮次只留「路径:行号」由模型按需读取；界面 / 意图提示贴到请求末尾，'
              + '避免每轮让整段历史失去前缀缓存。默认开启。',
              '省费 token 引用 句柄 前缀 缓存') +
     labelHtml('历史原文预算（tokens，0 = 关闭）', '省费 工作集 历史 原文 预算 token') +
@@ -771,22 +771,17 @@ function buildAgentPane() {
     hintHtml('模型想收尾、但计划里还有没做完的步骤（或结尾在问「要不要继续」）时，' +
              '由程序自己推它往下做。工具条里的同名选项与这里是同一份配置。',
              '自动续跑 继续 计划') +
-    setGroupHtml('提问卡', '提问 策略 自动化 自主 决策 提问卡 主动提问 范围') +
-    labelHtml('作用范围', '提问 策略 范围 普通聊天 自动化') +
-    '<select id="question-policy-scope" class="field-input">' +
-    '<option value="autopilot">仅自动化（默认）</option>' +
-    '<option value="all">所有对话（含普通聊天）</option>' +
-    '</select>' +
-    labelHtml('遇到提问卡 / 需要拍板时', '提问 策略 自动化 自主 决策 提问卡') +
+    setGroupHtml('提问卡', '提问 策略 自主 决策 提问卡 主动提问') +
+    labelHtml('遇到提问卡 / 需要拍板时', '提问 策略 自主 决策 提问卡') +
     '<select id="autonomy-question-policy" class="field-input">' +
+    '<option value="ask">ask（一律问我）</option>' +
     '<option value="smart">smart（可逆自决，不可逆 / 缺外部信息问我）</option>' +
     '<option value="auto">auto（一律自决，不阻塞）</option>' +
-    '<option value="ask">ask（一律问我）</option>' +
     '</select>' +
-    hintHtml('选「所有对话」后，这档策略也作用于普通聊天：smart 只把不可逆 / 缺信息的决定摆给你，'
-             + 'auto 能自决就自决。auto 也不会执行删除 / 覆盖 / 发布 / 付款 / 改凭据这类不可逆操作，'
+    hintHtml('smart 只把不可逆 / 缺信息的决定摆给你，auto 能自决就自决。'
+             + 'auto 也不会执行删除 / 覆盖 / 发布 / 付款 / 改凭据这类不可逆操作，'
              + '而是选可回滚的最小方案。',
-             '提问 策略 自动化 自主 决策 不可逆 普通聊天') +
+             '提问 策略 自主 决策 不可逆 普通聊天') +
     setGroupHtml('通知', '通知 提示音 音量 横幅 完成 等待回答 审批 操作 出错') +
     checkRowHtml('notify-banner', '显示系统通知横幅', '通知 横幅 系统 弹窗') +
     checkRowHtml('notify-sound', '播放提示音', '通知 提示音 声音') +
@@ -798,27 +793,6 @@ function buildAgentPane() {
     '<input id="notify-volume" class="field-input" type="range" min="0" max="100" step="5" value="60">' +
     hintHtml('横幅与声音分开控制：关掉横幅仍可只留提示音。提示音由本机合成，不需要音频文件。',
              '通知 横幅 声音 音量') +
-    setGroupHtml('自动化（Autopilot）', '自动化 autopilot 重启 恢复 看门狗 验收 评审') +
-    checkRowHtml('autopilot-verify',
-      '没有机检命令时用独立评审员判定完成', '自动化 验收 评审 完成 判定') +
-    hintHtml('评审员用新的上下文，只看目标、完成定义和原始证据（文件 / 命令输出 / '
-             + '工作区改动），不看模型自己的自述；判定不了的项不会算通过。',
-             '自动化 验收 评审 完成 证据 自述') +
-    checkRowHtml('autopilot-resume-on-start',
-      '应用重启后自动恢复未完成的自动化目标', '自动化 重启 恢复 续跑 断点') +
-    hintHtml('开启后，进程重启 / 崩溃后会把 running 的目标接回线程；'
-             + '关闭则统一转为暂停，等你手动恢复。', '自动化 重启 恢复 续跑 断点') +
-    checkRowHtml('autopilot-use-budget',
-      '启用回合 / 时长硬上限（关闭时用无进展看门狗）', '自动化 预算 回合 时长 上限 看门狗') +
-    hintHtml('关闭（默认）时不按固定回合数硬刹，只在连续多回合没有实际进展时干预；'
-             + '需要严格控制成本时再打开。', '自动化 预算 回合 时长 上限 看门狗') +
-    labelHtml('无进展看门狗（连续几回合无实际进展就干预，0 = 关闭）',
-              '自动化 看门狗 无进展 停滞 回合') +
-    limitRow('autopilot-watchdog-turns', intVal(cfg.autopilot_watchdog_turns, 4)) +
-    labelHtml('硬上限：最多回合', '自动化 预算 回合 上限') +
-    limitRow('autopilot-max-turns', intVal(cfg.autopilot_max_turns, 30)) +
-    labelHtml('硬上限：最长分钟', '自动化 预算 时长 上限') +
-    limitRow('autopilot-max-minutes', intVal(cfg.autopilot_max_minutes, 90)) +
     setGroupHtml('工具与写入', '工具 写入 shell 命令 沙箱 写前读 大厅 提示词') +
     labelHtml('Shell 自由度', 'Shell 命令 管道 重定向 白名单') +
     '<select id="agent-shell-mode" class="field-input">' +
@@ -1179,21 +1153,13 @@ function buildAgentPane() {
   const forkEl = qIn(pane, 'agent-explore-fork');
   if (forkEl) forkEl.checked = cfg.agent_explore_fork !== false;
   const qpEl = qIn(pane, 'autonomy-question-policy');
-  if (qpEl) qpEl.value = String(cfg.autonomy_question_policy || 'smart');
-  const qscEl = qIn(pane, 'question-policy-scope');
-  if (qscEl) qscEl.value = String(cfg.question_policy_scope || 'autopilot');
+  if (qpEl) qpEl.value = String(cfg.autonomy_question_policy || 'ask');
   ['notify-banner', 'notify-sound', 'notify-done', 'notify-ask', 'notify-error'].forEach((id) => {
     const el = qIn(pane, id);
     if (el) el.checked = cfg[id.replace(/-/g, '_')] !== false;
   });
   const nvEl = qIn(pane, 'notify-volume');
   if (nvEl) nvEl.value = String(cfg.notify_volume == null ? 60 : cfg.notify_volume);
-  const apVerifyEl = qIn(pane, 'autopilot-verify');
-  if (apVerifyEl) apVerifyEl.checked = cfg.autopilot_verify !== false;
-  const apResumeEl = qIn(pane, 'autopilot-resume-on-start');
-  if (apResumeEl) apResumeEl.checked = cfg.autopilot_resume_on_start !== false;
-  const apBudgetEl = qIn(pane, 'autopilot-use-budget');
-  if (apBudgetEl) apBudgetEl.checked = !!cfg.autopilot_use_budget;
   const exVerEl = qIn(pane, 'agent-explore-verify');
   if (exVerEl) exVerEl.checked = cfg.agent_explore_verify !== false;
   const exWriteEl = qIn(pane, 'agent-explore-write');
@@ -1316,8 +1282,7 @@ function buildAgentPane() {
   pane._collect = () => ({
     agent_max_rounds: clampLimit('agent-max-rounds', 0),
     agent_auto_continue: acVal,
-    autonomy_question_policy: (qIn(pane, 'autonomy-question-policy') || {}).value || 'smart',
-    question_policy_scope: (qIn(pane, 'question-policy-scope') || {}).value || 'autopilot',
+    autonomy_question_policy: (qIn(pane, 'autonomy-question-policy') || {}).value || 'ask',
     notify_banner: !!(qIn(pane, 'notify-banner') || {}).checked,
     notify_sound: !!(qIn(pane, 'notify-sound') || {}).checked,
     notify_done: !!(qIn(pane, 'notify-done') || {}).checked,
@@ -1325,12 +1290,6 @@ function buildAgentPane() {
     notify_error: !!(qIn(pane, 'notify-error') || {}).checked,
     notify_volume: Math.max(0, Math.min(100,
       parseInt((qIn(pane, 'notify-volume') || {}).value, 10) || 0)),
-    autopilot_verify: !!(qIn(pane, 'autopilot-verify') || {}).checked,
-    autopilot_resume_on_start: !!(qIn(pane, 'autopilot-resume-on-start') || {}).checked,
-    autopilot_use_budget: !!(qIn(pane, 'autopilot-use-budget') || {}).checked,
-    autopilot_watchdog_turns: clampLimit('autopilot-watchdog-turns', 4),
-    autopilot_max_turns: clampLimit('autopilot-max-turns', 30),
-    autopilot_max_minutes: clampLimit('autopilot-max-minutes', 90),
     agent_cmd_timeout: clampLimit('agent-cmd-timeout', 60),
     agent_net_audit: !!(qIn(pane, 'agent-net-audit') || {}).checked,
     agent_explore_enabled: !!(qIn(pane, 'agent-explore-enabled') || {}).checked,
@@ -2301,14 +2260,6 @@ function replayFadeIn(el) {
   el.classList.add('fade-in');
 }
 
-// IDE 主题总开关关闭时，把下方主题卡片整体置灰并禁用
-function syncIdeThemeGrid() {
-  const on = !!($('#ide-theme-enabled') || {}).checked;
-  const grid = $('#modal .ide-theme-grid');
-  if (grid) grid.classList.toggle('disabled', !on);
-  $$('#modal input[name="ide-theme"]').forEach((r) => { r.disabled = !on; });
-}
-
 function deepCopy(obj) {
   return obj == null ? obj : JSON.parse(JSON.stringify(obj));
 }
@@ -2445,16 +2396,6 @@ function fillStaticSettings(cfg, profile) {
   const gtr = document.querySelector('input[name="gal-theme"][value="' + gTheme + '"]');
   if (gtr) gtr.checked = true;
 
-  // IDE 编辑器主题：与界面主题是两套独立配置
-  const iTheme = c.ide_theme || '';
-  const itr = document.querySelector('input[name="ide-theme"][value="' + iTheme + '"]');
-  if (itr) itr.checked = true;
-  const ideToggle = $('#ide-theme-enabled');
-  if (ideToggle) {
-    ideToggle.checked = !!iTheme;
-    ideToggle.onchange = syncIdeThemeGrid;
-  }
-  syncIdeThemeGrid();
   if ($('#ide-whitespace')) $('#ide-whitespace').value = c.ide_whitespace || 'all';
   if ($('#ui-process-follow')) $('#ui-process-follow').checked = c.ui_process_follow !== false;
 
@@ -2776,7 +2717,6 @@ const HELP_SET_TARGET = {
   'IDE / Solo 模式（VS Code 风格工作区）': ['appearance', 'ide'],
   'Agent 沙箱（文件读写与命令）与审批': ['agent', 'agent'],
   '执行计划与分步思考（过程里的「步骤 2/5」）': ['agent', '计划'],
-  '自动化：自主规划到完成、断了自己续、提问按策略处理': ['agent', '自动化'],
   '自动续跑：什么时候自己继续、什么时候会停': ['agent', '续跑'],
   '变更审阅：块对 diff、标签页统计与提示栏': ['agent', '审阅'],
   '快捷键总览': ['keys', '快捷键'],
@@ -3492,16 +3432,6 @@ function collectSettings() {
 
   const tr = document.querySelector('input[name="theme"]:checked');
   if (tr) cfg.theme = tr.value;
-  // IDE 编辑器主题：总开关关闭 = 跟随界面主题（存空串）
-  // 开关打开时也允许选「跟随界面主题」（value 为空）—— 此时同样存空串，
-  // 绝不能兜底成 vscode-dark，否则「调浅色」会被静默改回深色。
-  const ideOn = !!($('#ide-theme-enabled') || {}).checked;
-  if (!ideOn) {
-    cfg.ide_theme = '';
-  } else {
-    const itr = document.querySelector('input[name="ide-theme"]:checked');
-    cfg.ide_theme = (itr && itr.value) || '';
-  }
   if ($('#ide-whitespace')) cfg.ide_whitespace = $('#ide-whitespace').value;
   if ($('#ui-process-follow')) cfg.ui_process_follow = !!$('#ui-process-follow').checked;
 
@@ -3967,7 +3897,6 @@ async function saveModal() {
   syncSearchPill();
   applyTheme(cfg.theme);
   galApplyTheme();
-  applyIdeTheme();
   ideApplyWhitespace();
   galApplyViewPrefs();
   // 刚开启「AI 自动写剧本」→ 立即为当前会话生成（用户可看到进度）
@@ -4064,46 +3993,6 @@ function applyTheme(theme) {
       && typeof drawNotesGraph === 'function') {
     drawNotesGraph();
   }
-}
-
-/* ---- IDE 主题：与上面那套界面主题是**两套独立配置** ----
-   实现方式与 GAL 主题同源：只在 IDE 模式给 <html> 挂 data-ide-theme，
-   退出 IDE 立刻摘掉 —— 所以 Solo / GAL 在任何情况下都看不到这套色板。
-   颜色本身写在 web/css/ide.css，Monaco 侧写在 gal-ide.js。
-   取值留空 = 跟随界面主题（不挂属性，直接走全局色板）。
-
-   注：这份清单要与 gal-ide.js 里 IDE_MONACO_THEMES 的键保持一致
-   （vscode-dark / vscode-light 不需要自定义 Monaco 主题，用内置 vs-dark / vs）。 */
-const IDE_VSCODE_CURRENT = 'vscode-current';   // 特殊值：跟随本机 VS Code 正在用的主题
-const IDE_THEME_IDS = ['vscode-modern-dark', 'vscode-modern-light',
-  'vscode-dark', 'vscode-light', 'trae-dark', 'trae-light', 'trae-blue'];
-
-function applyIdeTheme() {
-  const root = document.documentElement;
-  const t = String((state.config && state.config.ide_theme) || '');
-  const inIde = state.uiMode === 'ide';
-  let attr = '';
-  if (inIde) {
-    if (t === IDE_VSCODE_CURRENT) {
-      // 先用上一次解析出的预设，避免异步取回之前闪一下默认色；
-      // 取不到就跟随界面（不再兜底成深色预设）
-      attr = (typeof ideVscodePreset === 'function' ? ideVscodePreset() : '') || '';
-    } else if (IDE_THEME_IDS.indexOf(t) >= 0) {
-      attr = t;
-    }
-  }
-  if (attr) root.setAttribute('data-ide-theme', attr);
-  else root.removeAttribute('data-ide-theme');
-  if (typeof ideApplyVscodeVars === 'function') ideApplyVscodeVars();
-  // 「跟随 VS Code」需要异步取一次并开始轮询；其他取值则确保轮询已停
-  if (typeof ideVscodeCurrent === 'function' && ideVscodeCurrent()) {
-    ideRefreshVscodeCurrent();
-    ideStartVscodeThemePoll();
-  } else if (typeof ideStopVscodeThemePoll === 'function') {
-    ideStopVscodeThemePoll();
-  }
-  if (typeof ideSyncMonacoTheme === 'function') { try { ideSyncMonacoTheme(); } catch (e) { /* 忽略 */ } }
-  syncWindowChrome();     // IDE 主题切换后，标题栏也跟着变
 }
 
 /* ============================================================
@@ -4463,7 +4352,7 @@ function encodePcm16(f32) {
 /* ============================================================
    Agent：会话开关与沙箱目录
    ============================================================ */
-/* Agent 设置浮层：沙箱目录 / 路径 / 沙箱外只读收在开关右侧的小箭头里，
+/* Agent 设置浮层：沙箱目录 / 路径 / 写入与命令审批收在开关右侧的小箭头里，
    避免这 3 个胶囊和主开关一起把工具栏挤换行 */
 function closeAgentMenu() {
   const menu = $('#agent-menu');
@@ -4505,11 +4394,6 @@ function syncAgentUI() {
     sbOpen.classList.toggle('hidden', !on || !sandboxPath);
     sbOpen.title = sandboxPath
       ? ('在文件管理器中打开：' + sandboxPath) : '在文件管理器中打开沙箱目录';
-  }
-  const or = $('#btn-outside-read');
-  if (or) {
-    or.classList.toggle('hidden', !on);
-    or.classList.toggle('active', !!(on && s && s.allow_outside_read));
   }
   const pathBtn = $('#btn-sandbox-path');
   if (pathBtn) pathBtn.classList.toggle('hidden', !on);
@@ -4574,19 +4458,6 @@ async function setApprovalMode(mode) {
       else toast('自定义规则已生效');
     } catch (e) { /* 提示失败不影响已切换的模式 */ }
   }
-}
-
-// 允许 / 禁止 Agent 读取沙箱外的文件（只读，按会话保存）
-async function toggleOutsideRead() {
-  const s = curSession();
-  if (!s) return;
-  const on = !s.allow_outside_read;
-  try {
-    const r = await api('/api/session/agent', { id: s.id, allow_outside_read: on });
-    applySessions(r);
-  } catch (e) { toastErr('切换', e); return; }
-  syncAgentUI();
-  toast(on ? '已允许读取沙箱外文件（只读，写入仍限沙箱内）' : '已关闭沙箱外读取');
 }
 
 async function toggleAgent() {

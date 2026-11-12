@@ -898,10 +898,9 @@ def _run_one(q, ctx, cache, budget, emit, stop_event, seed_messages=None):
         base_prompt = ROLE_PROMPTS[role]
         agent_model = ""
         max_rounds = _round_cap
-    if ctx.get("allow_outside"):
-        base_prompt += (
-            "\n\n【边界】用户已授权只读沙箱外文件：仅在任务明确要求时用**绝对路径**读取，"
-            "不要主动翻沙箱外目录；写入仍然只能在沙箱内。")
+    base_prompt += (
+        "\n\n【边界】读取可用**绝对路径**指向沙箱外文件；秘密文件、本项目 data/ 与"
+        "禁止目录仍然拒绝，写入仍然只能在沙箱内。")
     try:
         depth = max(0, int(ctx.get("depth") or 0))
     except (TypeError, ValueError):
