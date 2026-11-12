@@ -973,6 +973,9 @@ function updateCtxMeter() {
 function renderContextBar(ctx) {
   syncCompressMarks(ctx);      // 压缩标记跟着 context 一起同步（GAL 内部会跳过）
   _lastCtx = ctx || null;
+  // 新壳层的右侧检查器复用同一份上下文数据（P1）；缓存一份供 ui-shell 初始化
+  window.__lastContext = ctx || null;
+  if (typeof uiInspectorSetContext === 'function') uiInspectorSetContext(ctx);
   updateCtxMeter();
   const r = ctxRingEnsure();
   r.hasCtx = !!(ctx && ctx.limit);

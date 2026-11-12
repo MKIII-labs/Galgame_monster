@@ -72,6 +72,8 @@
 <link rel="stylesheet" href="/static/css/turndots.css">
 <!-- 通用组件层：必须最后加载，用来把各页面历史写法统一的几何规格拉齐（见文件头注释） -->
 <link rel="stylesheet" href="/static/css/ui.css">
+<!-- 界面重构壳层：固定导航 / 顶栏 / 检查器 / 命令面板 / 全屏设置 -->
+<link rel="stylesheet" href="/static/css/shell.css">
 <!-- 复古像素主题用的点阵字体：只有 pixel 主题会引用这个字体族，因此 woff2 实际是「用到才下载」；
      非阻塞加载，失败即移除并回退到系统宋体 / 等宽（保证离线可用） -->
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
@@ -229,7 +231,39 @@
   </div>
 </header>
 <div id="app">
-  <!-- 侧栏 -->
+  <!-- 全局工作区导航：固定图标栏（对话 / 工作区 / 大厅 / 工作台 + 工具） -->
+  <nav id="app-rail" aria-label="工作区导航">
+    <div class="rail-brand" title="Galgame_monster" aria-hidden="true">
+      <svg viewBox="0 0 32 32">
+        <rect x="0.75" y="0.75" width="30.5" height="30.5" rx="5.6" fill="#4d6bfe"/>
+        <path d="M16 5 L18 13.88 L27 16 L18.12 17.88 L16 27 L13.88 18 L5 16 L13.75 14 Z" fill="#fff"/>
+      </svg>
+    </div>
+    <div id="mode-switch" class="mode-switch rail-modes" title="在「Solo 对话」「IDE 工作区」「功能大厅」「工作台」之间切换">
+      <button class="ms-btn active" data-mode="solo" title="Solo 对话" aria-label="Solo 对话"><svg class="ic"><use href="#i-chat"/></svg><span>Solo</span></button>
+      <button class="ms-btn" data-mode="ide" title="IDE 工作区" aria-label="IDE 工作区"><svg class="ic"><use href="#i-code"/></svg><span>IDE</span></button>
+      <button class="ms-btn" data-mode="hall" title="功能大厅" aria-label="功能大厅"><svg class="ic"><use href="#i-grid"/></svg><span>大厅</span></button>
+      <button class="ms-btn" data-mode="work" title="工作台" aria-label="工作台"><svg class="ic"><use href="#i-box"/></svg><span>工作台</span></button>
+    </div>
+    <div class="rail-spacer"></div>
+    <div class="rail-tools">
+      <button id="btn-plugins" class="ghost wide rail-btn" type="button"
+              title="插件：Python 工具插件 / MCP 服务器 / DSH 生态索引" aria-label="插件">
+        <svg class="ic"><use href="#i-box"/></svg><span>插件</span>
+      </button>
+      <!-- 用量 / 轨迹已收进右侧检查器；保留按钮节点以兼容既有事件绑定，仅隐藏入口 -->
+      <button id="btn-usage" class="ghost wide rail-btn hidden" title="Token 用量统计" aria-label="用量统计"><svg class="ic"><use href="#i-chart"/></svg><span>用量</span></button>
+      <button id="btn-trajectory" class="ghost wide rail-btn hidden" title="轨迹：查看模型看到的系统提示、上下文、思考、工具与耗时" aria-label="轨迹"><svg class="ic"><use href="#i-trajectory"/></svg><span>轨迹</span></button>
+      <button id="btn-saves" class="ghost wide rail-btn" title="会话存档 / 倒带：回退到旧存档点，或从旧点分叉出新线" aria-label="存档"><svg class="ic"><use href="#i-history"/></svg><span>存档</span></button>
+      <button id="btn-kb" class="ghost wide rail-btn" title="知识库 / 记忆图谱" aria-label="知识库"><svg class="ic"><use href="#i-brain"/></svg><span>知识库</span></button>
+      <button id="btn-notes" class="ghost wide rail-btn" title="内置笔记库（Markdown + 双链 + 关系图谱）" aria-label="笔记"><svg class="ic"><use href="#i-note"/></svg><span>笔记</span></button>
+      <button id="btn-reload" class="ghost wide rail-btn" title="刷新页面（重新加载界面，等同 Ctrl+R）" aria-label="刷新页面"><svg class="ic"><use href="#i-refresh"/></svg><span>刷新</span></button>
+      <button id="btn-theme" class="ghost rail-btn" title="切换主题" aria-label="切换主题"><svg class="ic"><use href="#i-theme"/></svg><span>主题</span></button>
+      <button id="btn-settings" class="ghost rail-btn" title="设置" aria-label="设置"><svg class="ic"><use href="#i-gear"/></svg><span>设置</span></button>
+    </div>
+  </nav>
+
+  <!-- 上下文侧栏 -->
   <aside id="sidebar">
     <button id="sidebar-toggle" class="sidebar-toggle" type="button" title="收起侧栏"
             aria-label="收起侧栏" aria-controls="sidebar" aria-expanded="true">
@@ -242,18 +276,6 @@
     <div class="sidebar-body">
     <div class="side-top">
       <button id="btn-new" class="new-chat"><svg class="ic"><use href="#i-plus"/></svg>新建对话</button>
-      <div id="mode-switch" class="mode-switch" title="在「Solo 对话」「IDE 工作区」「功能大厅」「工作台」之间切换">
-        <button class="ms-btn active" data-mode="solo" title="Solo 对话" aria-label="Solo 对话"><svg class="ic"><use href="#i-chat"/></svg><span>Solo</span></button>
-        <button class="ms-btn" data-mode="ide" title="IDE 工作区" aria-label="IDE 工作区"><svg class="ic"><use href="#i-code"/></svg><span>IDE</span></button>
-        <button class="ms-btn" data-mode="hall" title="功能大厅" aria-label="功能大厅"><svg class="ic"><use href="#i-grid"/></svg><span>大厅</span></button>
-        <button class="ms-btn" data-mode="work" title="工作台" aria-label="工作台"><svg class="ic"><use href="#i-box"/></svg><span>工作台</span></button>
-      </div>
-    </div>
-    <div class="side-nav">
-      <button id="btn-plugins" class="side-nav-item" type="button"
-              title="插件：Python 工具插件 / MCP 服务器 / DSH 生态索引">
-        <svg class="ic"><use href="#i-box"/></svg><span>插件</span>
-      </button>
     </div>
     <div class="side-head">
       <span class="side-label">会话记录</span>
@@ -263,20 +285,30 @@
       </button>
     </div>
     <div id="session-list" class="session-list"></div>
-    <div class="side-foot">
-      <button id="btn-usage" class="ghost wide" title="Token 用量统计"><svg class="ic"><use href="#i-chart"/></svg>用量统计</button>
-      <button id="btn-trajectory" class="ghost wide" title="轨迹：查看模型看到的系统提示、上下文、思考、工具与耗时"><svg class="ic"><use href="#i-trajectory"/></svg>轨迹</button>
-      <button id="btn-saves" class="ghost wide" title="会话存档 / 倒带：回退到旧存档点，或从旧点分叉出新线"><svg class="ic"><use href="#i-history"/></svg>存档</button>
-      <button id="btn-kb" class="ghost wide" title="知识库 / 记忆图谱"><svg class="ic"><use href="#i-brain"/></svg>知识库</button>
-      <button id="btn-notes" class="ghost wide" title="内置笔记库（Markdown + 双链 + 关系图谱）"><svg class="ic"><use href="#i-note"/></svg>笔记</button>
-      <button id="btn-reload" class="ghost wide" title="刷新页面（重新加载界面，等同 Ctrl+R）"><svg class="ic"><use href="#i-refresh"/></svg>刷新页面</button>
-      <button id="btn-theme" class="ghost" title="切换主题"><svg class="ic"><use href="#i-theme"/></svg>主题</button>
-      <button id="btn-settings" class="ghost" title="设置"><svg class="ic"><use href="#i-gear"/></svg>设置</button>
-    </div>
-    <div id="status-line" class="status-line" aria-live="polite">加载中…</div>
     </div><!-- /.sidebar-body -->
   </aside>
 
+  <!-- 主区外壳：顶栏 + 工作区面板 -->
+  <div id="app-body">
+    <header id="app-topbar">
+      <div class="topbar-left">
+        <span id="app-page-title" class="topbar-title">对话</span>
+        <span id="app-page-sub" class="topbar-sub">Solo</span>
+      </div>
+      <button id="btn-palette" class="topbar-cmd" type="button" title="打开命令面板（Ctrl/⌘ K）">
+        <svg class="ic"><use href="#i-search"/></svg>
+        <span>搜索或跳转</span>
+        <kbd>Ctrl K</kbd>
+      </button>
+      <div class="topbar-right">
+        <span id="status-line" class="status-line" aria-live="polite">加载中…</span>
+        <button id="btn-inspector" class="topbar-icon" type="button"
+                title="检查器：上下文 / 工具 / 用量 / 轨迹" aria-label="打开检查器"
+                aria-controls="inspector" aria-expanded="false">
+          <svg class="ic"><use href="#i-list"/></svg>
+        </button>
+      </div>
+    </header>
   <!-- 主区 -->
   <main id="main">
     <!-- 侧栏收起后：左上角悬浮的圆形展开按钮 -->
@@ -1270,7 +1302,52 @@
     </div>
     </div><!-- /.chat-col -->
   </main>
-</div>
+  </div><!-- /#app-body -->
+
+  <!-- 右侧检查器：上下文 / 工具 / 用量 / 轨迹 -->
+  <aside id="inspector" class="inspector hidden" aria-label="检查器">
+    <div class="insp-head">
+      <div class="insp-tabs" role="tablist">
+        <button class="insp-tab active" type="button" data-itab="context" role="tab" aria-selected="true">上下文</button>
+        <button class="insp-tab" type="button" data-itab="tools" role="tab" aria-selected="false">工具</button>
+        <button class="insp-tab" type="button" data-itab="usage" role="tab" aria-selected="false">用量</button>
+        <button class="insp-tab" type="button" data-itab="trajectory" role="tab" aria-selected="false">轨迹</button>
+      </div>
+      <button id="insp-close" class="insp-close" type="button" title="收起检查器" aria-label="收起检查器">✕</button>
+    </div>
+    <div class="insp-body">
+      <section class="insp-pane" data-ipane="context">
+        <div class="insp-meter"><i id="insp-ctx-bar"></i></div>
+        <p id="insp-ctx-text" class="insp-text">读取中…</p>
+        <button id="insp-ctx-more" class="ghost wide insp-btn" type="button">打开上下文详情</button>
+      </section>
+      <section class="insp-pane hidden" data-ipane="tools">
+        <p id="insp-tools" class="insp-text">最近一次回复的工具调用会显示在这里。</p>
+        <button id="insp-tools-more" class="ghost wide insp-btn" type="button">在消息流中定位最后一条回复</button>
+      </section>
+      <section class="insp-pane hidden" data-ipane="usage">
+        <div id="insp-usage" class="insp-text">打开后读取用量。</div>
+        <button id="insp-usage-more" class="ghost wide insp-btn" type="button">打开用量统计</button>
+      </section>
+      <section class="insp-pane hidden" data-ipane="trajectory">
+        <p class="insp-text">查看本轮的提示、上下文、思考、工具与耗时。</p>
+        <button id="insp-traj-more" class="ghost wide insp-btn" type="button">打开轨迹</button>
+      </section>
+    </div>
+  </aside>
+
+  <!-- 命令面板（Ctrl / ⌘ K） -->
+  <div id="palette" class="palette hidden" role="dialog" aria-modal="true" aria-label="命令面板">
+    <div class="palette-card" role="document">
+      <div class="palette-search">
+        <svg class="ic"><use href="#i-search"/></svg>
+        <input id="palette-input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="跳转工作区、会话或设置项…">
+      </div>
+      <div id="palette-list" class="palette-list" role="listbox" aria-label="命令结果"></div>
+      <div class="palette-foot"><span>↑↓ 选择</span><span>Enter 执行</span><span>Esc 关闭</span></div>
+    </div>
+  </div>
 
 <!-- 会话搜索浮层（点侧栏搜索图标打开） -->
 <div id="session-search-modal" class="ss-modal hidden" role="presentation">
@@ -2986,5 +3063,7 @@
 <script src="/static/work/templates.js"></script>
 <script src="/static/work/misc.js"></script>
 <script src="/static/init.js"></script>
+<script src="/static/ui-shell.js"></script>
+<script src="/static/palette.js"></script>
 </body>
 </html>

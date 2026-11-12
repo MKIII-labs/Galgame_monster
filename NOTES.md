@@ -1,5 +1,28 @@
 # NOTES
 
+## [2026-11-13] 界面重构 P1：全局壳层 + 设置全屏
+
+- 问题/决策：
+  - 按已确认方案实施 P1：固定导航、顶栏、右侧检查器、命令面板、设置全屏；功能零删除、API / 数据不改。
+  - 用量 / 轨迹入口从侧栏移入检查器；旧按钮节点保留但加 `hidden`，避免事件绑定断链。
+  - 设置只改布局（CSS 全屏化），保留原 `collectSettings` / 草稿 / 保存 / 取消 / 恢复默认逻辑。
+- 实现：
+  - `web/index.html`：新增 `#app-rail`（工作区 + 工具）、`#app-topbar`、`#app-body`、`#inspector`、`#palette`；模式切换从侧栏迁入导航。
+  - 新增 `web/css/shell.css`：导航 / 顶栏 / 检查器 / 命令面板 / 全屏设置；≤1100 检查器改覆盖层，≤900 图标栏收窄。
+  - 新增 `web/ui-shell.js`：顶栏标题随 `#main` 类同步；检查器上下文 / 工具 / 用量 / 轨迹；上下文复用 `renderContextBar` 的数据。
+  - 新增 `web/palette.js`：Ctrl/⌘ K 命令面板，跳转工作区、14 个设置页、最近会话、常用操作。
+  - `web/init.js`：`syncModeSwitchHome` 在有 `#rail-modes` 时不再搬动模式切换。
+  - `web/chat.js`：`renderContextBar` 缓存 `window.__lastContext` 并通知检查器。
+  - `web/settings.js`：补全 `agents` / `image` 页标题与说明。
+- 验收：
+  - 4 工作区 + 插件 + 设置全可达；设置 14 页均可切换且有内容；全屏宽度 = 视口宽度。
+  - 检查器显示上下文（已用 207,149 / 10,000,000）、近 7 天用量、最近回复工具数。
+  - 命令面板可过滤 / Enter 执行 / Esc 关闭；可从面板直接切到「功能大厅」或「设置：上下文与压缩」。
+  - 控制台 0 未捕获错误；桌面 1440×900 无横向溢出。
+  - 性能：Solo FCP 136 / LCP 856 / CLS 0.016 / TBT 331 ms（基线 128/128/0.0008/234），P5 前需复测中位数并优化。
+- 相关文件：`web/index.html`、`web/css/shell.css`、`web/ui-shell.js`、`web/palette.js`、`web/init.js`、`web/chat.js`、`web/settings.js`。
+- 下一步：P2 对话工作区（输入区四控件 + 能力浮层、消息过程折叠、状态带、待发送托盘）。
+
 ## [2026-11-13] 界面系统性重构：备份提交与方案输出
 
 - 问题/决策：

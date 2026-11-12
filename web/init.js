@@ -2023,9 +2023,16 @@ document.addEventListener('DOMContentLoaded', init);
 function syncModeSwitchHome() {
   const ms = document.getElementById('mode-switch');
   const float = document.getElementById('mode-float');
-  const host = document.querySelector('.side-top');
+  const rail = document.getElementById('rail-modes');
+  const host = rail || document.querySelector('.side-top');
   const app = document.getElementById('app');
   if (!ms || !float || !host || !app) return;
+  // 新壳层：模式切换固定在左侧导航栏，侧栏收起 / 展开都不再搬动它
+  if (rail) {
+    if (ms.parentElement !== rail) rail.appendChild(ms);
+    float.classList.add('hidden');
+    return;
+  }
   if (app.classList.contains('side-collapsed')) {
     if (ms.parentElement !== float) float.appendChild(ms);
     float.classList.remove('hidden');
