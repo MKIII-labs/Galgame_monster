@@ -173,8 +173,15 @@
   <symbol id="i-history" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 108.5-8.5A8.5 8.5 0 005 7.2"/><path d="M3.4 3.6v3.9h3.9M12 8.2V12l2.8 1.7"/></symbol>
   <symbol id="i-trajectory" viewBox="0 0 24 24"><path d="M4.5 19c3.8 0 4-6 7.5-6s3.7-6 7.5-6"/><circle cx="4.5" cy="19" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="13" r="1.5" fill="currentColor" stroke="none"/><circle cx="19.5" cy="7" r="1.5" fill="currentColor" stroke="none"/></symbol>
   <symbol id="i-debug" viewBox="0 0 24 24"><rect x="8" y="8" width="8" height="10" rx="4"/><path d="M8 11H4.5M8 14H4.5M8 17l-3 2M16 11h3.5M16 14h3.5M16 17l3 2M9.5 6.5L8 4.5M14.5 6.5L16 4.5M12 8V5"/></symbol>
-  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M4.9 7.5l1.9 1.1M17.2 15.4l1.9 1.1M4.9 16.5l1.9-1.1M17.2 8.6l1.9-1.1"/></symbol>
-  <symbol id="i-theme" viewBox="0 0 24 24"><path d="M20.5 14.6A8.6 8.6 0 019.4 3.5a8.6 8.6 0 1011.1 11.1z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="6.8"/><path d="M12 2.4v2.8M12 18.8v2.8M2.4 12h2.8M18.8 12h2.8M5.2 5.2l2 2M16.8 16.8l2 2M5.2 18.8l2-2M16.8 7.2l2-2"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 010 17z" fill="currentColor" stroke="none"/></symbol>
+  <!-- 导航栏专用图标：没有文字，图形要能直接说明用途 -->
+  <symbol id="i-puzzle" viewBox="0 0 24 24"><path transform="translate(12 12) scale(1.18) translate(-12 -12)" d="M4 7h3a2 2 0 104 0h3v3a2 2 0 110 4v3h-3a2 2 0 10-4 0H4v-3a2 2 0 110-4z"/></symbol>
+  <symbol id="i-library" viewBox="0 0 24 24"><path d="M12 6.5C10.2 5 7.6 4.5 4.5 4.5v13c3.1 0 5.7.5 7.5 2 1.8-1.5 4.4-2 7.5-2v-13c-3.1 0-5.7.5-7.5 2z"/><path d="M12 6.5v13"/></symbol>
+  <symbol id="i-notebook" viewBox="0 0 24 24"><rect x="6" y="3.5" width="13" height="17" rx="2"/><path d="M9.5 3.5v17"/><path d="M3.5 7.5h5.5M3.5 12h5.5M3.5 16.5h5.5"/><path d="M12.5 8.5h4M12.5 12h3M12.5 15.5h4"/></symbol>
+  <symbol id="i-workbench" viewBox="0 0 24 24"><rect x="5" y="4.5" width="14" height="16" rx="2.2"/><rect x="9" y="3" width="6" height="3.4" rx="1.2"/><path d="M8.6 11.4l2 2 4.2-4.2"/><path d="M8.6 16.4h6.8"/></symbol>
+  <symbol id="i-toolbox" viewBox="0 0 24 24"><rect x="3.5" y="8" width="17" height="11" rx="2.2"/><path d="M9 8V6.4A1.4 1.4 0 0110.4 5h3.2A1.4 1.4 0 0115 6.4V8"/><path d="M3.5 12.5h17M12 11.5v2"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M14.5 4.8v14.4"/><path d="M14.5 4.8h3.5a2 2 0 012 2v11a2 2 0 01-2 2h-3.5z" fill="currentColor" stroke="none" opacity=".16"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M8.5 5.5l10 6.5-10 6.5z"/></symbol>
   <symbol id="i-film" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.2"/><path d="M3 9.2h18M8 5v4.2M16 5v4.2M8 14.8h8"/></symbol>
   <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 17.5V6.2l10-2v11.3"/><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="16.5" cy="15.5" r="2.5"/></symbol>
@@ -243,25 +250,25 @@
       <button class="ms-btn active" data-mode="solo" title="Solo 对话" aria-label="Solo 对话"><svg class="ic"><use href="#i-chat"/></svg><span>Solo</span></button>
       <button class="ms-btn" data-mode="ide" title="IDE 工作区" aria-label="IDE 工作区"><svg class="ic"><use href="#i-code"/></svg><span>IDE</span></button>
       <button class="ms-btn" data-mode="hall" title="功能大厅" aria-label="功能大厅"><svg class="ic"><use href="#i-grid"/></svg><span>大厅</span></button>
-      <button class="ms-btn" data-mode="work" title="工作台" aria-label="工作台"><svg class="ic"><use href="#i-box"/></svg><span>工作台</span></button>
+      <button class="ms-btn" data-mode="work" title="工作台" aria-label="工作台"><svg class="ic"><use href="#i-workbench"/></svg><span>工作台</span></button>
     </div>
     <!-- 窄屏底部导航的第 5 项：打开命令面板（侧栏工具在窄屏收进面板，保证全部可达） -->
     <button id="btn-rail-more" class="rail-btn rail-more" type="button"
             title="更多工具：存档 / 知识库 / 笔记 / 设置 / 刷新…" aria-label="更多工具">
-      <svg class="ic"><use href="#i-grid"/></svg><span>工具</span>
+      <svg class="ic"><use href="#i-toolbox"/></svg><span>工具</span>
     </button>
     <div class="rail-spacer"></div>
     <div class="rail-tools">
       <button id="btn-plugins" class="ghost wide rail-btn" type="button"
               title="插件：Python 工具插件 / MCP 服务器 / DSH 生态索引" aria-label="插件">
-        <svg class="ic"><use href="#i-box"/></svg><span>插件</span>
+        <svg class="ic"><use href="#i-puzzle"/></svg><span>插件</span>
       </button>
       <!-- 用量 / 轨迹已收进右侧检查器；保留按钮节点以兼容既有事件绑定，仅隐藏入口 -->
       <button id="btn-usage" class="ghost wide rail-btn hidden" title="Token 用量统计" aria-label="用量统计"><svg class="ic"><use href="#i-chart"/></svg><span>用量</span></button>
       <button id="btn-trajectory" class="ghost wide rail-btn hidden" title="轨迹：查看模型看到的系统提示、上下文、思考、工具与耗时" aria-label="轨迹"><svg class="ic"><use href="#i-trajectory"/></svg><span>轨迹</span></button>
       <button id="btn-saves" class="ghost wide rail-btn" title="会话存档 / 倒带：回退到旧存档点，或从旧点分叉出新线" aria-label="存档"><svg class="ic"><use href="#i-history"/></svg><span>存档</span></button>
-      <button id="btn-kb" class="ghost wide rail-btn" title="知识库 / 记忆图谱" aria-label="知识库"><svg class="ic"><use href="#i-brain"/></svg><span>知识库</span></button>
-      <button id="btn-notes" class="ghost wide rail-btn" title="内置笔记库（Markdown + 双链 + 关系图谱）" aria-label="笔记"><svg class="ic"><use href="#i-note"/></svg><span>笔记</span></button>
+      <button id="btn-kb" class="ghost wide rail-btn" title="知识库 / 记忆图谱" aria-label="知识库"><svg class="ic"><use href="#i-library"/></svg><span>知识库</span></button>
+      <button id="btn-notes" class="ghost wide rail-btn" title="内置笔记库（Markdown + 双链 + 关系图谱）" aria-label="笔记"><svg class="ic"><use href="#i-notebook"/></svg><span>笔记</span></button>
       <button id="btn-reload" class="ghost wide rail-btn" title="刷新页面（重新加载界面，等同 Ctrl+R）" aria-label="刷新页面"><svg class="ic"><use href="#i-refresh"/></svg><span>刷新</span></button>
       <button id="btn-theme" class="ghost rail-btn" title="切换主题" aria-label="切换主题"><svg class="ic"><use href="#i-theme"/></svg><span>主题</span></button>
       <button id="btn-settings" class="ghost rail-btn" title="设置" aria-label="设置"><svg class="ic"><use href="#i-gear"/></svg><span>设置</span></button>
@@ -310,7 +317,7 @@
         <button id="btn-inspector" class="topbar-icon" type="button"
                 title="检查器：上下文 / 工具 / 用量 / 轨迹" aria-label="打开检查器"
                 aria-controls="inspector" aria-expanded="false">
-          <svg class="ic"><use href="#i-list"/></svg>
+          <svg class="ic"><use href="#i-panel"/></svg>
         </button>
       </div>
     </header>
