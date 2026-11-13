@@ -245,6 +245,11 @@
       <button class="ms-btn" data-mode="hall" title="功能大厅" aria-label="功能大厅"><svg class="ic"><use href="#i-grid"/></svg><span>大厅</span></button>
       <button class="ms-btn" data-mode="work" title="工作台" aria-label="工作台"><svg class="ic"><use href="#i-box"/></svg><span>工作台</span></button>
     </div>
+    <!-- 窄屏底部导航的第 5 项：打开命令面板（侧栏工具在窄屏收进面板，保证全部可达） -->
+    <button id="btn-rail-more" class="rail-btn rail-more" type="button"
+            title="更多工具：存档 / 知识库 / 笔记 / 设置 / 刷新…" aria-label="更多工具">
+      <svg class="ic"><use href="#i-grid"/></svg><span>工具</span>
+    </button>
     <div class="rail-spacer"></div>
     <div class="rail-tools">
       <button id="btn-plugins" class="ghost wide rail-btn" type="button"
@@ -324,6 +329,10 @@
       <div id="ide-notice" class="ide-notice">
         <span class="ide-notice-text"><svg class="ic"><use href="#i-bulb"/></svg> 内置 IDE：查看与编辑当前沙箱的文件，并可直接在下方终端里跑命令。需要完整插件生态时，点左栏 <svg class="ic"><use href="#i-code"/></svg> 用 VS Code 打开同一目录。</span>
         <button id="ide-notice-close" class="ide-notice-x" title="不再提示">✕</button>
+      </div>
+      <!-- 窄屏提示：只在 ≤900px 显示，不隐藏任何功能，仅说明可横向滚动 -->
+      <div id="ide-mobile-tip" class="ide-mobile-tip" role="note">
+        IDE 建议在桌面使用：当前窗口较窄，可横向滚动查看文件树、编辑区与终端。
       </div>
       <div class="ide-body">
       <!-- 活动栏 -->
@@ -745,12 +754,20 @@
         </div>
         <div class="work-head-right">
           <select id="work-scene" class="work-select" title="场景包：办公 / 学习 / 生活"></select>
-          <button id="work-focus" class="work-btn ghost" title="专注计时：开启一段专注，结束后记入统计">专注</button>
-          <button id="work-workflows" class="work-btn ghost" title="工作流：触发器 → 动作">工作流</button>
-          <button id="work-new-image" class="work-btn ghost" title="用本地 ComfyUI 生成图片">图片</button>
-          <button id="work-memory" class="work-btn ghost" title="统一记忆：检索与手动记录">记忆</button>
-          <button id="work-backup" class="work-btn ghost" title="导出 / 预检 / 恢复全量数据">备份</button>
           <button id="work-refresh" class="work-btn ghost" title="刷新">刷新</button>
+          <!-- 低频工具收进「更多」：按钮 ID 与事件绑定全部保持不变 -->
+          <div class="work-more-wrap">
+            <button id="work-more-btn" class="work-btn ghost" type="button"
+                    title="更多工作台工具：专注 / 工作流 / 图片 / 记忆 / 备份"
+                    aria-expanded="false" aria-controls="work-more-menu">更多</button>
+            <div id="work-more-menu" class="work-more-menu hidden" role="group" aria-label="更多工作台工具">
+              <button id="work-focus" class="work-btn ghost" title="专注计时：开启一段专注，结束后记入统计">专注</button>
+              <button id="work-workflows" class="work-btn ghost" title="工作流：触发器 → 动作">工作流</button>
+              <button id="work-new-image" class="work-btn ghost" title="用本地 ComfyUI 生成图片">图片</button>
+              <button id="work-memory" class="work-btn ghost" title="统一记忆：检索与手动记录">记忆</button>
+              <button id="work-backup" class="work-btn ghost" title="导出 / 预检 / 恢复全量数据">备份</button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="work-cols">
@@ -1130,24 +1147,34 @@
         <svg class="ic"><use href="#i-chevron"/></svg>
       </button>
       <div class="composer-body"><div class="composer-body-inner">
-      <div id="queue-bar" class="queue-bar hidden">
-        <div id="queue-list" class="queue-list hidden"></div>
-        <div class="queue-head">
-          <button id="queue-toggle" class="queue-toggle hidden" type="button"
-                  aria-expanded="false" title="向上展开 / 收起排队消息">▴</button>
-          <span id="queue-text" class="queue-text"></span>
-          <span id="queue-inline" class="queue-inline"></span>
-          <button id="queue-cancel" class="queue-cancel hidden" type="button" title="清空本会话的排队消息">全部取消</button>
+      <!-- 待发送托盘：排队消息 / 上下文引用 / 选中文本 / 附件统一收在一条带子里；
+           子节点与 ID 全部沿用原实现，托盘只负责合并外观与数量提示 -->
+      <div id="pending-tray" class="pending-tray hidden">
+        <div class="pending-head">
+          <span class="pending-label">待发送</span>
+          <span id="pending-count" class="pending-count"></span>
         </div>
-      </div>
-      <div id="ref-bar" class="quote-bar ref-bar hidden"></div>
-      <div id="quote-bar" class="quote-bar hidden"></div>
-      <div id="attach-bar" class="attach-bar hidden">
-        <div id="attach-thumbs" class="attach-thumbs hidden"></div>
-        <div id="attach-pastes" class="attach-pastes hidden"></div>
-        <div id="attach-docs" class="attach-docs hidden"></div>
-        <span id="attach-text" class="attach-text">已附带图片 · 可继续输入文字后一起发送</span>
-        <button id="attach-remove" class="attach-remove" title="移除附件">✕</button>
+        <div class="pending-items">
+          <div id="queue-bar" class="queue-bar hidden">
+            <div id="queue-list" class="queue-list hidden"></div>
+            <div class="queue-head">
+              <button id="queue-toggle" class="queue-toggle hidden" type="button"
+                      aria-expanded="false" title="向上展开 / 收起排队消息">▴</button>
+              <span id="queue-text" class="queue-text"></span>
+              <span id="queue-inline" class="queue-inline"></span>
+              <button id="queue-cancel" class="queue-cancel hidden" type="button" title="清空本会话的排队消息">全部取消</button>
+            </div>
+          </div>
+          <div id="ref-bar" class="quote-bar ref-bar hidden"></div>
+          <div id="quote-bar" class="quote-bar hidden"></div>
+          <div id="attach-bar" class="attach-bar hidden">
+            <div id="attach-thumbs" class="attach-thumbs hidden"></div>
+            <div id="attach-pastes" class="attach-pastes hidden"></div>
+            <div id="attach-docs" class="attach-docs hidden"></div>
+            <span id="attach-text" class="attach-text">已附带图片 · 可继续输入文字后一起发送</span>
+            <button id="attach-remove" class="attach-remove" title="移除附件">✕</button>
+          </div>
+        </div>
       </div>
       <!-- 变更审阅提示栏：一轮改完、还有文件没处理时出现在输入框上方 -->
       <div id="review-tip" class="review-tip hidden">
@@ -1333,6 +1360,7 @@
       </section>
       <section class="insp-pane hidden" data-ipane="tools">
         <p id="insp-tools" class="insp-text">最近一次回复的工具调用会显示在这里。</p>
+        <div id="insp-tools-list" class="insp-tools"></div>
         <button id="insp-tools-more" class="ghost wide insp-btn" type="button">在消息流中定位最后一条回复</button>
       </section>
       <section class="insp-pane hidden" data-ipane="usage">
@@ -3074,6 +3102,7 @@
 <script src="/static/work/misc.js"></script>
 <script src="/static/init.js"></script>
 <script src="/static/composer-cap.js"></script>
+<script src="/static/composer-tray.js"></script>
 <script src="/static/ui-shell.js"></script>
 <script src="/static/palette.js"></script>
 </body>

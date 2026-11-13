@@ -5741,3 +5741,24 @@
   - 导航清单 frontend/src/App.vue:16-23；大厅模块 frontend/src/docs/hall-modules.js；legacy 设置侧栏 web/index.html:1319-1341；legacy 大厅脚本 web/index.html:2999-3007（未加载 hall-gal.js）。
   - 复现：node .tmp_ui_verify/gal_removed_check.mjs（Edge headless + CDP）。
   - 环境：browser_lock / browser_navigate 不可用（客户端不支持 subagent isolation；Chrome 扩展未启动，browser_setup_plugin 被取消），改用 Edge headless + CDP。
+
+## [2026-11-13] 经典界面重构 P2–P5 收口（对话 / 大厅 / 工作台 / 移动端 / 无障碍）
+- 问题/决策：
+  - 继续按 `docs/UI_REFACTOR_PLAN.md` 完成剩余阶段；不改 API / 数据格式 / 配置语义，只改展示与入口。
+  - P2 待发送托盘：把排队 / 引用 / 选中文本 / 附件四条合并为 `#pending-tray`，子节点与 ID 全部保留。
+  - P3 去重：宽屏隐藏大厅 / 工作台内部标题，顶栏副标题跟随 `#hall-title` / `#work-sub`；工作台低频工具进「更多」。
+  - P4 移动端：≤700px 左侧导航改底部横条（4 工作区 + 工具），IDE 窄屏横向滚动并加提示。
+  - P5 无障碍：弹窗语义、通用焦点陷阱、图标按钮补名、减少动效。
+- 解决方案/原因：
+  - 托盘由 `web/composer-tray.js` 观察子树变化后计数；单条排队时列表 DOM 为空，按「队列条可见即至少 1 条」计数。
+  - 检查器工具页签读取最近一条 AI 消息里的 `.tool-card`，点击滚动定位并高亮。
+  - 关键修复：`web/init.js` 的 `syncModeSwitchHome()` 原先查找不存在的 `#rail-modes`，会把模式切换搬回侧栏；改查 `#app-rail` 后导航才真正固定。
+  - 窄屏 IDE 原被对话列挤成 0 宽：`#main.ide-mode` 开横向滚动，IDE 面板 `min-width:320px`、对话列 92vw。
+  - 命令面板补充存档 / 知识库 / 笔记 / 刷新，保证窄屏隐藏侧栏工具后仍 100% 可达。
+- 相关代码/指令（如果有）：
+  - 新增 `web/composer-tray.js`；改 `web/index.html`、`web/css/shell.css`、`web/ui-shell.js`、`web/palette.js`、`web/init.js`。
+  - 验收：`node scripts/ui_probe.mjs --url http://127.0.0.1:8791/ --out data/ui-p3 --modes solo,hall,work,settings`（加 `--mobile` 跑手机）。
+  - 回归：`node scripts/markdown_test.js` / `hotkeys_test.js` / `transpage_test.js` 全通过；`pytest -q` 全量通过（1 skipped）。
+  - 实测（1440×900）：Solo FCP 172 / LCP 924 / CLS 0.006 / TBT 366；手机五模式 CLS 0、无横向溢出、控制台 0 错误。
+- 注意：
+  - `pytest` 首轮曾出现 `test_archify` 两项失败（渲染器 validate 未通过），重跑全量 EXIT=0，属环境 / 偶发，与本轮前端改动无关。

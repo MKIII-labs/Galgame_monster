@@ -60,6 +60,14 @@
       group: '操作', label: '切换主题', sub: '浅色 / 深色',
       run: () => { const b = $('#btn-theme'); if (b) b.click(); },
     });
+    // 侧栏底部工具：窄屏（底部导航）下这些入口可能收进命令面板，保证全部可达
+    [['存档 / 倒带', 'btn-saves'], ['知识库 / 记忆图谱', 'btn-kb'],
+      ['笔记库', 'btn-notes'], ['刷新页面', 'btn-reload']].forEach(([label, id]) => {
+      out.push({
+        group: '工具', label, sub: '打开对应工具',
+        run: () => { const b = document.getElementById(id); if (b) b.click(); },
+      });
+    });
     out.push({
       group: '操作', label: '打开检查器', sub: '上下文 / 工具 / 用量 / 轨迹',
       run: () => { if (window.uiShell) window.uiShell.openInspector(); },
@@ -180,6 +188,9 @@
     if (e.target === palette) close();
   });
   if (trigger) trigger.onclick = open;
+  // 窄屏底部导航的「工具」项：打开同一命令面板（不新增业务能力）
+  const railMore = $('#btn-rail-more');
+  if (railMore) railMore.onclick = open;
 
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {

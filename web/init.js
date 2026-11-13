@@ -2023,13 +2023,13 @@ document.addEventListener('DOMContentLoaded', init);
 function syncModeSwitchHome() {
   const ms = document.getElementById('mode-switch');
   const float = document.getElementById('mode-float');
-  const rail = document.getElementById('rail-modes');
+  const rail = document.getElementById('app-rail');
   const host = rail || document.querySelector('.side-top');
   const app = document.getElementById('app');
   if (!ms || !float || !host || !app) return;
   // 新壳层：模式切换固定在左侧导航栏，侧栏收起 / 展开都不再搬动它
   if (rail) {
-    if (ms.parentElement !== rail) rail.appendChild(ms);
+    if (!rail.contains(ms)) rail.insertBefore(ms, rail.children[1] || null);
     float.classList.add('hidden');
     return;
   }
