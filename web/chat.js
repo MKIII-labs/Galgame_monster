@@ -1710,7 +1710,7 @@ function positionToBottomBtn() {
   const btn = $('#btn-bottom');
   const composer = document.querySelector('.composer');
   if (!btn || !composer) return;
-  btn.style.bottom = (composer.getBoundingClientRect().height + 14) + 'px';
+  btn.style.bottom = (composer.getBoundingClientRect().height + 10) + 'px';
 }
 
 // 只有用户主动点「回到底部」时才用平滑滚动

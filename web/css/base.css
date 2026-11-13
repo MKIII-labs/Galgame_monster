@@ -1457,7 +1457,8 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
 /* bottom 由 JS 按输入区实际高度动态设置（输入区高度会随进度条/附件条/提示换行变化），
    这里的值只是 JS 执行前的兜底 */
 .to-bottom {
-  position: absolute; right: 30px; bottom: 150px;
+  /* 水平居中在输入框正上方（按钮宽 38px，用 calc 抵消一半，避免与 .t-fade 的 transform 打架） */
+  position: absolute; left: calc(50% - 19px); right: auto; bottom: 150px;
   width: 38px; height: 38px; border-radius: 50%;
   background: var(--bg-side);
   border: 1px solid var(--border);

@@ -5844,3 +5844,16 @@
   - `ui_probe` 里 Solo 偶发 0.4–0.7 CLS，来源是会话消息重渲染后移除（`.msg.ai` 从 800 宽变 0），
     与侧栏无关；直接 `?mode=solo` 冷启动实测 CLS 0.0006。
   - IDE 首次装载 Monaco 的 CLS 仍偏高，属 Monaco 自身布局。
+
+## [2026-11-13] 「回到底部」按钮移到输入框正上方
+- 问题/决策：
+  - 原按钮固定在聊天列右下角（`right:30px`），离输入框中心较远，点起来不顺。
+  - 改成水平居中在输入框正上方，离输入框 10px。
+- 解决方案/原因：
+  - 用 `left: calc(50% - 19px)` 居中，而不是 `translateX(-50%)`：按钮的 `.t-fade.off`
+    已经用 `transform: scale(.9)` 做显隐动画，再写 transform 会互相覆盖。
+  - `positionToBottomBtn()` 的间距从 `+14` 改为 `+10`，其余动态计算不变（输入区变高时仍不压住输入框）。
+- 相关代码/指令（如果有）：
+  - `web/css/base.css` 的 `.to-bottom`、`web/chat.js` 的 `positionToBottomBtn()`。
+  - 验收：Solo 下按钮中心 x=867 / 输入框中心 x=867；IDE 下 1213 / 1213；
+    按钮底边距输入区顶部 10px；两种模式截图确认居中。
