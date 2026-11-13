@@ -505,10 +505,22 @@ button.insp-tool:focus-visible { outline: 2px solid var(--accent); outline-offse
    P3 大厅 / 工作台
    ============================================================ */
 
-/* 顶栏已经显示工作区与模块名，内部重复标题在宽屏隐藏（节点保留，脚本照常改写） */
+/* 顶栏已经显示工作区与模块名：大厅只去掉重复的大标题，保留模块说明；
+   工作台副标题已在顶栏同步，宽屏内部标题整体隐藏（节点保留，脚本照常改写） */
+.hall-panel .hall-title,
+.work-panel .work-title { display: none; }
 @media (min-width: 901px) {
-  .hall-panel .hall-titles,
   .work-panel .work-titles { display: none; }
+}
+
+/* 大厅模块内部：与顶栏重复的标题隐藏，保留说明与统计 */
+.hall-feature .iv-hero-title,
+.hall-feature .gal-hall-title,
+.hall-feature .stock-setup-head h3,
+.plugins-panel .gal-hall-title { display: none; }
+/* 各模块顶部工具条统一最小高度，切换模块时不会跳高度 */
+.hall-feature :is(.stock-toolbar, .math-top, .dojo-top, .iv-tabs, .geo-bar) {
+  min-height: 36px;
 }
 
 .work-more-wrap { position: relative; }

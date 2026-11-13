@@ -217,13 +217,7 @@ async function init() {
       if (ip) ip.classList.toggle('hidden', name !== 'input');
     };
   });
-  $('#btn-settings').onclick = openModal;
-  $('#btn-close-modal').onclick = closeModal;
-  $('#btn-cancel').onclick = closeModal;
-  $('#btn-save').onclick = saveModal;
-  setupSettingsSearch();                                  // 设置内搜索框（只绑一次）
-  document.addEventListener('keydown', onSettingsKeydown, true);   // 设置内键盘操作（捕获相）
-
+  // 设置入口 / 快捷键由 settings.js 在 DOM 就绪后统一绑定，避免和启动顺序耦合
   bindKbEvents();
   bindNotesEvents();
   bindSavesEvents();
@@ -801,13 +795,20 @@ async function init() {
   // 统一落到大厅，避免直接打开一个没有入口的页面。后端与 data/gal 保留，需要时可恢复。
   if (startMode === 'gal') startMode = 'hall';
   applyUiMode(startMode);
-  // ?hall=<id>：嵌入时直接展开某个大厅模块（不等用户再点一次卡片）
+  // ?hall=<id>：嵌入时直接展开某个大厅模块（模块脚本按需加载，等加载完再打开）
   if (embedCfg.hall && typeof hallOpenFeature === 'function') {
-    try { hallOpenFeature(embedCfg.hall); } catch (e) { /* 模块 id 不存在就留在大厅首页 */ }
+    const openEmbedHall = () => {
+      try { hallOpenFeature(embedCfg.hall); } catch (e) { /* 模块 id 不存在就留在大厅首页 */ }
+    };
+    if (typeof window.gmLoadGroup === 'function') {
+      window.gmLoadGroup('hall').then(openEmbedHall).catch(() => { /* 加载失败时留在大厅首页 */ });
+    } else {
+      openEmbedHall();
+    }
   }
   // ?settings=<tab>：嵌入时直接落到某个设置页签
   if (embedCfg.settings) {
-    try { openModal({ tab: embedCfg.settings }); } catch (e) { /* 非法页签忽略 */ }
+    try { window.gmOpenSettings({ tab: embedCfg.settings }); } catch (e) { /* 非法页签忽略 */ }
   }
   // 右键菜单冷启动：这时 SSE 还没连上，服务端把请求放在 /api/state 里兜底
   if (state.pendingOpen && typeof openPathInApp === 'function') {
@@ -1089,7 +1090,7 @@ async function init() {
   bindChips();
 
   if (!String(state.config.chat_api_key || '').trim()) {
-    setTimeout(() => { openModal({ tab: 'chat' }); toast('首次使用：请先填写聊天 API 密钥'); }, 400);
+    setTimeout(() => { window.gmOpenSettings({ tab: 'chat' }); toast('首次使用：请先填写聊天 API 密钥'); }, 400);
   }
   input.focus();
 }

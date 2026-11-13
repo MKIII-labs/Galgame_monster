@@ -657,6 +657,20 @@
         </div>
         <!-- 内置终端：ConPTY 会话，等于 VS Code 的集成终端（Ctrl+` 开关） -->
         <div id="ide-term-resizer" class="ide-term-resizer hidden" title="拖动调整终端高度（双击恢复）"></div>
+        <!-- 底部面板：终端 / 问题 / 大纲 / 结果统一到一个页签栏（各面板内部实现不变） -->
+        <div id="ide-bottom" class="ide-bottom hidden">
+          <div class="ide-bottom-head" role="tablist" aria-label="底部面板">
+            <button class="ide-bottom-tab" type="button" data-btab="term" role="tab" aria-selected="false">
+              <svg class="ic"><use href="#i-terminal"/></svg>终端</button>
+            <button class="ide-bottom-tab" type="button" data-btab="problems" role="tab" aria-selected="false">
+              问题 <span id="ide-bottom-pcount" class="ide-bottom-count"></span></button>
+            <button class="ide-bottom-tab" type="button" data-btab="outline" role="tab" aria-selected="false">
+              大纲 <span id="ide-bottom-ocount" class="ide-bottom-count"></span></button>
+            <button class="ide-bottom-tab hidden" type="button" data-btab="results" role="tab" aria-selected="false">结果</button>
+            <span class="ide-bottom-spacer"></span>
+            <button id="ide-bottom-close" class="ico-btn" type="button" title="关闭底部面板" aria-label="关闭底部面板">✕</button>
+          </div>
+          <div class="ide-bottom-body">
         <section id="ide-term" class="ide-term hidden">
           <div class="ide-term-head">
             <span class="ide-term-title"><svg class="ic"><use href="#i-terminal"/></svg>终端</span>
@@ -684,6 +698,8 @@
           </div>
           <div id="ide-intel-body" class="ide-intel-body"></div>
         </section>
+          </div>
+        </div>
         <div class="ide-status hidden">
           <span id="ide-status-path" class="ide-status-path">—</span>
           <span class="ide-status-right">
@@ -3038,6 +3054,7 @@
 
 <!-- 前端逻辑按功能拆分，按顺序加载（普通脚本，共享全局作用域；最后一个负责启动 init） -->
 <script src="/static/core.js"></script>
+<script src="/static/feature-loader.js"></script>
 <script src="/static/markdown.js"></script>
 <script src="/static/render.js"></script>
 <script src="/static/mdlint.js"></script>
@@ -3065,11 +3082,9 @@
 <script src="/static/gal/gal-editor.js"></script>
 <script src="/static/vendor/seti/seti-map.js"></script>
 <script src="/static/gal/gal-ide.js"></script>
-<script src="/static/transpage.js"></script>
-<script src="/static/reader.js"></script>
-<script src="/static/vendor/xterm/xterm.js"></script>
-<script src="/static/vendor/xterm/addon-fit.js"></script>
+<!-- 阅读器（PDF / 文档）与 xterm 终端内核按需加载：见 web/feature-loader.js -->
 <script src="/static/ide-term.js"></script>
+<script src="/static/ide-bottom.js"></script>
 <script src="/static/git.js"></script>
 <script src="/static/knowledge.js"></script>
 <script src="/static/saves.js"></script>
@@ -3080,26 +3095,7 @@
 <script src="/static/hk-doc.js"></script>
 <script src="/static/hotkeys.js"></script>
 <script src="/static/hall.js"></script>
-<script src="/static/hall-geo.js"></script>
-<script src="/static/hall-stock.js"></script>
-<script src="/static/hall-math.js"></script>
-<script src="/static/hall-math-archive.js"></script>
-<script src="/static/hall-math-exam.js"></script>
-<script src="/static/hall-dojo.js"></script>
-<script src="/static/hall-observe.js"></script>
-<script src="/static/hall-interview.js"></script>
-<script src="/static/hall-plugins.js"></script>
-<script src="/static/work/core.js"></script>
-<script src="/static/work/events.js"></script>
-<script src="/static/work/tasks.js"></script>
-<script src="/static/work/artifacts.js"></script>
-<script src="/static/work/workflows.js"></script>
-<script src="/static/work/backup.js"></script>
-<script src="/static/work/views.js"></script>
-<script src="/static/work/stats.js"></script>
-<script src="/static/work/focus.js"></script>
-<script src="/static/work/templates.js"></script>
-<script src="/static/work/misc.js"></script>
+<!-- 大厅各模块 / 工作台 / 插件市场按需加载：见 web/feature-loader.js -->
 <script src="/static/init.js"></script>
 <script src="/static/composer-cap.js"></script>
 <script src="/static/composer-tray.js"></script>

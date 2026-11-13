@@ -238,7 +238,19 @@ function hallOpenFeature(id) {
 function hallEnterMode() {
   if (!hallInited) {
     hallInited = true;
-    hallRenderHome();
+    const body = hallEl('hall-body');
+    if (body) body.innerHTML = '<div class="hall-empty">正在加载功能…</div>';
+    // 六个模块的脚本较大，首次进入大厅时才加载（见 web/feature-loader.js）
+    const ready = typeof window.gmLoadGroup === 'function'
+      ? window.gmLoadGroup('hall')
+      : Promise.resolve();
+    ready.then(() => hallRenderHome()).catch((e) => {
+      if (body) body.innerHTML = '';
+      const err = document.createElement('div');
+      err.className = 'hall-empty';
+      err.textContent = '功能加载失败：' + ((e && e.message) || e);
+      if (body) body.appendChild(err);
+    });
     return;
   }
   if (hallCurrent && typeof hallCurrent.onShow === 'function') {

@@ -637,7 +637,7 @@ function cmpRunCommand(cmd, action) {
     case '/new': if (typeof newSession === 'function') newSession(); break;
     case '/compress': if (typeof compressContextManually === 'function') compressContextManually(); break;
     case '/kb': if (typeof openKbModal === 'function') openKbModal(); break;
-    case '/settings': if (typeof openModal === 'function') openModal(); break;
+    case '/settings': if (window.gmOpenSettings) window.gmOpenSettings(); else if (typeof openModal === 'function') openModal(); break;
     case '/theme': { const b = $('#btn-theme'); if (b) b.click(); break; }
     case '/plan': {
       // 不立刻执行：把前缀留在输入框里，等用户补完目标再回车（发送时前端识别 /plan）

@@ -106,7 +106,9 @@ const cdp = new CDP(ws);
 const errors = [];
 cdp.on((msg) => {
   if (msg.method === 'Runtime.exceptionThrown') {
-    errors.push(msg.params.exceptionDetails.text || 'exception');
+    const d = msg.params.exceptionDetails || {};
+    const desc = d.exception && (d.exception.description || d.exception.value);
+    errors.push(desc || d.text || 'exception');
   }
   if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
     errors.push(`console.error: ${(msg.params.args || []).map((a) => a.value || '').join(' ')}`);
@@ -175,7 +177,7 @@ for (const mode of MODES) {
   if (mode === 'settings') {
     // 设置是在 Solo 上打开的浮层：先回到 Solo，再打开
     await evaluate(`typeof setUiMode === 'function' && setUiMode('solo')`);
-    await sleep(700);
+    await sleep(1200);
     await cdp.send('Page.reload', { ignoreCache: true });
     await sleep(3500);
     await evaluate(`document.querySelector('#btn-settings') && document.querySelector('#btn-settings').click()`);
@@ -188,7 +190,8 @@ for (const mode of MODES) {
   }
   // 每个模式从一次全新加载开始测量：否则 LCP / CLS 会把切模式引起的布局位移累计进来
   await evaluate(`typeof setUiMode === 'function' && setUiMode('${mode}')`);
-  await sleep(700);
+  // 等按需加载的模块脚本执行完再刷新；否则刷新会中断请求并污染 console 检查
+  await sleep(1800);
   await cdp.send('Page.reload', { ignoreCache: true });
   await sleep(mode === 'ide' ? 5000 : 3500);
   await shot(mode);

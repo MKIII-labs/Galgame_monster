@@ -660,7 +660,8 @@ function initHotkeys() {
   if (tg) {
     // 右下角这个按钮只做「打开功能说明」，不再有 HUD 展开态
     tg.onclick = () => {
-      if (typeof openModal === 'function') openModal({ tab: 'help' });
+      if (window.gmOpenSettings) window.gmOpenSettings({ tab: 'help' });
+      else if (typeof openModal === 'function') openModal({ tab: 'help' });
     };
   }
   const p = $('#hk-panel');
@@ -678,7 +679,8 @@ function initHotkeys() {
     const od = $('#hk-open-doc');
     if (od) od.onclick = () => {
       hkPanelOpen(false);
-      if (typeof openModal === 'function') openModal({ tab: 'keys' });
+      if (window.gmOpenSettings) window.gmOpenSettings({ tab: 'keys' });
+      else if (typeof openModal === 'function') openModal({ tab: 'keys' });
     };
   }
   // 设置面板 → 「快捷键」页：同一套改键 UI + 自动生成的完整说明

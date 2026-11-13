@@ -5762,3 +5762,37 @@
   - 实测（1440×900）：Solo FCP 172 / LCP 924 / CLS 0.006 / TBT 366；手机五模式 CLS 0、无横向溢出、控制台 0 错误。
 - 注意：
   - `pytest` 首轮曾出现 `test_archify` 两项失败（渲染器 validate 未通过），重跑全量 EXIT=0，属环境 / 偶发，与本轮前端改动无关。
+
+## [2026-11-13] 经典界面重构深入：IDE 底部页签 + 首屏按需加载
+- 问题/决策：
+  - 继续处理上一轮遗留：IDE 底部面板不统一、大厅模块内部标题重复、首屏脚本过多。
+  - IDE 新增 `#ide-bottom`：终端 / 问题 / 大纲 / 结果共用一条页签栏，内部实现全部复用。
+  - 新增 `web/feature-loader.js`，把大厅模块、工作台、插件市场、xterm、阅读器移出首屏。
+  - 设置脚本**没有**改成按需加载：`applyTheme()` / `syncWindowChrome()` 仍由 `settings.js` 提供，
+    而 `init.js` 启动时就要应用主题；拆分成本与风险大于 229 KB 的收益。
+- 解决方案/原因：
+  - 底部页签：`ideTermToggle()` 打开时收起 `#ide-intel`，`ideIntelToggle()` 打开时收起终端；
+    共享页签通过 MutationObserver 同步问题 / 大纲数量与「结果」可见性。
+  - 终端拖拽上限从 `el.parentElement` 改为 `el.closest('.ide-main')`，避免包一层容器后上限变小。
+  - 按需加载：动态插入脚本时 `async=false` 保证组内执行顺序，`Promise.all` 并发下载；
+    组只加载一次并缓存。
+  - **关键坑**：xterm.js / addon-fit.js 是 UMD，`define.amd` 存在时会注册成 AMD 模块而不是全局变量。
+    Monaco 的 `loader.js` 会安装 `define.amd`，所以必须**先加载 xterm、再调用 `ideInitOnce()`**；
+    否则终端报 `Can only have one anonymous define call per script file` 且 `window.Terminal` 为空。
+  - 兼容性兜底：通知跳工作台任务先加载 work 组；设置里的备份按钮首次点击加载 work 组；
+    插件入口在 `ui-shell.js` 兜底绑定；`?hall=<id>` 等大厅组加载完再打开模块。
+  - 大厅去重：`.hall-title` / `.work-title` 始终隐藏（顶栏已有），`.hall-sub` 保留为模块说明；
+    模块内部 `.iv-hero-title` / `.gal-hall-title` / `.stock-setup-head h3` 隐藏。
+- 相关代码/指令（如果有）：
+  - 新增 `web/feature-loader.js`、`web/ide-bottom.js`；改 `web/index.html`、`web/css/ide.css`、
+    `web/css/shell.css`、`web/gal/gal-ide.js`、`web/ide-term.js`、`web/hall.js`、`web/init.js`、
+    `web/auto.js`、`web/settings.js`、`web/ui-shell.js`、`web/palette.js`、`web/hotkeys.js`、
+    `web/composer.js`、`scripts/ui_probe.mjs`。
+  - 验收：`node scripts/ui_probe.mjs --url http://127.0.0.1:8791/ --out data/ui-final-d4 --modes solo,ide,hall,work,settings`。
+  - 实测（1440×900）：首屏脚本 89 → 50；Solo FCP 140 / LCP 840 / CLS 0.0005 / TBT 316；
+    大厅 LCP 536 / TBT 231；工作台 LCP 148 / TBT 376；手机五模式 CLS 0–0.003、0 错误。
+  - 回归：`pytest -q` EXIT=0（1 skipped）；三个前端单元测试全通过。
+- 注意：
+  - `ui_probe.mjs` 在 setUiMode 后改为等 1.8s 再刷新，否则刷新会中断按需加载请求，
+    在 console 里留下假的 `Uncaught`。
+  - IDE 首次装载 Monaco 的 CLS 仍偏高（0.4–0.9），属 Monaco 自身布局，本轮未处理。

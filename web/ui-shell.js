@@ -235,8 +235,26 @@
   // 首屏上下文数据由 chat.js 的 renderContextBar 缓存到 window.__lastContext
   if (window.__lastContext) setContext(window.__lastContext);
 
-  /* ---------------- 工作台「更多」浮层 ---------------- */
+  /* ---------------- 设置入口 ---------------- */
 
+  window.gmOpenSettings = function (opts) {
+    if (typeof openModal !== 'function') return;
+    if (typeof opts === 'string') openModal({ tab: opts });
+    else openModal(opts);
+  };
+  const settingsBtn = $('#btn-settings');
+  if (settingsBtn) settingsBtn.onclick = () => window.gmOpenSettings();
+
+  // 插件市场脚本按需加载，入口先在这里兜底绑定（hall-plugins.js 加载后会覆盖为同一行为）
+  const pluginsBtn = $('#btn-plugins');
+  if (pluginsBtn) {
+    pluginsBtn.onclick = () => {
+      if (typeof setUiMode === 'function') setUiMode('plugins');
+      else if (typeof applyUiMode === 'function') applyUiMode('plugins');
+    };
+  }
+
+  /* ---------------- 工作台「更多」浮层 ---------------- */
   (function workMore() {
     const btn = $('#work-more-btn');
     const menu = $('#work-more-menu');

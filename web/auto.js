@@ -163,9 +163,13 @@ async function notifyJump(target) {
   if (AUTO.jumping) return;              // 重复 IPC / 多监听时只跳一次
   AUTO.jumping = true;
   try {
-    if (target.taskId && typeof workOpenTask === 'function') {
+    if (target.taskId) {
+      // 工作台脚本按需加载：先确保 workOpenTask 已定义，再切模式
+      if (typeof workOpenTask !== 'function' && typeof window.gmLoadGroup === 'function') {
+        try { await window.gmLoadGroup('work'); } catch (e) { /* 加载失败就走后面的兜底 */ }
+      }
       if (typeof setUiMode === 'function') await setUiMode('work');
-      await workOpenTask(target.taskId);
+      if (typeof workOpenTask === 'function') await workOpenTask(target.taskId);
       return;
     }
     if (target.sessionId) {

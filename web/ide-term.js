@@ -246,6 +246,11 @@ function ideTermToggle(force) {
   const el = $('#ide-term');
   if (!el) return;
   const open = typeof force === 'boolean' ? force : el.classList.contains('hidden');
+  // 底部面板同一时间只显示一个页签：打开终端时收起问题 / 大纲
+  if (open && typeof ideIntelToggle === 'function') {
+    const intel = $('#ide-intel');
+    if (intel && !intel.classList.contains('hidden')) ideIntelToggle(null, false);
+  }
   el.classList.toggle('hidden', !open);
   const rz = $('#ide-term-resizer');
   if (rz) rz.classList.toggle('hidden', !open);
@@ -253,6 +258,14 @@ function ideTermToggle(force) {
   if (act) act.classList.toggle('active', open);
   if (open) {
     ideTermApplyHeight();
+    // xterm 内核按需加载：首次打开终端时若还没就绪，加载完再启动
+    if (typeof window.Terminal !== 'function' && typeof window.gmLoadGroup === 'function') {
+      window.gmLoadGroup('xterm').then(() => {
+        ideTermEnsure();
+        setTimeout(() => { ideTermFit(); if (ideTermState && ideTermState.term) ideTermState.term.focus(); }, 40);
+      }).catch((e) => ideTermHint('xterm.js 加载失败：' + ((e && e.message) || e)));
+      return;
+    }
     ideTermEnsure();
     setTimeout(() => {
       ideTermFit();
@@ -276,7 +289,7 @@ function ideTermBindResizer() {
     e.preventDefault();
     const startY = e.clientY;
     const startH = el.getBoundingClientRect().height;
-    const main = el.parentElement;
+    const main = el.closest('.ide-main') || el.parentElement;
     const maxH = main ? Math.max(120, main.getBoundingClientRect().height * 0.75) : 600;
     const move = (ev) => {
       const h = Math.max(90, Math.min(maxH, startH - (ev.clientY - startY)));

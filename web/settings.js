@@ -3306,8 +3306,16 @@ function setupSettingsSearch() {
   if (ciRebuild) ciRebuild.onclick = codeindexRebuild;
   const backup = $('#app-backup');
   if (backup) backup.onclick = () => {
-    if (typeof workOpenBackupDialog === 'function') workOpenBackupDialog();
-    else toast('备份与恢复在工作台里');
+    if (typeof workOpenBackupDialog === 'function') { workOpenBackupDialog(); return; }
+    // 工作台脚本按需加载：首次点备份时再拉取，拉取成功后直接打开弹窗
+    if (typeof window.gmLoadGroup === 'function') {
+      window.gmLoadGroup('work').then(() => {
+        if (typeof workOpenBackupDialog === 'function') workOpenBackupDialog();
+        else toast('备份与恢复在工作台里');
+      }).catch(() => toast('备份与恢复在工作台里'));
+      return;
+    }
+    toast('备份与恢复在工作台里');
   };
   const resetAll = $('#app-reset-all');
   if (resetAll) resetAll.onclick = resetAllSettings;
@@ -4547,3 +4555,26 @@ async function pickSandboxPath() {
 /* ============================================================
    IDE / Solo 模式：以「当前会话沙箱」为根的工作区
    ============================================================ */
+
+/* ============================================================
+   设置入口绑定（原在 init.js 中）
+   ------------------------------------------------------------
+   放在本文件末尾，等 DOM 就绪后绑定入口与快捷键；
+   这样设置相关的 DOM / 键盘逻辑集中在一处，不再和 init 的启动顺序耦合。
+   ============================================================ */
+(function bindSettingsEntry() {
+  function bind() {
+    const openBtn = document.querySelector('#btn-settings');
+    if (openBtn) openBtn.onclick = () => openModal();
+    const closeX = document.querySelector('#btn-close-modal');
+    if (closeX) closeX.onclick = closeModal;
+    const cancel = document.querySelector('#btn-cancel');
+    if (cancel) cancel.onclick = closeModal;
+    const save = document.querySelector('#btn-save');
+    if (save) save.onclick = saveModal;
+    setupSettingsSearch();
+    document.addEventListener('keydown', onSettingsKeydown, true);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind);
+  else bind();
+})();

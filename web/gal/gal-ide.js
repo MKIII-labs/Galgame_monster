@@ -85,7 +85,19 @@ function applyUiMode(mode) {
     clearTimeout(_galCursorTimer); _galCursorTimer = null;
     const gp0 = $('#gal-panel'); if (gp0) gp0.classList.remove('gal-cursor-off');
   }
-  if (m === 'ide') { ideInitOnce(); loadIdeTree(); ideWatchStart(); }
+  if (m === 'ide') {
+    const startIde = () => { ideInitOnce(); loadIdeTree(); ideWatchStart(); };
+    // xterm 内核按需加载：必须在 Monaco 的 AMD loader 之前执行，
+    // 否则 xterm / addon-fit 的 UMD 会被当成 AMD 模块注册，拿不到 window.Terminal。
+    if (typeof window.Terminal !== 'function' && typeof window.gmLoadGroup === 'function') {
+      window.gmLoadGroup('xterm').then(startIde).catch((e) => {
+        console.warn('[终端] xterm 加载失败', e);
+        startIde();
+      });
+    } else {
+      startIde();
+    }
+  }
   else { ideWatchStop(); }
   if (m === 'gal') { galEnterMode(); }
   if (m === 'hall') {
@@ -95,10 +107,22 @@ function applyUiMode(mode) {
   }
   if (m === 'work') {
     if (typeof workEnterMode === 'function') workEnterMode();
+    else if (typeof window.gmLoadGroup === 'function') {
+      window.gmLoadGroup('work').then(() => {
+        if (state.uiMode === 'work' && typeof workEnterMode === 'function') workEnterMode();
+      }).catch((e) => console.warn('[工作台] 脚本加载失败', e));
+    }
   } else if (typeof workLeaveMode === 'function') {
     workLeaveMode();
   }
-  if (m === 'plugins' && typeof marketEnter === 'function') marketEnter();
+  if (m === 'plugins') {
+    if (typeof marketEnter === 'function') marketEnter();
+    else if (typeof window.gmLoadGroup === 'function') {
+      window.gmLoadGroup('plugins').then(() => {
+        if (state.uiMode === 'plugins' && typeof marketEnter === 'function') marketEnter();
+      }).catch((e) => console.warn('[插件] 脚本加载失败', e));
+    }
+  }
   // 会话列表按模式过滤：进/出剧场时立刻换一份列表
   if (typeof renderSessions === 'function' && state.sessions && state.sessions.sessions) {
     renderSessions();
@@ -2166,6 +2190,11 @@ function ideIntelToggle(tab, force) {
   const box = $('#ide-intel');
   if (!box) return;
   const want = (typeof force === 'boolean') ? force : !IDE_INTEL.open;
+  // 底部面板同一时间只显示一个页签：打开问题 / 大纲时收起终端
+  if (want && typeof ideTermToggle === 'function') {
+    const term = $('#ide-term');
+    if (term && !term.classList.contains('hidden')) ideTermToggle(false);
+  }
   if (want && tab) IDE_INTEL.tab = tab;
   IDE_INTEL.open = want;
   box.classList.toggle('hidden', !want);
@@ -4560,6 +4589,11 @@ async function openIdeFile(rel, opts) {
   if (ideIsPdf(rel)) {
     idePushRecent(rel);
     if (window.Reader && window.Reader.open) return window.Reader.open(rel);
+    // 阅读器脚本按需加载：首次打开 PDF 时再拉取
+    if (typeof window.gmLoadGroup === 'function') {
+      try { await window.gmLoadGroup('reader'); } catch (e) { /* 下面统一提示 */ }
+      if (window.Reader && window.Reader.open) return window.Reader.open(rel);
+    }
     return toast('阅读器脚本未加载，请刷新页面', 'error');
   }
   if (state.ideTabList.includes(rel)) {

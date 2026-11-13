@@ -77,7 +77,8 @@
       out.push({
         group: '设置', label: '设置：' + label, sub: '打开对应设置页',
         run: () => {
-          if (typeof openModal === 'function') openModal({ tab });
+          if (window.gmOpenSettings) window.gmOpenSettings({ tab });
+          else if (typeof openModal === 'function') openModal({ tab });
         },
       });
     });
