@@ -56,6 +56,9 @@ function applyUiMode(mode) {
   state.uiMode = m;
   // 记住上次模式：<head> 内联脚本据此在首帧前恢复会话侧栏状态
   try { localStorage.setItem('gm.uiMode', m); } catch (e) { /* 隐私模式 */ }
+  // 会话侧栏按模式切换：Solo 展开，其余模式默认收起（见 init.js 的会话侧栏策略）。
+  // 放在面板初始化之前，IDE 首次量尺寸时就是正确的宽度。
+  if (typeof window.gmSidebarSync === 'function') window.gmSidebarSync(m);
   const main = $('#main');
   if (main) {
     main.classList.toggle('ide-mode', m === 'ide');
@@ -130,8 +133,6 @@ function applyUiMode(mode) {
     renderSessions();
   }
   if (prevMode !== m) replayModeEnter(m);      // 只在真的换了模式时播入场，初始化那次不播
-  // 会话侧栏按模式切换：Solo 展开，其余模式默认收起（见 init.js 的会话侧栏策略）
-  if (typeof window.gmSidebarSync === 'function') window.gmSidebarSync(m);
 }
 
 // IDE 首次进入时初始化：装载本地 Monaco，并做一次性绑定
