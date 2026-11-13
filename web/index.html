@@ -46,6 +46,28 @@
     } catch (e) { /* 老浏览器没有 URLSearchParams：按默认加载 */ }
     window.__GM_EMBED__ = cfg;
   })();
+  /* 首帧前恢复会话侧栏状态：避免「先展开、初始化后再收起」导致整页跳一下。
+     模式优先取 URL 参数，其次取上次模式；没有记录时按 Solo 展开处理。 */
+  (function () {
+    try {
+      var mode = (window.__GM_EMBED__ && window.__GM_EMBED__.mode)
+        || localStorage.getItem('gm.uiMode') || 'solo';
+      var collapsed;
+      if (window.matchMedia('(max-width: 900px)').matches) {
+        var sm = localStorage.getItem('gm.sideMobile');
+        collapsed = sm === null ? true : sm === '1';
+      } else {
+        var map = {};
+        try {
+          var raw = localStorage.getItem('gm.sidebarByMode.v1');
+          map = raw ? JSON.parse(raw) : {};
+        } catch (e2) { map = {}; }
+        if (map && Object.prototype.hasOwnProperty.call(map, mode)) collapsed = !!map[mode];
+        else collapsed = mode !== 'solo';
+      }
+      if (collapsed) document.documentElement.setAttribute('data-side-collapsed', '1');
+    } catch (e) { /* 隐私模式：按默认展开 */ }
+  })();
 </script>
 <!-- 样式按功能拆分，按顺序加载（顺序即层叠顺序，等价于原来的单文件） -->
 <link rel="stylesheet" href="/static/css/base.css">
@@ -276,7 +298,7 @@
   </nav>
 
   <!-- 上下文侧栏 -->
-  <aside id="sidebar">
+  <aside id="sidebar" aria-label="会话列表">
     <button id="sidebar-toggle" class="sidebar-toggle" type="button" title="收起侧栏"
             aria-label="收起侧栏" aria-controls="sidebar" aria-expanded="true">
       <svg class="ic"><use href="#i-sidebar"/></svg>
@@ -304,6 +326,11 @@
   <div id="app-body">
     <header id="app-topbar">
       <div class="topbar-left">
+        <button id="btn-sidebar-top" class="topbar-icon" type="button"
+                title="收起会话列表" aria-label="收起会话列表"
+                aria-controls="sidebar" aria-expanded="true">
+          <svg class="ic"><use href="#i-sidebar"/></svg>
+        </button>
         <span id="app-page-title" class="topbar-title">对话</span>
         <span id="app-page-sub" class="topbar-sub">Solo</span>
       </div>
@@ -323,11 +350,6 @@
     </header>
   <!-- 主区 -->
   <main id="main">
-    <!-- 侧栏收起后：左上角悬浮的圆形展开按钮 -->
-    <button id="sidebar-expand" class="sidebar-expand" type="button" title="展开侧栏"
-            aria-label="展开侧栏" aria-controls="sidebar" aria-expanded="false">
-      <svg class="ic"><use href="#i-sidebar"/></svg>
-    </button>
     <!-- 侧栏收起时，模式切换会挪到这个悬浮容器里（同一个节点，不复制） -->
     <div id="mode-float" class="mode-float hidden"></div>
     <!-- IDE 模式：以「当前会话的沙箱」为根的工作区（Solo 模式下隐藏） -->

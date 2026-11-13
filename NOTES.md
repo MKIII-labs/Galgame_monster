@@ -5814,3 +5814,33 @@
     重写 `i-gear` / `i-theme`；导航栏、工作台模式、检查器按钮改用新 id。
   - 验收：Edge headless 截图放大左侧栏与手机底栏，7 个工具图标与 4 个工作区图标均可辨认；
     控制台 0 错误。
+
+## [2026-11-13] 会话侧栏按模式收起（IDE / 大厅 / 工作台 / 插件默认收起）
+- 问题/决策：
+  - 会话侧栏固定 268px，IDE 里与文件树、右侧对话列叠加，1440 宽下 IDE 只剩约 736px；
+    大厅 / 工作台 / 插件是整屏页面，会话列表与当前任务无关。
+  - 之前保留侧栏是因为笔记与侧栏绑定；笔记已改为独立弹窗，这个理由不再成立。
+  - 方案：Solo 默认展开；IDE / 大厅 / 工作台 / 插件默认收起；顶栏统一开关 + 推挤展开；
+    每个模式单独记忆手动开合。
+- 解决方案/原因：
+  - 顶栏左侧新增 `#btn-sidebar-top`（所有模式可见，展开时高亮），取代左下角悬浮展开按钮；
+    旧节点与相关 CSS 已删除。
+  - 模式策略在 `web/init.js`：`SIDEBAR_DEFAULT_COLLAPSED` + `gm.sidebarByMode.v1`；
+    Solo 继续写 `config.sidebar_collapsed`（跨设备），其他模式只写本地，避免互相覆盖。
+  - `gal-ide.js` 的 `applyUiMode()` 末尾调用 `window.gmSidebarSync(m)`；切模式时加
+    `#app.no-side-anim` 立即生效，避免 IDE 里 Monaco 连续 resize。
+  - 手机 / 平板切模式时抽屉自动收起；`gm.sideMobile` 仍保留手动开合记忆。
+  - **首帧防位移**：`<head>` 内联脚本读取 `gm.uiMode`（applyUiMode 写入）+ 按模式记忆，
+    在首次绘制前给 `<html>` 加 `data-side-collapsed="1"`，CSS 首屏即按收起布局；
+    `applySidebarCollapsed()` 同步这个属性，展开时移除。否则会出现「先展开、初始化后再收起」
+    导致整页跳一下（大厅 / 工作台 CLS 0.18）。
+- 相关代码/指令（如果有）：
+  - 改 `web/index.html`、`web/init.js`、`web/gal/gal-ide.js`、`web/css/shell.css`、
+    `web/css/base.css`、`web/css/ui.css`；文档见 `docs/UI_REFACTOR_PLAN.md` 的 P3.5。
+  - 验收：`node scripts/ui_probe.mjs --url http://127.0.0.1:8791/ --out data/ui-sidebar-final2 --modes solo,ide,hall,work,settings`。
+  - 实测：Solo 展开、IDE/大厅/工作台/插件收起；IDE 手动展开刷新后保持；清掉记忆恢复默认收起；
+    大厅 / 工作台 CLS 0.0006；手机五模式 CLS 0–0.003、0 错误。
+- 注意：
+  - `ui_probe` 里 Solo 偶发 0.4–0.7 CLS，来源是会话消息重渲染后移除（`.msg.ai` 从 800 宽变 0），
+    与侧栏无关；直接 `?mode=solo` 冷启动实测 CLS 0.0006。
+  - IDE 首次装载 Monaco 的 CLS 仍偏高，属 Monaco 自身布局。

@@ -250,9 +250,7 @@
   }
   :is(.modal-card, .modal-card.wide) { width: min(720px, 94vw); }
   .modal-body { padding: var(--sp-3); }
-  /* 收起态的左下角悬浮件：贴底会被输入框挡住，顶到输入框上方；
-     模式切换条在窄屏一律收起（走侧栏抽屉切模式），避免压住页面标题 */
-  .sidebar-expand { top: auto; bottom: 132px; left: 10px; }
+  /* 窄屏走侧栏抽屉切模式，页面上不再保留悬浮模式切换 */
   .mode-float { display: none; }
 }
 
@@ -302,8 +300,6 @@
 html.embed #titlebar,
 html.embed #sidebar,
 html.embed #sidebar-toggle,
-html.embed #sidebar-expand,
-html.embed .sidebar-expand,
 html.embed #mode-switch,
 html.embed #mode-float,
 html.embed #hall-back {

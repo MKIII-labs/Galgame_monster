@@ -1040,6 +1040,8 @@ async function init() {
   function applySidebarCollapsed(on) {
     const app = $('#app');
     if (app) app.classList.toggle('side-collapsed', !!on);
+    // 与 <head> 内联脚本的首帧状态保持同步；展开时移除，避免 CSS 继续压成 0 宽
+    document.documentElement.toggleAttribute('data-side-collapsed', !!on);
     const t = $('#sidebar-toggle');
     if (t) {
       const label = on ? '展开侧栏' : '收起侧栏';
@@ -1047,23 +1049,75 @@ async function init() {
       t.setAttribute('aria-label', label);
       t.setAttribute('aria-expanded', on ? 'false' : 'true');
     }
-    const ex = $('#sidebar-expand');
-    if (ex) ex.setAttribute('aria-expanded', on ? 'false' : 'true');
+    // 顶栏会话开关：所有模式共用，收起后仍然可见
+    const top = $('#btn-sidebar-top');
+    if (top) {
+      const label = on ? '展开会话列表' : '收起会话列表';
+      top.title = label;
+      top.setAttribute('aria-label', label);
+      top.setAttribute('aria-controls', 'sidebar');
+      top.setAttribute('aria-expanded', on ? 'false' : 'true');
+      top.classList.toggle('is-on', !on);
+    }
     syncModeSwitchHome();
   }
   applyComposerCollapsed(!!(state.config && state.config.composer_collapsed));
-  // 窄屏（平板竖屏 / 手机）默认收起侧栏：否则 268px 的侧栏会把主区挤成一条缝。
-  // 桌面端的偏好存在服务端配置里；窄屏单独记一份，避免「手动展开后被刷新重置」。
-  var _narrow = false;
-  try { _narrow = window.matchMedia('(max-width: 900px)').matches; } catch (e) { _narrow = false; }
-  var _sideCollapsed = !!(state.config && state.config.sidebar_collapsed);
-  if (_narrow) {
-    try {
-      var _sm = localStorage.getItem('gm.sideMobile');
-      _sideCollapsed = _sm === null ? true : _sm === '1';
-    } catch (e) { _sideCollapsed = true; }
+
+  /* ---------------- 会话侧栏：按模式记忆 ---------------- */
+  // Solo 以会话列表为主要工作区，默认展开；IDE / 大厅 / 工作台 / 插件默认收起。
+  // 每个模式单独记忆手动开合，互不影响；Solo 仍同步服务端偏好，其余只存本地。
+  const SIDEBAR_DEFAULT_COLLAPSED = {
+    solo: false, ide: true, hall: true, work: true, plugins: true, gal: true,
+  };
+  const SIDEBAR_MODE_KEY = 'gm.sidebarByMode.v1';
+  function sidebarIsNarrow() {
+    try { return window.matchMedia('(max-width: 900px)').matches; } catch (e) { return false; }
   }
-  applySidebarCollapsed(_sideCollapsed);
+  function sidebarModeMap() {
+    try {
+      const raw = localStorage.getItem(SIDEBAR_MODE_KEY);
+      const obj = raw ? JSON.parse(raw) : null;
+      return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+    } catch (e) { return {}; }
+  }
+  function sidebarSaveMode(mode, collapsed) {
+    try {
+      const map = sidebarModeMap();
+      map[mode] = collapsed ? 1 : 0;
+      localStorage.setItem(SIDEBAR_MODE_KEY, JSON.stringify(map));
+    } catch (e) { /* 隐私模式：只影响本次会话 */ }
+  }
+  function sidebarCollapsedFor(mode) {
+    const m = mode || 'solo';
+    if (sidebarIsNarrow()) {
+      try {
+        const sm = localStorage.getItem('gm.sideMobile');
+        return sm === null ? true : sm === '1';
+      } catch (e) { return true; }
+    }
+    const map = sidebarModeMap();
+    if (Object.prototype.hasOwnProperty.call(map, m)) return !!map[m];
+    // 首次迁移：Solo 沿用旧的全局偏好，其余模式按默认策略
+    if (m === 'solo' && state.config && typeof state.config.sidebar_collapsed === 'boolean') {
+      return !!state.config.sidebar_collapsed;
+    }
+    return SIDEBAR_DEFAULT_COLLAPSED[m] !== false;
+  }
+  function applySidebarForMode(mode) {
+    const m = mode || state.uiMode || 'solo';
+    // 手机 / 平板切模式时把抽屉收起来，避免挡在内容上
+    const target = sidebarIsNarrow() ? true : sidebarCollapsedFor(m);
+    const app = $('#app');
+    if (!app || app.classList.contains('side-collapsed') === target) return;
+    app.classList.add('no-side-anim');       // 切模式不做宽度动画，避免 IDE 连续 resize
+    applySidebarCollapsed(target);
+    requestAnimationFrame(() => requestAnimationFrame(() => app.classList.remove('no-side-anim')));
+  }
+  window.gmSidebarSync = (mode) => {
+    try { applySidebarForMode(mode); } catch (e) { /* 侧栏同步失败不影响切模式 */ }
+  };
+
+  applySidebarCollapsed(sidebarCollapsedFor(state.uiMode || 'solo'));
   if ($('#composer-handle')) $('#composer-handle').onclick = () => {
     const c = document.querySelector('.composer');
     const on = !(c && c.classList.contains('collapsed'));
@@ -1079,14 +1133,20 @@ async function init() {
       ideFreezeEditorLayout(240);
     }
     applySidebarCollapsed(on);
-    try {
-      if (window.matchMedia('(max-width: 900px)').matches) localStorage.setItem('gm.sideMobile', on ? '1' : '0');
-    } catch (e) { /* 隐私模式：不记也行 */ }
-    state.config = Object.assign({}, state.config || {}, { sidebar_collapsed: on });
-    api('/api/config', { sidebar_collapsed: on }).catch(() => {});
+    if (sidebarIsNarrow()) {
+      try { localStorage.setItem('gm.sideMobile', on ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
+    } else {
+      const mode = state.uiMode || 'solo';
+      sidebarSaveMode(mode, on);
+      // Solo 继续同步服务端偏好（跨设备）；其他模式只存本地，避免互相覆盖
+      if (mode === 'solo') {
+        state.config = Object.assign({}, state.config || {}, { sidebar_collapsed: on });
+        api('/api/config', { sidebar_collapsed: on }).catch(() => {});
+      }
+    }
   }
   if ($('#sidebar-toggle')) $('#sidebar-toggle').onclick = () => toggleSidebar(true);
-  if ($('#sidebar-expand')) $('#sidebar-expand').onclick = () => toggleSidebar(false);
+  if ($('#btn-sidebar-top')) $('#btn-sidebar-top').onclick = () => toggleSidebar();
   bindChips();
 
   if (!String(state.config.chat_api_key || '').trim()) {

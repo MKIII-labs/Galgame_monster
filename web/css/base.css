@@ -180,24 +180,7 @@ html.electron #app { height: calc(100dvh - var(--tb-h)); }
   opacity: 0; visibility: hidden; pointer-events: none;
   transition: opacity var(--t-fast) var(--ease), visibility var(--t-press) linear var(--t);
 }
-/* 收起后浮在主区左下角的圆形「展开侧栏」按钮（所有模式统一，避开大厅 / 工作台顶部） */
-.sidebar-expand {
-  position: absolute; top: auto; bottom: 56px; left: 10px; z-index: 9;
-  width: 30px; height: 30px; padding: 0;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: 50%; border: 1px solid var(--border);
-  background: var(--bg); color: var(--text-dim);
-  box-shadow: var(--shadow-sm);
-  opacity: 0; visibility: hidden; transform: scale(.9);
-  transition: opacity var(--t) var(--ease), transform var(--t) var(--ease),
-              visibility var(--t) var(--ease), background var(--t-fast) var(--ease),
-              color var(--t-fast) var(--ease);
-}
-.sidebar-expand .ic { width: 16px; height: 16px; }
-#app.side-collapsed .sidebar-expand { opacity: 1; visibility: visible; transform: none; }
-.sidebar-expand:hover { background: var(--bg-hover); color: var(--text); }
-.sidebar-expand:active { transform: scale(.94); }
-.sidebar-expand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 侧栏展开 / 收起统一由顶栏的会话开关控制（#btn-sidebar-top），不再有左下角悬浮按钮 */
 
 .side-top { padding-bottom: var(--sp-4); }
 

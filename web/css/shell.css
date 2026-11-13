@@ -87,8 +87,7 @@
 #app-rail .rail-btn:hover { background: var(--bg-hover); color: var(--text); }
 #app-rail .rail-btn.active { background: var(--accent-soft); color: var(--accent); }
 
-/* 侧栏收起后，展开按钮不要压在导航栏上 */
-.sidebar-expand { left: 64px; }
+/* 旧的悬浮模式切换已并入左侧导航，节点保留但不再显示 */
 #mode-float { display: none !important; }
 
 /* ---------------- 主区外壳 ---------------- */
@@ -117,9 +116,40 @@
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
 }
+/* 顶栏左侧的会话侧栏开关：与检查器按钮同一规格 */
+#btn-sidebar-top { flex: none; }
+#btn-sidebar-top .ic { width: 17px; height: 17px; }
+/* 切换模式时侧栏状态立即生效，避免 IDE 里 Monaco 连续 resize */
+#app.no-side-anim #sidebar,
+#app.no-side-anim .sidebar-body { transition: none !important; }
+/* 首帧前的收起状态（由 <head> 内联脚本写入）：与 #app.side-collapsed 同义，
+   避免先展开再收起的整页布局位移 */
+html[data-side-collapsed="1"] #sidebar {
+  width: 0;
+  flex: 0 0 0;
+  padding: 0;
+  border: 0;
+}
+html[data-side-collapsed="1"] .sidebar-body {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+@media (max-width: 900px) {
+  html[data-side-collapsed="1"] #sidebar {
+    width: min(82vw, 300px);
+    flex: none;
+    padding: var(--sp-4) var(--sp-3);
+    padding-top: 42px;
+    transform: translateX(-100%);
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+html.embed #btn-sidebar-top { display: none !important; }
 .topbar-title {
   font-size: 14px;
   font-weight: 600;
@@ -651,8 +681,6 @@ button.insp-tool:focus-visible { outline: 2px solid var(--accent); outline-offse
     height: 44px;
   }
   #app-body { order: 1; flex: 1; min-height: 0; }
-
-  .sidebar-expand { bottom: calc(var(--mobile-nav-h) + 8px); }
 
   /* 检查器改底部抽屉，压在导航之上 */
   #inspector {
