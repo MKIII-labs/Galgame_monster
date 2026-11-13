@@ -1175,6 +1175,12 @@
         <button id="btn-clear-input" class="composer-clear hidden" type="button" title="清空输入" aria-label="清空输入">✕</button>
         <div class="composer-toolbar">
           <div class="toolbar-left">
+            <button id="btn-cap" class="pill cap-btn" type="button"
+                    title="能力：深度思考 / 联网搜索 / Agent / AI 优化"
+                    aria-expanded="false" aria-controls="cap-tray">
+              <svg class="ic"><use href="#i-gear"/></svg>能力<span id="cap-dot" class="cap-dot hidden" aria-hidden="true"></span>
+            </button>
+            <div id="cap-tray" class="cap-tray hidden" role="group" aria-label="能力开关">
             <span class="think-wrap">
               <button id="btn-think" class="pill" title="开启 / 关闭深度思考">
                 <svg class="ic"><use href="#i-sparkle"/></svg>深度思考
@@ -1273,10 +1279,14 @@
                 </div>
               </div>
             </span>
+            <button id="btn-improve" class="pill cap-action"
+                    title="AI 优化输入（Ctrl+I）：润色 / 精简 / 扩写">
+              <svg class="ic"><use href="#i-sparkle"/></svg>AI 优化输入
+            </button>
+            </div><!-- /#cap-tray -->
           </div>
           <div class="toolbar-right">
             <button id="btn-more" class="icon" title="更多输入选项" aria-label="更多输入选项">⋯</button>
-            <button id="btn-improve" class="icon" title="AI 优化输入（Ctrl+I）：润色 / 精简 / 扩写" aria-label="AI 优化输入"><svg class="ic"><use href="#i-sparkle"/></svg></button>
             <div class="swap-slot">
               <button id="btn-attach" class="icon" title="添加附件：图片 / 文档（PDF、Word、Excel、txt/md/csv…；也可直接 Ctrl+V 粘贴或拖入文件）"><svg class="ic"><use href="#i-attach"/></svg></button>
               <button id="btn-stop" class="icon stop off" title="停止生成">■</button>
@@ -3063,6 +3073,7 @@
 <script src="/static/work/templates.js"></script>
 <script src="/static/work/misc.js"></script>
 <script src="/static/init.js"></script>
+<script src="/static/composer-cap.js"></script>
 <script src="/static/ui-shell.js"></script>
 <script src="/static/palette.js"></script>
 </body>

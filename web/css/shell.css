@@ -344,6 +344,47 @@
   color: var(--text-dim);
 }
 
+/* ---------------- 输入区「能力」浮层 ---------------- */
+
+.toolbar-left { position: relative; }
+.cap-btn { position: relative; }
+.cap-btn.is-open { background: var(--bg-hover); color: var(--text); }
+.cap-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 2px;
+  flex: none;
+}
+.cap-dot.hidden { display: none; }
+.cap-tray {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 32;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 280px;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+}
+.cap-tray.hidden { display: none; }
+.cap-tray .think-wrap,
+.cap-tray .agent-wrap { display: flex; width: 100%; gap: 2px; }
+.cap-tray .think-wrap .pill,
+.cap-tray .agent-wrap .pill { flex: 1; justify-content: flex-start; }
+.cap-tray .agent-more,
+.cap-tray .think-more { width: 24px; }
+.cap-tray #btn-search { width: 100%; justify-content: flex-start; }
+.cap-tray .agent-menu,
+.cap-tray .think-menu { bottom: calc(100% + 4px); }
+#btn-improve.cap-action { width: 100%; justify-content: flex-start; }
+
 /* ---------------- 设置：全屏层 ---------------- */
 
 #modal { padding: 0; }
@@ -363,6 +404,20 @@
   bottom: 0;
   z-index: 5;
   background: var(--bg-elevated);
+}
+
+/* ---------------- 触屏：悬停操作常显 ---------------- */
+
+@media (hover: none) {
+  .session-item .sacts {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .msg-act-list {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
 }
 
 /* ---------------- 窄屏收口（P1 先保证不溢出） ---------------- */
