@@ -8,6 +8,7 @@
 """
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -74,3 +75,64 @@ def test_kill_tree_passes_no_window(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
     agent._kill_tree(12345)
     assert seen.get("creationflags") == winproc.no_window()
+
+
+def _install_once():
+    """装一次全局兜底，返回 (包装前的 __init__, 包装前的 _INSTALLED, 最近一次调用的 kwargs)。
+
+    3.13 的 Popen 不再把 creationflags 挂到实例上，所以用一层记录器接住实参。
+    """
+    original = subprocess.Popen.__init__
+    flag = winproc._INSTALLED
+    base = getattr(original, "__wrapped__", original)
+    seen = {}
+
+    def recorder(self, *args, **kwargs):
+        seen.clear()
+        seen.update(kwargs)
+        return base(self, *args, **kwargs)
+
+    subprocess.Popen.__init__ = recorder
+    winproc._INSTALLED = False
+    assert winproc.install_default() is True
+    return original, flag, seen
+
+
+@pytest.mark.skipif(os.name != "nt", reason="CREATE_NO_WINDOW 只在 Windows 生效")
+def test_install_default_injects_flag():
+    """没显式传 creationflags 的调用，必须自动补上 CREATE_NO_WINDOW。"""
+    original, flag, seen = _install_once()
+    try:
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait(timeout=30)
+        assert seen.get("creationflags") == winproc.CREATE_NO_WINDOW
+    finally:
+        subprocess.Popen.__init__ = original
+        winproc._INSTALLED = flag
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只在 Windows 注入")
+def test_install_default_keeps_explicit_flags():
+    """显式传了 creationflags 的调用不能被覆盖（弹窗之外的语义要保留）。"""
+    original, flag, seen = _install_once()
+    try:
+        explicit = subprocess.CREATE_NEW_PROCESS_GROUP
+        p = subprocess.Popen([sys.executable, "-c", "pass"], creationflags=explicit)
+        p.wait(timeout=30)
+        assert seen.get("creationflags") == explicit
+    finally:
+        subprocess.Popen.__init__ = original
+        winproc._INSTALLED = flag
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只在 Windows 注入")
+def test_install_default_idempotent():
+    """重复安装不应反复包装 Popen。"""
+    original, flag, _seen = _install_once()
+    try:
+        wrapped = subprocess.Popen.__init__
+        assert winproc.install_default() is False
+        assert subprocess.Popen.__init__ is wrapped
+    finally:
+        subprocess.Popen.__init__ = original
+        winproc._INSTALLED = flag

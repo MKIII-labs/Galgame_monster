@@ -30,6 +30,7 @@ window.gmLoadGroup = (function () {
       '/static/work/focus.js',
       '/static/work/templates.js',
       '/static/work/misc.js',
+      '/static/work/ai.js',
     ],
     plugins: ['/static/hall-plugins.js'],
     xterm: [

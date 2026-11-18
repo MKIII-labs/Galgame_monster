@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "updated": "",
+  "note": "官方插件市场索引（随包）。items 为空 = 当前没有官方插件；可在 config 里把 plugin_index_url 指向远端 https 索引。每个条目：{id, name, version, author, description, permissions, homepage, url(https zip), sha256, size}",
+  "items": []
+}

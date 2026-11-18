@@ -298,28 +298,6 @@ def test_bare_action_promise_is_detected():
     assert r is not None and "计划" in r["why"]
 
 
-def test_pending_plan_end_reason_fallback():
-    """正常 stop + 计划还有步骤 + 最后一段没工具 → 收尾必须给可继续原因。"""
-    from app.api.chat import _pending_plan_end_reason
-
-    plan = {"steps": [{"text": "跑验证", "status": "doing"},
-                      {"text": "同步文档", "status": "pending"}]}
-    r = _pending_plan_end_reason(plan, "扫描文档里实际存在的规模数字。", False, False)
-    assert r is not None and r["kind"] == "idle"
-    assert "2 步" in r["text"] and r["action"] == "continue"
-    # 最后一个工具轮（有调用）不能再报「没调工具」
-    assert _pending_plan_end_reason(plan, "扫描文档。", True, False) is None
-    # GAL / 明确完成 / 受阻 / 等拍板 / 成篇总结 都不误报
-    assert _pending_plan_end_reason(plan, "随便", False, True) is None
-    assert _pending_plan_end_reason(plan, "已经全部完成。", False, False) is None
-    assert _pending_plan_end_reason(plan, "无法继续，缺少文件。", False, False) is None
-    assert _pending_plan_end_reason(plan, "要不要按 A 做？", False, False) is None
-    assert _pending_plan_end_reason(plan, "说明" * 200, False, False) is None
-    # 计划已全部完成 → 不提示
-    done = {"steps": [{"text": "a", "status": "done"}]}
-    assert _pending_plan_end_reason(done, "短句。", False, False) is None
-
-
 def test_done_claim_verdict_catches_virtual_tool_work():
     """正文说「已写好 / 现在运行」但本轮零工具 → 必须点明只是文字描述。"""
     from app.api.chat import _done_claim_verdict
@@ -334,24 +312,6 @@ def test_done_claim_verdict_catches_virtual_tool_work():
     failed = [{"tool": "run_command", "write": True, "result": "❌ 失败"}]
     ok_read = {"tool": "read_file", "result": "ok"}
     assert "写操作全部失败" in _done_claim_verdict(text, [ok_read] + failed, [])
-
-
-def test_pending_plan_end_reason_without_plan():
-    """零工具 + 无计划 + 长正文：收尾必须给出原因，不能只留「完成时间」。"""
-    from app.api.chat import _pending_plan_end_reason
-
-    long_text = "补丁脚本已写好，现在运行它，然后读取结果。" * 20
-    r = _pending_plan_end_reason({}, long_text, False, False, tool_count=0)
-    assert r is not None and "没有执行任何工具" in r["text"]
-    assert r["action"] == "continue"
-
-    assert _pending_plan_end_reason({}, long_text, False, False, tool_count=3) is None
-    assert _pending_plan_end_reason({}, "短句。", False, False, tool_count=0) is None
-    done = {"steps": [{"text": "a", "status": "done"}]}
-    assert _pending_plan_end_reason(done, long_text, False, False, tool_count=0) is None
-    # 非 Agent 会话（无文件 / 命令能力）：纯文字回答不该被催「继续输出让它真正动手」
-    assert _pending_plan_end_reason({}, long_text, False, False, tool_count=0,
-                                    agent_mode=False) is None
 
 
 def test_latest_plan_only_reads_last_assistant_message():

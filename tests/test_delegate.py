@@ -8,6 +8,7 @@ from app import agent_defs, delegate, explore
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_defs, "AGENTS_DIR", str(tmp_path / "agents"))
+    monkeypatch.setattr(agent_defs, "USER_AGENTS_DIR", str(tmp_path / "user_agents"))
     monkeypatch.setattr(explore, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(explore, "VERIFY_EVIDENCE", False)
 

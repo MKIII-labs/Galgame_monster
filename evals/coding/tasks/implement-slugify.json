@@ -1,0 +1,15 @@
+{
+  "name": "implement-slugify",
+  "fixture": "fixtures/textutil",
+  "prompt": "实现 textutil.slugify：把文本转成小写、用连字符连接单词、去掉首尾多余符号。仓库里有测试，请运行测试直到通过；不要修改测试文件。完成后简要说明实现方式。",
+  "test": ["python", "test_textutil.py"],
+  "solution_files": {
+    "textutil.py": "import re\n\n\ndef slugify(text):\n    parts = re.findall(r\"[a-z0-9]+\", str(text or \"\").lower())\n    return \"-\".join(parts)\n"
+  },
+  "expect": {
+    "tests_pass": true,
+    "pre_test_fails": true,
+    "changed_files": ["textutil.py"],
+    "forbid_changed": ["test_"]
+  }
+}

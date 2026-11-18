@@ -134,10 +134,21 @@ function renderMarkdown(src) {
   return out;
 }
 
+/* 模型偶尔不用 ```memory 围栏，而是吐 <memory>…</memory> 包裹 JSON。
+   服务端正常会摘掉；这里对历史消息 / 流式收尾再兜一层，避免控制块露给用户。
+   只删「像 ops JSON」的块，正常讨论这个标签的文字不受影响。 */
+function stripMemoryTags(src) {
+  let s = String(src == null ? '' : src);
+  if (s.indexOf('<') < 0 || !/memory/i.test(s)) return s;
+  s = s.replace(/<\s*memory\s*>([\s\S]*?)<\s*\/\s*memory\s*>/gi, (m, body) =>
+    (/ops/.test(body) || /^\s*[\{\[]/.test(body)) ? '' : m);
+  return s.replace(/<\s*memory\s*>\s*(?=[\{\[])[\s\S]*$/i, '');
+}
+
 /* 带兜底的渲染：任何异常 / 空结果都退回纯文本，保证消息不会因为一条坏 Markdown 整块消失。
    聊天、流式收尾、历史重渲染都走这里；renderMarkdown 保留给纯函数测试与预览。 */
 function safeRenderMarkdown(src) {
-  const text = String(src == null ? '' : src);
+  const text = stripMemoryTags(src);
   if (!text) return '';
   try {
     const out = renderMarkdown(text);

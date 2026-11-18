@@ -53,10 +53,9 @@ function hkLabel(spec) {
 }
 
 /* 录制时校验：这个键能不能用在当前作用域。
-   关键约束 —— 除 GAL（它有「焦点不在输入框」的保护）以外，**不接受裸的可打印字符**，
-   否则用户把「发送」改成 E，以后每次打 e 都会发消息。只允许组合键或功能键。 */
+   关键约束 —— **不接受裸的可打印字符**，否则用户把「发送」改成 E，
+   以后每次打 e 都会发消息。只允许组合键或功能键。 */
 function hkSpecProblem(scope, spec) {
-  if (scope === 'gal') return '';
   if (spec === 'Shift+Enter') return 'Shift+Enter 是「换行」，请换一个';
   const parts = String(spec).split('+');
   const main = parts[parts.length - 1];

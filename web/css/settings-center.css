@@ -1,0 +1,360 @@
+/* ============================================================
+   设置中心 · 壳层（顶栏搜索 / 右侧目录 / 分区 / 移动端）
+   ============================================================ */
+
+/* ---------- 顶栏：标题 + 搜索 + 保存状态 ---------- */
+#modal .settings-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+}
+#modal .settings-head .settings-title { flex: none; }
+#modal .settings-head-acts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  margin-left: auto;
+}
+#modal .settings-head .foot-dirty { margin: 0; }
+#modal .settings-back { display: none; }
+
+#modal .settings-search {
+  position: relative;
+  flex: 1;
+  max-width: 430px;
+  margin: 0;
+}
+#modal .settings-search-input {
+  width: 100%;
+  padding: 6px 10px;
+}
+#modal .settings-search-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  max-height: 46vh;
+  overflow-y: auto;
+  margin: 0;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+/* ---------- 右侧本页目录 ---------- */
+#modal .settings-toc {
+  padding: 22px 12px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-side);
+  overflow-y: auto;
+}
+#modal .settings-toc-title {
+  margin: 0 0 8px;
+  padding: 0 8px;
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+#modal .set-anchors {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  position: static;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+}
+#modal .set-anchor {
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+#modal .set-anchor:hover { background: var(--bg-hover); color: var(--text); }
+#modal .set-anchor.active {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+@media (max-width: 1200px) {
+  #modal .settings-toc { display: none; }
+}
+
+/* ---------- 能力与工具：页内二级分段 ---------- */
+#modal .settings-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 980px;
+  margin: 0 auto 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+#modal .settings-subnav.hidden { display: none; }
+#modal .settings-subnav-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+#modal .settings-subnav-btn:hover { background: var(--bg-hover); color: var(--text); }
+#modal .settings-subnav-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---------- 页内任务分区 ---------- */
+#modal .set-section {
+  max-width: 980px;
+  margin: 0 auto 20px;
+}
+#modal .set-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+  padding: 0 2px;
+}
+#modal .set-section-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 650;
+  letter-spacing: .01em;
+  color: var(--text);
+}
+#modal .set-section-adv {
+  flex: none;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+#modal .set-section-adv:hover { background: var(--bg-hover); color: var(--text); }
+#modal .set-section-adv[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#modal .set-section-danger .set-section-title { color: #c0392b; }
+#modal .set-section-danger .set-section-head {
+  border-top: 1px dashed color-mix(in srgb, #c0392b 40%, transparent);
+  padding-top: 12px;
+}
+#modal .set-card.adv-hidden { display: none !important; }
+#modal .pane > .set-card { max-width: 980px; margin-left: auto; margin-right: auto; }
+
+/* 卡片头只留折叠按钮后，右侧操作区更安静 */
+#modal .set-card-acts .set-card-act[data-act="reset-card"] { display: none; }
+
+
+/* ---------- 显示级别 ---------- */
+.settings-level {
+  margin: 8px 10px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-side);
+}
+.settings-level-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.settings-level-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+}
+.settings-level-opts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  margin-top: 6px;
+}
+.settings-level-btn {
+  padding: 4px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.settings-level-btn:hover { background: var(--bg-hover); }
+.settings-level-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---------- 标签筛选 ---------- */
+.settings-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 10px 0;
+}
+.settings-tag-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.settings-tag-btn:hover { background: var(--bg-hover); }
+.settings-tag-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/* ---------- 被级别 / 标签隐藏的分区 ---------- */
+.set-card.meta-hidden { display: none !important; }
+.settings-meta-hint {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+}
+
+/* ---------- 草稿恢复条 ---------- */
+.settings-draft-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  font-size: 12px;
+}
+.settings-draft-acts { display: flex; gap: 6px; flex: none; }
+
+/* ---------- 底部变更摘要 ---------- */
+.foot-summary {
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* ---------- 配置历史 ---------- */
+.settings-history-list { display: flex; flex-direction: column; gap: 4px; }
+.settings-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.settings-history-main { min-width: 0; }
+.settings-history-time { font-size: 12px; color: var(--text); }
+.settings-history-keys {
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-history-acts { display: flex; gap: 2px; flex: none; }
+.settings-history-acts .danger { color: #c0392b; }
+.settings-history-diff {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-side);
+}
+.settings-history-diff-head {
+  margin-bottom: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.settings-history-diff-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(0, 2fr) 16px minmax(0, 2fr);
+  gap: 6px;
+  align-items: baseline;
+  padding: 3px 0;
+  border-top: 1px dashed var(--border);
+  font-size: 11.5px;
+}
+.settings-history-diff-row code { color: var(--text-dim); }
+.shd-before { color: var(--text-dim); text-decoration: line-through; }
+.shd-arrow { color: var(--text-dim); text-align: center; }
+.shd-after { color: var(--text); }
+
+/* ---------- 控件一致性：输入 / 下拉 / 文本域同一套焦点与禁用态 ---------- */
+#modal .field-input,
+#modal select,
+#modal textarea.ta,
+#modal input[type="number"],
+#modal input[type="text"],
+#modal input[type="password"] {
+  border-radius: 7px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+#modal .field-input:focus,
+#modal select:focus,
+#modal textarea.ta:focus,
+#modal input[type="number"]:focus,
+#modal input[type="text"]:focus,
+#modal input[type="password"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+#modal .field-input:disabled,
+#modal select:disabled,
+#modal textarea.ta:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+/* 数值 + 滑块：同一行内垂直居中对齐 */
+#modal .range-row { display: flex; align-items: center; gap: 8px; }
+#modal .range-row input[type="range"] { flex: 1; min-width: 0; }
+#modal .range-row input[type="number"] { width: 88px; flex: none; }
+
+@media (max-width: 760px) {
+  .foot-summary { display: none; }
+  .settings-history-diff-row { grid-template-columns: 1fr; }
+  .shd-arrow { display: none; }
+}

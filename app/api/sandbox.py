@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
+import base64
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import time
-from app.store import _lock
-from app import agent, diffview, git, ide_complete, ide_review, winproc
+from app.store import _lock, set_live_flags
+from app import agent, diffview, docparse, git, ide_complete, ide_review, winproc
 from app.config import get_api_conf
 from app.llm import _quick_chat
 from app.registry import route
 from app.sessions import (ensure_session_kb_fields, find_session, load_sessions, save_sessions)
+from app.uploads import save_upload
 from app.vscode import (find_vscode_cli, vscode_import_payload)
 
 def _api_sandbox_pick(h):
@@ -74,7 +76,14 @@ def _api_sandbox_save(h):
         if err:
             return err
         try:
-            r = agent.write_text(sb, body.get("path"), body.get("content"))
+            r = agent.write_text(sb, body.get("path"), body.get("content"),
+                                 base_mtime=body.get("base_mtime"))
+            if r.get("conflict"):
+                # 磁盘上的文件在编辑期间被改过：不覆盖，交给前端确认
+                # 用 200 返回：前端 api() 对非 2xx 只抛出 error，会丢掉 conflict 标记
+                return h._json({"ok": False, "conflict": True,
+                                "mtime": r.get("mtime"),
+                                "error": "文件已在磁盘上被修改"})
             r["ok"] = True
             return h._json(r)
         except agent.SandboxError as e:
@@ -300,7 +309,8 @@ def _api_sandbox_revert_hunks(h):
                 agent.write_text(sb, rel, merged)
             except agent.SandboxError as e:
                 return h._json({"ok": False, "error": str(e)}, 400)
-        ntoken = agent.register_undo(s.get("id"), undo_ops, "撤销部分改动：" + rel)
+        ntoken = agent.register_undo(s.get("id"), undo_ops,
+                                     "撤销部分改动：" + rel, root=sb)
         d = diffview.build(old, merged, ctx, stat_only=True)
         return h._json({"ok": True, "changed": len(indices), "token": ntoken,
                         "adds": d["adds"], "dels": d["dels"]})
@@ -548,22 +558,110 @@ def _api_session_agent(h):
         s["updated_at"] = time.time()
         with _lock:
             save_sessions(data)
+        # 正在进行的回复也要立刻看到新开关：交给下一轮取走（持久化仍以会话为准）
+        if "agent_enabled" in body or "sandbox" in body:
+            set_live_flags(s.get("id"), {
+                "agent_enabled": bool(s.get("agent_enabled")),
+                "sandbox": s.get("sandbox") or "",
+            })
         h._ok_sessions(data)
+
+
+_ASK_DOC_MAX_CHARS = 2_000_000      # 与 chat.py 的 MAX_INLINE_DOC_CHARS 一致
+
+
+def _ask_attach_payload(body):
+    """提问卡附带的图片 / 文档（base64），只取结构正确的项。"""
+    imgs = body.get("images") if isinstance(body.get("images"), list) else []
+    docs = body.get("docs") if isinstance(body.get("docs"), list) else []
+    out = {"images": [], "docs": []}
+    for it in imgs[:4]:
+        if isinstance(it, dict) and str(it.get("data") or "").strip():
+            out["images"].append({"mime": it.get("mime") or "image/png",
+                                  "data": str(it.get("data")),
+                                  "name": str(it.get("name") or "")[:200]})
+    for it in docs[:10]:
+        nm = str(it.get("name") or "").strip()[:200] if isinstance(it, dict) else ""
+        if nm and str(it.get("data") or "").strip():
+            out["docs"].append({"name": nm, "mime": it.get("mime") or "",
+                                "data": str(it.get("data"))})
+    return out
+
+
+def _register_ask_uploads(sid, payload):
+    """把提问卡附件落盘并解析，返回可挂到消息里的元信息。
+
+    只落盘、不直接改会话：这一轮的消息对象归聊天线程所有，由它在
+    wait_answers 之后挂到本轮用户消息上再落盘（避免两边写同一份会话互相覆盖）。
+    """
+    if not sid or not payload or not (payload["images"] or payload["docs"]):
+        return None
+    imgs, docs = [], []
+    for im in payload["images"]:
+        up = save_upload(sid, im["mime"], im["data"])
+        if up:
+            imgs.append({"id": up.get("id"), "file": up.get("name"),
+                         "name": im.get("name") or up.get("name"),
+                         "mime": im["mime"], "size": up.get("size") or 0})
+    for d in payload["docs"]:
+        up = save_upload(sid, d["mime"], d["data"], d["name"])
+        if not up:
+            continue
+        meta = {"id": up.get("id"), "file": up.get("name"), "name": d["name"],
+                "mime": d["mime"], "size": up.get("size") or 0, "chars": 0, "text": ""}
+        try:
+            text, warn, pages = docparse.extract_pages(d["name"], base64.b64decode(d["data"]))
+            if text:
+                text = text[:_ASK_DOC_MAX_CHARS]
+                meta.update({"chars": len(text), "text": text})
+                if pages:
+                    meta["pages"] = pages
+                if warn:
+                    meta["warn"] = warn
+            elif warn:
+                meta["error"] = warn
+        except Exception as e:            # noqa: BLE001  解析失败也要登记文件本身
+            meta["error"] = str(e) or "解析失败"
+        docs.append(meta)
+    if not imgs and not docs:
+        return None
+    return {"images": imgs, "docs": docs,
+            "names": [x["name"] for x in (imgs + docs)]}
 
 
 def _api_agent_answer(h):
         """回答 AI 中途提出的问题（唤醒正在等待的对话线程）。
-        支持整组提交：answers 为与问题一一对应的数组；也兼容单个 answer。"""
+        支持整组提交：answers 为与问题一一对应的数组；也兼容单个 answer。
+        提问卡里选的图片 / 文档随回答一起提交，落盘后可用 attachment_read 回看。"""
         body = h._body()
+        qid = body.get("qid")
         answers = body.get("answers")
         if answers is None:
             answers = body.get("answer")
-        ok = agent.submit_answers(body.get("qid"), answers)
+        # 先确认提问还在等：超时后再落附件只会留下没人认领的文件
+        meta = agent.ask_meta(qid) or {}
+        if not meta:
+            return h._json({"ok": False, "error": "这条提问已超时或被取消"}, 409)
+        # 先落附件再唤醒等待线程：此时对话线程还阻塞在 wait_answers，不会并发写会话
+        atts = _register_ask_uploads(str(meta.get("sid") or ""), _ask_attach_payload(body))
+        ok = agent.submit_answers(qid, answers, attachments=atts)
         if not ok:
             # 超时 / 被取消 / qid 已失效：前端据此把卡片恢复成可操作并提示，
             # 而不是让用户以为已经答上了。
             return h._json({"ok": False, "error": "这条提问已超时或被取消"}, 409)
-        h._json({"ok": True})
+        h._json({"ok": True, "attachments": atts or None})
+
+
+@route("/api/interactions")
+def _api_interactions(h):
+        """当前等待用户处理的交互（审批 / 提问 / 计划审批）。
+
+        这些卡片原本只随 SSE 事件下发一次；断线、刷新、切换会话后前端就拿不到了，
+        后端却还在等。前端用这份快照把丢失的卡片重建出来。
+        """
+        body = h._body()
+        sid = str(body.get("session_id") or "").strip()
+        h._json({"ok": True, "items": agent.pending_interactions(sid)})
 
 
 @route("/api/agent/ask/dismiss")

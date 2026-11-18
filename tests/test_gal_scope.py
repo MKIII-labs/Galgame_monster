@@ -1,15 +1,6 @@
 # -*- coding: utf-8 -*-
-"""GAL 剧场独立会话 / 记忆隔离，以及会话记忆写入偏好修正。"""
+"""会话记忆隔离与写入偏好（原 GAL 剧场用例，GAL 下线后保留通用部分）。"""
 from app import context, knowledge, mem_tool, prompt_assembly as pa, sessions
-
-
-def test_session_defaults_are_isolated():
-    s = {}
-    sessions.ensure_session_kb_fields(s)
-    assert s["gal_scope"] == "main"
-    assert s["gal_use_profile"] is False
-    assert s["gal_use_kb"] is False
-    assert s["gal_use_rules"] is False
 
 
 def test_session_use_profile_defaults_on_and_exposed():
@@ -42,16 +33,6 @@ def test_tool_prompt_can_skip_session_and_kb():
     s = {"ai_write": True, "memory": {"nodes": []}, "kb_ids": []}
     assert mem_tool.build_tool_prompt(
         s, include_profile=False, include_kb=False, include_session=False) == ""
-
-
-def test_slim_sessions_exposes_gal_flags():
-    s = {"id": "s1", "title": "剧场", "updated_at": 1, "messages": [],
-         "gal_scope": "gal", "gal_use_profile": True,
-         "gal_use_kb": False, "gal_use_rules": True}
-    item = sessions.slim_sessions({"current": "s1", "sessions": [s]})["sessions"][0]
-    assert item["gal_scope"] == "gal"
-    assert item["gal_use_profile"] is True
-    assert item["gal_use_rules"] is True
 
 
 def test_slim_sessions_exposes_approval_mode():
@@ -96,31 +77,7 @@ def test_trim_compress_marks_drop_and_shift():
     assert [m["index"] for m in s["compress_marks"]] == [1, 2]
 
 
-def test_new_gal_session_marks_scope(monkeypatch):
-    from app.api import sessions as api_sessions
-    data = {"current": "", "sessions": []}
-    monkeypatch.setattr(api_sessions, "load_sessions", lambda: data)
-    monkeypatch.setattr(api_sessions, "save_sessions", lambda d: None)
-    monkeypatch.setattr(api_sessions.saves, "add_save", lambda *a, **k: None)
-
-    class H:
-        def _body(self):
-            return {"gal_scope": "gal", "gal_use_profile": True, "gal_use_rules": True}
-
-        def _ok_sessions(self, d):
-            self.data = d
-
-    h = H()
-    api_sessions._api_session_new(h)
-    s = h.data["sessions"][0]
-    assert s["gal_scope"] == "gal"
-    assert s["gal_enabled"] is True
-    assert s["kb_ids"] == []
-    assert s["gal_use_profile"] is True
-    assert s["gal_use_rules"] is True
-
-
-def test_gal_writable_scopes_can_exclude_global(monkeypatch):
+def test_writable_scopes_can_exclude_global(monkeypatch):
     monkeypatch.setattr(mem_tool, "load_kb_index",
                         lambda: {"kbs": [
                             {"id": "kb_x", "name": "数学", "ai_write": True},
@@ -131,24 +88,6 @@ def test_gal_writable_scopes_can_exclude_global(monkeypatch):
     assert [k for k, _ in mem_tool.writable_scopes(s)] == ["session", "kb_x", "kb_p"]
     assert [k for k, _ in mem_tool.writable_scopes(
         s, include_profile=False, include_kb=False)] == ["session"]
-
-
-def test_gal_chat_ops_only_allow_session(monkeypatch):
-    sess = {"id": "s1", "gal_scope": "gal", "memory": {"nodes": [], "edges": []}}
-    monkeypatch.setattr(mem_tool, "load_sessions", lambda: {"sessions": [sess]})
-    monkeypatch.setattr(mem_tool, "find_session", lambda data, sid: sess)
-    monkeypatch.setattr(mem_tool, "load_kb_index", lambda: {"kbs": []})
-    monkeypatch.setattr(mem_tool, "load_profile", lambda: {"auto_learn_enabled": False})
-    seen = {}
-
-    def fake_apply(sid, allowed, ops):
-        seen["allowed"] = allowed
-        return {}, ["作用域 kb_x 不可写"], {}
-
-    monkeypatch.setattr(mem_tool, "apply_memory_ops", fake_apply)
-    out = mem_tool.apply_chat_ops("s1", [{"scope": "kb_x", "op": "add", "title": "x"}])
-    assert seen["allowed"] == []
-    assert out and out["problems"]
 
 
 def test_memory_prompt_prefers_session_scope():
@@ -184,23 +123,6 @@ def test_profile_read_block_is_marked_readonly(monkeypatch):
     text = knowledge.profile_read_block()
     assert "只读" in text and "不要修改" in text
     assert "表达偏好" in text and "先给结论" in text
-
-
-def test_gal_prompt_flags_reach_retrieval(monkeypatch):
-    seen = {}
-
-    def spy(s, q, exclude_pinned=False, skip_profile=False, include_kbs=True,
-            include_session=True):
-        seen.update(exclude_pinned=exclude_pinned, skip_profile=skip_profile,
-                    include_kbs=include_kbs, include_session=include_session)
-        return "", 0
-
-    monkeypatch.setattr(pa, "retrieve_memory", spy)
-    pa.base_system_prompt({"gal_scope": "gal"}, "q", gal_mode=True,
-                          profile_manual="", tool_text="工具",
-                          skip_profile=True, include_kbs=False)
-    assert seen == {"exclude_pinned": True, "skip_profile": True,
-                    "include_kbs": False, "include_session": True}
 
 
 def test_profile_text_injected_readonly():

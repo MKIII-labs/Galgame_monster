@@ -67,18 +67,6 @@ def test_tool_and_acceptance_metrics(tmp_path):
     assert bad.startswith("❌")
 
 
-def test_fidelity_gate_action():
-    g = chat._fidelity_gate_action
-    assert g("nudge", False, None, 70, False, False) == "allow"
-    assert g("off", True, 30, 70, False, False) == "allow"
-    assert g("nudge", True, 80, 70, False, False) == "allow"
-    assert g("nudge", True, 44, 70, False, False) == "nudge"
-    assert g("nudge", True, 44, 70, False, True) == "allow"      # 已提醒过一次
-    assert g("strict", True, 44, 70, False, True) == "block"
-    assert g("strict", True, 44, 70, True, True) == "allow"      # 写了豁免理由
-    assert g("nudge", True, None, 70, False, False) == "allow"   # 没有分数不拦
-
-
 def test_schema_and_plan_mode_expose_image_compare():
     names = [t["function"]["name"]
              for t in agent.native_tool_schemas(agent_on=True,
@@ -165,12 +153,3 @@ def test_see_image_multi_capture(monkeypatch, tmp_path):
         {"paths": ["a.png", "b.png"], "question": "比较两张"})
     assert len(seen["images"]) == 2 and seen["q"] == "比较两张"
     assert "回落" in text and undo is None and write is False
-
-
-def test_fidelity_stale_next():
-    f = chat._fidelity_stale_next
-    assert f([50, 55], 0) == 0                     # 次数不够
-    assert f([50, 55, 56], 0) == 1                 # 比此前最佳高 1 → 仍算没明显提升
-    assert f([50, 55, 60], 0) == 0                 # 明显提升，清零
-    assert f([50, 55, 55], 1) == 2                 # 连续第二次没提升
-    assert f([50, 55, 40], 1) == 2                 # 变差也算没提升

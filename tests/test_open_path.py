@@ -35,7 +35,6 @@ def test_open_dir_reuses_most_recent(monkeypatch, tmp_path):
                  _session("other", str(tmp_path), 3))
     monkeypatch.setattr(open_session, "load_sessions", lambda: data)
     monkeypatch.setattr(open_session, "save_sessions", lambda d: None)
-    monkeypatch.setattr(open_session.saves, "add_save", lambda *a, **k: None)
     s, created = open_session.open_dir_session(str(folder))
     assert created is False
     assert s["id"] == "new"
@@ -48,7 +47,6 @@ def test_open_dir_creates_session(monkeypatch, tmp_path):
     data = _data()
     monkeypatch.setattr(open_session, "load_sessions", lambda: data)
     monkeypatch.setattr(open_session, "save_sessions", lambda d: None)
-    monkeypatch.setattr(open_session.saves, "add_save", lambda *a, **k: None)
     s, created = open_session.open_dir_session(str(folder))
     assert created is True
     assert s["title"] == "Game"

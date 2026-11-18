@@ -151,7 +151,8 @@ def turn_begin(sid):
     from .base import MAX_TURNS
     from .state import (_TURNS, _turns_lock)
     with _turns_lock:
-        _TURNS[sid] = {"tokens": [], "ts": time.time()}
+        _TURNS[sid] = {"tokens": [], "ts": time.time(),
+                       "id": "t%d" % int(time.time() * 1000)}
         if len(_TURNS) > MAX_TURNS:
             oldest = sorted(_TURNS.items(), key=lambda kv: kv[1]["ts"])[0][0]
             if oldest != sid:

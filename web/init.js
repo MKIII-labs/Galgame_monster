@@ -70,7 +70,7 @@ function upgradeMath() {
 }
 
 // 消息重新渲染时可能再次插入 math-pending（尤其是 KaTeX 晚于首屏加载）。
-// 监听 #chat / #gal-text，发现新的待渲染公式就补一次。
+// 监听 #chat，发现新的待渲染公式就补一次。
 let _mathUpgradeTimer = null;
 function scheduleMathUpgrade() {
   if (!window.katex) return;
@@ -89,15 +89,13 @@ function watchMathNodes() {
       }
     }
   });
-  ['chat', 'gal-text'].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) obs.observe(el, { childList: true, subtree: true });
-  });
+  const chatEl = document.getElementById('chat');
+  if (chatEl) obs.observe(chatEl, { childList: true, subtree: true });
 }
 
 function upgradeCode() {
   if (!window.hljs) return;
-  document.querySelectorAll('#chat pre code.hljs, #gal-text pre code.hljs').forEach((el) => {
+  document.querySelectorAll('#chat pre code.hljs').forEach((el) => {
     if (el.dataset.upgraded) return;
     el.dataset.upgraded = '1';
     const lang = el.getAttribute('data-lang');
@@ -174,10 +172,15 @@ async function init() {
   const _running = Array.isArray(data.streaming) ? data.streaming : [];
   state.streamingSids = {};
   _running.forEach((id) => { state.streamingSids[String(id)] = true; });
-  applyTheme(state.config.theme);
-  galApplyTheme();
+  // 主题以本地记录优先（<head> 里已经按它画了首帧，这里保持一致，避免闪一下旧配色）；
+  // 没有本地记录时再用配置里的值，老配置 light / dark 仍然属于「现代扁平化」。
+  let bootTheme = state.config.theme;
+  try { bootTheme = localStorage.getItem('gm.theme') || bootTheme; } catch (e) { /* 忽略 */ }
+  applyTheme(bootTheme);
   renderSessions();
   renderMessages();
+  // 上次断线 / 重开窗口时丢失的审批卡、提问卡：按服务端快照补回来
+  if (typeof renderPendingCards === 'function') renderPendingCards();
   renderContextBar(data.context);
   // 远端流（刷新后本地没有流对象）也要立刻把「停止」按钮亮起来：
   // 以前只填了 streamingSids，没有同步 UI，结果界面显示「模型输出中」却没有停止键。
@@ -220,7 +223,6 @@ async function init() {
   // 设置入口 / 快捷键由 settings.js 在 DOM 就绪后统一绑定，避免和启动顺序耦合
   bindKbEvents();
   bindNotesEvents();
-  bindSavesEvents();
   bindTitlebar();
 
   // 弹窗无障碍语义：7 个 .modal 共用，一处补齐
@@ -245,12 +247,33 @@ async function init() {
   $('#btn-reload').onclick = () => location.reload();
 
   $('#btn-theme').onclick = () => {
-    const next = isDarkTheme() ? 'light' : 'dark';
-    applyTheme(next);
-    api('/api/config', Object.assign({}, state.config, { theme: next })).then(() => {
-      state.config.theme = next;
-    });
+    const style = document.documentElement.getAttribute('data-style') || 'aurora';
+    if (style === 'flat') {
+      // 现代扁平化：这个按钮只负责浅色 ↔ 深色
+      const cur = document.documentElement.getAttribute('data-theme') || 'light';
+      const next = cur === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      api('/api/config', Object.assign({}, state.config, { theme: next })).then(() => {
+        state.config.theme = next;
+      });
+      return;
+    }
+    // 雾光：左下角按钮是这套主题专属的「氛围」入口（静谧 → 流动 → 辉光）
+    if (typeof cycleMood === 'function') cycleMood();
   };
+
+  // 雾光卡片：指针跟随高光（CSS 用 --mx / --my 画一层很淡的径向光）
+  // 只在悬停到卡片时写变量，避免全局 pointermove 频繁触发布局
+  document.addEventListener('pointermove', (e) => {
+    if (document.documentElement.getAttribute('data-style') !== 'aurora') return;
+    const el = e.target && e.target.closest
+      ? e.target.closest('.hall-card,.work-task,.mk-plugin,.mk-card,.theme-card,.mood-card')
+      : null;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    el.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+    el.style.setProperty('--my', (e.clientY - r.top) + 'px');
+  }, { passive: true });
 
   // 深度思考开关 + 档位（状态存进 config.json，重启保留）
   // 档位不再用常驻下拉：和 Agent 一样收进小箭头浮层，工具栏只留一个胶囊
@@ -332,7 +355,6 @@ async function init() {
   };
 
   // 用量统计
-  $('#btn-usage').onclick = () => openUsage('day7');
   $('#btn-close-usage').onclick = closeUsage;
   $$('#usage-modal .tab').forEach((t) => {
     t.onclick = () => openUsage(t.dataset.usageRange);
@@ -378,6 +400,7 @@ async function init() {
   $('#btn-sandbox').onclick = pickSandbox;
   if ($('#btn-sandbox-open')) $('#btn-sandbox-open').onclick = openSandboxFolder;
   $('#btn-sandbox-path').onclick = pickSandboxPath;
+  if ($('#btn-sandbox-clear')) $('#btn-sandbox-clear').onclick = clearSandbox;
   // 写入审批档位：手动 / 自动 / 完全访问 / 自定义
   document.querySelectorAll('#agent-menu .approve-opt').forEach((btn) => {
     btn.onclick = (e) => {
@@ -396,291 +419,35 @@ async function init() {
   syncAgentUI();
 
   // IDE / Solo 模式
-  $$('#mode-switch .ms-btn').forEach((b) => { b.onclick = () => setUiMode(b.dataset.mode); });
-  if ($('#gal-char-btn')) $('#gal-char-btn').onclick = () => galToggleChars();
-  if ($('#gal-manage')) $('#gal-manage').onclick = () => galToggleChars(true);
-  if ($('#gal-script')) $('#gal-script').onclick = () => galToggleScript();
-  if ($('#gal-script-close')) $('#gal-script-close').onclick = () => galToggleScript(false);
-  if ($('#gal-script-gen')) $('#gal-script-gen').onclick = galGenerateScript;
-  if ($('#gal-review')) $('#gal-review').onclick = () => galToggleReview();
-  if ($('#gal-review-close')) $('#gal-review-close').onclick = () => galToggleReview(false);
-  if ($('#gal-journal')) $('#gal-journal').onclick = () => galToggleJournal();
-  if ($('#gal-journal-top')) $('#gal-journal-top').onclick = () => galToggleJournal();
-  if ($('#gal-jview-list')) $('#gal-jview-list').onclick = () => galSetJournalView('list');
-  if ($('#gal-jview-graph')) $('#gal-jview-graph').onclick = () => galSetJournalView('graph');
-  if ($('#gal-journal-close')) $('#gal-journal-close').onclick = () => galToggleJournal(false);
-  if ($('#gal-clone')) $('#gal-clone').onclick = () => galToggleClone();
-  if ($('#gal-clone-close')) $('#gal-clone-close').onclick = () => galToggleClone(false);
-  if ($('#gal-clone-test')) $('#gal-clone-test').onclick = galCloneTest;
-  if ($('#gal-clone-save')) $('#gal-clone-save').onclick = galCloneSave;
-  if ($('#gal-clone-upload')) {
-    $('#gal-clone-upload').onchange = (e) => {
-      const f = e.target.files && e.target.files[0];
-      e.target.value = '';
-      galCloneUpload(f);
+  const PREFETCH_GROUP = { ide: 'xterm', hall: 'hall', work: 'work' };
+  $$('#mode-switch .ms-btn').forEach((b) => {
+    b.onclick = () => setUiMode(b.dataset.mode);
+    // 悬停 / 聚焦就提前下载该模式的重脚本，点击时少等一次网络往返
+    const warm = () => {
+      const g = PREFETCH_GROUP[b.dataset.mode];
+      if (g && typeof gmPrefetchGroup === 'function') gmPrefetchGroup(g);
     };
-  }
-  if ($('#gal-more')) $('#gal-more').onclick = (e) => { e.stopPropagation(); galToggleMenu(); };
-  if ($('#gal-menu')) {
-    $('#gal-menu').addEventListener('click', (e) => { if (e.target.closest('button')) galToggleMenu(false); });
-  }
-  document.addEventListener('click', (e) => {
-    const m = $('#gal-menu');
-    if (!m || m.classList.contains('hidden')) return;
-    if (e.target.closest('#gal-menu') || e.target.closest('#gal-more')) return;
-    galToggleMenu(false);
+    b.addEventListener('mouseenter', warm, { once: true });
+    b.addEventListener('focus', warm, { once: true });
   });
+  const warmPlugins = () => {
+    if (typeof gmPrefetchGroup === 'function') gmPrefetchGroup('plugins');
+  };
+  const pluginsBtn = $('#btn-plugins');
+  if (pluginsBtn) {
+    pluginsBtn.addEventListener('mouseenter', warmPlugins, { once: true });
+    pluginsBtn.addEventListener('focus', warmPlugins, { once: true });
+  }
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    const sv = $('#saves-modal');
-    if (sv && !sv.classList.contains('hidden')) { closeSaves(); return; }   // 存档弹窗最上层
-    // 另外四个弹窗原先都不支持 Esc（只能点 ✕），这里一并接上，键盘用户不必再去够鼠标
+    // 几个弹窗原先都不支持 Esc（只能点 ✕），这里一并接上，键盘用户不必再去够鼠标
     const um = $('#usage-modal');
     if (um && !um.classList.contains('hidden')) { closeUsage(); return; }
     const nm = $('#notes-modal');
     if (nm && !nm.classList.contains('hidden')) { closeNotesModal(); return; }
     const km = $('#kb-modal');
     if (km && !km.classList.contains('hidden')) { closeKbModal(); return; }
-    const gmed = $('#gal-modal');
-    if (gmed && !gmed.classList.contains('hidden')) { hideWithAnim(gmed); return; }
-    const ic = $('#gal-intro-card');
-    if (ic && !ic.classList.contains('hidden')) { galCloseIntroCard(); return; }   // 开场卡在最上层
-    const gm = $('#gal-menu');
-    if (gm && !gm.classList.contains('hidden')) { galToggleMenu(false); return; }
-    const bp = $('#gal-bgs');
-    if (bp && !bp.classList.contains('hidden')) { galToggleBgs(false); return; }
-    const mp = $('#gal-bgms');
-    if (mp && !mp.classList.contains('hidden')) { galToggleBgms(false); return; }
-    const cp = $('#gal-clone-panel');
-    if (cp && !cp.classList.contains('hidden')) { galToggleClone(false); return; }
-    const sp = $('#gal-script-panel');
-    if (sp && !sp.classList.contains('hidden')) { galToggleScript(false); return; }
-    const p = $('#gal-review-panel');
-    if (p && !p.classList.contains('hidden')) { galToggleReview(false); return; }
-    const jp = $('#gal-journal-panel');
-    if (jp && !jp.classList.contains('hidden')) { galToggleJournal(false); return; }
   });
-  if ($('#gal-refresh')) {
-    $('#gal-refresh').onclick = async () => { await galLoadCharacters(); toast('角色列表已刷新'); };
-  }
-  if ($('#gal-chars-search')) {
-    $('#gal-chars-search').oninput = () => galRenderCharCards();
-    $('#gal-chars-search').onkeydown = (e) => { if (e.key === 'Escape') galToggleChars(false); };
-  }
-  if ($('#gal-import')) $('#gal-import').onclick = () => $('#gal-import-file').click();
-  if ($('#gal-import-file')) {
-    $('#gal-import-file').onchange = (e) => {
-      const files = e.target.files;
-      e.target.value = '';
-      galImportPacks(files);
-    };
-  }
-  if ($('#gal-import-dir')) $('#gal-import-dir').onclick = galImportPacksDir;
-  if ($('#gal-export')) $('#gal-export').onclick = galExportCharacter;
-  if ($('#gal-del-char')) $('#gal-del-char').onclick = galDeleteCharacter;
-  // 点击面板外部时收起角色面板
-  document.addEventListener('click', (e) => {
-    const panel = $('#gal-chars');
-    if (!panel || panel.classList.contains('hidden')) return;
-    if (e.target.closest('#gal-chars') || e.target.closest('#gal-char-btn') || e.target.closest('#gal-manage')) return;
-    galToggleChars(false);
-  });
-  // 背景管理面板
-  if ($('#gal-bg-btn')) $('#gal-bg-btn').onclick = () => galToggleBgs();
-  if ($('#gal-bgs-search')) {
-    $('#gal-bgs-search').oninput = () => galRenderBgCards();
-    $('#gal-bgs-search').onkeydown = (e) => { if (e.key === 'Escape') galToggleBgs(false); };
-  }
-  if ($('#gal-bg-add')) $('#gal-bg-add').onclick = () => $('#gal-bg-file').click();
-  if ($('#gal-bg-file')) {
-    $('#gal-bg-file').onchange = (e) => {
-      const files = e.target.files;
-      e.target.value = '';
-      galBgUpload(files);
-    };
-  }
-  if ($('#gal-bg-edit')) $('#gal-bg-edit').onclick = () => galBgOpenEditor();
-  if ($('#gal-bg-ed-save')) $('#gal-bg-ed-save').onclick = galBgSaveEditor;
-  if ($('#gal-bg-ed-cancel')) $('#gal-bg-ed-cancel').onclick = () => galBgOpenEditor(false);
-  if ($('#gal-bg-use')) $('#gal-bg-use').onclick = galBgUse;
-  if ($('#gal-bg-del')) $('#gal-bg-del').onclick = galBgDelete;
-  // 音乐（BGM）管理面板
-  if ($('#gal-bgm-btn')) $('#gal-bgm-btn').onclick = () => galToggleBgms();
-  if ($('#gal-bgms-search')) {
-    $('#gal-bgms-search').oninput = () => galRenderBgmCards();
-    $('#gal-bgms-search').onkeydown = (e) => { if (e.key === 'Escape') galToggleBgms(false); };
-  }
-  if ($('#gal-bgm-add')) $('#gal-bgm-add').onclick = () => $('#gal-bgm-file').click();
-  if ($('#gal-bgm-file')) {
-    $('#gal-bgm-file').onchange = (e) => {
-      const files = e.target.files;
-      e.target.value = '';
-      galBgmUpload(files);
-    };
-  }
-  if ($('#gal-bgm-edit')) $('#gal-bgm-edit').onclick = () => galBgmOpenEditor();
-  if ($('#gal-bgm-ed-save')) $('#gal-bgm-ed-save').onclick = galBgmSaveEditor;
-  if ($('#gal-bgm-ed-cancel')) $('#gal-bgm-ed-cancel').onclick = () => galBgmOpenEditor(false);
-  if ($('#gal-bgm-play')) $('#gal-bgm-play').onclick = galBgmPreview;
-  if ($('#gal-bgm-use')) $('#gal-bgm-use').onclick = galBgmUse;
-  if ($('#gal-bgm-stop')) $('#gal-bgm-stop').onclick = galBgmStop;
-  if ($('#gal-bgm-del')) $('#gal-bgm-del').onclick = galBgmDelete;
-  if ($('#gal-stats-btn')) $('#gal-stats-btn').onclick = galToggleStats;
-  if ($('#gal-stats-reset')) $('#gal-stats-reset').onclick = galResetStats;
-  // 角色介绍开场卡
-  if ($('#gal-intro-start')) $('#gal-intro-start').onclick = () => {
-    galCloseIntroCard();
-    const inp = $('#input');
-    if (inp) inp.focus();
-  };
-  if ($('#gal-intro-close')) $('#gal-intro-close').onclick = galCloseIntroCard;
-  // 点击面板外部时收起背景面板
-  document.addEventListener('click', (e) => {
-    const panel = $('#gal-bgs');
-    if (!panel || panel.classList.contains('hidden')) return;
-    if (e.target.closest('#gal-bgs') || e.target.closest('#gal-bg-btn')) return;
-    galToggleBgs(false);
-  });
-  // 点击面板外部时收起音乐面板
-  document.addEventListener('click', (e) => {
-    const panel = $('#gal-bgms');
-    if (!panel || panel.classList.contains('hidden')) return;
-    if (e.target.closest('#gal-bgms') || e.target.closest('#gal-bgm-btn')) return;
-    galToggleBgms(false);
-  });
-  if ($('#gal-tts')) $('#gal-tts').onclick = galToggleTts;
-  if ($('#gal-skip')) $('#gal-skip').onclick = galSkipSpeech;
-  if ($('#speech-tts-test')) $('#speech-tts-test').onclick = galTestTts;
-  if ($('#speech-tts-voices')) $('#speech-tts-voices').onclick = galLoadTtsVoices;
-  if ($('#gal-edit')) {
-    $('#gal-edit').onclick = () => galOpenEditor(galState.charId || (curSession() || {}).gal_character_id || '', false);
-  }
-  if ($('#gal-new-char')) $('#gal-new-char').onclick = () => galOpenEditor('', true);
-  // 首次进 GAL 的引导气泡：点「知道了」关闭，之后不再出现
-  if ($('#gal-tip-ok')) $('#gal-tip-ok').onclick = () => galCloseTip();
-  // 对白框右下角的推进指示器：点它等同按空格（打字中 = 立即补全）
-  if ($('#gal-adv-hint')) $('#gal-adv-hint').onclick = () => galAdvance();
-  // 段末的「轮到你了」提示：点它聚焦底部输入框，直接说点什么
-  const nudgeEl = $('#gal-nudge');
-  if (nudgeEl) {
-    const focusComposer = () => { const i = $('#input'); if (i) { i.focus(); autoGrow(); } };
-    nudgeEl.onclick = focusComposer;
-    nudgeEl.onkeydown = (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault(); e.stopPropagation();   // 别让它冒泡成「推进对话」
-        focusComposer();
-      }
-    };
-  }
-  // GAL 输入区：工具条默认收起（只留 ⋯ / 附件或停止 / 麦克风 / 发送），点「⋯」展开或收起
-  const moreBtn = $('#btn-more');
-  if (moreBtn) {
-    moreBtn.onclick = () => {
-      const box = document.querySelector('.composer-box');
-      if (!box) return;
-      const open = box.classList.toggle('gal-tools-open');
-      moreBtn.title = open ? '收起输入选项' : '更多输入选项';
-    };
-  }
-  // GAL：聚焦输入框时，立绘轻轻「凑近」一点（表示她在听你说）
-  const composerInput = $('#input');
-  if (composerInput) {
-    composerInput.addEventListener('focus', () => document.documentElement.classList.add('gal-input-focus'));
-    composerInput.addEventListener('blur', () => document.documentElement.classList.remove('gal-input-focus'));
-  }
-  // 角色编辑器：主题色 + AI 帮写
-  if ($('#gal-ed-color')) {
-    $('#gal-ed-color').oninput = (e) => { galEdColor = e.target.value; };
-  }
-  if ($('#gal-ed-color-clear')) {
-    $('#gal-ed-color-clear').onclick = () => {
-      galEdColor = '';
-      if ($('#gal-ed-color')) $('#gal-ed-color').value = '#7c9cff';
-    };
-  }
-  if ($('#gal-ed-draft')) $('#gal-ed-draft').onclick = galAiDraft;
-  if ($('#gal-auto-btn')) $('#gal-auto-btn').onclick = galToggleAuto;
-  // 点击舞台（对白框 / 立绘区）推进；按钮与面板不拦
-  const galStage = document.querySelector('#gal-panel .gal-stage');
-  if (galStage) {
-    galStage.addEventListener('click', (e) => {
-      if (e.target.closest('button, a, select, input, textarea, .gal-review, .gal-chars, .gal-menu, .gal-bar')) return;
-      galAdvance();
-    });
-  }
-  // 选项现在浮在画面中部（传统日式 galgame 的做法），不再顶起对白框；
-  // 只需要跟着对白框自身高度同步立绘层底边（立绘永不被压住）。
-  if (typeof ResizeObserver !== 'undefined') {
-    const dlg = $('#gal-dialog');
-    if (dlg) {
-      dlg.style.bottom = '';                        // 清掉旧逻辑可能留下的偏移
-      new ResizeObserver(galSyncSpriteLift).observe(dlg);
-    }
-    window.addEventListener('resize', galSyncSpriteLift);
-  }
-  document.addEventListener('keydown', (e) => {
-    // 焦点在输入框里时 Ctrl 属于编辑操作，不该触发剧情快进
-    galState.fast = !isTypingTarget(e.target) && !!e.ctrlKey;
-    galHotkeys(e);
-  });
-  document.addEventListener('keyup', (e) => { galState.fast = !isTypingTarget(e.target) && !!e.ctrlKey; });
-  window.addEventListener('blur', () => { galState.fast = false; });   // 失焦兜底
-  // 工具条：配音预设快捷切换
-  if ($('#gal-tts-preset')) $('#gal-tts-preset').onchange = (e) => galSwitchTtsPreset(e.target.value);
-  // 角色编辑器：配音预设
-  if ($('#gal-ed-tts-preset')) {
-    $('#gal-ed-tts-preset').onchange = (e) => {
-      galEdTtsWrite();                       // 先把旧预设的改动写回
-      galEdTts.active = e.target.value || '';
-      galEdTtsRender();
-    };
-  }
-  if ($('#gal-ed-tts-add')) {
-    $('#gal-ed-tts-add').onclick = async () => {
-      const n = ((await appPrompt('新建配音预设名称（如：日常 / 激动）')) || '').trim();
-      if (!n) return;
-      if (galEdTts.presets[n]) { toast('预设「' + n + '」已存在'); return; }
-      galEdTtsWrite();
-      galEdTts.presets[n] = { provider: '', voice: '', model: '', speed: 1.0, url: '' };
-      galEdTts.active = n;
-      galEdTtsRender();
-    };
-  }
-  if ($('#gal-ed-tts-del')) {
-    $('#gal-ed-tts-del').onclick = () => {
-      const n = galEdTts.active;
-      if (!n) { toast('请先在下拉里选择要删除的预设'); return; }
-      if (!confirm('删除配音预设「' + n + '」？')) return;
-      delete galEdTts.presets[n];
-      galEdTts.active = Object.keys(galEdTts.presets)[0] || '';
-      galEdTtsRender();
-    };
-  }
-  if ($('#gal-ed-tts-test')) $('#gal-ed-tts-test').onclick = galEdTtsTest;
-  ['gal-ed-tts-provider', 'gal-ed-tts-voice', 'gal-ed-tts-model', 'gal-ed-tts-speed',
-   'gal-ed-tts-url', 'gal-ed-tts-prompt', 'gal-ed-tts-ref', 'gal-ed-tts-lang',
-   'gal-ed-tts-gpt', 'gal-ed-tts-sovits'].forEach((id) => {
-    const el = $('#' + id);
-    if (el) { el.oninput = () => galEdTtsWrite(); el.onchange = () => galEdTtsWrite(); }
-  });
-  if ($('#gal-ed-ref-upload')) {
-    $('#gal-ed-ref-upload').onchange = (e) => {
-      const f = e.target.files && e.target.files[0];
-      e.target.value = '';
-      galUploadRefAudio(f);
-    };
-  }
-  if ($('#gal-modal-close')) $('#gal-modal-close').onclick = () => hideWithAnim($('#gal-modal'));
-  if ($('#gal-ed-cancel')) $('#gal-ed-cancel').onclick = () => hideWithAnim($('#gal-modal'));
-  if ($('#gal-ed-save')) $('#gal-ed-save').onclick = galSaveEditor;
-  if ($('#gal-ed-add-sprite')) $('#gal-ed-add-sprite').onclick = () => galEditorAddRow(null);
-  if ($('#gal-ed-upload')) {
-    $('#gal-ed-upload').onchange = (e) => {
-      const files = e.target.files;
-      e.target.value = '';
-      galEditorUpload(files);
-    };
-  }
   $('#ide-refresh').onclick = () => loadIdeTree();
   ideInitNotice();
   if ($('#ide-tree')) $('#ide-tree').addEventListener('keydown', ideTreeKeydown);
@@ -744,12 +511,12 @@ async function init() {
     else if (hit.id === 'ide.palette') idePaletteOpen('cmd');
     else if (hit.id === 'ide.sidebar') ideToggleSidebar();
     else if (hit.id === 'ide.terminal') ideTermToggle();
+    else if (hit.id === 'ide.terminalNew') ideTermNew();
     else if (hit.id.indexOf('ide.debug') === 0
              && typeof ideDebugShortcut === 'function') ideDebugShortcut(hit.id);
   });
-  // 对话内查找（Ctrl+F）；GAL 模式下不接管，设置面板打开时也不抢
+  // 对话内查找（Ctrl+F）；设置面板打开时不接管
   document.addEventListener('keydown', (e) => {
-    if (state.uiMode === 'gal') return;
     const m = $('#modal');
     if (m && !m.classList.contains('hidden')) return;
     // 编辑器聚焦时把 Ctrl+F 让给 Monaco —— 那是 VS Code 的「编辑器内查找」。
@@ -773,11 +540,12 @@ async function init() {
     if (notes && !notes.classList.contains('hidden')) {
       if (!state.noteCurrent) { toast('先打开一篇笔记'); return; }
       e.preventDefault();
-      setNoteMode(state.noteMode === 'edit' ? 'preview' : 'edit');
-      toast(state.noteMode === 'edit' ? '已切换到编辑（源码）' : '已切换到预览');
+      // 块编辑 ↔ Markdown 源码（预览 / 分栏用顶部的视图切换）
+      const next = typeof notesToggleView === 'function' ? notesToggleView() : '';
+      toast(next === 'source' ? '已切换到 Markdown 源码' : '已切换到块编辑');
       return;
     }
-    if (state.uiMode !== 'solo') return;      // IDE / GAL 的 Ctrl+Shift+V 有别的语义
+    if (state.uiMode !== 'solo') return;      // IDE 的 Ctrl+Shift+V 有别的语义
     e.preventDefault();
     toggleChatRenderByKey();
   });
@@ -791,8 +559,7 @@ async function init() {
   let startMode = (state.config && state.config.ui_mode) || 'solo';
   // 嵌入模式用 URL 指定工作区（?mode=ide|hall|work），优先于上次配置
   if (embedCfg.mode) startMode = embedCfg.mode;
-  // GAL 剧场已从界面下线（入口、设置页签、大厅卡片均已移除）：历史配置里若是 gal，
-  // 统一落到大厅，避免直接打开一个没有入口的页面。后端与 data/gal 保留，需要时可恢复。
+  // GAL 剧场已下线：历史配置里若是 gal，统一落到大厅
   if (startMode === 'gal') startMode = 'hall';
   applyUiMode(startMode);
   // ?hall=<id>：嵌入时直接展开某个大厅模块（模块脚本按需加载，等加载完再打开）
@@ -887,18 +654,43 @@ async function init() {
   if ($('#autochat-max')) $('#autochat-max').onchange = updateAutoChatGap;
   if ($('#autochat-test')) $('#autochat-test').onclick = testAutoChat;
   startEvents();          // 常驻通道：服务端可在没人提问时主动推送
+  // 从后台 / 休眠切回前台：SSE 可能已断，待办状态先对一次账
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && typeof syncPendingState === 'function') syncPendingState();
+  });
 
   // IDE 模式：拖动分隔条调整右侧聊天栏宽度（双击恢复默认；松手后记住）
   (function setupIdeResizer() {
     const rz = $('#ide-resizer');
     if (!rz) return;
-    const clamp = (v) => Math.max(260, Math.min(760, Math.round(v)));
-    const apply = (w) => document.documentElement.style.setProperty('--ide-chat-w', w + 'px');
+    const DEFAULT_W = 460;
+    const clamp = (v) => Math.max(300, Math.min(820, Math.round(v)));
+    // 按实际栏宽给排版降级：narrow ≤440 收紧内边距，tiny ≤340 让出头像
+    const tune = (w) => {
+      const col = $('.chat-col');
+      if (!col) return;
+      col.dataset.cw = w <= 340 ? 'tiny' : (w <= 440 ? 'narrow' : '');
+    };
+    const apply = (w) => {
+      document.documentElement.style.setProperty('--ide-chat-w', w + 'px');
+      try { localStorage.setItem('gm.ideChatW', String(w)); } catch (e) { /* 隐私模式 */ }
+      tune(w);
+    };
     const saved = Number((state.config || {}).ide_chat_width);
-    if (saved >= 260 && saved <= 760) apply(saved);
+    if (saved >= 300 && saved <= 820) apply(saved);
+    // 窗口缩放 / 媒体查询（≤1200px 会把栏强制缩到 320）也会改变实际宽度，
+    // 只靠拖动时的 apply() 会让 data-cw 停在旧值。盯住真实宽度最稳。
+    const col0 = $('.chat-col');
+    if (col0 && typeof ResizeObserver === 'function') {
+      const ro = new ResizeObserver(() => {
+        const w = Math.round(col0.getBoundingClientRect().width);
+        if (w > 0) tune(w);
+      });
+      ro.observe(col0);
+    }
     const persist = () => {
       const col = $('.chat-col');
-      const w = col ? clamp(col.getBoundingClientRect().width) : 380;
+      const w = col ? clamp(col.getBoundingClientRect().width) : DEFAULT_W;
       const cfg = Object.assign({}, state.config || {}, { ide_chat_width: w });
       api('/api/config', cfg).then(() => { state.config = cfg; }).catch(() => {});
     };
@@ -910,10 +702,27 @@ async function init() {
       const startW = col.getBoundingClientRect().width;
       rz.classList.add('dragging');
       document.body.style.userSelect = 'none';
-      const onMove = (ev) => apply(clamp(startW - (ev.clientX - startX)));
+      // 拖动时给一个宽度气泡：只拖不看数字很难停到想要的宽度
+      let tip = null;
+      const showTip = (ev, w) => {
+        if (!tip) {
+          tip = document.createElement('div');
+          tip.className = 'ide-resizer-tip';
+          document.body.appendChild(tip);
+        }
+        tip.textContent = w + 'px';
+        tip.style.left = ev.clientX + 'px';
+        tip.style.top = (ev.clientY + 20) + 'px';
+      };
+      const onMove = (ev) => {
+        const w = clamp(startW - (ev.clientX - startX));
+        apply(w);
+        showTip(ev, w);
+      };
       const onUp = () => {
         rz.classList.remove('dragging');
         document.body.style.userSelect = '';
+        if (tip) { tip.remove(); tip = null; }
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
         persist();
@@ -921,7 +730,7 @@ async function init() {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
-    rz.addEventListener('dblclick', () => { apply(380); persist(); });
+    rz.addEventListener('dblclick', () => { apply(DEFAULT_W); persist(); });
   })();
 
   // IDE 模式：拖动调整左侧文件管理区宽度（双击恢复 260px；松手后记住）
@@ -961,7 +770,7 @@ async function init() {
     rz.addEventListener('dblclick', () => { apply(260); persist(); });
   })();
 
-  // 代码块：复制 / 超长折叠展开（Solo 与 GAL 舞台都要）
+  // 代码块：复制 / 超长折叠展开
   const onCodeBlockClick = (e) => {
     const foldBtn = e.target.closest('[data-fold]');
     if (foldBtn) {
@@ -976,40 +785,15 @@ async function init() {
     navigator.clipboard.writeText(code ? code.textContent : '').then(() => toast('已复制代码', 'success'));
   };
   $('#chat').addEventListener('click', onCodeBlockClick);
-  if ($('#gal-text')) $('#gal-text').addEventListener('click', onCodeBlockClick);
 
   // 设置弹窗左侧导航切换
   $$('#modal .settings-nav .snav-btn').forEach((tab) => {
     tab.onclick = () => setSettingsTab(tab.dataset.tab);
   });
 
-  // 回到底部按钮（用 .off 过渡显隐，而非 display:none 硬切）
-  // 同时维护「是否跟随最新输出」：只有贴着底才跟随，用户上翻立即锁定
-  $('#chat').addEventListener('scroll', () => {
-    const far = !nearBottom();
-    $('#btn-bottom').classList.toggle('off', !far);
-    if (typeof rememberChatScroll === 'function') rememberChatScroll();   // 记住这个会话读到哪
-    // 自己滚的（流式贴底 / 点「回到底部」）不算用户操作：scroll 事件是异步派发的，
-    // 等它回来时内容往往又长高了，再判一次 isAtBottom 就会把跟随关掉。
-    if (_programmaticScroll > 0 || Date.now() < _smoothScrollUntil) return;
-    setFollowBottom(isAtBottom(FOLLOW_SLOP));
-  });
-  // 滚轮向上 = 明确要看历史：立刻锁住，不等 scroll 事件排队。
-  // 过程折叠区有自己的滚动条：在内层滚动只影响过程跟随，不能把主窗口跟随一起关掉。
-  $('#chat').addEventListener('wheel', (e) => {
-    const body = e.target.closest && e.target.closest('.process-fold-body');
-    if (body && body.scrollHeight > body.clientHeight + 1) return;   // 内层能滚：交给它
-    if (e.deltaY < 0) setFollowBottom(false);
-  }, { passive: true });
-  $('#chat').addEventListener('touchmove', (e) => {
-    const body = e.target.closest && e.target.closest('.process-fold-body');
-    if (body && body.scrollHeight > body.clientHeight + 1) return;
-    if (_programmaticScroll > 0) return;
-    setFollowBottom(isAtBottom(FOLLOW_SLOP));
-  }, { passive: true });
-  // 图片加载 / 代码高亮 / 工具卡展开不会产生 delta，跟随状态下要补一次贴底
-  watchChatGrowth();
-  $('#btn-bottom').onclick = () => scrollToBottomSmooth();
+  // 自动跟随（贴底 / 回到底部按钮 / 用户上翻暂停）统一由 web/follow.js 绑定：
+  // 尺寸突变与用户滚动在那里分开判定，避免「内容一跳就断跟随」。
+  bindChatFollow();
 
   // 输入区高度会变（上下文进度条显隐 / 附件条 / 提示换行 / 文本域长高），
   // 按钮的 bottom 必须跟着走，否则会压到输入框上
@@ -1042,13 +826,6 @@ async function init() {
     if (app) app.classList.toggle('side-collapsed', !!on);
     // 与 <head> 内联脚本的首帧状态保持同步；展开时移除，避免 CSS 继续压成 0 宽
     document.documentElement.toggleAttribute('data-side-collapsed', !!on);
-    const t = $('#sidebar-toggle');
-    if (t) {
-      const label = on ? '展开侧栏' : '收起侧栏';
-      t.title = label;
-      t.setAttribute('aria-label', label);
-      t.setAttribute('aria-expanded', on ? 'false' : 'true');
-    }
     // 顶栏会话开关：所有模式共用，收起后仍然可见
     const top = $('#btn-sidebar-top');
     if (top) {
@@ -1067,7 +844,7 @@ async function init() {
   // Solo 以会话列表为主要工作区，默认展开；IDE / 大厅 / 工作台 / 插件默认收起。
   // 每个模式单独记忆手动开合，互不影响；Solo 仍同步服务端偏好，其余只存本地。
   const SIDEBAR_DEFAULT_COLLAPSED = {
-    solo: false, ide: true, hall: true, work: true, plugins: true, gal: true,
+    solo: false, ide: true, hall: true, work: true, plugins: true,
   };
   const SIDEBAR_MODE_KEY = 'gm.sidebarByMode.v1';
   function sidebarIsNarrow() {
@@ -1145,7 +922,6 @@ async function init() {
       }
     }
   }
-  if ($('#sidebar-toggle')) $('#sidebar-toggle').onclick = () => toggleSidebar(true);
   if ($('#btn-sidebar-top')) $('#btn-sidebar-top').onclick = () => toggleSidebar();
   bindChips();
 
@@ -1155,955 +931,19 @@ async function init() {
   input.focus();
 }
 
-/* ============================================================
-   内置笔记库（Obsidian 核心版）
-   文件树 / 编辑·预览 / [[双链]]跳转 / 关系图谱 / 反向链接 / 搜索
-   ============================================================ */
-
-let notesGraphNet = null;
-let noteSaveTimer = null;
-let noteSearchTimer = null;
-const notesPos = {};   // 节点坐标缓存：重绘时保持布局稳定
-
-function flattenNotes(tree, out) {
-  const acc = out || [];
-  (tree || []).forEach((n) => {
-    if (n.type === 'file') acc.push(n);
-    else flattenNotes(n.children, acc);
-  });
-  return acc;
-}
-
-function notesNameIndex() {
-  const map = {};
-  flattenNotes(state.noteTree).forEach((f) => {
-    map[String(f.name).toLowerCase()] = f.path;
-    map[String(f.path).replace(/\.md$/i, '').toLowerCase()] = f.path;
-  });
-  return map;
-}
-
-// [[名字]] → 已存在的笔记路径（找不到返回 null）
-function resolveNotePath(name) {
-  const key = String(name || '').trim().toLowerCase();
-  if (!key) return null;
-  const idx = notesNameIndex();
-  return idx[key] || idx[key.split('/').pop()] || null;
-}
-
-async function loadNotes() {
-  const r = await api('/api/notes/tree', {});
-  if (!r || !r.ok) { toast('笔记库读取失败'); return; }
-  state.noteTree = r.tree || [];
-  state.noteGraph = r.graph || { nodes: [], edges: [] };
-  renderNotesTree();
-  drawNotesGraph();
-}
-
-function renderNotesTree() {
-  const box = $('#nt-tree');
-  if (!box) return;
-  if (!state.noteOpen) state.noteOpen = new Set();
-  const open = state.noteOpen;
-  const rows = [];
-  const walk = (nodes, depth) => {
-    (nodes || []).forEach((n) => {
-      const pad = 8 + depth * 12;
-      if (n.type === 'dir') {
-        const isOpen = open.has(n.path);
-        rows.push('<div class="nt-row" data-dir="' + escapeHtml(n.path) + '" style="padding-left:' + pad + 'px">' +
-          '<span class="nt-caret">' + (isOpen ? '▾' : '▸') + '</span>' + icon('folder') + ' ' + escapeHtml(n.name) + '</div>');
-        if (isOpen) walk(n.children, depth + 1);
-      } else {
-        rows.push('<div class="nt-row" data-note="' + escapeHtml(n.path) + '" style="padding-left:' + pad + 'px">' +
-          '<span class="nt-caret"></span>' + icon('note') + ' ' + escapeHtml(n.name) + '</div>');
-      }
-    });
-  };
-  walk(state.noteTree, 0);
-  box.innerHTML = rows.join('') || '<div class="hint">还没有笔记，点「笔记」按钮新建一篇。</div>';
-  box.querySelectorAll('[data-dir]').forEach((el) => {
-    const toggle = () => {
-      const p = el.dataset.dir;
-      if (open.has(p)) open.delete(p); else open.add(p);
-      renderNotesTree();
-    };
-    el.onclick = toggle;
-    makeClickable(el, toggle, '文件夹：' + (el.textContent || '').trim());
-  });
-  box.querySelectorAll('[data-note]').forEach((el) => {
-    if (el.dataset.note === state.noteCurrent) el.classList.add('active');
-    const openNote2 = () => openNote(el.dataset.note);
-    el.onclick = openNote2;
-    makeClickable(el, openNote2, '笔记：' + (el.textContent || '').trim());
-  });
-}
-
-async function openNote(path) {
-  if (!path) return;
-  if (state.noteCurrent && state.noteCurrent !== path) await saveNoteNow();
-  const [r, ar] = await Promise.all([
-    api('/api/notes/get', { path: path }),
-    api('/api/notes/anno/list', { path: path }),
-  ]);
-  if (!r || !r.ok) { toast('打开失败：' + ((r && r.error) || '笔记不存在')); return; }
-  const prev = state.noteCurrent;
-  state.noteCurrent = path;
-  state.noteAnnos = (ar && ar.items) || [];
-  $('#nt-path').textContent = path;
-  $('#nt-textarea').value = r.content || '';
-  renderBacklinks(r.backlinks || []);
-  setNoteMode(state.noteMode || 'preview');
-  noteLintSchedule();               // 预览模式也要先把问题数算出来（按钮上有徽标）
-  renderNotesTree();
-  highlightNotesNode(prev, path);   // 只改高亮，不重建图谱（不丢缩放/平移）
-}
-
-function setNoteMode(mode) {
-  state.noteMode = mode === 'edit' ? 'edit' : 'preview';
-  const has = !!state.noteCurrent;
-  const ta = $('#nt-textarea');
-  const pv = $('#nt-preview-box');
-  if (state.noteMode === 'preview' && has) {
-    pv.innerHTML = safeRenderMarkdown(ta.value);
-    pv.querySelectorAll('a.wikilink').forEach((a) => {
-      if (!resolveNotePath(a.dataset.note)) a.classList.add('missing');
-    });
-    applyNoteAnnotations(pv);
-  }
-  renderNoteAnnos();
-  ta.classList.toggle('hidden', !has || state.noteMode !== 'edit');
-  pv.classList.toggle('hidden', !has || state.noteMode !== 'preview');
-  $('#nt-empty').classList.toggle('hidden', has);
-  $('#nt-edit').classList.toggle('active', state.noteMode === 'edit');
-  $('#nt-preview').classList.toggle('active', state.noteMode === 'preview');
-  // 笔记预览与对话共用同一套富媒体渲染（```svg / ```chart / ```mermaid）。
-  // 只在 innerHTML 里生成占位块、不调用 enhance 的话，图形会一直停在「渲染中…」。
-  // 放在可见性切换之后：图表初始化需要真实尺寸，隐藏状态下会量成 0。
-  if (state.noteMode === 'preview' && has && window.enhanceRichMedia) {
-    window.enhanceRichMedia(pv);
-  }
-  renderNoteLint();
-}
-
-/* ============================================================
-   Markdown 语法纠错（笔记侧）
-   ------------------------------------------------------------
-   规则引擎在 web/mdlint.js（与 IDE 共用），这里只负责：
-   · 开关（localStorage，默认开）
-   · 编辑区下方的问题条：点击跳行、单条修复、全部修正
-   · 顶部按钮上的问题数徽标（预览模式也看得到）
-   只做「提示 + 一键修正」，不会在用户没点的时候改正文。
-   ============================================================ */
-const NOTE_LINT_KEY = 'gm.notes_lint';
-let noteLintTimer = 0;
-let noteLintItems = [];
-let noteLintCollapsed = false;
-
-function noteLintEnabled() {
-  try { return localStorage.getItem(NOTE_LINT_KEY) !== '0'; } catch (e) { return true; }
-}
-
-function setNoteLintEnabled(on) {
-  try { localStorage.setItem(NOTE_LINT_KEY, on ? '1' : '0'); } catch (e) { /* 隐私模式忽略 */ }
-}
-
-function noteLintSchedule() {
-  clearTimeout(noteLintTimer);
-  if (!noteLintEnabled() || !state.noteCurrent || !window.MDLint) {
-    noteLintItems = [];
-    renderNoteLint();
-    return;
-  }
-  noteLintTimer = setTimeout(noteLintRun, 400);
-}
-
-function noteLintRun() {
-  const ta = $('#nt-textarea');
-  if (!noteLintEnabled() || !state.noteCurrent || !window.MDLint || !ta) {
-    noteLintItems = [];
-    renderNoteLint();
-    return;
-  }
-  try {
-    noteLintItems = MDLint.lint(ta.value, { noteNames: Object.keys(notesNameIndex()) });
-  } catch (e) {
-    noteLintItems = [];
-    if (window.console) console.error('[mdlint] 检查失败', e);
-  }
-  renderNoteLint();
-}
-
-function noteLintBadge() {
-  const on = noteLintEnabled();
-  const btn = $('#nt-lint');
-  if (btn) {
-    btn.classList.toggle('on', on);
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    btn.title = on ? 'Markdown 纠错：已开启（点击关闭）' : 'Markdown 纠错：已关闭（点击开启）';
-  }
-  const n = on ? noteLintItems.length : 0;
-  const b = $('#nt-lint-n');
-  if (b) b.textContent = n ? String(n) : '';
-}
-
-function renderNoteLint() {
-  noteLintBadge();
-  const box = $('#nt-lint-box');
-  if (!box) return;
-  const show = noteLintEnabled() && !!state.noteCurrent &&
-    state.noteMode === 'edit' && noteLintItems.length > 0;
-  box.classList.toggle('hidden', !show);
-  if (!show) { box.innerHTML = ''; return; }
-
-  const list = noteLintItems;
-  const fixable = list.filter((x) => x.fix).length;
-  const head = '<div class="nt-lint-head"><b>⚠ ' + list.length + '</b> 处问题' +
-    (fixable ? '<button class="nt-lint-fix" data-lint-fix-all>全部修正（' + fixable + '）</button>' : '') +
-    '<button class="nt-lint-collapse" data-lint-collapse>' + (noteLintCollapsed ? '展开' : '收起') + '</button>' +
-    '</div>';
-  if (noteLintCollapsed) { box.innerHTML = head; return; }
-
-  box.innerHTML = head + '<div class="nt-lint-list">' + list.map((it, i) => {
-    const ico = it.severity === 'error' ? '✖' : (it.severity === 'warning' ? '⚠' : 'ⓘ');
-    return '<div class="nt-lint-row ' + it.severity + '" data-lint-row="' + i + '">' +
-      '<span class="nt-lint-ico">' + ico + '</span>' +
-      '<span class="nt-lint-msg">' + escapeHtml(it.message) + '</span>' +
-      '<span class="nt-lint-line">L' + (it.line + 1) + '</span>' +
-      (it.fix ? '<button class="nt-lint-fix-one" data-lint-fix="' + i + '" title="只修正这一条">修复</button>' : '') +
-      '</div>';
-  }).join('') + '</div>';
-}
-
-function noteLintGoto(it) {
-  const ta = $('#nt-textarea');
-  if (!it || !ta) return;
-  if (state.noteMode !== 'edit') setNoteMode('edit');
-  const lines = ta.value.split('\n');
-  let off = 0;
-  for (let i = 0; i < it.line; i++) off += (lines[i] || '').length + 1;
-  const col = Math.max(1, it.col || 1);
-  const start = off + col - 1;
-  const end = start + Math.max(1, (it.endCol || col + 1) - col);
-  ta.focus();
-  try { ta.setSelectionRange(start, Math.min(end, ta.value.length)); } catch (e) { /* 忽略 */ }
-  const lh = parseFloat(getComputedStyle(ta).lineHeight) || 24;
-  ta.scrollTop = Math.max(0, (it.line + 0.5) * lh - ta.clientHeight / 2);
-}
-
-function noteLintApply(items) {
-  const ta = $('#nt-textarea');
-  if (!ta || !window.MDLint) return;
-  const r = MDLint.fixAll(ta.value, items || []);
-  if (!r || r.fixed <= 0 || r.text === ta.value) { toast('没有可自动修正的问题'); return; }
-  // 用 execCommand 写入：textarea 的 Ctrl+Z 能一步撤回整次修正
-  const keepSel = ta.selectionStart;
-  const keepTop = ta.scrollTop;
-  ta.focus();
-  try { ta.setSelectionRange(0, ta.value.length); } catch (e) { /* 忽略 */ }
-  let ok = false;
-  try { ok = document.execCommand('insertText', false, r.text); } catch (e) { ok = false; }
-  if (!ok) ta.value = r.text;
-  try { ta.setSelectionRange(Math.min(keepSel, ta.value.length), Math.min(keepSel, ta.value.length)); } catch (e) { /* 忽略 */ }
-  ta.scrollTop = keepTop;
-  scheduleNoteSave();
-  noteLintRun();
-  toast('已修正 ' + r.fixed + ' 处');
-}
-
-function scheduleNoteSave() {
-  clearTimeout(noteSaveTimer);
-  noteSaveTimer = setTimeout(saveNoteNow, 900);
-}
-
-async function saveNoteNow() {
-  clearTimeout(noteSaveTimer);
-  if (!state.noteCurrent) return;
-  const r = await api('/api/notes/save', { path: state.noteCurrent, content: $('#nt-textarea').value });
-  if (!r || !r.ok) { toast('保存失败：' + ((r && r.error) || '')); return; }
-  state.noteGraph = r.graph || state.noteGraph;
-  const bl = await api('/api/notes/backlinks', { path: state.noteCurrent });
-  renderBacklinks((bl && bl.backlinks) || []);
-  if (state.noteGraphTab !== 'backlinks') drawNotesGraph();
-}
-
-async function newNote(pathArg) {
-  let path = pathArg;
-  if (!path) {
-    const name = await appPrompt('新笔记标题（可写 文件夹/子标题 建到子目录）');
-    if (!name || !name.trim()) return;
-    path = name.trim();
-  }
-  if (!/\.md$/i.test(path)) path += '.md';
-  const r = await api('/api/notes/new', { path: path });
-  if (!r || !r.ok) {
-    if (r && r.path) { await loadNotes(); await openNote(r.path); toast('该笔记已存在，已为你打开'); return; }
-    toast('新建失败：' + ((r && r.error) || ''));
-    return;
-  }
-  state.noteTree = r.tree;
-  state.noteGraph = r.graph;
-  renderNotesTree();
-  drawNotesGraph();
-  await openNote(r.path);
-  setNoteMode('edit');
-  $('#nt-textarea').focus();
-}
-
-async function newNoteFolder() {
-  const name = await appPrompt('新文件夹名称（可写 一级/二级）');
-  if (!name || !name.trim()) return;
-  const r = await api('/api/notes/folder/new', { path: name.trim() });
-  if (!r || !r.ok) { toast('新建文件夹失败：' + ((r && r.error) || '')); return; }
-  state.noteTree = r.tree;
-  state.noteGraph = r.graph;
-  state.noteOpen.add(name.trim().replace(/\\/g, '/'));
-  renderNotesTree();
-  toast('已创建文件夹');
-}
-
-async function renameCurrentNote() {
-  if (!state.noteCurrent) { toast('先打开一篇笔记'); return; }
-  const cur = state.noteCurrent.split('/').pop().replace(/\.md$/i, '');
-  const name = await appPrompt('重命名为（会自动更新其它笔记里的 [[旧名]] 链接）', cur);
-  if (!name || !name.trim() || name.trim() === cur) return;
-  await saveNoteNow();
-  const r = await api('/api/notes/rename', { path: state.noteCurrent, name: name.trim() });
-  if (!r || !r.ok) { toast('重命名失败：' + ((r && r.error) || '')); return; }
-  state.noteTree = r.tree;
-  state.noteGraph = r.graph;
-  state.noteCurrent = null;
-  renderNotesTree();
-  drawNotesGraph();
-  await openNote(r.path);
-  toast('已重命名，相关双链已同步更新');
-}
-
-async function deleteCurrentNote() {
-  if (!state.noteCurrent) { toast('先打开一篇笔记'); return; }
-  if (!confirm('删除笔记「' + state.noteCurrent + '」？该操作不可撤销')) return;
-  clearTimeout(noteSaveTimer);
-  const r = await api('/api/notes/delete', { path: state.noteCurrent });
-  if (!r || !r.ok) { toast('删除失败'); return; }
-  state.noteTree = r.tree;
-  state.noteGraph = r.graph;
-  state.noteCurrent = null;
-  state.noteMode = 'preview';
-  $('#nt-textarea').value = '';
-  $('#nt-path').textContent = '未打开笔记';
-  noteLintSchedule();
-  renderBacklinks([]);
-  setNoteMode('preview');
-  renderNotesTree();
-  drawNotesGraph();
-}
-
-function renderBacklinks(list) {
-  const box = $('#nt-backlinks');
-  if (!box) return;
-  const items = list || [];
-  box.innerHTML = items.length
-    ? items.map((b) => '<div class="bl" data-note="' + escapeHtml(b.path) + '"><b>' + escapeHtml(b.name) + '</b>' +
-        (b.snippet ? '<div>' + escapeHtml(b.snippet) + '</div>' : '') + '</div>').join('')
-    : '<div class="hint">还没有其它笔记链接到这一篇。在别的笔记里写 <code>[[这篇的标题]]</code> 就会出现在这里。</div>';
-  box.querySelectorAll('.bl').forEach((el) => { el.onclick = () => openNote(el.dataset.note); });
-}
-
-function drawNotesGraph() {
-  const el = $('#nt-graph');
-  if (!el || el.classList.contains('hidden')) return;
-  const view = notesGraphNet ? (() => {
-    try { return { pos: notesGraphNet.getViewPosition(), scale: notesGraphNet.getScale() }; } catch (e) { return null; }
-  })() : null;
-  if (notesGraphNet) { try { notesGraphNet.destroy(); } catch (e) { } notesGraphNet = null; }
-
-  const g = state.noteGraph || { nodes: [], edges: [] };
-  if (!window.vis || !window.vis.Network || !window.vis.DataSet) {
-    el.innerHTML = '<p class="hint" style="padding:16px">图谱库 vis-network 未加载（本地文件缺失且 CDN 不可用）。</p>';
-    return;
-  }
-  el.innerHTML = '';
-  if (!g.nodes.length) {
-    el.innerHTML = '<p class="hint" style="padding:16px">还没有笔记。新建几篇，用 <code>[[双链]]</code> 互相关联，这里就会长出关系网络。</p>';
-    return;
-  }
-  const th = graphTheme();
-  const cur = state.noteCurrent;
-  const activeColor = {
-    background: th.accentSoft, border: th.accent,
-    highlight: { background: th.accentSoft, border: th.accent },
-    hover: { background: th.accentSoft, border: th.accent },
-  };
-  const nodes = g.nodes.map((n) => {
-    const missing = !!n.missing;
-    const active = n.id === cur;
-    const o = {
-      id: n.id,
-      label: missing ? (n.label + ' ?') : n.label,
-      shape: 'dot',
-      size: active ? 22 : (missing ? 12 : 16),
-      borderWidth: 2,
-      font: { color: th.font, size: 13, strokeWidth: 3, strokeColor: th.labelBg },
-      color: missing
-        ? { background: th.warnSoft, border: th.warn,
-            highlight: { background: th.warnSoft, border: th.warn },
-            hover: { background: th.warnSoft, border: th.warn } }
-        : (active ? activeColor : graphNodeColor(null, th)),
-      shadow: { enabled: true, color: th.nodeShadow, size: 6, x: 0, y: 1 },
-    };
-    if (missing) o.shapeProperties = { borderDashes: [4, 4] };
-    const p = notesPos[n.id];
-    if (p && typeof p.x === 'number') { o.x = p.x; o.y = p.y; }
-    return o;
-  });
-  const edges = g.edges.map((e) => ({
-    id: e.id, from: e.from, to: e.to,
-    color: { color: th.edge, highlight: th.edge, hover: th.edge },
-    arrows: { to: { enabled: true, scaleFactor: 0.6 } },
-    width: 1.5,
-  }));
-  try {
-    const ds = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
-    notesGraphNet = new vis.Network(el, ds, {
-      physics: { stabilization: { enabled: true, iterations: 150 },
-                 barnesHut: { gravitationalConstant: -6000, springLength: 120 } },
-      interaction: { hover: true },
-      locale: 'cn',
-      locales: VIS_LOCALES,
-    });
-    notesGraphNet._ds = ds;
-    notesGraphNet.on('stabilized', () => captureNotesPositions());
-    notesGraphNet.on('dragEnd', (p) => captureNotesPositions(p.nodes));
-    notesGraphNet.on('click', (p) => {
-      if (!p.nodes || !p.nodes.length) return;
-      const id = p.nodes[0];
-      if (String(id).indexOf('missing:') === 0) {
-        const nd = (state.noteGraph.nodes || []).find((x) => x.id === id);
-        newNote(((nd ? nd.label : '') + '.md').replace(/[\\/:*?"<>|]/g, ''));
-      } else {
-        openNote(id);
-      }
-    });
-    if (view) { try { notesGraphNet.moveTo({ position: view.pos, scale: view.scale }); } catch (e) { } }
-  } catch (err) {
-    notesGraphNet = null;
-    el.innerHTML = '<p class="hint" style="padding:16px">图谱渲染失败：' +
-      escapeHtml(err && err.message ? err.message : String(err)) + '</p>';
-  }
-}
-
-function captureNotesPositions(ids) {
-  if (!notesGraphNet) return;
-  let pos = {};
-  try { pos = notesGraphNet.getPositions(ids || undefined); } catch (e) { return; }
-  Object.keys(pos).forEach((k) => { notesPos[k] = pos[k]; });
-}
-
-function highlightNotesNode(prev, cur) {
-  if (!notesGraphNet || !notesGraphNet._ds) return;
-  const th = graphTheme();
-  const activeColor = {
-    background: th.accentSoft, border: th.accent,
-    highlight: { background: th.accentSoft, border: th.accent },
-    hover: { background: th.accentSoft, border: th.accent },
-  };
-  const paint = (id, active) => {
-    if (!id) return;
-    const nd = (state.noteGraph.nodes || []).find((x) => x.id === id);
-    if (!nd || nd.missing) return;
-    notesGraphNet._ds.nodes.update({
-      id: id,
-      size: active ? 22 : 16,
-      color: active ? activeColor : graphNodeColor(null, th),
-    });
-  };
-  paint(prev, false);
-  paint(cur, true);
-}
-
-function switchNotesTab(name) {
-  state.noteGraphTab = name;
-  $$('#notes-modal .ntab').forEach((t) => t.classList.toggle('active', t.dataset.ntab === name));
-  $('#nt-graph').classList.toggle('hidden', name !== 'graph');
-  $('#nt-backlinks').classList.toggle('hidden', name !== 'backlinks');
-  $('#nt-annos').classList.toggle('hidden', name !== 'annos');
-  if (name === 'graph') drawNotesGraph();
-  if (name === 'annos') renderNoteAnnos();
-}
-
-/* ---------- 笔记批注：选中预览文字加批注，不改动 Markdown 正文 ---------- */
-let noteAnnoPop = null;
-let noteAnnoDraft = null;
-
-function noteTextIndex(root) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-  const nodes = [];
-  let text = '';
-  let n;
-  while ((n = walker.nextNode())) {
-    nodes.push({ node: n, start: text.length });
-    text += n.nodeValue || '';
-  }
-  return { nodes, text };
-}
-
-/* 批注高亮：只在**文本节点内部**切分并包 <mark>。
-   不能对整段 Range 调 surroundContents —— 当引文结束时正好落在下一个文本节点
-   的开头（例如「…聚点」紧接着下一条 <li> 的 <strong>），Range 会跨过 <li> 边界，
-   surroundContents 抛错后走 extractContents，把 <li> 整个塞进 <mark>，
-   列表 / 表格结构就被拆坏了。这里永远不包元素，跨块时逐块高亮。 */
-function applyNoteAnnotations(root) {
-  const items = state.noteAnnos || [];
-  if (!items.length) return;
-  items.forEach((a) => {
-    const quote = a && a.quote;
-    if (!quote) return;
-    const { nodes, text } = noteTextIndex(root);
-    const want = Math.max(0, Number(a.nth) || 0);
-    let idx = -1;
-    let from = 0;
-    for (let i = 0; i <= want; i++) {
-      idx = text.indexOf(quote, from);
-      if (idx < 0) break;
-      from = idx + 1;
-    }
-    if (idx < 0) idx = text.indexOf(quote);
-    if (idx < 0) return;
-    const end = idx + quote.length;
-    nodes.forEach((it) => {
-      const node = it.node;
-      const v = node.nodeValue || '';
-      if (!v) return;
-      const s = it.start;
-      const e = s + v.length;
-      if (e <= idx || s >= end) return;
-      // 公式 / 隐藏源码不切：KaTeX 的内部结构被切开会让 math 排版错位
-      if (node.parentElement
-          && node.parentElement.closest('.katex, .rich-media-src, script, style')) return;
-      const a0 = Math.max(0, idx - s);
-      const b0 = Math.min(v.length, end - s);
-      let target = node;
-      if (a0 > 0) target = target.splitText(a0);
-      if (b0 - a0 < target.nodeValue.length) target.splitText(b0 - a0);
-      const mark = document.createElement('mark');
-      mark.className = 'nt-anno';
-      mark.dataset.id = a.id;
-      mark.title = a.comment || '';
-      target.parentNode.replaceChild(mark, target);
-      mark.appendChild(target);
-    });
-  });
-}
-
-function renderNoteAnnos() {
-  const box = $('#nt-annos');
-  const cnt = $('#nt-anno-count');
-  const items = state.noteAnnos || [];
-  if (cnt) cnt.textContent = items.length ? String(items.length) : '';
-  if (!box) return;
-  box.innerHTML = items.length
-    ? items.map((a) => '<div class="nt-anno-item" data-id="' + escapeHtml(a.id) + '">' +
-        '<div class="q">“' + escapeHtml(a.quote) + '”</div>' +
-        '<div class="c">' + escapeHtml(a.comment) + '</div></div>').join('')
-    : '<div class="hint">在右侧预览里选中一段文字，点「批注」写下想法。</div>';
-  box.querySelectorAll('.nt-anno-item').forEach((el) => {
-    el.onclick = () => {
-      const a = (state.noteAnnos || []).find((x) => x.id === el.dataset.id);
-      const mark = document.querySelector('#nt-preview-box mark.nt-anno[data-id="' + el.dataset.id + '"]');
-      if (mark) {
-        mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        mark.classList.add('flash');
-        setTimeout(() => mark.classList.remove('flash'), 1000);
-        if (a) showAnnoPop(a, mark.getBoundingClientRect());
-      } else if (a) {
-        showAnnoPop(a, { left: box.getBoundingClientRect().left, right: 0, top: 120, bottom: 120 });
-      }
-    };
-  });
-}
-
-function noteDraftFromRange(range) {
-  const pv = $('#nt-preview-box');
-  const { text } = noteTextIndex(pv);
-  const quote = range.toString();
-  if (!quote) return null;
-  const pre = document.createRange();
-  pre.selectNodeContents(pv);
-  try { pre.setEnd(range.startContainer, range.startOffset); } catch (e) { return null; }
-  const start = pre.toString().length;
-  let nth = 0;
-  let from = 0;
-  let hit;
-  while ((hit = text.indexOf(quote, from)) >= 0 && hit < start) {
-    nth++;
-    from = hit + 1;
-  }
-  const copyText = (window.SelKit && typeof window.SelKit.plainText === 'function')
-    ? window.SelKit.plainText(range)
-    : quote;
-  return {
-    quote: quote.slice(0, 500),
-    copy_text: copyText,
-    prefix: text.slice(Math.max(0, start - 30), start),
-    suffix: text.slice(start + quote.length, start + quote.length + 30),
-    nth,
-    comment: '',
-    rect: range.getBoundingClientRect(),
-  };
-}
-
-/* 预览区选区工具条：批注 / 提问 / 引用 */
-function noteTitle() {
-  const name = String(state.noteCurrent || '').split('/').pop().replace(/\.md$/i, '');
-  return name || '未命名笔记';
-}
-
-/* 笔记预览的划词浮层：UI 由 web/selkit.js 统一渲染，这里只注册适配器。 */
-let noteSelRegistered = false;
-
-function copyPlainText(text) {
-  const t = String(text || '');
-  if (!t) return;
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(t).then(
-      () => toast('已复制'),
-      () => toast('复制失败', 'error'));
-    return;
-  }
-  const ta = document.createElement('textarea');
-  ta.value = t;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.select();
-  try { document.execCommand('copy'); toast('已复制'); }
-  catch (e) { toast('复制失败', 'error'); }
-  ta.remove();
-}
-
-function registerNoteSelection() {
-  if (noteSelRegistered || !window.SelKit) return;
-  noteSelRegistered = true;
-  window.SelKit.register({
-    id: 'notes',
-    roots: () => [$('#nt-preview-box')],
-    maxText: 500,
-    capture: (range) => {
-      const pv = $('#nt-preview-box');
-      if (!pv || !state.noteCurrent || !pv.contains(range.commonAncestorContainer)) return null;
-      const raw = String(range.toString() || '').trim();
-      // 与旧行为一致：超过 500 字不弹（批注锚点按原文计算，截断会挂错位置）
-      if (!raw || raw.length > 500) return null;
-      const draft = noteDraftFromRange(range);
-      if (!draft || !String(draft.quote || '').trim()) return null;
-      return {
-        text: draft.quote,
-        rect: draft.rect || range.getBoundingClientRect(),
-        label: '笔记《' + noteTitle() + '》',
-        raw: draft,
-      };
-    },
-    actions: [
-      { id: 'ask', label: '提问', icon: 'chat', primary: true,
-        run: (ctx) => noteAskOpen(ctx.raw, ctx.rect) },
-      { id: 'quote', label: '引用', icon: 'note', primary: true,
-        run: (ctx) => quoteNoteDraft(ctx.raw) },
-      { id: 'anno', label: '批注', icon: 'pencil',
-        run: (ctx) => showAnnoPop(ctx.raw, ctx.rect) },
-      { id: 'copy', label: '复制', icon: 'copy',
-        run: (ctx) => copyPlainText(ctx.raw.copy_text || ctx.raw.quote) },
-    ],
-  });
-}
-
-/* 引用选中片段到主对话：关闭笔记库并聚焦输入框，用户接着提问即可 */
-async function quoteNoteDraft(draft) {
-  if (!draft || !draft.quote) return;
-  noteAnnoDraft = draft;
-  if (typeof addQuote !== 'function') { toast('当前界面不支持引用', 'error'); return; }
-  addQuote(draft.quote, '笔记《' + noteTitle() + '》');
-  try { await closeNotesModal(); } catch (e) { /* 保存失败也要让引用生效 */ }
-  const input = $('#input');
-  if (input) input.focus();
-  toast('已引用到对话，直接提问即可');
-}
-
-/* ---------- 划词提问：AskKit 统一面板（多轮 + 线程落库） ---------- */
-
-function noteAskOpen(draft, rect) {
-  if (!draft || !String(draft.quote || '').trim()) return;
-  if (!window.AskKit) { toast('问答面板未加载，请刷新页面', 'error'); return; }
-  const path = state.noteCurrent || '';
-  if (!path) return;
-  window.AskKit.open({
-    scope: 'doc:notes:' + path,
-    source: 'notes',
-    selection: {
-      kind: 'note', text: draft.quote, prefix: draft.prefix, suffix: draft.suffix,
-      nth: draft.nth, title: noteTitle(), path: path,
-    },
-    anchor: 'note:' + path + ':' + draft.nth + '|' + String(draft.quote || '').slice(0, 40),
-    label: '笔记《' + noteTitle() + '》',
-    quote: draft.quote,
-    title: '笔记问答',
-    rect: rect || draft.rect,
-    persist: (qa) => saveNoteAskAsAnno(draft, path, qa),
-    onQuote: (text) => {
-      if (typeof addQuote !== 'function') { toast('当前界面不支持引用', 'error'); return; }
-      addQuote(text, '笔记问答《' + noteTitle() + '》');
-      window.AskKit.close();
-      closeNotesModal().then(() => {
-        const input = $('#input');
-        if (input) input.focus();
-      }).catch(() => {});
-      toast('已引用到对话');
-    },
-  });
-}
-
-/* 回答存为批注：统一 annotations 表（doc_key = notes:<路径>，kind=qa）。 */
-function saveNoteAskAsAnno(draft, path, qa) {
-  return api('/api/notes/anno/save', {
-    path: path, id: '',
-    quote: draft.quote, prefix: draft.prefix, suffix: draft.suffix, nth: draft.nth,
-    question: (qa && qa.question) || '', answer: (qa && qa.answer) || '',
-  }).then((r) => {
-    if (!r || !r.ok) throw new Error((r && r.error) || '保存失败');
-    state.noteAnnos = r.items || [];
-    renderNoteAnnos();
-    setNoteMode('preview');
-    return true;
-  });
-}
-
-function ensureAnnoPop() {
-  if (noteAnnoPop) return noteAnnoPop;
-  const el = document.createElement('div');
-  el.id = 'nt-anno-pop';
-  el.className = 'nt-anno-pop hidden';
-  el.innerHTML = '<div class="nt-anno-quote"></div>' +
-    '<textarea class="nt-anno-text" placeholder="写下你的批注…"></textarea>' +
-    '<div class="nt-anno-acts">' +
-      '<button class="ghost nt-anno-del hidden">删除</button>' +
-      '<span class="nt-anno-gap"></span>' +
-      '<button class="ghost nt-anno-cancel">取消</button>' +
-      '<button class="primary nt-anno-save">保存</button>' +
-    '</div>';
-  document.body.appendChild(el);
-  el.querySelector('.nt-anno-cancel').onclick = hideAnnoPop;
-  el.querySelector('.nt-anno-save').onclick = saveAnnoPop;
-  el.querySelector('.nt-anno-del').onclick = deleteAnnoPop;
-  el.addEventListener('mousedown', (e) => e.stopPropagation());
-  noteAnnoPop = el;
-  return el;
-}
-
-function hideAnnoPop() {
-  if (noteAnnoPop) noteAnnoPop.classList.add('hidden');
-  noteAnnoDraft = null;
-}
-
-function showAnnoPop(info, rect) {
-  if (!info) return;
-  noteAnnoDraft = Object.assign({}, info);
-  const pop = ensureAnnoPop();
-  pop.querySelector('.nt-anno-quote').textContent =
-    info.quote.length > 80 ? info.quote.slice(0, 80) + '…' : info.quote;
-  pop.querySelector('.nt-anno-text').value = info.comment || '';
-  pop.querySelector('.nt-anno-del').classList.toggle('hidden', !info.id);
-  pop.classList.remove('hidden');
-  const w = Math.min(360, window.innerWidth - 24);
-  pop.style.width = w + 'px';
-  const h = pop.offsetHeight || 150;
-  const left = Math.max(8, Math.min(window.innerWidth - w - 8, rect.left));
-  let top = rect.bottom + 8;
-  if (top + h > window.innerHeight - 8) top = Math.max(8, rect.top - h - 8);
-  pop.style.left = left + 'px';
-  pop.style.top = top + 'px';
-  setTimeout(() => pop.querySelector('.nt-anno-text').focus(), 0);
-}
-
-async function saveAnnoPop() {
-  const pop = noteAnnoPop;
-  if (!pop || !noteAnnoDraft || !state.noteCurrent) return;
-  const comment = pop.querySelector('.nt-anno-text').value.trim();
-  if (!comment) { toast('批注内容不能为空'); return; }
-  const r = await api('/api/notes/anno/save', {
-    path: state.noteCurrent, id: noteAnnoDraft.id || '',
-    quote: noteAnnoDraft.quote, prefix: noteAnnoDraft.prefix,
-    suffix: noteAnnoDraft.suffix, nth: noteAnnoDraft.nth, comment: comment,
-  });
-  if (!r || !r.ok) { toast('保存失败：' + ((r && r.error) || '')); return; }
-  state.noteAnnos = r.items || [];
-  hideAnnoPop();
-  setNoteMode('preview');
-  toast('批注已保存');
-}
-
-async function deleteAnnoPop() {
-  if (!noteAnnoDraft || !noteAnnoDraft.id || !state.noteCurrent) return;
-  if (!confirm('删除这条批注？')) return;
-  const r = await api('/api/notes/anno/delete', { path: state.noteCurrent, id: noteAnnoDraft.id });
-  if (!r || !r.ok) { toast('删除失败'); return; }
-  state.noteAnnos = r.items || [];
-  hideAnnoPop();
-  setNoteMode('preview');
-  toast('批注已删除');
-}
-
-function wireNoteAnnotations() {
-  const pv = $('#nt-preview-box');
-  if (!pv) return;
-  registerNoteSelection();
-  pv.addEventListener('click', (e) => {
-    const mark = e.target.closest('mark.nt-anno');
-    if (!mark) return;
-    const a = (state.noteAnnos || []).find((x) => x.id === mark.dataset.id);
-    if (a) showAnnoPop(a, mark.getBoundingClientRect());
-  });
-  document.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.selbar') || e.target.closest('.selbar-more-menu') ||
-        e.target.closest('#nt-anno-pop') || e.target.closest('.askkit')) return;
-    if (noteAnnoPop) noteAnnoPop.classList.add('hidden');
-  });
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    if (noteAnnoPop) noteAnnoPop.classList.add('hidden');
-  });
-}
-
-async function searchNotes(q) {
-  const box = $('#nt-hits');
-  if (!q) { box.classList.add('hidden'); box.innerHTML = ''; return; }
-  const r = await api('/api/notes/search', { q: q });
-  const hits = (r && r.hits) || [];
-  box.classList.remove('hidden');
-  box.innerHTML = hits.length
-    ? hits.map((h) => '<div class="hit" data-note="' + escapeHtml(h.path) + '"><b>' + escapeHtml(h.name) + '</b>' +
-        (h.snippet ? '<span>' + escapeHtml(h.snippet) + '</span>' : '') + '</div>').join('')
-    : '<div class="hint">没有匹配的笔记。</div>';
-  box.querySelectorAll('.hit').forEach((el) => { el.onclick = () => openNote(el.dataset.note); });
-}
-
-async function openNotesModal() {
-  if (!state.noteOpen) state.noteOpen = new Set();
-  showWithAnim($('#notes-modal'));
-  replayFadeIn($('#nt-graph'));
-  await loadNotes();
-  switchNotesTab(state.noteGraphTab || 'graph');
-  if (!state.noteCurrent) {
-    const files = flattenNotes(state.noteTree);
-    if (files.length) await openNote(files[0].path);
-  }
-  noteLintBadge();                  // 没有打开笔记时也让开关状态/徽标正确
-}
-
-// 供工作台「记忆 → 打开来源」跳到指定笔记
-window.notesOpen = async function (rel) {
-  if (!rel) return;
-  await openNotesModal();
-  await openNote(rel);
-};
-
-async function closeNotesModal() {
-  await saveNoteNow();
-  hideWithAnim($('#notes-modal'), () => {
-    if (notesGraphNet) { try { notesGraphNet.destroy(); } catch (e) { } notesGraphNet = null; }
-  });
-}
-
-function bindNotesEvents() {
-  $('#btn-notes').onclick = () => openNotesModal();
-  $('#btn-close-notes').onclick = closeNotesModal;
-  $('#nt-new').onclick = () => newNote();
-  $('#nt-new-folder').onclick = newNoteFolder;
-  $('#nt-rename').onclick = renameCurrentNote;
-  $('#nt-delete').onclick = deleteCurrentNote;
-  $('#nt-edit').onclick = () => setNoteMode('edit');
-  $('#nt-preview').onclick = () => setNoteMode('preview');
-  $('#nt-textarea').addEventListener('input', () => { scheduleNoteSave(); noteLintSchedule(); });
-  $('#nt-textarea').addEventListener('blur', () => { if (state.noteMode === 'edit') saveNoteNow(); });
-  $('#nt-lint').onclick = () => {
-    const next = !noteLintEnabled();
-    setNoteLintEnabled(next);
-    if (!next) noteLintItems = [];
-    renderNoteLint();
-    if (next) noteLintSchedule();
-    toast(next ? '已开启 Markdown 纠错' : '已关闭 Markdown 纠错');
-  };
-  $('#nt-lint-box').addEventListener('click', (e) => {
-    if (e.target.closest('[data-lint-collapse]')) {
-      noteLintCollapsed = !noteLintCollapsed;
-      renderNoteLint();
-      return;
-    }
-    if (e.target.closest('[data-lint-fix-all]')) {
-      noteLintApply(noteLintItems.filter((x) => x.fix));
-      return;
-    }
-    const one = e.target.closest('[data-lint-fix]');
-    if (one) {
-      e.stopPropagation();
-      const it = noteLintItems[Number(one.dataset.lintFix)];
-      if (it) noteLintApply([it]);
-      return;
-    }
-    const row = e.target.closest('[data-lint-row]');
-    if (row) noteLintGoto(noteLintItems[Number(row.dataset.lintRow)]);
-  });
-  $('#nt-search').addEventListener('input', (e) => {
-    clearTimeout(noteSearchTimer);
-    const q = e.target.value.trim();
-    noteSearchTimer = setTimeout(() => searchNotes(q), 250);
-  });
-  $$('#notes-modal .ntab').forEach((t) => { t.onclick = () => switchNotesTab(t.dataset.ntab); });
-  $('#nt-preview-box').addEventListener('click', (e) => {
-    const a = e.target.closest('a.wikilink');
-    if (!a) return;
-    e.preventDefault();
-    const name = a.dataset.note || '';
-    const path = resolveNotePath(name);
-    if (path) { openNote(path); return; }
-    const clean = name.replace(/[\\/:*?"<>|]/g, '').trim();
-    if (clean) newNote(clean + '.md');
-  });
-  wireNoteAnnotations();
-}
-
 document.addEventListener('DOMContentLoaded', init);
 
 /* ============================================================
-   模式切换的「挪家」+ 快捷键
+   模式切换：固定放在左侧导航栏
    ------------------------------------------------------------
-   侧栏收起后 .sidebar-body 整体隐藏，模式按钮也就跟着没了；
-   但 Solo ↔ IDE 是最常来回切的一对，不该逼用户先展开侧栏。
-   做法是移动**同一个** #mode-switch 节点（不复制 DOM，active 状态只有一份）：
-     · 侧栏展开 → 回到 .side-top（原来的位置，文字按钮）
-     · 侧栏收起 → 挂到 #mode-float（图标按钮；所有模式都竖排在左下角）
+   旧壳层曾在侧栏收起时把 #mode-switch 挪到悬浮容器；新壳层把模式切换
+   固定在 #app-rail，侧栏开合都不再搬动它，这里只做一次兜底校正。
    ============================================================ */
 function syncModeSwitchHome() {
   const ms = document.getElementById('mode-switch');
-  const float = document.getElementById('mode-float');
   const rail = document.getElementById('app-rail');
-  const host = rail || document.querySelector('.side-top');
-  const app = document.getElementById('app');
-  if (!ms || !float || !host || !app) return;
-  // 新壳层：模式切换固定在左侧导航栏，侧栏收起 / 展开都不再搬动它
-  if (rail) {
-    if (!rail.contains(ms)) rail.insertBefore(ms, rail.children[1] || null);
-    float.classList.add('hidden');
-    return;
-  }
-  if (app.classList.contains('side-collapsed')) {
-    if (ms.parentElement !== float) float.appendChild(ms);
-    float.classList.remove('hidden');
-  } else {
-    if (ms.parentElement !== host) {
-      const anchor = document.getElementById('btn-new');
-      host.insertBefore(ms, anchor && anchor.nextSibling ? anchor.nextSibling : null);
-    }
-    float.classList.add('hidden');
-  }
+  if (!ms || !rail) return;
+  if (!rail.contains(ms)) rail.insertBefore(ms, rail.children[1] || null);
 }
 
 /* Ctrl+Alt+1..4 直接切模式：不依赖侧栏，也不依赖当前模式 */

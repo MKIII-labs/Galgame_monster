@@ -30,6 +30,27 @@ def test_set_validates_and_status(tmp_path):
     assert "pending" in chat._acceptance_status_text(s)
 
 
+def test_check_tool_alias_is_normalized(tmp_path):
+    """模型写 read / grep 这类语义名时，收敛成真实工具名，别整条拒绝。"""
+    s = {}
+    r = {"text": "a.txt 里有 hello", "check": {"tool": "read", "args": {"path": "a.txt"}},
+         "expect": {"contains": "hello"}}
+    text, changed = chat._acceptance_handle(
+        s, {"action": "set", "criteria": [r]},
+        str(tmp_path), {"sid": "s1"}, agent_on=True)
+    assert changed, text
+    assert chat._acceptance_criteria(s)[0]["check"]["tool"] == "read_file"
+
+    r2 = {"text": "找到引用位置", "check": {"tool": "grep", "args": {"pattern": "hello"}},
+          "expect": {"contains": "hello"}}
+    s2 = {}
+    text2, changed2 = chat._acceptance_handle(
+        s2, {"action": "set", "criteria": [r2]},
+        str(tmp_path), {"sid": "s1"}, agent_on=True)
+    assert changed2, text2
+    assert chat._acceptance_criteria(s2)[0]["check"]["tool"] == "search_code"
+
+
 def test_run_safe_check_passes(tmp_path):
     (tmp_path / "a.txt").write_text("hello world", encoding="utf-8")
     s = {}

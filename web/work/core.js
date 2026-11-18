@@ -235,10 +235,13 @@ function workEnterMode() {
   if (typeof warmNotifySound === 'function') warmNotifySound();
   const cols = document.querySelector('.work-cols');
   if (cols) cols.scrollTop = 0;      // 每次进来从「今日」顶部开始
+  // 首进要等日程 / 任务两个接口：先铺骨架，别让面板空着
+  if (!WORK.loadedOnce && cols && typeof gmSkeleton === 'function') gmSkeleton(cols, 5);
   workLoadScene();
   workLoad(true);
   workApplyView();
   workRenderFocusBtn();
+  if (typeof workAiEnter === 'function') workAiEnter();
   if (WORK.timer) clearInterval(WORK.timer);
   // 日程 / 产物变更走 SSE 推送，30 秒只做一次兜底轮询（断线时也不会停更）
   WORK.timer = setInterval(() => workLoad(false), 30000);
@@ -277,6 +280,11 @@ async function workLoad(showError) {
     WORK.tasks = tasks.tasks || [];
     WORK.lastErr = '';
     workRenderAll(!!showError);          // 今日 / 任务先出来
+    if (!WORK.loadedOnce) {
+      WORK.loadedOnce = true;
+      const cols = document.querySelector('#work-panel .work-cols');
+      if (cols && typeof gmSkeletonClear === 'function') gmSkeletonClear(cols);
+    }
     const arts = await artsP;
     if (arts && arts.__err) {
       if (showError) toastErr('产物加载失败', arts.__err);
@@ -285,6 +293,8 @@ async function workLoad(showError) {
       workRenderAll(!!showError);        // 产物到了再补一列
     }
   } catch (e) {
+    const cols = document.querySelector('#work-panel .work-cols');
+    if (cols && typeof gmSkeletonClear === 'function') gmSkeletonClear(cols);
     if (showError || WORK.lastErr !== e.message) {
       WORK.lastErr = e.message;
       toastErr('工作台加载失败', e);
@@ -314,6 +324,8 @@ function workRenderAll(force) {
   }
   workApplyView();
   workRenderFocusBtn();
+  if (typeof workAiRenderOverview === 'function') workAiRenderOverview();
+  if (typeof workAiRenderFocus === 'function') workAiRenderFocus();
   const sub = workEl('work-sub');
   if (sub) {
     const d = new Date();
@@ -413,6 +425,29 @@ function workBind() {
   document.querySelectorAll('#work-views-tabs button').forEach((b) => {
     b.onclick = () => workSetView(b.dataset.wview);
   });
+  document.querySelectorAll('#work-plan-sub button').forEach((b) => {
+    b.onclick = () => workSetView(b.dataset.pview);
+  });
+  // 概览数字：点一下跳到对应列（任务用筛选表达）
+  document.querySelectorAll('#work-overview [data-wjump]').forEach((b) => {
+    b.onclick = () => {
+      const jump = b.dataset.wjump;
+      if (jump === 'today') {
+        const col = workEl('work-today');
+        if (col) col.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        const q = workEl('work-quick');
+        if (q) q.focus();
+      } else {
+        const filter = workEl('work-task-filter');
+        if (jump === 'running') { WORK.taskFilter = 'running'; if (filter) filter.value = 'running'; }
+        else if (jump === 'overdue') { WORK.taskFilter = ''; if (filter) filter.value = ''; WORK.taskQuery = ''; }
+        else { WORK.taskFilter = ''; if (filter) filter.value = ''; }
+        workRenderTasks();
+        const col = workEl('work-tasks');
+        if (col) col.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    };
+  });
   try {
     const saved = localStorage.getItem('gm.work.view');
     if (saved) WORK.view = saved;
@@ -468,6 +503,7 @@ function workBind() {
       workCloseDialog();
     }
   });
+  if (typeof workAiBind === 'function') workAiBind();
 }
 
 /* ============================================================

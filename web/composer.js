@@ -17,6 +17,17 @@ const CMP_HISTORY_MAX = 50;
 const CMP_POP_MAX = 6;
 const CMP_LONG_TEXT = 5000;        // 超过此字数提示「内容较长」
 
+// 触屏 / 无精确指针：手机、平板等「主输入是手指」的设备。
+// 只看媒体查询，不用 maxTouchPoints：带触屏的 Windows 笔电也会报触摸点，
+// 但它们有键盘，Enter 提示仍然有用。
+function isTouchUI() {
+  try {
+    return window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+  } catch (e) {
+    return false;
+  }
+}
+
 // `/` 指令表：kind=local 本地立即执行；kind=ai 交给 AI 处理；group 只用于面板分组
 const CMP_COMMANDS = [
   { cmd: '/clear',     desc: '清空输入框',              kind: 'local', group: '会话' },
@@ -24,7 +35,7 @@ const CMP_COMMANDS = [
   { cmd: '/compress',  desc: '压缩较早的历史对话',      kind: 'local', group: '会话' },
   { cmd: '/kb',        desc: '打开知识库 / 记忆图谱',   kind: 'local', group: '视图' },
   { cmd: '/settings',  desc: '打开设置',                kind: 'local', group: '视图' },
-  { cmd: '/theme',     desc: '切换明暗主题',            kind: 'local', group: '视图' },
+  { cmd: '/theme',     desc: '切换雾光氛围 / 扁平化明暗', kind: 'local', group: '视图' },
   { cmd: '/plan',      desc: '先出计划（本轮只读，不执行）', kind: 'local', group: 'AI' },
   { cmd: '/polish',    desc: 'AI 润色当前输入',         kind: 'ai', action: 'polish', group: 'AI' },
   { cmd: '/spec',      desc: 'AI 改成规格（目标/范围/边界/验收）', kind: 'ai', action: 'spec', group: 'AI' },
@@ -219,18 +230,20 @@ function cmpRefPayload() {
 }
 
 /* ---------- 发送前预检（非阻塞：只提示缺什么，不拦发送） ----------
-   研究结论（Ask-or-Assume / UX 提示质量研究）：让用户越用越会写的关键不是教程，
-   而是「在他自己的句子上指出缺哪一块」。所以这里只做两件事：
-   ① 输入停顿时判断缺 目标 / 范围 / 边界 / 验收；② 给一个「按建议改写」入口（/spec）。 */
+   目标：让用户的输入更容易被 AI 一次听懂。只做两件事：
+   ① 输入停顿时判断「AI 会不会理解错」（指代 / 上下文 / 期望产出 / 多任务 / 约束）；
+   ② 给一个「改清楚」入口：优先直接用模型返回的 rewrite，不额外再调一次模型。 */
 let _precheckTimer = null;
 let _precheckGaps = [];
+let _precheckExample = '';
+let _precheckRewrite = '';
 let _precheckFor = '';
 let _precheckBusy = false;
 let _precheckFirstAt = 0;         // 本轮连续输入的起点：用来算 maxWait
 let _precheckLastSentAt = 0;      // 上次真正发请求的时间：两次请求的最小间隔
-const _precheckSeen = new Map();  // 同一段文字不重复调模型
-// 只对「会改东西」的输入做预检；闲聊、短句、/ 指令都不打扰
-const _TASK_RE = /改|加|删|重构|优化|修|实现|调整|替换|做成|写一?个|新增|去掉|迁移|拆分/;
+const _precheckSeen = new Map();  // 同一段文字不重复调模型：text -> {gaps, example, rewrite}
+// 只对「会改东西 / 排障 / 要 AI 动手」的输入做预检；闲聊、短句、/ 指令都不打扰
+const _TASK_RE = /改|加|删|重构|优化|修|实现|调整|替换|做成|写一?个|新增|去掉|迁移|拆分|解决|排查|定位|看看|看下|报错/;
 const PRECHECK_IDLE = 900;        // 停止输入这么久就检查
 const PRECHECK_MAX_WAIT = 2200;   // 连续打字时最多憋这么久也要检查一次
 const PRECHECK_MIN_GAP = 2000;    // 两次真实请求的最小间隔
@@ -238,6 +251,8 @@ const PRECHECK_SEEN_MAX = 30;
 
 function cmpClearPrecheck() {
   _precheckGaps = [];
+  _precheckExample = '';
+  _precheckRewrite = '';
   _precheckFor = '';
   _precheckFirstAt = 0;
 }
@@ -251,10 +266,16 @@ function cmpPrecheckMatches(cur) {
   return cur.length > _precheckFor.length && cur.indexOf(_precheckFor) === 0;
 }
 
+function _precheckApply(r) {
+  _precheckGaps = (r.gaps || []).slice(0, 3);
+  _precheckExample = String(r.example || '');
+  _precheckRewrite = String(r.rewrite || '');
+}
+
 async function _precheckRun(text) {
   const cached = _precheckSeen.get(text);
   if (cached) {
-    _precheckGaps = cached.slice(0, 3);
+    _precheckApply(cached);
     _precheckFor = text;
     cmpUpdateHint();
     return;
@@ -265,12 +286,13 @@ async function _precheckRun(text) {
   try {
     const r = await api('/api/compose', { text: text, action: 'check' });
     if (!r || !r.ok) return;          // 失败静默：预检不该影响输入
-    const gaps = (r.gaps || []).slice(0, 3);
-    _precheckSeen.set(text, gaps);
+    _precheckApply(r);
+    _precheckSeen.set(text, {
+      gaps: _precheckGaps, example: _precheckExample, rewrite: _precheckRewrite,
+    });
     while (_precheckSeen.size > PRECHECK_SEEN_MAX) {
       _precheckSeen.delete(_precheckSeen.keys().next().value);
     }
-    _precheckGaps = gaps;
     _precheckFor = text;
   } catch (e) {
     /* 静默：预检失败不该影响输入 */
@@ -314,36 +336,43 @@ function cmpUpdateHint() {
   if (!el || !inp) return;
   const n = inp.value.length;
   const over = n > CMP_LONG_TEXT;
-  const streaming = typeof state !== 'undefined' && !!state.streaming;
+  const streaming = typeof isStreaming === 'function'
+    ? isStreaming() : !!(typeof state !== 'undefined' && state.streaming);
   // 正在修改历史消息：优先显示状态，避免用户以为在写一条新消息
   if (editTarget && editTarget.sid === String((state && state.sessions && state.sessions.current) || '')) {
-    el.textContent = '正在修改第 ' + (editTarget.index + 1) + ' 条消息 · Enter 发送 · Esc 取消';
+    el.textContent = '正在修改第 ' + (editTarget.index + 1) + ' 条消息'
+      + (isTouchUI() ? '' : ' · Enter 发送 · Esc 取消');
     el.classList.add('warn');
-    galSyncDraft(inp.value);
     return;
   }
   // 预检建议优先显示：只在「还对得上当前内容」时有效，避免提示过期内容
   if (_precheckGaps.length && cmpPrecheckMatches(inp.value.trim())) {
-    el.innerHTML = '建议补充：' + _precheckGaps.map(escapeHtml).join(' · ') +
-      ' <button type="button" class="cmp-fix">按建议改写</button>';
+    el.innerHTML =
+      '<span class="cmp-line">建议补充：' + _precheckGaps.map(escapeHtml).join(' · ') +
+      ' <button type="button" class="cmp-fix" title="改成 AI 更容易一次做对的指令">改清楚</button></span>' +
+      (_precheckExample
+        ? '<span class="cmp-line cmp-example">示例：' + escapeHtml(_precheckExample) + '</span>'
+        : '');
     el.classList.add('warn');
     const b = el.querySelector('.cmp-fix');
-    if (b) b.onclick = () => improveInput('spec');
-    galSyncDraft(inp.value);
+    if (b) b.onclick = () => cmpApplyPrecheckRewrite();
     return;
   }
+  // 触屏设备没有物理键盘：别再显示 Enter / Shift+Enter 这类用不上的提示，
+  // 否则手机底栏会被挤到截断。
+  const touch = isTouchUI();
   let txt = over
     ? ('内容较长（' + n + ' 字），建议精简或拆分')
-    : (n ? (n + ' 字 · ' + (streaming ? 'Enter 排队' : 'Enter 发送') + ' · Shift+Enter 换行')
-         : (streaming ? '正在生成… · 可继续输入，Enter 排队，本轮结束后自动发送'
-                      : 'Enter 发送 · Shift+Enter 换行 · / 指令 · # 引用上下文'));
+    : (n ? (touch ? (n + ' 字') : (n + ' 字 · ' + (streaming ? 'Enter 排队' : 'Enter 发送') + ' · Shift+Enter 换行'))
+         : (streaming
+            ? (touch ? '正在生成… · 可继续输入，发送后排队'
+                     : '正在生成… · 可继续输入，Enter 排队，本轮结束后自动发送')
+            : (touch ? '/ 指令 · # 引用上下文'
+                     : 'Enter 发送 · Shift+Enter 换行 · / 指令 · # 引用上下文')));
   // 有请求在路上时给个反馈：否则「点了没反应」和「没触发」用户分不出来
   if (_precheckBusy && n) txt = '预检中… · ' + txt;
   if (el.textContent !== txt) el.textContent = txt;
   el.classList.toggle('warn', over);
-  // GAL：把正在打的字实时映射到对白区（「草稿变剧中台词」）。
-  // 挂在这里是因为所有改动输入内容的路径（打字 / 清空 / 撤销 / AI 优化 / 历史补全 / 语音）最终都会走到它。
-  galSyncDraft(inp.value);
 }
 
 function cmpUpdateClear() {
@@ -700,6 +729,34 @@ function cmpImproveFx(btn, state) {
   }
 }
 
+/* 每次润色 / 改写都领一个序号：晚到的旧结果不允许覆盖新内容。
+   （连点两次、或等结果时用户改了输入 / 已发送，都靠它丢弃过期结果。） */
+let _improveSeq = 0;
+
+/* 「改清楚」：优先直接用预检返回的 rewrite（不再多调一次模型）；
+   没有 rewrite 时退回 polish，让模型按新规则补全。 */
+function cmpApplyPrecheckRewrite() {
+  const inp = cmpInput();
+  if (!inp) return;
+  const before = inp.value;
+  const next = String(_precheckRewrite || '').trim();
+  if (!next) {
+    cmpClearPrecheck();
+    improveInput('polish');
+    return;
+  }
+  _improveSeq++;                       // 作废在飞的润色请求
+  inp.value = next;
+  autoGrow(); cmpUpdateClear(); cmpUpdateHint();
+  cmpShowUndo(before);
+  // 模型没把握的地方写成（待确认：…）：选中第一处，用户直接打字替换
+  const m = /（待确认：[^）]*）|\(待确认:[^)]*\)/.exec(next);
+  if (m) {
+    try { inp.setSelectionRange(m.index, m.index + m[0].length); } catch (e) { /* 忽略 */ }
+  }
+  inp.focus();
+}
+
 async function improveInput(action, targetLang) {
   const inp = cmpInput();
   if (!inp) return;
@@ -710,14 +767,21 @@ async function improveInput(action, targetLang) {
   const btn = $('#btn-improve');
   cmpImproveFx(btn, 'busy');
   const before = inp.value;
+  const mine = ++_improveSeq;
   cmpSetHint('AI 优化中…');
   try {
     const r = await api('/api/compose', {
       text: text, action: action || 'polish', target_lang: targetLang || '',
     });
+    if (mine !== _improveSeq) return;  // 期间又发起了新的优化 / 已按建议改写 / 已发送
     if (!r || !r.ok) { toast((r && (r.message || r.error)) || 'AI 优化失败', 'error'); cmpUpdateHint(); return; }
     const out = String(r.text || '').trim();
     if (!out) { toast('AI 没有返回内容', 'error'); cmpUpdateHint(); return; }
+    if (inp.value !== before) {        // 等待期间用户自己改了内容：不能覆盖
+      toast('输入已变化，这次优化没有应用');
+      cmpUpdateHint();
+      return;
+    }
     inp.value = out;
     autoGrow(); cmpUpdateClear();
     cmpClearPrecheck();
@@ -731,11 +795,13 @@ async function improveInput(action, targetLang) {
       if (b) b.onclick = () => { inp.value = before; autoGrow(); cmpUpdateHint(); cmpUpdateClear(); inp.focus(); };
     }
   } catch (e) {
-    toast('AI 优化失败：' + e, 'error');
+    if (mine === _improveSeq) toast('AI 优化失败：' + e, 'error');
     cmpUpdateHint();
   } finally {
-    cmpImproveFx(btn, '');          // 失败时也要退出 busy；done 由自己的 timer 收
-    inp.focus();
+    if (mine === _improveSeq) {
+      cmpImproveFx(btn, '');           // 失败时也要退出 busy；done 由自己的 timer 收
+      inp.focus();
+    }
   }
 }
 
@@ -919,7 +985,10 @@ function initComposer() {
   if (typeof orig !== 'function') return;
   window.sendMessage = function () {
     const inp = cmpInput();
-    if (inp && inp.value.trim()) cmpRemember(inp.value.trim());
+    if (inp && inp.value.trim()) {
+      cmpRemember(inp.value.trim());
+      _improveSeq++;                 // 已发送：在飞的润色结果不能再回填输入框
+    }
     return orig.apply(this, arguments);
   };
 })();

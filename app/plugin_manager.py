@@ -7,11 +7,12 @@
 
 安全边界：
 - 插件是任意 Python 代码，安装/启用都必须由用户在界面上确认；默认总开关关闭。
-- 安装只接受：内置源、本地目录、zip、https Git 仓库；不执行任何安装脚本，
+- 安装只接受：内置源、本地目录、zip、https 市场地址、https Git 仓库；不执行任何安装脚本，
   也不跟随 zip 里的软链 / 越界路径。
 - 启停与安装都只写文件 + config，运行时加载需要重启进程。
 """
 import ast
+import hashlib
 import json
 import os
 import re
@@ -20,7 +21,10 @@ import subprocess
 import tempfile
 import zipfile
 
+import requests
+
 from app import capabilities
+from app import winproc
 from app.config import load_config, save_config
 from app.store import RESOURCES_DIR, ROOT
 
@@ -320,6 +324,45 @@ def install_zip(path):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def install_url(url, sha256="", size=0):
+    """从市场索引里的 https 地址下载 zip 并安装（校验大小 / sha256 后再复用 install_zip）。"""
+    raw = str(url or "").strip()
+    if not raw.lower().startswith("https://"):
+        return None, "只支持 https:// 的下载地址"
+    want_sha = str(sha256 or "").strip().lower()
+    try:
+        want_size = int(size or 0)
+    except (TypeError, ValueError):
+        return None, "插件大小声明不合法"
+    tmp = tempfile.mkdtemp(prefix="gm-plugin-dl-")
+    try:
+        path = os.path.join(tmp, "plugin.zip")
+        digest = hashlib.sha256()
+        total = 0
+        with requests.get(raw, timeout=30, stream=True) as r:
+            r.raise_for_status()
+            if not str(r.url or "").lower().startswith("https://"):
+                return None, "下载地址被重定向到非 https"
+            with open(path, "wb") as f:
+                for chunk in r.iter_content(64 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > MAX_BYTES:
+                        return None, "下载内容超过 %d MB" % (MAX_BYTES // 1024 // 1024)
+                    digest.update(chunk)
+                    f.write(chunk)
+        if want_size and total != want_size:
+            return None, "文件大小与索引不一致（%d ≠ %d）" % (total, want_size)
+        if want_sha and digest.hexdigest() != want_sha:
+            return None, "sha256 校验失败，已放弃安装"
+        return install_zip(path)
+    except requests.RequestException as e:
+        return None, "下载失败：%s" % e
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def install_git(url):
     raw = str(url or "").strip()
     if not re.match(r"^https://[A-Za-z0-9.-]+/", raw) or "@" in raw.split("://", 1)[-1].split("/")[0]:
@@ -328,7 +371,7 @@ def install_git(url):
     try:
         p = subprocess.run(["git", "clone", "--depth", "1", "--", raw, tmp],
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=GIT_TIMEOUT)
+                           timeout=GIT_TIMEOUT, creationflags=winproc.no_window())
         if p.returncode != 0:
             err = (p.stderr or b"").decode("utf-8", "replace").strip()[:300]
             return None, "git clone 失败：%s" % (err or p.returncode)

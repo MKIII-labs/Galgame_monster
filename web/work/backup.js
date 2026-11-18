@@ -189,7 +189,7 @@ async function workBackupPreflight(file) {
     const s = (result && result.summary) || {};
     setInfo('预检通过：会话 ' + (s.sessions || 0) +
       ' · 知识库 ' + (s.knowledge || 0) + ' · 笔记 ' + (s.notes || 0) +
-      ' · 附件 ' + (s.uploads || 0) + ' · 存档 ' + (s.saves || 0) +
+      ' · 附件 ' + (s.uploads || 0) +
       ' · 任务 ' + (s.tasks || 0));
     if (restore) restore.disabled = false;
     toast('预检通过', 'success');

@@ -65,12 +65,10 @@ eq('hkLabel: Shift+Digit1 → Shift+1', hkLabel('Shift+Digit1'), 'Shift+1');
 /* ---------- 3. 录制校验（裸键闸门） ---------- */
 truthy('hkSpecProblem: 裸字母键被拒（打字会误触发）', hkSpecProblem('editor', 'KeyE'));
 truthy('hkSpecProblem: 裸数字键被拒', hkSpecProblem('editor', 'Digit1'));
-eq('hkSpecProblem: 裸方向键放行（GAL 默认键就是 ArrowUp，属既有约定）',
-  hkSpecProblem('editor', 'ArrowDown'), '');
+eq('hkSpecProblem: 裸方向键放行', hkSpecProblem('editor', 'ArrowDown'), '');
 eq('hkSpecProblem: 裸 Esc 放行', hkSpecProblem('editor', 'Escape'), '');
 eq('hkSpecProblem: 组合键放行', hkSpecProblem('editor', 'Ctrl+KeyE'), '');
 eq('hkSpecProblem: 功能键放行', hkSpecProblem('editor', 'F5'), '');
-eq('hkSpecProblem: GAL 作用域例外（有焦点保护，允许裸键）', hkSpecProblem('gal', 'KeyE'), '');
 truthy('hkSpecProblem: Shift+Enter 明确拒绝（那是换行）', hkSpecProblem('editor', 'Shift+Enter'));
 
 /* ---------- 4. 优先级：用户自定义优先 ---------- */

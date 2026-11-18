@@ -2,11 +2,13 @@
 """思考 / 工具的展示顺序落库：块顺序、失败轮、裁剪、续写合并。"""
 from app.api.chat import (_append_round_blocks, _empty_final_text,
                           _ensure_old_text_block,
+                          _finish_closing_text,
                           _inject_prev_end_note,
                           _is_pseudo_final, _mark_answer_blocks, _merge_blocks,
+                          _needs_finish_body_nudge,
                           _needs_finish_nudge,
                           _needs_plan_gate,
-                          _pending_plan_end_reason, _web_page_note,
+                          _web_page_note,
                           _reasoning_cap, _retry_reasoning_block,
                           _strip_reasoning_blocks, _trim_reasoning_blocks)
 
@@ -182,38 +184,37 @@ def test_inject_prev_end_note():
     assert len(msgs2) == 1                      # 没有结束原因就不动
 
 
-def test_pending_plan_end_reason_covers_promise_after_all_steps_done():
-    """计划全做完、末句却承诺再干一步 → 收尾必须给「继续输出」（现场 00:36:27）。"""
-    plan = {"steps": [{"text": "S12", "status": "done"}]}
-    r = _pending_plan_end_reason(plan, "……三视口全部通过，S12 标记完成。修完后再跑一次确认。",
-                                 has_calls=False, tool_count=46)
-    assert r and r["action"] == "continue"
-    # 正常交付（结尾没有动作承诺）不打扰用户
-    assert _pending_plan_end_reason(plan, "……三视口全部通过，收工。",
-                                    has_calls=False, tool_count=46) is None
+def test_finish_without_body_is_nudged_then_closed_with_summary():
+    """finish 前正文为空：先提醒；仍然为空则用 finish 的 summary 补一段可见正文。"""
+    assert _needs_finish_body_nudge("", 0) is True
+    assert _needs_finish_body_nudge("   ", 0) is True
+    assert _needs_finish_body_nudge("已完成，文件在 a.html", 0) is False
+    assert _needs_finish_body_nudge("", 1) is False       # 每回合只提醒一次
+
+    text = _finish_closing_text("改好了 A", ["补 B", "  "])
+    assert text.startswith("## 完成") and "改好了 A" in text and "- 补 B" in text
+    assert _finish_closing_text("", []) == ""
 
 
 def test_finish_nudge_only_when_tools_were_used():
     """Trae 路线：用过工具却没调 finish 就收尾 → 提醒一次补声明。
 
-    纯聊天 / 问答（没用过工具）不打扰；GAL / 非 agent 会话也不要求。
+    纯聊天 / 问答（没用过工具）不打扰；非 agent 会话也不要求。
     """
     # 用过工具、没 finish → 提醒
-    assert _needs_finish_nudge(agent_mode=True, gal_mode=False,
+    assert _needs_finish_nudge(agent_mode=True,
                                finished=False, nudged=False, tool_count=3) is True
     # 已经调过 finish → 不再提醒
-    assert _needs_finish_nudge(agent_mode=True, gal_mode=False,
+    assert _needs_finish_nudge(agent_mode=True,
                                finished=True, nudged=False, tool_count=3) is False
     # 只提醒一次
-    assert _needs_finish_nudge(agent_mode=True, gal_mode=False,
+    assert _needs_finish_nudge(agent_mode=True,
                                finished=False, nudged=True, tool_count=3) is False
     # 没用过工具（纯问答）→ 不打扰
-    assert _needs_finish_nudge(agent_mode=True, gal_mode=False,
+    assert _needs_finish_nudge(agent_mode=True,
                                finished=False, nudged=False, tool_count=0) is False
-    # 非 agent / GAL → 不要求
-    assert _needs_finish_nudge(agent_mode=False, gal_mode=False,
-                               finished=False, nudged=False, tool_count=9) is False
-    assert _needs_finish_nudge(agent_mode=True, gal_mode=True,
+    # 非 agent → 不要求
+    assert _needs_finish_nudge(agent_mode=False,
                                finished=False, nudged=False, tool_count=9) is False
 
 
@@ -241,17 +242,25 @@ def _long(tag=""):
     return (tag or "交付") + "。" + "这里是完整结论与依据。" * 12
 
 
-def test_answer_marks_delivery_before_finish():
-    """最常见形态：先写答案再调 finish；finish 后的补充留在过程里。"""
-    blocks = [{"kind": "text", "text": "过程"},
+def test_answer_marks_text_after_last_real_tool():
+    """位置口径：最后一次真实工具之后的正文都算答案，之前的旁白折叠。"""
+    blocks = [{"kind": "text", "text": _long("过程旁白")},
               {"kind": "tool", "i": 0},
               {"kind": "reasoning", "text": "想"},
-              {"kind": "text", "text": "交付"},
+              {"kind": "text", "text": _long("交付")},
               {"kind": "tool", "i": 1},
               {"kind": "reasoning", "text": "补充"},
               {"kind": "text", "text": "收尾补充"}]
     tools = [{"tool": "edit_file"}, {"tool": "finish"}]
-    assert _answer_ids(blocks, tools) == [3]
+    assert _answer_ids(blocks, tools) == [3, 6]
+
+
+def test_answer_folds_long_process_narration():
+    """旁白再长，只要后面还有工具调用，就折进过程区（截图现场：180 字旁白）。"""
+    blocks = [{"kind": "text", "text": _long("过程旁白")},
+              {"kind": "tool", "i": 0},
+              {"kind": "text", "text": _long("交付")}]
+    assert _answer_ids(blocks, [{"tool": "read_file"}]) == [2]
 
 
 def test_answer_marks_after_finish_when_rework():
@@ -298,10 +307,10 @@ def test_answer_marks_recomputed_after_continuation():
 
 
 def test_answer_stopped_keeps_last_visible_text():
-    """停止 = 暂停：最后一段可见正文留在答案区（哪怕是半句旁白）。
+    """停止 = 暂停：只保留最后一段可见正文，中间的长旁白不再回到答案区。
 
-    现场：`提示词工程师 #55` 停止时最后的正文块是 24 字残句，
-    后面还有一段 reasoning —— 以前会被当成正式答案，或者被整个折走。
+    现场（前端设计风格图谱 #27）：停止回合里「先摸清两件事…」等 180 字旁白
+    位于工具之间，以前按「实质交付」留在正文，成了截图里的噪声。
     """
     blocks = [{"kind": "text", "text": _long("完整报告")},
               {"kind": "tool", "i": 0},
@@ -311,27 +320,25 @@ def test_answer_stopped_keeps_last_visible_text():
     assert _answer_ids(blocks, [{"tool": "read_file"}], stopped=True) == [3]
 
 
-def test_answer_skips_trailing_narration_after_finish():
-    """正常收尾：finish 前后都有旁白时，答案取最近一段实质交付，而不是最后一句。"""
+def test_answer_marks_text_between_last_tool_and_finish():
+    """finish 不是真实工具：它前面、最后一次真实工具之后的正文就是答案。"""
     blocks = [{"kind": "tool", "i": 0},
               {"kind": "text", "text": _long("完整交付")},
               {"kind": "reasoning", "text": "验收复核"},
-              {"kind": "tool", "i": 1},
-              {"kind": "reasoning", "text": "还要再核一次"},
-              {"kind": "text", "text": "核对 world.html 里 logEvent 的每个调用点的实际形态。"}]
+              {"kind": "tool", "i": 1}]
     tools = [{"tool": "read_file"}, {"tool": "finish"}]
     assert _answer_ids(blocks, tools) == [1]
 
 
-def test_answer_skips_short_narration_before_finish():
-    """finish 前紧挨着一句旁白、前面才是交付：不能被旁白顶掉。"""
+def test_answer_marks_short_text_after_last_real_tool():
+    """最后工具之后的短句也是终稿，不因长度被折进过程区。"""
     blocks = [{"kind": "tool", "i": 0},
               {"kind": "text", "text": _long("完整交付")},
-              {"kind": "reasoning", "text": "再补一项"},
-              {"kind": "text", "text": "先补最后一项事实，以免把 H 层状态写错。"},
+              {"kind": "reasoning", "text": "再核一项"},
+              {"kind": "text", "text": "已完成，自检通过。"},
               {"kind": "tool", "i": 1}]
     tools = [{"tool": "search_files"}, {"tool": "finish"}]
-    assert _answer_ids(blocks, tools) == [1]
+    assert _answer_ids(blocks, tools) == [1, 3]
 
 
 def test_answer_short_reply_still_marked():
@@ -342,3 +349,17 @@ def test_answer_short_reply_still_marked():
               {"kind": "tool", "i": 1}]
     tools = [{"tool": "read_file"}, {"tool": "finish"}]
     assert _answer_ids(blocks, tools) == [2]
+
+
+def test_finish_tool_names_match_frontend():
+    """收尾工具名是跨端契约：前后端集合不一致会让答案归属直接分叉。"""
+    import os
+    import re
+    from app.api.chat import _FINISH_TOOL_NAMES
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "web", "chat.js"), encoding="utf-8").read()
+    m = re.search(r"const FINISH_TOOL_NAMES = new Set\(\[(.*?)\]\);", src, re.S)
+    assert m, "web/chat.js 里找不到 FINISH_TOOL_NAMES"
+    names = set(re.findall(r"['\"]([^'\"]+)['\"]", m.group(1)))
+    assert names == set(_FINISH_TOOL_NAMES)

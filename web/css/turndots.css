@@ -14,22 +14,31 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 9px;
-  padding: 8px 5px;
+  gap: 2px;
+  padding: 6px 3px;
   border-radius: 10px;
 }
 .td-rail:hover { background: var(--bg-hover); }
+/* 视觉圆点 4px，但点击热区 14px：以前两者都是 4px，鼠标要很准、触屏基本点不到 */
 .td-dot {
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.td-dot::before {
+  content: '';
   width: 4px;
   height: 4px;
   border-radius: 50%;
   background: var(--text-dim);
   opacity: .55;
-  cursor: pointer;
   transition: transform var(--t-fast), opacity var(--t-fast), background var(--t-fast);
 }
-.td-dot:hover,
-.td-dot.on {
+.td-dot:hover::before,
+.td-dot.on::before {
   background: var(--accent);
   opacity: 1;
   transform: scale(1.8);
@@ -37,7 +46,7 @@
 
 .td-panel {
   position: absolute;
-  left: 16px;
+  left: 26px;
   top: 50%;
   transform: translateY(-50%);
   width: 250px;

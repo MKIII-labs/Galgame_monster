@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import time
+
 from app import notes as noteslib
 
 def _api_notes_tree(h):
@@ -19,7 +21,8 @@ def _api_notes_save(h):
         rel = body.get("path")
         if not noteslib.write_note(rel, body.get("content")):
             return h._json({"ok": False, "error": "保存失败（路径非法）"}, 400)
-        h._json({"ok": True, "backlinks": noteslib.backlinks(rel),
+        h._json({"ok": True, "saved_at": time.time(),
+                    "backlinks": noteslib.backlinks(rel),
                     "graph": noteslib.graph()})
 
 
@@ -40,6 +43,15 @@ def _api_notes_delete(h):
 def _api_notes_rename(h):
         body = h._body()
         ok, info = noteslib.rename_path(body.get("path"), body.get("name"))
+        if not ok:
+            return h._json({"ok": False, "error": info}, 400)
+        h._json({"ok": True, "path": info, "tree": noteslib.list_tree(),
+                    "graph": noteslib.graph()})
+
+
+def _api_notes_move(h):
+        body = h._body()
+        ok, info = noteslib.move_note(body.get("path"), body.get("to") or "")
         if not ok:
             return h._json({"ok": False, "error": info}, 400)
         h._json({"ok": True, "path": info, "tree": noteslib.list_tree(),

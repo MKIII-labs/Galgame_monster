@@ -7,7 +7,8 @@ from .approval import (
     _match_command_rules, _match_rules, _match_tool_rules, _secret_allowed, _secret_deny_text,
     _tool_arg_brief, approval_remember, describe_call, get_approval, is_secret_path,
     judge_command, judge_shell, judge_tool_rule, judge_write, new_approval, normalize_approval,
-    remember_approval_rule, requires_approval, resolve_approval, wait_approval,
+    pending_approvals, remember_approval_rule, requires_approval, resolve_approval,
+    wait_approval,
 )
 from .base import (
     BLANK_RANGE_MIN, BLANK_SCAN_MAX, BLANK_STD_MIN, BUILD_LOCK, CHECK_MAX_FILES,
@@ -30,7 +31,8 @@ from .dispatch import (
 )
 from .groups import (
     BLOCKED_SEGMENTS, COMPUTER_TOOLS, FILE_TOOLS, GIT_WRITE_TOOLS, LSP_TOOLS,
-    OUTSIDE_READ_TOOLS, PLAN_MODE_TOOLS, READ_ONLY_SEGMENTS, RUN_TOOLS, SEE_MAX_IMAGES,
+    OUTSIDE_READ_TOOLS, PLAN_MODE_TOOLS, READ_ONLY_SEGMENTS, RUN_TOOLS,
+    SANDBOXLESS_TOOLS, SANDBOX_ONLY_TOOLS, SEE_MAX_IMAGES,
     SEE_MAX_TOTAL, TOOLS, TOOL_ALIASES, TOOL_GROUPS, TOOL_GROUP_KEYS, WRITE_TOOLS,
     _CAP_NAMESPACES, _PLUGIN_TOOLS, _PLUGIN_TOOLS_LOCK, _REQUIRED_ARGS, _capability_ids,
     _json_type, hidden_tools, is_known_tool, tool_group_catalog, writes_files,
@@ -46,12 +48,13 @@ from .plan import (
     PLAN_MAX_STEPS, PLAN_MAX_TEXT, PLAN_MAX_VERIFY, PLAN_REVIEW_TIMEOUT, PLAN_STATUSES, _ASKS,
     _PLAN_REVIEWS, _PLAN_REVIEWS_LOCK, _asks_lock, _plan_accept, _plan_deps, _plan_done_when,
     _plan_log, _plan_status, _plan_token, _plan_txt, accept, accept_tokens, apply_plan_patch,
-    ask_meta, dismiss_ask, get_plan_review, new_asks, new_plan_review, normalize_plan,
-    pick_directory, plan_brief, resolve_plan_review, submit_answers, wait_answers,
-    wait_plan_review,
+    ask_attachments, ask_meta, dismiss_ask, get_plan_review, new_asks, new_plan_review,
+    normalize_plan,
+    pending_asks, pending_plan_reviews, pick_directory, plan_brief, resolve_plan_review,
+    submit_answers, wait_answers, wait_plan_review,
 )
 from .prompt import (
-    _ASK_PROMPT, _CAPABILITY_BOUNDARY, _COMPUTER_PROMPT, _FINISH_PROMPT, _META_ALIAS_PROMPT,
+    _ASK_PROMPT, _CAPABILITY_BOUNDARY, _COMPUTER_POINTER, _FINISH_PROMPT, _META_ALIAS_PROMPT,
     _NO_SEARCH_PROMPT, _PICKER_CODE, _PICK_MARK, _PLAN_MODE_PROMPT, _PLAN_PROMPT,
     _REMINDER_PROMPT, _RESEARCH_PROMPT, _RESEARCH_PROMPT_SHORT, _SEARCH_PROMPT,
     _VISUAL_BITMAP_NO, _VISUAL_BITMAP_OK, _VISUAL_DIAGRAM_OFF, _VISUAL_DIAGRAM_READY,
@@ -155,3 +158,17 @@ from app import tool_protocol
 from app.config import light_chat_is_local, load_config
 from app.mem_tool import DSML_CLOSE, DSML_OPEN, MemoryExtractor, _loads_loose
 from app.store import DATA_DIR
+
+
+def pending_interactions(sid=None):
+    """当前等待用户处理的交互（审批 / 提问 / 计划审批）。
+
+    这些交互原本只随 SSE 事件下发一次；断线、刷新、重开窗口后前端就再也拿不到，
+    后端却仍在等待。这里给出一份可随时重取的快照，供前端重建卡片。
+    """
+    rows = []
+    rows.extend(pending_approvals(sid))
+    rows.extend(pending_asks(sid))
+    rows.extend(pending_plan_reviews(sid))
+    rows.sort(key=lambda r: r.get("at") or 0)
+    return rows

@@ -262,6 +262,17 @@ def summary_block(summary):
     return "以下是本次对话较早内容的摘要（原始消息已压缩）：\n" + (summary or "")
 
 
+_AUDIO_EXT = (".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac",
+              ".wma", ".amr", ".opus", ".aiff", ".aif", ".ape")
+
+
+def _is_audio_att(name, mime=""):
+    """音频附件不能把二进制正文拼进上下文（曾把 10MB m4a 读成 1024 万字乱码）。"""
+    if str(mime or "").lower().startswith("audio/"):
+        return True
+    return str(name or "").lower().endswith(_AUDIO_EXT)
+
+
 def _msg_text(m, refs_handle=False):
     """一条消息真正发给模型的文本：正文 + 图片描述 + 附件正文。
     估算与拼装必须共用这一个函数，否则进度条会低估附件体积。
@@ -292,6 +303,13 @@ def _msg_text(m, refs_handle=False):
             if not isinstance(_d, dict):
                 continue
             fn = str(_d.get("name") or "附件")
+            if _is_audio_att(fn, _d.get("mime")):
+                # 历史数据里音频曾被当成二进制文本读进来（10MB 乱码），
+                # 这里必须绕开 docs[].text，否则每次请求都会把整段乱码重发。
+                note = "（音频文件未转写：请先转成文字，或用语音输入）"
+                text = (text + "\n\n【附件：" + fn + "】" + note) if text \
+                       else ("【用户上传了附件 " + fn + "】" + note)
+                continue
             body = str(_d.get("text") or "")
             if body:
                 text = (text + "\n\n【附件：" + fn + "】\n" + body) if text \
@@ -301,9 +319,15 @@ def _msg_text(m, refs_handle=False):
                 text = (text + "\n\n【附件：" + fn + "】" + note) if text \
                        else ("【用户上传了附件 " + fn + "】" + note)
     elif m.get("doc_text"):
-        fn = (m.get("doc") or {}).get("name") or "附件"
-        text = (text + "\n\n【附件：" + str(fn) + "】\n" + m["doc_text"]) if text \
-               else ("【用户上传了附件 " + str(fn) + "】\n" + m["doc_text"])
+        _doc = m.get("doc") if isinstance(m.get("doc"), dict) else {}
+        fn = str(_doc.get("name") or "附件")
+        if _is_audio_att(fn, _doc.get("mime")):
+            note = "（音频文件未转写：请先转成文字，或用语音输入）"
+            text = (text + "\n\n【附件：" + fn + "】" + note) if text \
+                   else ("【用户上传了附件 " + fn + "】" + note)
+        else:
+            text = (text + "\n\n【附件：" + fn + "】\n" + m["doc_text"]) if text \
+                   else ("【用户上传了附件 " + fn + "】\n" + m["doc_text"])
     # `@文件` 引用：正文在发送时由 app/fileref.py 抽好挂在消息上。
     # 估算与拼装共用本函数，所以引用体积也会被算进上下文占用。
     for r in (m.get("refs") or []):

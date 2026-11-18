@@ -81,7 +81,16 @@ def test_decision_prompt_routes_web_tasks_to_computer():
     assert "操作网页" not in off
 
 
-def test_computer_prompt_has_login_takeover_loop():
-    assert "ask_user" in agent._COMPUTER_PROMPT
-    assert "完成登录" in agent._COMPUTER_PROMPT
-    assert "默认直接用 computer_open 尝试" in agent._COMPUTER_PROMPT
+def test_computer_skill_and_pointer():
+    """详细规程放在 Skill 里，核心提示词只留指针。"""
+    assert "computer-use" in agent._COMPUTER_POINTER
+    assert "ask_user" in agent._COMPUTER_POINTER
+    import os
+    from app import skills
+    path = os.path.join(skills.PRESETS_DIR, "computer-use", "SKILL.md")
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    assert "ask_user" in text
+    assert "computer_open" in text
+    assert "密码框不读不填" in text
+    assert "受控窗口" in text

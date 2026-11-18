@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from app import agent, explore
+from app import agent, agent_defs, explore
 
 
 @pytest.fixture(autouse=True)
@@ -13,6 +13,26 @@ def _no_evidence(monkeypatch, tmp_path):
     """旧用例聚焦调度/预算；证据核验由 test_evidence_* 显式开启。"""
     monkeypatch.setattr(explore, "VERIFY_EVIDENCE", False)
     monkeypatch.setattr(explore, "DATA_DIR", str(tmp_path))   # 子会话落盘隔离
+    monkeypatch.setattr(agent_defs, "AGENTS_DIR", str(tmp_path / "agents"))
+    monkeypatch.setattr(agent_defs, "USER_AGENTS_DIR", str(tmp_path / "user_agents"))
+
+
+def test_delivery_checklist_is_role_aware():
+    critic = explore.delivery_checklist("critic")
+    assert "结果" in critic and "冲突" in critic
+    assert "来源 URL" in explore.delivery_checklist("searcher")
+    assert "未验证" in explore.delivery_checklist("worker")
+    generic = explore.delivery_checklist("custom-agent")
+    assert "结果" in generic and "角色补充" in generic
+
+
+def test_format_results_does_not_claim_evidence_when_missing():
+    base = {"goal": "g", "tokens": 3, "ms": 10, "results": [{
+        "id": "r1", "role": "reader", "ok": True, "text": "结论",
+        "evidence": {}}]}
+    assert "没有可核对的引用证据" in explore.format_results(base)
+    base["results"][0]["evidence"] = {"checked": 1, "ok": 1}
+    assert "带证据的结论已核对来源" in explore.format_results(base)
 
 
 def test_normalize_args_limits_and_roles():
@@ -406,16 +426,18 @@ def test_followup_handles_missing_batch_and_disabled(tmp_path):
 # 第 4 阶段：嵌套深度 / 后台批次
 # ============================================================
 def test_nested_tools_only_for_read_roles():
-    assert "explore" in explore.ROLE_TOOLS["reader"]
-    assert "explore" in explore.ROLE_TOOLS["finder"]
-    assert "explore" in explore.ROLE_TOOLS["searcher"]
-    assert "explore" not in explore.ROLE_TOOLS["critic"]
-    assert "explore" not in explore.ROLE_TOOLS["worker"]
+    def tools(aid):
+        return set(agent_defs.get_agent(aid)["effective_tools"])
+    assert "explore" in tools("reader")
+    assert "explore" in tools("finder")
+    assert "explore" in tools("searcher")
+    assert "explore" not in tools("critic")
+    assert "explore" not in tools("worker")
     # 只读 git 工具：子代理要能回答「有没有未提交改动 / 仓库是什么状态」
-    assert "git_status" in explore.ROLE_TOOLS["finder"]
-    assert "git_status" in explore.ROLE_TOOLS["reader"]
-    assert "git_status" in explore.ROLE_TOOLS["critic"]
-    assert "置信度" in explore._COMMON
+    assert "git_status" in tools("finder")
+    assert "git_status" in tools("reader")
+    assert "git_status" in tools("critic")
+    assert "结果" in explore.delivery_checklist("critic")
 
 
 def test_depth_limit_rejects(tmp_path):

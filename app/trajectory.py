@@ -133,26 +133,144 @@ def _append(sid, typ, data=None):
         return 0
 
 
-def _iter_events(sid):
-    """按时间顺序读事件（旧滚动文件在前）。坏行跳过。"""
-    out = []
-    for p in (_old_path(sid), _path(sid)):
+# ---------------------------------------------------------------- 事件缓存
+# 45MB 的会话有 2.4 万条事件；「跟随最新」每 2.5s 全量重读会把 CPU 打满。
+# 这里按 (size, mtime) 判重，只把新增字节追加进来；旧文件被滚动时整体重建。
+_EV_CACHE = {}
+_EV_MAX = 2
+_EV_LOCK = threading.Lock()
+
+
+def _stat_rev(paths):
+    out = {}
+    for p in paths:
         try:
-            with open(p, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        item = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(item, dict) and item.get("type"):
-                        out.append(item)
+            st = os.stat(p)
+            out[p] = [int(st.st_size), int(st.st_mtime_ns)]
         except OSError:
-            continue
-    out.sort(key=lambda x: int(x.get("seq") or 0))
+            out[p] = [0, 0]
     return out
+
+
+def _parse_events(blob):
+    out = []
+    for line in blob.split(b"\n"):
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            item = json.loads(s.decode("utf-8", "ignore"))
+        except ValueError:
+            continue
+        if isinstance(item, dict) and item.get("type"):
+            out.append(item)
+    return out
+
+
+def _load_events_full(sid):
+    old, cur = _old_path(sid), _path(sid)
+    events = []
+    pend = {}
+    for p in (old, cur):
+        try:
+            with open(p, "rb") as f:
+                blob = f.read()
+        except OSError:
+            pend[p] = b""
+            continue
+        # 末尾没有换行：可能正在写入，留给下一次增量
+        parts = blob.split(b"\n")
+        tail = parts.pop()
+        events.extend(_parse_events(b"\n".join(parts)))
+        pend[p] = tail
+    events.sort(key=lambda x: int(x.get("seq") or 0))
+    rev = _stat_rev([old, cur])
+    return {
+        "rev": rev, "events": events,
+        "byseq": {int(e.get("seq") or 0): e for e in events},
+        "pending": pend,
+        "offset": {cur: rev[cur][0] - len(pend.get(cur) or b"")},
+        "used": time.monotonic(),
+    }
+
+
+def _append_events(c, cur):
+    """从上次偏移读当前文件的新增部分（旧文件未滚动时才安全）。"""
+    off = int(c["offset"].get(cur) or 0)
+    try:
+        with open(cur, "rb") as f:
+            f.seek(off)
+            blob = f.read()
+    except OSError:
+        return
+    if not blob:
+        return
+    blob = (c["pending"].get(cur) or b"") + blob
+    parts = blob.split(b"\n")
+    tail = parts.pop()
+    consumed = len(blob) - len(tail)
+    new = _parse_events(b"\n".join(parts))
+    for ev in new:
+        c["events"].append(ev)
+        c["byseq"][int(ev.get("seq") or 0)] = ev
+    c["offset"][cur] = off + consumed
+    c["pending"][cur] = tail
+
+
+def _iter_events(sid):
+    """按时间顺序读事件（旧滚动文件在前）。带增量缓存，返回的列表只读。"""
+    old, cur = _old_path(sid), _path(sid)
+    rev = _stat_rev([old, cur])
+    with _EV_LOCK:
+        c = _EV_CACHE.get(sid)
+        if c and c["rev"] == rev:
+            c["used"] = time.monotonic()
+            return c["events"]
+        if (c and c["rev"].get(old) == rev[old]
+                and rev[cur][0] >= int(c["offset"].get(cur) or 0)):
+            _append_events(c, cur)
+            c["rev"] = rev
+            c["used"] = time.monotonic()
+            return c["events"]
+        c = _load_events_full(sid)
+        _EV_CACHE[sid] = c
+        if len(_EV_CACHE) > _EV_MAX:
+            oldest = min(_EV_CACHE.items(), key=lambda kv: kv[1]["used"])[0]
+            if oldest != sid:
+                _EV_CACHE.pop(oldest, None)
+        return c["events"]
+
+
+def _event_by_seq(sid, seq):
+    try:
+        s = int(seq or 0)
+    except (TypeError, ValueError):
+        return None
+    if s <= 0:
+        return None
+    _iter_events(sid)                 # 确保缓存已建立
+    c = _EV_CACHE.get(sid) or {}
+    return (c.get("byseq") or {}).get(s)
+
+
+def _drop_cache(sid):
+    with _EV_LOCK:
+        _EV_CACHE.pop(sid, None)
+        _PROJ_CACHE.pop(sid, None)
+
+
+def drop(sid):
+    """删除会话时一并删除轨迹日志，避免删完会话后磁盘上还留着完整对话副本。"""
+    s = str(sid or "").strip()
+    if not s:
+        return
+    _drop_cache(s)
+    base = _path(s)
+    for p in (base, _old_path(s), base[:-len(".jsonl")] + ".1.jsonl"):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
 
 
 def _scan_last_turn(sid):
@@ -502,6 +620,7 @@ def _subagent_cells(sid, batch, parent_id):
         out.append({
             "kind": "subtool",
             "recordId": "%s:%s" % (parent_id, key),
+            "inline": True,              # 子代理转录来自独立文件，直接内联
             "text": "[%s] %s" % (role, _preview(ask) or "子代理"),
             "inputDetail": ask,
             "outputDetail": _transcript(msgs),
@@ -515,6 +634,7 @@ def _subagent_cells(sid, batch, parent_id):
 
 
 def _finalize(sid, turns, before=None, limit_turns=30, source="events"):
+    """回退投影 / 导出用的收尾：编号、统计、工具排行、token 曲线。"""
     total_turns = len(turns)
     if before:
         try:
@@ -530,288 +650,611 @@ def _finalize(sid, turns, before=None, limit_turns=30, source="events"):
     if lim > 0 and len(turns) > lim:
         has_more = True
         turns = turns[-lim:]
-    counts = {}
-    tokens = {"prompt": 0, "completion": 0, "reasoning": 0}
+    counts, tools, series, marks = {}, {}, [], []
+    tokens = {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0}
     errors = 0
+    steps = 0
+    peak = 0
     idx = 1
     for t in turns:
-        t.pop("_g", None)
+        st = {"cells": 0, "steps": 0, "tools": 0, "errors": 0, "peakIn": 0,
+              "outTok": 0, "inTok": 0, "think": 0, "cached": 0, "secs": 0}
+        t["_gi"] = None
         for g in t.get("groups") or []:
+            if g.get("step"):
+                steps += 1
+                st["steps"] += 1
             for c in g.get("cells") or []:
                 c["index"] = idx
+                c["inline"] = True       # 回退投影自带全文，前端不再按 refs 取
                 idx += 1
-                counts[c.get("kind") or "?"] = counts.get(c.get("kind") or "?", 0) + 1
+                kind = c.get("kind") or "?"
+                counts[kind] = counts.get(kind, 0) + 1
+                st["cells"] += 1
                 if c.get("isError"):
                     errors += 1
-                for k in tokens:
-                    try:
-                        tokens[k] += int(c.get(k) or 0)
-                    except (TypeError, ValueError):
-                        pass
+                    st["errors"] += 1
+                if kind in ("tool", "subtool"):
+                    st["tools"] += 1
+                    name = c.get("toolName") or ""
+                    if kind == "tool" and name:
+                        d = tools.setdefault(name, {"name": name, "count": 0,
+                                                    "errors": 0, "ms": 0, "chars": 0})
+                        d["count"] += 1
+                        d["ms"] += int((c.get("timeSeconds") or 0) * 1000)
+                        d["chars"] += int(c.get("resultChars") or 0)
+                        if c.get("isError"):
+                            d["errors"] += 1
+                pin = int(c.get("input") or 0)
+                if pin > peak:
+                    peak = pin
+                if pin > st["peakIn"]:
+                    st["peakIn"] = pin
+                st["inTok"] += pin
+                st["outTok"] += int(c.get("output") or 0)
+                st["think"] += int(c.get("think") or 0)
+                st["cached"] += int(c.get("cacheRead") or 0)
+                st["secs"] += float(c.get("timeSeconds") or 0)
+                if kind == "message":
+                    series.append([int(t.get("turn") or 0), idx, pin,
+                                   int(c.get("output") or 0),
+                                   int(c.get("cacheRead") or 0),
+                                   int(c.get("ttftMs") or 0),
+                                   round(float(c.get("timeSeconds") or 0), 2)])
+                if kind == "compacted":
+                    marks.append({"type": "compact", "turn": int(t.get("turn") or 0),
+                                  "at": int(c.get("startedAt") or 0)})
+        t.pop("_gi", None)
+        t["stats"] = st
+    for t in turns:
+        for g in t.get("groups") or []:
+            for c in g.get("cells") or []:
+                tokens["prompt"] += int(c.get("input") or 0)
+                tokens["completion"] += int(c.get("output") or 0)
+                tokens["reasoning"] += int(c.get("think") or 0)
+                tokens["cached"] += int(c.get("cacheRead") or 0)
     return {
         "sid": sid, "source": source, "turns": turns,
-        "stats": {"cells": idx - 1, "turns": total_turns,
-                  "by_kind": counts, "errors": errors, "tokens": tokens},
-        "has_more": has_more,
+        "stats": {"cells": idx - 1, "turns": total_turns, "steps": steps,
+                  "tools": sum(d["count"] for d in tools.values()),
+                  "by_kind": counts, "errors": errors, "tokens": tokens,
+                  "peakContext": peak},
+        "tools": sorted(tools.values(), key=lambda d: -d["count"])[:40],
+        "series": _thin(series), "marks": marks,
+        "has_more": has_more, "total_turns": total_turns,
     }
 
 
-def build(sid, before=None, limit_turns=30):
-    """把轨迹事件投影成 turn -> group -> cell。没有轨迹日志时回退到会话消息。"""
-    events = _iter_events(sid)
-    if not events:
-        return _build_from_session(sid, before=before, limit_turns=limit_turns)
+def _thin(series, limit=480):
+    """token 曲线抽稀：点数太多前端画不动，等距取样并保留最后一点。"""
+    n = len(series)
+    if n <= limit:
+        return series
+    step = max(1, n // (limit - 1))
+    out = series[::step][:limit - 1]
+    out.append(series[-1])
+    return out
 
-    turns, by_turn, calls = [], {}, {}
-    header = {}
-    prev_system = ""
 
-    def ensure_turn(n, ts=0):
-        n = int(n or 0)
+# ---------------------------------------------------------------- 投影
+# turn -> group（输入 / 第 N 步）-> cell。
+# cell 只带预览与「详情引用」（refs），正文在选中时才按需取：
+# 45MB 的会话若把输入 / 输出 / schema 全塞进列表，一次要回 43MB JSON。
+
+_PROJ_CACHE = {}
+_PROJ_MAX = 2
+
+
+class _Proj:
+    """增量投影器：事件只追加，所以新事件继续喂给同一个实例即可。"""
+
+    def __init__(self, sid, events):
+        self.sid = sid
+        self.events = events
+        self.pos = 0
+        self.turns = []
+        self.by_turn = {}
+        self.calls = {}
+        self.rids = set()
+        self.header = {}
+        self.header_seq = 0
+        self.prev_system = ""
+        self.no = 0
+        self.total_turns = 0
+        self.kind = {}
+        self.tool_stats = {}
+        self.tokens = {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0}
+        self.peak = 0
+        self.errors = 0
+        self.steps = 0
+        self.series = []
+        self.marks = []
+        self.started = 0
+
+    def sync(self, events):
+        if self.events is not events:
+            self.__init__(self.sid, events)
+        if self.pos < len(events):
+            for i in range(self.pos, len(events)):
+                try:
+                    self._one(events[i])
+                except Exception:        # noqa: BLE001 单条坏事件不影响整份
+                    pass
+                self.pos = i + 1
+
+    # ------------------------------------------------------------ 结构
+
+    def _turn(self, n, ts=0):
+        try:
+            n = int(n or 0)
+        except (TypeError, ValueError):
+            n = 0
         if n <= 0:
-            n = (turns[-1]["turn"] + 1) if turns else 1
-        t = by_turn.get(n)
+            n = (self.turns[-1]["turn"] + 1) if self.turns else 1
+        t = self.by_turn.get(n)
         if t is None:
             t = {"turn": n, "start": int(ts or 0), "end": None, "reason": "",
-                 "groups": [], "_g": None}
-            by_turn[n] = t
-            turns.append(t)
+                 "groups": [], "_gi": -1,
+                 "stats": {"cells": 0, "steps": 0, "tools": 0, "errors": 0,
+                           "peakIn": 0, "outTok": 0, "inTok": 0, "think": 0,
+                           "cached": 0, "secs": 0}}
+            self.by_turn[n] = t
+            self.turns.append(t)
+            self.total_turns = len(self.turns)
+            if ts and not self.started:
+                self.started = int(ts)
+        elif ts and not t.get("start"):
+            t["start"] = int(ts)
         return t
 
-    def group_of(t, title, desc=""):
-        g = t.get("_g")
-        if g is not None and g.get("title") == title:
-            return g
-        g = {"title": title, "description": desc, "cells": []}
+    def _group(self, t, title, step=0):
+        i = t["_gi"]
+        if 0 <= i < len(t["groups"]) and t["groups"][i]["title"] == title:
+            if step:
+                t["groups"][i]["step"] = step
+            return t["groups"][i]
+        for j in range(len(t["groups"]) - 1, -1, -1):
+            if t["groups"][j]["title"] == title:
+                t["_gi"] = j
+                if step:
+                    t["groups"][j]["step"] = step
+                return t["groups"][j]
+        g = {"title": title, "step": int(step or 0), "cells": []}
         t["groups"].append(g)
-        t["_g"] = g
+        t["_gi"] = len(t["groups"]) - 1
         return g
 
-    def add(t, title, cell):
-        group_of(t, title)["cells"].append(cell)
+    def _cell(self, t, title, step, cell, ts=0):
+        rid = str(cell.get("recordId") or "")
+        if rid and rid in self.rids:     # 子代理可能被 tool/result 与 subagent 各展开一次
+            return cell
+        self.no += 1
+        cell["index"] = self.no
+        if not rid:
+            cell["recordId"] = "c_%d" % self.no
+        else:
+            self.rids.add(rid)
+        if ts and not cell.get("startedAt"):
+            cell["startedAt"] = int(ts)
+        self._group(t, title, step)["cells"].append(cell)
+        kind = cell.get("kind") or "?"
+        self.kind[kind] = self.kind.get(kind, 0) + 1
+        st = t["stats"]
+        st["cells"] += 1
+        if cell.get("isError"):
+            st["errors"] += 1
+            self.errors += 1
+        if kind in ("tool", "subtool"):
+            st["tools"] += 1
+            name = cell.get("toolName") or ""
+            if kind == "tool" and name:
+                d = self.tool_stats.setdefault(
+                    name, {"name": name, "count": 0, "errors": 0, "ms": 0, "chars": 0})
+                d["count"] += 1
+        pin = int(cell.get("input") or 0)
+        if pin:
+            if pin > self.peak:
+                self.peak = pin
+            if pin > st["peakIn"]:
+                st["peakIn"] = pin
+            st["inTok"] += pin
+            self.tokens["prompt"] += pin
+        if cell.get("output"):
+            st["outTok"] += int(cell["output"])
+            self.tokens["completion"] += int(cell["output"])
+        if cell.get("think"):
+            st["think"] += int(cell["think"])
+            self.tokens["reasoning"] += int(cell["think"])
+        if cell.get("cacheRead"):
+            st["cached"] += int(cell["cacheRead"])
+            self.tokens["cached"] += int(cell["cacheRead"])
+        if cell.get("timeSeconds"):
+            st["secs"] += float(cell["timeSeconds"])
+        if kind == "message":
+            self.series.append([int(t.get("turn") or 0), self.no, pin,
+                                int(cell.get("output") or 0),
+                                int(cell.get("cacheRead") or 0),
+                                int(cell.get("ttftMs") or 0),
+                                round(float(cell.get("timeSeconds") or 0), 2)])
+        return cell
 
-    for ev in events:
+    # ------------------------------------------------------------ 事件
+
+    def _one(self, ev):
         typ = ev.get("type")
         data = ev.get("data") or {}
         ts = int(ev.get("ts") or 0)
+        seq = int(ev.get("seq") or 0)
+
         if typ == "turn/start":
-            ensure_turn(data.get("turn"), ts)
-        elif typ == "turn/end":
-            t = ensure_turn(data.get("turn"), ts)
+            self._turn(data.get("turn"), ts)
+            return
+        if typ == "turn/end":
+            t = self._turn(data.get("turn"), ts)
             t["end"] = ts
             t["reason"] = str(data.get("reason") or "")
-        elif typ == "request/header":
-            t = ensure_turn(data.get("turn"), ts)
-            header = data.get("header") or {}
-            step = int(data.get("step") or 0)
-            title = ("第 %d 步" % step) if step else "输入"
-            system = str(header.get("system") or "")
-            tools = header.get("tools") or []
-            parts = data.get("parts") if isinstance(data.get("parts"), list) else []
-            reason = str(data.get("reason") or "")
-            changed = [str(p.get("label") or "") for p in parts if p.get("changed")]
-            if reason == "initial":
-                text = "初始系统提示 · %d 字 · 工具 %d 个" % (len(system), len(tools))
-            elif reason == "resume":
-                text = ("系统提示（进程重启后恢复）· %d 字 · 工具 %d 个"
-                        % (len(system), len(tools)))
-            elif reason == "change":
-                bits = []
-                if changed:
-                    bits.append("、".join(changed[:3]) + ("…" if len(changed) > 3
-                                                          else ""))
-                if data.get("changedTools"):
-                    bits.append("工具")
-                text = "系统提示更新：%s · 工具 %d 个" % ("、".join(bits) or "内容",
-                                                          len(tools))
-            else:                          # 旧事件没有 reason / parts：保持原样
-                text = "系统提示 · %d 字 · 工具 %d 个" % (len(system), len(tools))
-            cell = {
-                "kind": "system",
-                "recordId": "sys_%s_%s" % (t["turn"], step),
-                "text": text,
-                "inputDetail": system,
-                "schemaDetail": json.dumps(tools, ensure_ascii=False, default=str),
-                "parts": [{"id": str(p.get("id") or ""),
-                           "label": str(p.get("label") or ""),
-                           "chars": int(p.get("chars") or 0),
-                           "changed": bool(p.get("changed")),
-                           "recordId": "part_%s_%s_%s"
-                                       % (t["turn"], step, p.get("id"))}
-                          for p in parts],
-                "systemReason": reason,
-                "model": str(header.get("model") or ""),
-                "provider": str(header.get("provider") or ""),
-                "toolCount": len(tools),
-                "startedAt": ts,
-            }
-            if prev_system and prev_system != system:
-                cell["promptDiff"] = _diff_text(prev_system, system)
-            add(t, title, cell)
-            # 每个分段单独成行（对齐 DSH 的「注入项逐条可见」）：
-            # 技能索引 / 系统时间 / Agent 工具说明…都在这里能找到原文。
-            for p in parts:
-                start = int(p.get("start") or 0)
-                end = int(p.get("end") or 0)
-                seg = system[start:end] if 0 <= start < end <= len(system) else ""
-                if not seg:
-                    continue
-                tag = ("（变化）" if reason == "change" and p.get("changed")
-                       else "")
-                add(t, title, {
-                    "kind": "context",
-                    "recordId": "part_%s_%s_%s" % (t["turn"], step, p.get("id")),
-                    "text": "%s%s · %d 字" % (tag, p.get("label") or "段落",
-                                              len(seg)),
-                    "inputDetail": seg,
-                    "source": {"kind": "prompt_part",
-                               "label": str(p.get("label") or ""),
-                               "part": str(p.get("id") or ""),
-                               "changed": bool(p.get("changed"))},
-                    "startedAt": ts,
-                })
-            prev_system = system
-        elif typ == "user/message":
-            t = ensure_turn(data.get("turn"), ts)
-            src = data.get("source") if isinstance(data.get("source"), dict) else {}
-            kind = str(src.get("kind") or "human")
-            content = str(data.get("content") or "")
-            label = str(src.get("label") or kind)
-            if kind == "human":
-                add(t, "输入", {
-                    "kind": "user", "text": _preview(content) or "（空消息）",
-                    "inputDetail": content, "opensTurn": True,
-                    "source": src, "startedAt": ts,
-                })
-            else:
-                add(t, "输入", {
-                    "kind": "context", "text": "[%s] %s" % (label, _preview(content)),
-                    "inputDetail": content, "source": src, "startedAt": ts,
-                })
-        elif typ == "assistant/message":
-            t = ensure_turn(data.get("turn"), ts)
-            step = int(data.get("step") or 0)
-            title = ("第 %d 步" % step) if step else "第 1 步"
-            content = str(data.get("content") or "")
-            reasoning = str(data.get("reasoning") or "")
-            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-            timing = data.get("timing") if isinstance(data.get("timing"), dict) else {}
-            start = timing.get("start")
-            first = timing.get("first")
-            end = timing.get("end")
-            dur = None
-            if isinstance(start, (int, float)) and isinstance(end, (int, float)):
-                dur = max(0.0, float(end) - float(start))
-            ttft = timing.get("first_ms")
-            if not isinstance(ttft, (int, float)) and isinstance(start, (int, float)) \
-                    and isinstance(first, (int, float)):
-                ttft = max(0.0, (float(first) - float(start)) * 1000.0)
-            if reasoning:
-                add(t, title, {
-                    "kind": "reasoning", "text": _preview(reasoning),
-                    "thinkingDetail": reasoning, "startedAt": ts,
-                })
-            out_tok = int(usage.get("completion_tokens") or 0)
-            speed = None
-            if isinstance(dur, (int, float)) and dur > 0 and out_tok:
-                speed = round(out_tok / float(dur), 1)     # decode tok/s
-            details = usage.get("prompt_tokens_details") or {}
-            add(t, title, {
-                "kind": "message",
-                "text": _preview(content) or ("（只有思考）" if reasoning else "（无正文）"),
-                "outputDetail": content,
-                "input": int(usage.get("prompt_tokens") or 0),
-                "output": out_tok,
-                "think": int((usage.get("completion_tokens_details") or {})
-                             .get("reasoning_tokens") or 0)
-                         or int(usage.get("reasoning_tokens") or 0),
-                "cacheRead": int(details.get("cached_tokens") or 0),
-                "cacheWrite": int(details.get("cache_write_tokens")
-                                  or details.get("cache_creation_tokens") or 0),
-                "decodeTps": speed,
-                "timeSeconds": dur, "ttftMs": ttft,
-                "startedAt": ts,
-            })
-        elif typ == "tool/call":
-            t = ensure_turn(data.get("turn"), ts)
-            step = int(data.get("step") or 0)
-            title = ("第 %d 步" % step) if step else "第 1 步"
-            name = str(data.get("name") or "")
-            call_id = str(data.get("callId") or "")
-            args = str(data.get("arguments") or "")
-            cell = {
-                "kind": "tool", "recordId": call_id,
-                "text": "%s(%s)" % (name, _preview(args, 80)),
-                "inputDetail": args, "callId": call_id, "toolName": name,
-                "schemaDetail": _tool_schema(header, name),
-                "subagent": name in _SUBAGENT_TOOLS,
-                "startedAt": ts,
-            }
-            add(t, title, cell)
-            calls[call_id] = cell
-        elif typ == "tool/result":
-            t = ensure_turn(data.get("turn"), ts)
+            if t["reason"] in ("error", "failed", "aborted"):
+                self.marks.append({"type": "error", "turn": t["turn"], "at": ts,
+                                   "label": t["reason"]})
+            return
+        if typ == "step/start":
+            t = self._turn(data.get("turn"), ts)
+            self.steps += 1
+            t["stats"]["steps"] += 1
+            return
+        if typ == "request/header":
+            self._header(ev, data, ts, seq)
+            return
+        if typ == "user/message":
+            self._user(data, ts, seq)
+            return
+        if typ == "assistant/message":
+            self._assistant(data, ts, seq)
+            return
+        if typ == "tool/call":
+            self._tool_call(data, ts, seq)
+            return
+        if typ == "tool/result":
+            self._tool_result(data, ts, seq)
+            return
+        if typ == "subagent":
+            t = self._turn(data.get("turn"), ts)
             step = int(data.get("step") or 0)
             title = ("第 %d 步" % step) if step else "第 1 步"
             call_id = str(data.get("callId") or "")
-            cell = calls.get(call_id)
-            if cell is None:
-                name = str(data.get("name") or "")
-                cell = {"kind": "tool", "recordId": call_id,
-                        "text": name, "callId": call_id, "toolName": name,
-                        "subagent": name in _SUBAGENT_TOOLS, "startedAt": ts}
-                add(t, title, cell)
-                calls[call_id] = cell
-            text = str(data.get("result") or "")
-            cell.update({
-                "result": text, "outputDetail": text,
-                "isError": not bool(data.get("ok", True)),
-                "traceId": str(data.get("traceId") or ""),
-                "resultChars": int(data.get("resultChars") or 0),
-                "write": bool(data.get("write")),
-                "errorText": str(data.get("error") or ""),
-                "timeSeconds": (int(data.get("ms") or 0) / 1000.0
-                                if data.get("ms") is not None else None),
-            })
-            name = str(cell.get("toolName") or data.get("name") or "")
-            if name in _SUBAGENT_TOOLS:
-                batch = str(data.get("batch") or "")
-                for child in _subagent_cells(sid, batch, call_id):
-                    add(t, title, child)
-        elif typ == "subagent":
-            t = ensure_turn(data.get("turn"), ts)
-            step = int(data.get("step") or 0)
-            title = ("第 %d 步" % step) if step else "第 1 步"
-            call_id = str(data.get("callId") or "")
-            cell = calls.get(call_id)
             batch = str(data.get("batch") or "")
-            if cell is not None and batch:
-                for child in _subagent_cells(sid, batch, call_id):
-                    add(t, title, child)
-        elif typ == "todo/write":
-            t = ensure_turn(data.get("turn"), ts)
+            if self.calls.get(call_id) is not None and batch:
+                for child in _subagent_cells(self.sid, batch, call_id):
+                    self._cell(t, title, step, child, ts)
+            return
+        if typ == "todo/write":
+            t = self._turn(data.get("turn"), ts)
             plan = data.get("plan") if isinstance(data.get("plan"), dict) else {}
             steps = plan.get("steps") or []
             done = sum(1 for s in steps if isinstance(s, dict)
                        and s.get("status") == "done")
-            add(t, "第 1 步" if not t["groups"] else t["groups"][-1]["title"], {
+            self._cell(t, self._title(t), 0, {
                 "kind": "context",
                 "text": "计划 v%s · %d 步 · %d 完成" % (
                     plan.get("revision") or 1, len(steps), done),
-                "inputDetail": json.dumps(plan, ensure_ascii=False, default=str),
-                "source": {"kind": "plan", "label": "计划"},
-                "startedAt": ts,
-            })
-        elif typ == "compact":
-            t = ensure_turn(data.get("turn"), ts)
-            add(t, "输入", {
+                "refs": {"in": str(seq)}, "source": {"kind": "plan", "label": "计划"},
+                "sizes": {"input": len(json.dumps(plan, ensure_ascii=False,
+                                                  default=str))},
+            }, ts)
+            self.marks.append({"type": "plan", "turn": int(t.get("turn") or 0),
+                               "at": ts, "rev": plan.get("revision") or 1,
+                               "done": done, "total": len(steps)})
+            return
+        if typ == "review":
+            t = self._turn(data.get("turn"), ts)
+            rep = data.get("report") if isinstance(data.get("report"), dict) else {}
+            verdict = str(rep.get("verdict") or "")
+            self._cell(t, self._title(t), 0, {
+                "kind": "review",
+                "text": "验收 %s" % (verdict or "—"),
+                "refs": {"in": str(seq)}, "source": {"kind": "review", "label": "验收"},
+                "isError": verdict in ("fail", "failed", "reject"),
+                "sizes": {"input": len(json.dumps(rep, ensure_ascii=False,
+                                                  default=str))},
+            }, ts)
+            self.marks.append({"type": "review", "turn": int(t.get("turn") or 0),
+                               "at": ts, "verdict": verdict})
+            return
+        if typ == "compact":
+            t = self._turn(data.get("turn"), ts)
+            self._cell(t, "输入", 0, {
                 "kind": "compacted",
                 "text": "压缩历史：%s → %s 条，摘要 %s 字" % (
                     data.get("before") or 0, data.get("after") or 0,
                     data.get("chars") or 0),
-                "startedAt": ts,
-            })
-    return _finalize(sid, turns, before=before, limit_turns=limit_turns)
+                "refs": {"in": str(seq)},
+            }, ts)
+            self.marks.append({"type": "compact", "turn": int(t.get("turn") or 0),
+                               "at": ts})
+            return
+
+    def _title(self, t):
+        gs = t.get("groups") or []
+        if gs and gs[-1].get("step"):
+            return "第 %d 步" % gs[-1]["step"]
+        return "第 1 步" if gs else "输入"
+
+    def _header(self, ev, data, ts, seq):
+        t = self._turn(data.get("turn"), ts)
+        self.header = data.get("header") or {}
+        self.header_seq = seq
+        step = int(data.get("step") or 0)
+        title = ("第 %d 步" % step) if step else "输入"
+        system = str(self.header.get("system") or "")
+        tools = self.header.get("tools") or []
+        parts = data.get("parts") if isinstance(data.get("parts"), list) else []
+        reason = str(data.get("reason") or "")
+        changed = [str(p.get("label") or "") for p in parts if p.get("changed")]
+        if reason == "initial":
+            text = "初始系统提示 · %d 字 · 工具 %d 个" % (len(system), len(tools))
+        elif reason == "resume":
+            text = ("系统提示（进程重启后恢复）· %d 字 · 工具 %d 个"
+                    % (len(system), len(tools)))
+        elif reason == "change":
+            bits = []
+            if changed:
+                bits.append("、".join(changed[:3]) + ("…" if len(changed) > 3 else ""))
+            if data.get("changedTools"):
+                bits.append("工具")
+            text = "系统提示更新：%s · 工具 %d 个" % ("、".join(bits) or "内容",
+                                                      len(tools))
+        else:
+            text = "系统提示 · %d 字 · 工具 %d 个" % (len(system), len(tools))
+        try:
+            schema_len = len(json.dumps(tools, ensure_ascii=False, default=str))
+        except Exception:                # noqa: BLE001
+            schema_len = 0
+        cell = {
+            "kind": "system", "recordId": "sys_%s_%s" % (t["turn"], step),
+            "text": text, "refs": {"sys": str(seq)},
+            "sizes": {"input": len(system), "schema": schema_len},
+            "parts": [{"id": str(p.get("id") or ""),
+                       "label": str(p.get("label") or ""),
+                       "chars": int(p.get("chars") or 0),
+                       "changed": bool(p.get("changed")),
+                       "recordId": "part_%s_%s_%s" % (t["turn"], step, p.get("id"))}
+                      for p in parts],
+            "systemReason": reason,
+            "model": str(self.header.get("model") or ""),
+            "provider": str(self.header.get("provider") or ""),
+            "toolCount": len(tools),
+            "startedAt": ts,
+        }
+        if self.prev_system and self.prev_system != system:
+            cell["diff"] = [len(self.prev_system), len(system)]
+        self._cell(t, title, step, cell, ts)
+        for p in parts:
+            start = int(p.get("start") or 0)
+            end = int(p.get("end") or 0)
+            seg = system[start:end] if 0 <= start < end <= len(system) else ""
+            if not seg:
+                continue
+            tag = ("（变化）" if reason == "change" and p.get("changed") else "")
+            self._cell(t, title, step, {
+                "kind": "context",
+                "recordId": "part_%s_%s_%s" % (t["turn"], step, p.get("id")),
+                "text": "%s%s · %d 字" % (tag, p.get("label") or "段落", len(seg)),
+                "refs": {"part": str(seq)}, "seg": [start, end],
+                "sizes": {"input": len(seg)},
+                "source": {"kind": "prompt_part",
+                           "label": str(p.get("label") or ""),
+                           "part": str(p.get("id") or ""),
+                           "changed": bool(p.get("changed"))},
+            }, ts)
+        self.prev_system = system
+
+    def _user(self, data, ts, seq):
+        t = self._turn(data.get("turn"), ts)
+        src = data.get("source") if isinstance(data.get("source"), dict) else {}
+        kind = str(src.get("kind") or "human")
+        content = str(data.get("content") or "")
+        label = str(src.get("label") or kind)
+        if kind == "human":
+            self._cell(t, "输入", 0, {
+                "kind": "user", "text": _preview(content) or "（空消息）",
+                "refs": {"in": str(seq)}, "opensTurn": True, "source": src,
+                "sizes": {"input": len(content)},
+            }, ts)
+        else:
+            self._cell(t, "输入", 0, {
+                "kind": "context", "text": "[%s] %s" % (label, _preview(content)),
+                "refs": {"in": str(seq)}, "source": src,
+                "sizes": {"input": len(content)},
+            }, ts)
+
+    def _assistant(self, data, ts, seq):
+        t = self._turn(data.get("turn"), ts)
+        step = int(data.get("step") or 0)
+        title = ("第 %d 步" % step) if step else "第 1 步"
+        content = str(data.get("content") or "")
+        reasoning = str(data.get("reasoning") or "")
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        timing = data.get("timing") if isinstance(data.get("timing"), dict) else {}
+        start, first, end = timing.get("start"), timing.get("first"), timing.get("end")
+        dur = None
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            dur = max(0.0, float(end) - float(start))
+        ttft = timing.get("first_ms")
+        if not isinstance(ttft, (int, float)) and isinstance(start, (int, float)) \
+                and isinstance(first, (int, float)):
+            ttft = max(0.0, (float(first) - float(start)) * 1000.0)
+        # 事件 ts 是「写回时刻」；瀑布要的是请求起止，所以额外带上 endAt
+        started = int(round(float(start) * 1000)) if isinstance(start, (int, float)) else ts
+        ended = int(round(float(end) * 1000)) if isinstance(end, (int, float)) else 0
+        if reasoning:
+            self._cell(t, title, step, {
+                "kind": "reasoning", "text": _preview(reasoning),
+                "refs": {"out": str(seq)}, "sizes": {"output": len(reasoning)},
+                "startedAt": started, "endAt": ended,
+            }, ts)
+        out_tok = int(usage.get("completion_tokens") or 0)
+        speed = None
+        if isinstance(dur, (int, float)) and dur > 0 and out_tok:
+            speed = round(out_tok / float(dur), 1)
+        details = usage.get("prompt_tokens_details") or {}
+        think = int((usage.get("completion_tokens_details") or {})
+                    .get("reasoning_tokens") or 0) or int(
+            usage.get("reasoning_tokens") or 0)
+        self._cell(t, title, step, {
+            "kind": "message",
+            "text": _preview(content) or ("（只有思考）" if reasoning else "（无正文）"),
+            "refs": {"out": str(seq)},
+            "input": int(usage.get("prompt_tokens") or 0),
+            "output": out_tok, "think": think,
+            "cacheRead": int(details.get("cached_tokens") or 0),
+            "cacheWrite": int(details.get("cache_write_tokens")
+                              or details.get("cache_creation_tokens") or 0),
+            "decodeTps": speed, "timeSeconds": dur, "ttftMs": ttft,
+            "sizes": {"output": len(content), "thinking": len(reasoning)},
+            "startedAt": started, "endAt": ended,
+        }, ts)
+
+    def _tool_call(self, data, ts, seq):
+        t = self._turn(data.get("turn"), ts)
+        step = int(data.get("step") or 0)
+        title = ("第 %d 步" % step) if step else "第 1 步"
+        name = str(data.get("name") or "")
+        call_id = str(data.get("callId") or "")
+        args = str(data.get("arguments") or "")
+        cell = {
+            "kind": "tool", "recordId": call_id,
+            "text": "%s(%s)" % (name, _preview(args, 90)),
+            "refs": {"in": str(seq)}, "callId": call_id, "toolName": name,
+            "schemaRef": str(self.header_seq or ""),
+            "subagent": name in _SUBAGENT_TOOLS,
+            "sizes": {"input": len(args)},
+            "search": args[:300],
+        }
+        self._cell(t, title, step, cell, ts)
+        if call_id:
+            self.calls[call_id] = cell
+
+    def _tool_result(self, data, ts, seq):
+        t = self._turn(data.get("turn"), ts)
+        step = int(data.get("step") or 0)
+        title = ("第 %d 步" % step) if step else "第 1 步"
+        call_id = str(data.get("callId") or "")
+        cell = self.calls.get(call_id)
+        if cell is None:
+            name = str(data.get("name") or "")
+            cell = {"kind": "tool", "recordId": call_id, "text": name,
+                    "callId": call_id, "toolName": name,
+                    "schemaRef": str(self.header_seq or ""),
+                    "subagent": name in _SUBAGENT_TOOLS, "sizes": {}}
+            self._cell(t, title, step, cell, ts)
+            self.calls[call_id] = cell
+        text = str(data.get("result") or "")
+        ok = bool(data.get("ok", True))
+        was_error = bool(cell.get("isError"))
+        cell.update({
+            "isError": not ok,
+            "traceId": str(data.get("traceId") or ""),
+            "resultChars": int(data.get("resultChars") or 0),
+            "write": bool(data.get("write")),
+            "timeSeconds": (int(data.get("ms") or 0) / 1000.0
+                            if data.get("ms") is not None else None),
+            "errorText": str(data.get("error") or "")[:300],
+            "endAt": ts or None,
+            "sizes": dict(cell.get("sizes") or {}, output=int(
+                data.get("resultChars") or len(text))),
+        })
+        refs = dict(cell.get("refs") or {})
+        refs["out"] = str(seq)
+        cell["refs"] = refs
+        if not ok and not was_error:
+            t["stats"]["errors"] += 1
+            self.errors += 1
+        name = str(cell.get("toolName") or data.get("name") or "")
+        d = self.tool_stats.get(name)
+        if d is not None:
+            d["ms"] += int(data.get("ms") or 0)
+            d["chars"] += int(data.get("resultChars") or 0)
+            if not ok:
+                d["errors"] += 1
+        if cell.get("timeSeconds"):
+            t["stats"]["secs"] += float(cell["timeSeconds"])
+        if name in _SUBAGENT_TOOLS:
+            batch = str(data.get("batch") or "")
+            for child in _subagent_cells(self.sid, batch, call_id):
+                self._cell(t, title, step, child, ts)
+
+    # ------------------------------------------------------------ 输出
+
+    def render(self, before=None, limit_turns=30, source="events"):
+        turns = self.turns
+        total = len(turns)
+        if before:
+            try:
+                b = int(before)
+                turns = [t for t in turns if int(t.get("turn") or 0) < b]
+            except (TypeError, ValueError):
+                pass
+        has_more = False
+        try:
+            lim = int(limit_turns or 0)
+        except (TypeError, ValueError):
+            lim = 30
+        if lim > 0 and len(turns) > lim:
+            has_more = True
+            turns = turns[-lim:]
+        out = []
+        for t in turns:
+            st = dict(t["stats"])
+            start, end = int(t.get("start") or 0), t.get("end")
+            if start and end and end > start:
+                st["durMs"] = int(end - start)
+            else:
+                st["durMs"] = int(round((st.get("secs") or 0) * 1000))
+            item = {k: v for k, v in t.items() if not k.startswith("_")}
+            item["stats"] = st
+            out.append(item)
+        tools = sorted(self.tool_stats.values(), key=lambda d: -d["count"])[:40]
+        for d in tools:
+            d["avgMs"] = int(d["ms"] / d["count"]) if d["count"] else 0
+        return {
+            "sid": self.sid, "source": source, "turns": out,
+            "stats": {"cells": self.no, "turns": self.total_turns,
+                      "steps": self.steps,
+                      "tools": sum(d["count"] for d in self.tool_stats.values()),
+                      "by_kind": dict(self.kind), "errors": self.errors,
+                      "tokens": dict(self.tokens), "peakContext": self.peak,
+                      "startedAt": self.started},
+            "tools": tools, "series": _thin(self.series[-2000:]),
+            "marks": self.marks[-200:], "has_more": has_more,
+            "total_turns": total,
+        }
+
+
+def _proj_for(sid):
+    events = _iter_events(sid)
+    if not events:
+        with _EV_LOCK:
+            _PROJ_CACHE.pop(sid, None)
+        return None
+    with _EV_LOCK:
+        p = _PROJ_CACHE.get(sid)
+        if p is None:
+            p = _Proj(sid, events)
+            _PROJ_CACHE[sid] = p
+            if len(_PROJ_CACHE) > _PROJ_MAX:
+                for k in list(_PROJ_CACHE)[:-_PROJ_MAX]:
+                    if k != sid:
+                        _PROJ_CACHE.pop(k, None)
+    p.sync(events)
+    return p
+
+
+def build(sid, before=None, limit_turns=30):
+    """把轨迹事件投影成 turn -> group -> cell（轻量，详情按需取）。"""
+    p = _proj_for(sid)
+    if p is None:
+        return _build_from_session(sid, before=before, limit_turns=limit_turns)
+    return p.render(before=before, limit_turns=limit_turns)
 
 
 def _build_from_session(sid, before=None, limit_turns=30):
@@ -947,6 +1390,118 @@ def revision(sid):
         except OSError:
             out[key] = [0, 0]
     return out
+
+
+def _json_text(obj):
+    try:
+        return json.dumps(obj, ensure_ascii=False, indent=2, default=str)
+    except Exception:                    # noqa: BLE001
+        return str(obj)
+
+
+def _header_diff(sid, ev):
+    """和上一条请求头比：只给系统提示差异，省得把两份全文都塞给前端。"""
+    seq = int(ev.get("seq") or 0)
+    cur = ((ev.get("data") or {}).get("header") or {}).get("system") or ""
+    prev = ""
+    for it in _iter_events(sid):
+        if int(it.get("seq") or 0) >= seq:
+            break
+        if it.get("type") == "request/header":
+            prev = ((it.get("data") or {}).get("header") or {}).get("system") or ""
+    if not prev or prev == cur:
+        return ""
+    return _diff_text(prev, cur)
+
+
+def cell_detail(sid, refs=None, kind="", seg=None, schema_ref=0,
+                tool_name="", trace_id="", record_id=""):
+    """按引用取一条记录的完整正文：列表只带预览，点开才算。"""
+    refs = refs if isinstance(refs, dict) else {}
+    parts = {}
+
+    def get(key):
+        try:
+            return _event_by_seq(sid, refs.get(key))
+        except (TypeError, ValueError):
+            return None
+
+    ev = get("sys") or get("part")
+    if ev is not None and ev.get("type") == "request/header":
+        header = (ev.get("data") or {}).get("header") or {}
+        system = str(header.get("system") or "")
+        if kind == "system":
+            parts["input"] = system
+            parts["schema"] = _json_text(header.get("tools") or [])
+            diff = _header_diff(sid, ev)
+            if diff:
+                parts["diff"] = diff
+        else:
+            try:
+                s, e = int((seg or [0, 0])[0] or 0), int((seg or [0, 0])[1] or 0)
+            except (TypeError, ValueError, IndexError):
+                s, e = 0, 0
+            s = max(0, min(s, len(system)))
+            e = max(s, min(e, len(system)))
+            parts["input"] = system[s:e]
+
+    ev = get("in")
+    if ev is not None:
+        typ = ev.get("type")
+        d = ev.get("data") or {}
+        if typ == "user/message":
+            parts["input"] = str(d.get("content") or "")
+            src = d.get("source") if isinstance(d.get("source"), dict) else {}
+            parts["label"] = "%s · %s" % (src.get("kind") or "human",
+                                          src.get("label") or "")
+        elif typ == "tool/call":
+            parts["input"] = str(d.get("arguments") or "")
+        elif typ == "todo/write":
+            parts["input"] = _json_text(d.get("plan"))
+        elif typ == "review":
+            parts["input"] = _json_text(d.get("report"))
+        elif typ == "compact":
+            parts["input"] = "压缩前 %s 条 → 压缩后 %s 条\n摘要 %s 字" % (
+                d.get("before") or 0, d.get("after") or 0, d.get("chars") or 0)
+        elif typ == "assistant/message":
+            parts["input"] = str(d.get("reasoning") or "")
+            parts["output"] = str(d.get("content") or "")
+
+    ev = get("out")
+    if ev is not None:
+        typ = ev.get("type")
+        d = ev.get("data") or {}
+        if typ == "assistant/message":
+            parts["thinking"] = str(d.get("reasoning") or "")
+            if kind != "reasoning":
+                parts["output"] = str(d.get("content") or "")
+        elif typ == "tool/result":
+            text = str(d.get("result") or "")
+            tid = str(trace_id or d.get("traceId") or "")
+            if tid:
+                try:
+                    from app import tool_trace
+                    full = tool_trace.load(sid, tid)
+                    if isinstance(full, dict) and full.get("result") is not None:
+                        text = str(full.get("result") or "")
+                        parts["from"] = "trace"
+                except Exception:        # noqa: BLE001
+                    pass
+            parts["output"] = text
+            if not bool(d.get("ok", True)):
+                parts["error"] = str(d.get("error") or "")
+
+    if schema_ref and tool_name:
+        try:
+            hev = _event_by_seq(sid, schema_ref)
+        except (TypeError, ValueError):
+            hev = None
+        if hev is not None:
+            header = (hev.get("data") or {}).get("header") or {}
+            schema = _tool_schema(header, tool_name)
+            if schema:
+                parts["schema"] = _json_text(json.loads(schema))
+    return {"ok": True, "parts": parts, "recordId": str(record_id or "")}
 
 
 def tool_detail(sid, trace_id="", call_id=""):

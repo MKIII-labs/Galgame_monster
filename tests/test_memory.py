@@ -99,6 +99,72 @@ def test_apply_memory_ops_append_note(monkeypatch):
     assert saved["ok"] is True
 
 
+def test_strip_memory_tags_only_drops_control_blocks():
+    from app.mem_tool import strip_memory_tags
+    leaked = '说明文字<memory>{"ops":[{"scope":"session","op":"add","title":"x"}]}</memory>'
+    assert strip_memory_tags(leaked) == "说明文字"
+    # 未闭合的 JSON 尾巴也要删掉
+    assert strip_memory_tags('正文<memory>{"ops":[{"scope":"session"}]') == "正文"
+    # 正常讨论这个标签（无 ops / 非 JSON）不误伤
+    keep = "写法是 <memory>…</memory> 这样的标签"
+    assert strip_memory_tags(keep) == keep
+
+
+def test_memory_extractor_accepts_memory_tag():
+    """模型改写成 <memory> 时也要摘除并解析出 ops（流式分片）。"""
+    from app import mem_tool
+    mx = mem_tool.MemoryExtractor()
+    assert mx.feed("好的<memory>") == "好的"
+    assert mx.feed('{"ops":[{"scope":"session","op":"add","title":"t"}]}') == ""
+    assert mx.feed("</memory>") == ""
+    mx.finish()
+    assert mx.visible_text() == "好的"
+    assert len(mx.ops()) == 1 and mx.ops()[0]["title"] == "t"
+
+
+def test_build_tool_prompt_native_uses_tool_instead_of_template():
+    from app import mem_tool
+    s = {"id": "s1", "memory": {"nodes": [], "edges": []}}
+    native = mem_tool.build_tool_prompt(s, include_profile=False, include_kb=False,
+                                        native=True)
+    text = mem_tool.build_tool_prompt(s, include_profile=False, include_kb=False)
+    assert "memory_apply" in native
+    assert "```memory\n" not in native
+    assert "```memory\n" in text and "memory_apply" not in text
+
+
+def test_memory_apply_capability_invokes_ops(monkeypatch):
+    from app import capabilities, mem_tool
+    seen = {}
+
+    def _fake(sid, ops):
+        seen["sid"], seen["ops"] = sid, ops
+        return {"applied": 1, "summary": "新增 1", "problems": [],
+                "changed": {"session": {"node_add": ["n1"]}}, "undo": "u_1"}
+
+    monkeypatch.setattr(mem_tool, "apply_chat_ops", _fake)
+    ctx = {"session_id": "s1"}
+    text, is_write = capabilities.invoke(
+        "memory.apply", {"ops": [{"scope": "session", "op": "add", "title": "t"}]}, ctx)
+    assert is_write is True
+    assert seen["sid"] == "s1" and len(seen["ops"]) == 1
+    assert "新增 1" in text
+    assert ctx["mem_note"]["undo"] == "u_1"
+
+
+def test_clean_sessions_data_strips_leaks():
+    from app.memory_leak import clean_sessions_data
+    data = {"sessions": [{"id": "s1", "messages": [
+        {"role": "assistant",
+         "content": '好了<memory>{"ops":[{"scope":"session"}]}</memory>'},
+        {"role": "user", "content": "正常内容"},
+    ]}]}
+    stats = clean_sessions_data(data)
+    assert stats == {"sessions": 1, "messages": 1, "chars": stats["chars"]}
+    assert data["sessions"][0]["messages"][0]["content"] == "好了"
+    assert data["sessions"][0]["messages"][1]["content"] == "正常内容"
+
+
 def test_reindex_mirrors_kb_and_session(monkeypatch):
     monkeypatch.setattr(memory, "load_kb_index",
                         lambda: {"kbs": [{"id": "k1", "name": "测试库"}]})

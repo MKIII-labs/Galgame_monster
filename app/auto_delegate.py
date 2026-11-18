@@ -35,18 +35,18 @@ _TASK_RE = re.compile(
 _CONT_RE = re.compile(r"^(继续|接着|然后|往下|下一步|刚才|刚说)|继续做|接着做")
 
 
-def enabled_agents():
+def enabled_agents(sandbox=""):
     """当前启用且定义没坏的子代理。"""
     out = []
-    for a in agent_defs.list_agents():
+    for a in agent_defs.list_agents(sandbox=sandbox):
         if a.get("enabled") and not a.get("error"):
             out.append(a)
     return out
 
 
-def routing_block():
+def routing_block(sandbox=""):
     """系统提示里的「什么时候该派活」块；没有可用代理就返回空串。"""
-    rows = enabled_agents()
+    rows = enabled_agents(sandbox)
     if not rows:
         return ""
     lines = ["【自动派发（suggest）】可用子代理（delegate 的 agent 参数）："]
@@ -153,7 +153,12 @@ def review_note(text):
 
 def run_agent(agent_id, task, ctx):
     """跑单个命名代理，返回 delegate.run 的结果。"""
-    return delegate.run({"agents": [{"agent": agent_id, "task": task}]}, ctx)
+    c = dict(ctx or {})
+    if not c.get("group"):
+        c["group"] = ("自动复核" if agent_id in ("reviewer", "critic",
+                                                 "fidelity-reviewer")
+                      else "自动规划")
+    return delegate.run({"agents": [{"agent": agent_id, "task": task}]}, c)
 
 
 def first_text(res):

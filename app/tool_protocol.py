@@ -48,10 +48,16 @@ _ERR_PREFIXES = ("❌", "文件不存在", "源不存在", "目录不存在", "�
                  "未找到", "old 在多处出现", "目标是目录", "目标已存在",
                  "拒绝覆盖", "沙箱拒绝", "工具执行出错", "未知工具")
 
+# 搜索零命中是正常结果，不是错误。旧文案「未找到匹配（沙箱：…）」里同时含
+# 「未找到」和「沙箱」，曾被升级成 SANDBOX_DENIED；这里先把零命中排除掉。
+_ZERO_HIT_PREFIXES = ("没有匹配", "未找到匹配", "无匹配", "没有搜索结果")
+
 
 def is_error(text):
     """工具实现没有统一的 ok 字段，这里按既有错误前缀判断。"""
     t = str(text or "").lstrip()
+    if t.startswith(_ZERO_HIT_PREFIXES):
+        return False
     return t.startswith(_ERR_PREFIXES)
 
 

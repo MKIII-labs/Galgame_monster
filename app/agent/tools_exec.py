@@ -103,6 +103,19 @@ CMD_SCRIPT_EXTS = {"python": (".py",), "python3": (".py",), "py": (".py",),
 
 CMD_VERSION_FLAGS = {"--version", "-version", "-v", "-V", "-h", "--help"}
 
+
+def _warn(msg):
+    """pythonw 下 sys.stderr 是 None：写日志失败绝不能拖垮命令本身。
+
+    现场：OS 沙箱退回普通执行时这里直接 sys.stderr.write，报
+    `'NoneType' object has no attribute 'write'`，整条命令被当成工具失败。
+    """
+    try:
+        if sys.stderr:
+            sys.stderr.write(msg)
+    except Exception:                  # noqa: BLE001
+        pass
+
 # 这些目录永远不进入（噪音 / 版本库 / 虚拟环境）
 
 
@@ -653,9 +666,10 @@ def _t_run_command(root, args, stop_event=None, shell_mode="strict",
                 return _out, None
             if not getattr(_t_run_command, "_osb_warned", False):
                 _t_run_command._osb_warned = True
-                sys.stderr.write("[sandbox] OS 沙箱未启用：%s\n" % _why)
+                _warn("[sandbox] OS 沙箱未启用（%s），已退回普通执行；"
+                      "不会再弹 UAC\n" % _why)
     except Exception as _e:                # noqa: BLE001  沙箱故障不能拖垮命令本身
-        sys.stderr.write("[sandbox] OS 沙箱初始化失败，退回普通执行：%s\n" % _e)
+        _warn("[sandbox] OS 沙箱初始化失败，退回普通执行：%s\n" % _e)
     try:
         if plan["shell"]:
             proc = subprocess.Popen(display, cwd=workdir, env=_cmd_env(), shell=True,

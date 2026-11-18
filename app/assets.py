@@ -69,6 +69,44 @@ def _image_info(path):
         return {"error": str(e)[:120]}
 
 
+def _audio_info(path):
+    """音频元信息：wav 用标准库，其余格式尝试 soundfile（可选依赖）。
+
+    只读属性，不解码整段音频；任何失败都记 error，不影响扫描。
+    """
+    info = {}
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".wav":
+        try:
+            import wave
+            with wave.open(path, "rb") as w:
+                ch = w.getnchannels()
+                sr = w.getframerate()
+                frames = w.getnframes()
+                info.update({
+                    "channels": int(ch), "sample_rate": int(sr),
+                    "duration": round(frames / float(sr), 3) if sr else 0,
+                    "codec": "pcm",
+                })
+            return info
+        except Exception as e:             # noqa: BLE001
+            info["error"] = str(e)[:120]
+    try:
+        import soundfile as sf             # 延迟导入：没装也不影响其它格式
+        meta = sf.info(path)
+        return {
+            "channels": int(meta.channels),
+            "sample_rate": int(meta.samplerate),
+            "duration": round(float(meta.duration), 3),
+            "codec": str(meta.subtype or meta.format or ""),
+        }
+    except ImportError:
+        info.setdefault("error", "未安装 soundfile，只能读取 wav 元信息")
+    except Exception as e:                 # noqa: BLE001
+        info["error"] = str(e)[:120]
+    return info
+
+
 def scan(root, rel=".", out=""):
     """扫描目录，返回 (给模型看的文本, 机器可读摘要)。"""
     base = os.path.abspath(root)
@@ -96,6 +134,7 @@ def scan(root, rel=".", out=""):
                 item.update(_image_info(p))
                 images.append(item)
             elif kind == "audio":
+                item.update(_audio_info(p))
                 audio.append(item)
             elif kind == "model":
                 models.append(item)
@@ -137,7 +176,18 @@ def scan(root, rel=".", out=""):
         top = sorted(sizes.items(), key=lambda kv: -kv[1])[:8]
         lines.append("图片尺寸分布：" + "、".join("%s×%d" % (k, v) for k, v in top))
     if audio:
-        lines.append("音频：%s" % "、".join(x["file"] for x in audio[:8]))
+        def _audio_label(it):
+            bits = []
+            if it.get("duration"):
+                bits.append("%.2fs" % it["duration"])
+            if it.get("sample_rate"):
+                bits.append("%dHz" % it["sample_rate"])
+            if it.get("channels"):
+                bits.append("%dch" % it["channels"])
+            if it.get("codec"):
+                bits.append(str(it["codec"]))
+            return it["file"] + ("（%s）" % " · ".join(bits) if bits else "")
+        lines.append("音频：%s" % "、".join(_audio_label(x) for x in audio[:8]))
     if models:
         lines.append("模型：%s" % "、".join(x["file"] for x in models[:8]))
     if out:

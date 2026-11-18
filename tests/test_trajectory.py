@@ -12,6 +12,8 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DATA_DIR", str(tmp_path))
     trajectory._TURN_LAST.clear()
     trajectory._HEADER_LAST.clear()
+    trajectory._EV_CACHE.clear()
+    trajectory._PROJ_CACHE.clear()
     trajectory._CFG_CACHE.update({"at": 0.0, "enabled": True,
                                   "cap": trajectory.DEFAULT_FIELD_CAP})
     return tmp_path
@@ -53,7 +55,11 @@ def test_build_turns_and_cell_fields(tmp_path):
     assert "tool" in kinds and "context" in kinds
     part = next(c for c in _cells(view)
                 if (c.get("source") or {}).get("kind") == "prompt_part")
-    assert part["inputDetail"] == "SYSTEM"
+    # 列表只带引用，正文按需取
+    assert part["sizes"]["input"] == len("SYSTEM")
+    pd = trajectory.cell_detail(sid, refs=part["refs"], kind="context",
+                                seg=part["seg"])
+    assert pd["parts"]["input"] == "SYSTEM"
     cells = _cells(view)
     msg = next(c for c in cells if c["kind"] == "message")
     assert msg["input"] == 10 and msg["output"] == 4
@@ -61,7 +67,11 @@ def test_build_turns_and_cell_fields(tmp_path):
     assert msg["ttftMs"] == 200
     tool = next(c for c in cells if c["kind"] == "tool")
     assert tool["traceId"] == "tr1" and tool["timeSeconds"] == 0.012
-    assert tool["schemaDetail"]  # 从 request/header 的工具 schema 取到
+    td = trajectory.cell_detail(sid, refs=tool["refs"], kind="tool",
+                                schema_ref=tool["schemaRef"],
+                                tool_name="read_file")
+    assert "read_file" in td["parts"]["schema"]
+    assert td["parts"]["output"] == "内容"
     assert tool["resultChars"] == 2 and tool["errorText"] == ""
     sys_cell = next(c for c in cells if c["kind"] == "system")
     assert sys_cell["model"] == "m1" and sys_cell["provider"] == "p"
@@ -109,9 +119,13 @@ def test_header_parts_change_detection_and_diff():
     systems = [c for c in cells if c["kind"] == "system"]
     assert systems[0]["text"].startswith("初始系统提示")
     assert "可用 Skill" in systems[1]["text"]          # 只有这一段变了
-    assert "画图" in (systems[1].get("promptDiff") or "")
+    assert systems[1]["diff"]                            # 有变化才带 diff 标记
+    sd = trajectory.cell_detail(sid, refs=systems[1]["refs"], kind="system")
+    assert "画图" in sd["parts"]["diff"]
     parts = [c for c in cells if (c.get("source") or {}).get("kind") == "prompt_part"]
-    assert any("画图" in c["inputDetail"] for c in parts)
+    texts = [trajectory.cell_detail(sid, refs=c["refs"], kind="context",
+                                    seg=c["seg"])["parts"]["input"] for c in parts]
+    assert any("画图" in x for x in texts)
     assert any("（变化）" in c["text"] for c in parts)
 
 
@@ -232,6 +246,7 @@ def test_api_routes_registered_and_respond(monkeypatch):
     from app.api import trajectory as api_mod
 
     assert get("POST", "/api/trajectory") is api_mod._api_trajectory
+    assert get("POST", "/api/trajectory/cell") is api_mod._api_trajectory_cell
     assert get("POST", "/api/trajectory/rev") is api_mod._api_trajectory_rev
     assert get("POST", "/api/trajectory/tool") is api_mod._api_trajectory_tool
     assert get("POST", "/api/trajectory/export") is api_mod._api_trajectory_export

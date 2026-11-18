@@ -24,23 +24,54 @@ function workSetView(view) {
   const ok = ['today', 'week', 'month', 'board', 'stats'];
   WORK.view = ok.includes(view) ? view : 'today';
   try { localStorage.setItem('gm.work.view', WORK.view); } catch (e) { /* 忽略 */ }
-  workApplyView();
+  // 视图切换做一次交叉淡化；没有 View Transitions 时只给新视图补淡入
+  const run = () => workApplyView();
+  if (typeof gmPageTransition === 'function') {
+    gmPageTransition(run, null, () => {
+      const el = workViewEl(WORK.view);
+      if (typeof gmPageIn === 'function') gmPageIn(el);
+    });
+  } else {
+    run();
+  }
+}
+
+/* 当前视图对应的容器（骨架 / 入场动画的落点） */
+function workViewEl(view) {
+  const v = view || WORK.view || 'today';
+  if (v === 'today') return document.querySelector('#work-panel .work-cols');
+  const map = { week: 'work-view-week', month: 'work-view-month',
+                board: 'work-view-board', stats: 'work-view-stats' };
+  return workEl(map[v] || '');
 }
 
 function workApplyView() {
   const view = WORK.view || 'today';
+  const today = view === 'today';
   const cols = document.querySelector('#work-panel .work-cols');
-  if (cols) cols.classList.toggle('hidden', view !== 'today');
+  if (cols) cols.classList.toggle('hidden', !today);
+  // 概览 / 产物属于「今天」驾驶舱；切到计划 / 看板 / 复盘时让位给整页视图
+  const overview = workEl('work-overview');
+  if (overview) overview.classList.toggle('hidden', !today);
+  const dock = workEl('work-dock');
+  if (dock) dock.classList.toggle('hidden', !today);
+  const planSub = workEl('work-plan-sub');
+  if (planSub) planSub.classList.toggle('hidden', !(view === 'week' || view === 'month'));
   const map = { week: 'work-view-week', month: 'work-view-month',
                 board: 'work-view-board', stats: 'work-view-stats' };
   Object.keys(map).forEach((v) => {
     const el = workEl(map[v]);
     if (el) el.classList.toggle('hidden', view !== v);
   });
+  // 「计划」是周 / 月共用的顶级页签：month 时也让「计划」保持高亮
+  const active = view === 'month' ? 'week' : view;
   document.querySelectorAll('#work-views-tabs button').forEach((b) => {
-    const on = b.dataset.wview === view;
+    const on = b.dataset.wview === active;
     b.classList.toggle('on', on);
     b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('#work-plan-sub button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.pview === view);
   });
   if (view === 'week') {
     workRenderWeek();

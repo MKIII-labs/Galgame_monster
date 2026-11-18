@@ -102,12 +102,25 @@ def resolve_path(sandbox, rel, allow_outside=False, for_read=False):
     """
     from .groups import (BLOCKED_SEGMENTS, READ_ONLY_SEGMENTS)
     sandbox = clean_sandbox(sandbox)
-    root = _real(sandbox or "")
-    if not sandbox or not os.path.isdir(root):
-        raise SandboxError("沙箱目录不存在或未设置：" + (sandbox or "（空）"))
     raw = str(rel or "").strip().strip('"').strip("'")
     if raw.lower().startswith("file://"):
         raw = raw[7:]
+    if not sandbox:
+        # 未选择工作目录：只放行「绝对路径读取」，给 Agent 保留看文件的能力；
+        # 写入 / 命令仍要求先选目录（相对路径也没有可解析的基准）。
+        if not for_read:
+            raise SandboxError("尚未选择沙箱目录：写入 / 删除 / 执行命令前请先在工具栏选择目录。")
+        if not (os.path.isabs(raw) or (len(raw) > 1 and raw[1] == ":")):
+            raise SandboxError("尚未选择沙箱目录：读取请用绝对路径，或先在工具栏选择工作目录。")
+        target = _real(raw)
+        _assert_not_blocked(target, for_read)
+        data = _real(DATA_DIR)
+        if target == data or target.startswith(data + os.sep):
+            raise SandboxError("data 目录被禁止访问（含密钥等运行数据）")
+        return target
+    root = _real(sandbox)
+    if not os.path.isdir(root):
+        raise SandboxError("沙箱目录不存在或未设置：" + sandbox)
     if os.path.isabs(raw) or (len(raw) > 1 and raw[1] == ":"):
         target = _real(raw)                      # 绝对路径
         if target != root and not target.startswith(root + os.sep):
@@ -136,6 +149,8 @@ def resolve_path(sandbox, rel, allow_outside=False, for_read=False):
 
 
 def _rel(root, path):
+    if not root:
+        return str(path or "")
     try:
         return os.path.relpath(path, _real(root)).replace("\\", "/")
     except ValueError:

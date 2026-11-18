@@ -130,6 +130,26 @@ FILE_TOOLS = {"list_dir", "read_file", "read_files", "search_files", "search_cod
               "open_preview", "visual_check", "asset_scan", "asset_convert", "asset_atlas",
               "asset_inline", "asset_validate", "run_workflow_script"}
 
+# 没有沙箱目录（未选工作目录）时仍然可用的只读工具：读文件 / 列目录 / 看图 / 会话附件。
+# 这些工具支持「绝对路径读取」，所以不依赖沙箱根目录；相对路径仍需要先选目录。
+SANDBOXLESS_TOOLS = frozenset((
+    "list_dir", "read_file", "read_files", "see_image",
+    "image_compare", "image_analyze", "geometry_compare",
+    "attachment_read", "read_tool_result",
+))
+
+# 必须有沙箱根目录才能用的工具：写入 / 命令 / 搜索 / Git / LSP / 可视化产物 / 子代理…
+# 「未选目录」模式下这些工具既不下发 schema，也在运行时拦掉。
+SANDBOX_ONLY_TOOLS = frozenset(FILE_TOOLS) - SANDBOXLESS_TOOLS | frozenset((
+    "run_command", "shell", "run_script", "archify",
+    "find_symbol", "check_code",
+    "render_check", "render_views", "scene_assert", "mesh_inspect",
+    "audio_probe", "audio_compare",
+    "run_workflow", "workflow_status", "workflow_resume", "workflow_cancel",
+    "explore", "explore_followup", "explore_status", "explore_result",
+    "explore_cancel",
+))
+
 # 模型常见的「同义词 / 简写 / OpenAI 风格下划线名」→ 本项目工具名。
 # 这里只做**保守**映射：不确定的别名不映射，避免把正常工具改错。
 
@@ -220,7 +240,7 @@ def _capability_ids():
 
 _CAP_NAMESPACES = {"bili", "calendar", "stock", "memory", "task", "note",
                    "observe", "skill", "doc", "llm", "search",
-                   "workflow", "computer", "gal", "kb", "image"}
+                   "workflow", "computer", "kb", "image"}
 
 
 def is_known_tool(name):

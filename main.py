@@ -31,7 +31,7 @@ _OUT_FH = None
 _CODE_FILES = ("main.py", "app/httpd.py", "app/api/chat.py", "app/llm.py",
                "app/bilibili.py", "app/agent.py", "app/stock.py", "app/config.py",
                "app/api/hall_stock.py", "web/hall.js", "web/hall-stock.js",
-               "web/markdown.js", "web/chat.js", "web/stream.js")
+               "web/markdown.js", "web/chat.js", "web/stream/stream-core.js")
 _APP_AUMID = ""                        # 传给 Electron 壳的 AppUserModelID（任务栏图标靠它）
 
 WINDOW_W, WINDOW_H = 1280, 860
@@ -151,8 +151,15 @@ def _save_preferred_port(port):
 
 def _write_state(port):
     try:
+        # token 写进 runtime 文件是给 CLI 客户端用的：它和界面共用同一套 API，
+        # 但拿不到页面里注入的 __TOKEN__。文件在用户自己的 data/ 下，权限随目录。
+        try:
+            from app.httpd import TOKEN as _token
+        except Exception:
+            _token = ""
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump({"pid": os.getpid(), "port": int(port),
+                       "token": _token,
                        "started": time.time(), "code_stamp": _code_stamp()},
                       f, ensure_ascii=False)
     except Exception as e:
@@ -312,6 +319,9 @@ def open_app_window(url):
         exe,
         "--app=" + url,
         "--window-size=%d,%d" % (WINDOW_W, WINDOW_H),
+        # 应用窗口默认铺满：--window-size 只是「还原后」的尺寸，不给这个参数时
+        # 每次启动都是一个小窗（用户从快捷方式启动的预期是整屏）。
+        "--start-maximized",
         "--user-data-dir=" + PROFILE_DIR,
         "--no-first-run",
         "--no-default-browser-check",
@@ -396,6 +406,10 @@ def _set_open_request(path):
 
 def main():
     global _APP_AUMID
+    # 兜底：本进程之后派生的控制台子进程默认不弹窗（显式传 creationflags 的除外）。
+    # 必须在任何子进程启动之前装好，否则漏网的那一条就已经闪过去了。
+    from app import winproc
+    winproc.install_default()
     _log("start main.py; python=%s" % sys.executable)
     _APP_AUMID = _ensure_app_shortcut()
     open_path = _open_arg(sys.argv[1:])

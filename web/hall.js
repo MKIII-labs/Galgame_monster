@@ -190,6 +190,7 @@ function hallRenderHome() {
   hallTeardown();
   const body = hallEl('hall-body');
   if (!body) return;
+  if (typeof gmSkeletonClear === 'function') gmSkeletonClear(body);
   body.innerHTML = '';
   hallSetChrome('功能大厅', 'AI 可以陪你一起玩的互动玩法');
   hallSetBadge(HALL_FEATURES.length ? (HALL_FEATURES.length + ' 个功能') : '');
@@ -207,29 +208,41 @@ function hallRenderHome() {
   grid.className = 'hall-grid';
   HALL_FEATURES.forEach((f) => grid.appendChild(hallCardEl(f)));
   body.appendChild(grid);
+  if (typeof gmPageIn === 'function') gmPageIn(body);
 }
 
 function hallOpenFeature(id) {
   const f = HALL_FEATURES.find((x) => x.id === id);
   if (!f) { toast('没有这个功能：' + id); return; }
-  hallTeardown();
   const body = hallEl('hall-body');
-  if (!body) return;
-  body.innerHTML = '';
-  hallSetChrome(f.name, f.desc || '');
-  hallSetBadge(f.tag || '');
-  const back = hallEl('hall-back');
-  if (back) back.classList.remove('hidden');
+  const run = () => {
+    hallTeardown();
+    if (!body) return;
+    body.innerHTML = '';
+    hallSetChrome(f.name, f.desc || '');
+    hallSetBadge(f.tag || '');
+    const back = hallEl('hall-back');
+    if (back) back.classList.remove('hidden');
 
-  const root = document.createElement('div');
-  root.className = 'hall-feature';
-  body.appendChild(root);
-  hallCurrent = f;
-  try {
-    f.mount(root);
-  } catch (e) {
-    root.textContent = '功能加载失败：' + ((e && e.message) || e);
-    console.error('[大厅] 挂载功能失败', id, e);
+    const root = document.createElement('div');
+    root.className = 'hall-feature';
+    body.appendChild(root);
+    hallCurrent = f;
+    try {
+      f.mount(root);
+    } catch (e) {
+      root.textContent = '功能加载失败：' + ((e && e.message) || e);
+      console.error('[大厅] 挂载功能失败', id, e);
+    }
+  };
+  // 模块切换做个交叉淡化；没有 View Transitions 时退回新块的淡入
+  if (typeof gmPageTransition === 'function') {
+    gmPageTransition(run, null, () => {
+      const feature = body && body.querySelector('.hall-feature');
+      if (typeof gmPageIn === 'function') gmPageIn(feature || body);
+    });
+  } else {
+    run();
   }
 }
 
@@ -239,7 +252,11 @@ function hallEnterMode() {
   if (!hallInited) {
     hallInited = true;
     const body = hallEl('hall-body');
-    if (body) body.innerHTML = '<div class="hall-empty">正在加载功能…</div>';
+    if (body) {
+      // 首次进大厅要下载 8 个模块脚本：先铺骨架，别留一句「正在加载」白屏
+      if (typeof gmSkeleton === 'function') gmSkeleton(body, 6);
+      else body.innerHTML = '<div class="hall-empty">正在加载功能…</div>';
+    }
     // 六个模块的脚本较大，首次进入大厅时才加载（见 web/feature-loader.js）
     const ready = typeof window.gmLoadGroup === 'function'
       ? window.gmLoadGroup('hall')

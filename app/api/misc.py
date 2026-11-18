@@ -13,7 +13,7 @@ from app.search import (SEARCH_PROVIDERS, chat_search_available,
 from app.imaging import chat_vision_available
 from app.usage import aggregate_usage
 from app.context import current_context
-from app.config import (default_config, get_api_conf, load_config, save_config)
+from app.config import (default_config, get_api_conf, load_config)
 from app.knowledge import (load_kb_index, relations_payload)
 from app.profile import (DEFAULT_PROFILE, clean_rules, load_profile, save_profile)
 from app.sessions import (load_sessions, save_sessions, slim_sessions)
@@ -149,10 +149,15 @@ def _api_app_open_data_dir(h):
 
 def _api_save_config(h):
         incoming = h._body()
-        cfg = load_config()
-        cfg.update(incoming)
-        with _lock:
-            save_config(cfg)
+        # 统一走设置中心：先校验、再落盘，并留下「保存前」快照供回滚。
+        from app import settings_center
+        res = settings_center.save_patch(incoming, source="api/config")
+        if not res.get("ok"):
+            errors = res.get("errors") or []
+            msg = "；".join("%s：%s" % (e.get("key") or "配置", e.get("message"))
+                            for e in errors if e)
+            return h._json({"ok": False, "error": msg or "配置校验失败",
+                            "errors": errors}, 400)
         # 配置变更后让外部工具与钩子重新读：MCP 断开旧连接、hooks 清掉 3 秒缓存
         try:
             from app import mcp, hooks
@@ -169,7 +174,8 @@ def _api_save_config(h):
                 calendar_lib.apply_system_switch()
             except Exception:                # noqa: BLE001
                 pass
-        h._json({"ok": True})
+        return h._json({"ok": True, "history_id": res.get("history_id") or "",
+                        "changed": res.get("changed") or []})
 
 
 @route("/api/open/folder")
@@ -286,9 +292,14 @@ def _api_stop(h):
 
 # 输入优化动作 → 指令措辞（见 web/composer.js 的 improveInput / precheckInput）
 _COMPOSE_ACTIONS = {
-    "polish": ("优化成一条清楚的指令：保留原文全部事实与意图，不增删事实；"
-               "把含糊处补成「要改什么 / 范围 / 不要动什么 / 验收标准」这类可执行表述；"
-               "原文没说的需求不要编，缺什么放进 gaps。"),
+    "polish": ("把输入改写成「AI 能一次听懂、做对」的指令，同时保留原意与全部事实。\n"
+               "可以做：补全对象（改哪个文件 / 哪段代码 / 哪个功能）、明确期望产出"
+               "（解释 / 改代码 / 写文件 / 给方案）、补上可执行的范围与验收；"
+               "把口语化、指代不明的说法换成具体表述。\n"
+               "不要做：改变用户目标、增加他没提的功能、编造文件 / 数字 / 事实、"
+               "写成公文体或大幅扩写；语气保持用户本人的口吻。\n"
+               "无法从原文推断、但会直接影响执行的关键信息不要编："
+               "在 text 里写成（待确认：…），并同步放进 gaps。"),
     "spec": ("改写成规格，纯文本四段（不要额外解释）：\n"
              "目标：一句话\n改动范围：只改哪些文件 / 模块\n不要动：明确边界\n"
              "验收标准：怎么算做完（可验证）\n"
@@ -299,19 +310,25 @@ _COMPOSE_ACTIONS = {
 
 # 发送前预检：只判断缺什么，不改写正文
 _CHECK_RULE = (
-    "只判断、不改写。判断这条指令是否缺少「能一次做对」所需的信息："
-    "目标、改动范围（哪个文件 / 模块）、边界（不要动什么）、验收标准。"
-    "只有缺了会导致做错时才列，最多 3 条，每条不超过 20 字，不要客套话；"
-    "如果这条消息里塞了几个互不相关的任务（例如「修 bug + 加交互 + 新增功能」），"
-    "把「包含 N 个不相关任务，建议拆开分别发」作为第一条 gaps；"
-    "example 给一句「补全后可以怎么说」的示例（不超过 60 字）。")
+    "只判断、不改写。判断这条输入能否让 AI 一次听懂、做对，重点看：\n"
+    "① 对象不明：说的「这个 / 它 / 上面 / 刚才」具体指什么；\n"
+    "② 缺关键上下文：哪个项目 / 文件 / 版本 / 环境 / 哪段代码；\n"
+    "③ 期望产出不清：要解释、要改代码、要写文件、还是要方案；\n"
+    "④ 一条消息里塞了几个互不相关的任务；\n"
+    "⑤ 关键约束缺失且会导致做错：范围、不要动什么、验收。\n"
+    "只有缺了会导致做错时才列，最多 3 条，每条不超过 20 字，"
+    "写「缺什么」（例如「没说是哪个文件」），不要教用户怎么写；\n"
+    "example 给一句「补全后可以这么说」的示例（不超过 60 字）；\n"
+    "rewrite 给一版改清楚后的指令：只补指代、上下文、期望产出与结构，"
+    "绝不编造原文没有的事实；没说的关键信息写成（待确认：…）。")
 
 
 def _api_compose(h):
         """轻量「输入优化」：润色 / 精简 / 扩写 / 翻译 / 规格化 / 预检，并顺带识别意图。
 
         走 _quick_chat（配置了 light_model 时自动用它），用量按 source="compose" 记录。
-        action="check" 只做发送前预检：返回 gaps（缺什么）+ example，不改写正文。
+        action="check" 只做发送前预检：返回 gaps（缺什么）+ example（补全示例）
+        + rewrite（改清楚后的版本），不改写正文。
         """
         body = h._body()
         text = str(body.get("text") or "").strip()
@@ -343,7 +360,7 @@ def _api_compose(h):
                                    t["fix"][:80].replace("\n", " ")) for t in tips))
         if action == "check":
             prompt = ("你是输入预检员。只输出一个 JSON 对象：\n"
-                      '{"gaps": ["..."], "example": "..."}\n'
+                      '{"gaps": ["..."], "example": "...", "rewrite": "..."}\n'
                       "要求：" + rule + memo + "\n\n用户的指令：\n" + text)
         else:
             prompt = ("你是输入优化助手。请按要求处理下面的文本，并且**只输出一个 JSON 对象**：\n"
@@ -357,18 +374,20 @@ def _api_compose(h):
         except Exception as e:
             return h._json({"ok": False, "error": "call_failed", "message": "调用失败：%s" % e})
         data = mem_tool._loads_loose(out)
-        new_text, intent, example, gaps = "", "", "", []
+        new_text, intent, example, rewrite, gaps = "", "", "", "", []
         if isinstance(data, dict):
             new_text = str(data.get("text") or "").strip()
             intent = str(data.get("intent") or "").strip()
             example = str(data.get("example") or "").strip()
+            rewrite = str(data.get("rewrite") or "").strip()
             g = data.get("gaps")
             if isinstance(g, list):
                 gaps = [str(x).strip() for x in g if str(x).strip()][:3]
         if action == "check":
             # 预检失败不该打扰用户：宁可没有提示，也不要弹错误
             return h._json({"ok": True, "text": "", "intent": intent,
-                            "gaps": gaps, "example": example, "action": action})
+                            "gaps": gaps, "example": example, "rewrite": rewrite[:1200],
+                            "action": action})
         if not new_text:                     # 模型没按 JSON 输出 → 退回去掉围栏的纯文本
             new_text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", out).strip()
         if not new_text:

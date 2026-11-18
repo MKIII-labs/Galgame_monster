@@ -8,8 +8,10 @@
   - 其余路径：Access Denied，需要显式授权后才能访问
   - 网络：显式授予 internetClient capability
 
-授权（ACL）通常需要管理员权限：`ensure_acls()` 会先尝试当前权限，
-失败时用 UAC 提权执行一次性授权。
+授权（ACL）通常需要管理员权限：`ensure_acls()` 默认**不提权**——提权会弹 UAC
+（Windows 安全提示），而 Trae 的命令链路不会在每次执行时弹系统授权框。
+只有用户显式打开 `agent_sandbox_elevate` 时才走一次 UAC；否则授权失败就
+退回普通子进程执行（仍受沙箱路径规则与审批约束）。
 
 主进程不直接 CreateProcess，而是用「最小环境」启动 `app.sandbox_launcher`，
 由它创建 AppContainer 子进程；这样 API key 等父进程环境不会带进沙箱。
@@ -35,6 +37,8 @@ _PERM_WRITE = "M"
 _ERROR_ALREADY_EXISTS = 183
 _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 _CREATE_NO_WINDOW = 0x08000000
+# 内置组「所有应用程序包」：Chromium 要求 AppContainer 可访问的安装目录必须同时给它读权限
+_ALL_APP_PACKAGES = "S-1-15-2-1"
 _ATTR_SECURITY_CAPABILITIES = 0x00020009
 _SE_GROUP_ENABLED = 0x00000004
 _STARTF_USESTDHANDLES = 0x00000100
@@ -49,7 +53,7 @@ _userenv = None
 _kernel32 = None
 _sid_lock = threading.Lock()
 _sid_cache = {"str": "", "ptr": None}
-_acl_state = {"failed": False, "reason": ""}
+_acl_state = {"failed": False, "reason": "", "ok_roots": set()}
 
 
 class SandboxError(Exception):
@@ -200,7 +204,7 @@ def has_grant(path, sid=None):
     sid = sid or sid_string()
     try:
         r = subprocess.run(["icacls", str(path)], capture_output=True, text=True,
-                           timeout=30)
+                           timeout=30, creationflags=_CREATE_NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return False
     return sid.lower() in (r.stdout or "").lower()
@@ -214,7 +218,8 @@ def _grant_now(paths, perm, recursive=True):
         if recursive:
             cmd.append("/T")
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900,
+                               creationflags=_CREATE_NO_WINDOW)
         except (OSError, subprocess.SubprocessError):
             return False
         if r.returncode != 0:
@@ -242,7 +247,8 @@ def _grant_elevated(paths, perm, recursive=True):
               % bat.replace("'", "''"))
         r = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-Command", ps], capture_output=True, text=True, timeout=1800)
+             "-Command", ps], capture_output=True, text=True, timeout=1800,
+            creationflags=_CREATE_NO_WINDOW)
         if r.returncode != 0:
             return False
     except (OSError, subprocess.SubprocessError):
@@ -283,12 +289,57 @@ def toolchain_paths():
     return uniq
 
 
-def ensure_acls(root, elevate=True):
+def _fix_electron_install(root):
+    """给项目内的 Electron 安装目录补 ALL APPLICATION PACKAGES 读权限。
+
+    Chromium 的 install_dir_access 有硬性检查：安装目录一旦出现 AppContainer 包 SID，
+    就必须同时有 ALL APPLICATION PACKAGES 的访问权，否则 Electron 主进程直接
+    __debugbreak（0x80000003，窗口闪退，app.log 只有 browser window exited）。
+
+    把本项目目录选作 AI 沙箱根目录时，ensure_acls 会递归加上包 SID，正好踩中这条；
+    这里补上另一半。只在本项目的 electron/dist 存在时生效，失败静默（不能拖垮命令）。
+    """
+    dist = os.path.join(root, "desktop", "node_modules", "electron", "dist")
+    if not os.path.isdir(dist):
+        return
+    try:
+        # icacls 会把内置组显示成「APPLICATION PACKAGE AUTHORITY\ALL APPLICATION PACKAGES」，
+        # 未必是 SID 字面量，所以两种写法都要认。
+        r = subprocess.run(["icacls", dist], capture_output=True, text=True, timeout=30,
+                           creationflags=_CREATE_NO_WINDOW)
+        probe = (r.stdout or "").lower()
+        if _ALL_APP_PACKAGES.lower() in probe or "all application packages" in probe:
+            return
+        subprocess.run(["icacls", dist, "/grant", "*%s:(OI)(CI)(RX)" % _ALL_APP_PACKAGES,
+                        "/T", "/C", "/Q"],
+                       capture_output=True, text=True, timeout=900,
+                       creationflags=_CREATE_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _elevate_allowed():
+    """命令执行时是否允许弹 UAC 提权。
+
+    默认关闭：UAC 是「Windows 安全提示」弹窗的主要来源，Trae 的命令链路
+    不会在每条命令前要求系统授权。需要 OS 级沙箱的用户可以显式打开
+    `agent_sandbox_elevate`（每次启动最多授权一次）。
+    """
+    try:
+        from app.config import load_config
+        return bool((load_config() or {}).get("agent_sandbox_elevate", False))
+    except Exception:                  # noqa: BLE001  配置读不到就按不安全的方向处理
+        return False
+
+
+def ensure_acls(root, elevate=None):
     """确保沙箱根（读写）与工具链（读执行）已授权。
 
-    返回 (ok, message)。缺少授权时先试当前权限，失败再走一次 UAC 提权；
-    失败结果会缓存，避免每条命令都重试提权。
+    返回 (ok, message)。缺少授权时先试当前权限；只有显式允许提权时才走 UAC，
+    否则直接返回失败，由调用方退回普通执行。
     """
+    if elevate is None:
+        elevate = _elevate_allowed()
     if _acl_state["failed"]:
         return False, _acl_state["reason"]
 
@@ -304,24 +355,38 @@ def ensure_acls(root, elevate=True):
     root = os.path.realpath(str(root or ""))
     if not root or not os.path.isdir(root):
         return _fail("沙箱目录不存在：%s" % (root or "（空）"))
+    # 同一次运行里同一个沙箱根已经授权过就不再重查：
+    # 之前每条命令都要对根 + 每个工具链目录跑一遍 icacls，首次未授权还会递归 /T（实测数分钟）。
+    if root in _acl_state["ok_roots"]:
+        return True, ""
     read_paths = toolchain_paths()
     if not _grant_now([root], _PERM_WRITE):
         if not elevate or not _grant_elevated([root], _PERM_WRITE):
-            return _fail("没有权限给沙箱目录授权（需要管理员）")
+            return _fail("没有权限给沙箱目录授权（未提权，避免 UAC 弹窗）")
+    # 必须在授权沙箱根之后立刻补 Electron 的读权限：
+    # 工具链授权失败会提前 return，如果放在最后，包 SID 已经加上了、补救却没跑。
+    _fix_electron_install(root)
     if read_paths and not _grant_now(read_paths, _PERM_READ):
         if not elevate or not _grant_elevated(read_paths, _PERM_READ):
-            return _fail("没有权限给工具链目录授权（需要管理员）")
+            return _fail("没有权限给工具链目录授权（未提权，避免 UAC 弹窗）")
+    _acl_state["ok_roots"].add(root)
     return True, ""
 
 
-def grant_extra(paths, perm="RX"):
-    """给沙箱外路径追加授权（越界命令获准后调用）。"""
+def grant_extra(paths, perm="RX", elevate=None):
+    """给沙箱外路径追加授权（越界命令获准后调用）。
+
+    默认不提权：提权会弹 UAC，而这条路径在「用户已经批准命令」之后执行，
+    再弹一个系统授权框等于二次打断。
+    """
+    if elevate is None:
+        elevate = _elevate_allowed()
     paths = [os.path.realpath(p) for p in (paths or []) if p and os.path.exists(p)]
     if not paths:
         return True
     if _grant_now(paths, perm):
         return True
-    return _grant_elevated(paths, perm)
+    return _grant_elevated(paths, perm) if elevate else False
 
 
 # ---------------------------------------------------------------- 启动与执行
@@ -399,7 +464,8 @@ def run_direct(argv, shell_cmd=None, cwd="", allow_network=True):
     pi = _PROCESS_INFORMATION()
     cmd_buf = ctypes.create_unicode_buffer(cmdline)
     ok = _kernel32.CreateProcessW(
-        exe, cmd_buf, None, None, True, _EXTENDED_STARTUPINFO_PRESENT,
+        exe, cmd_buf, None, None, True,
+        _EXTENDED_STARTUPINFO_PRESENT | _CREATE_NO_WINDOW,
         None, workdir, ctypes.byref(si), ctypes.byref(pi))
     if not ok:
         raise SandboxError("沙箱内启动命令失败（错误码 %d）"
@@ -489,7 +555,8 @@ def run(argv, cwd, env=None, timeout=60, stop_event=None, on_line=None,
 def _kill_tree(proc):
     try:
         subprocess.run(["taskkill", "/PID", str(int(proc.pid)), "/T", "/F"],
-                       capture_output=True, timeout=10)
+                       capture_output=True, timeout=10,
+                       creationflags=_CREATE_NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         try:
             proc.kill()
@@ -590,7 +657,8 @@ class ShellSession:
         if self._proc is not None:
             try:
                 subprocess.run(["taskkill", "/PID", str(int(self._proc.pid)),
-                                "/T", "/F"], capture_output=True, timeout=10)
+                                "/T", "/F"], capture_output=True, timeout=10,
+                               creationflags=_CREATE_NO_WINDOW)
             except (OSError, subprocess.SubprocessError):
                 try:
                     self._proc.kill()

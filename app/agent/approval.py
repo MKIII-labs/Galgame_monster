@@ -3,6 +3,7 @@
 import fnmatch
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -188,6 +189,15 @@ def describe_call(name, args):
         return {"kind": "command", "risk": risk, "argv": argv,
                 "text": "执行 %s（工作目录 %s，风险 %s）"
                         % (" ".join(argv), cwd, risk)}
+    if name == "shell":
+        act = str(args.get("action") or "run").strip().lower()
+        if act == "run":
+            return {"kind": "command", "risk": "一般",
+                    "text": "持久 shell 执行：%s" % (args.get("command") or "（未提供命令）")}
+        label = {"read": "继续取输出", "status": "查看终端状态", "close": "关闭 shell",
+                 "interrupt": "中断当前命令", "input": "向终端写入输入"}.get(act, act)
+        return {"kind": "command", "risk": "只读" if act in ("read", "status") else "一般",
+                "text": "持久 shell：%s" % label}
     if name == "render_check":
         return {"kind": "read", "risk": "只读",
                 "text": "渲染自检：%s（视口 %s%s）"
@@ -411,17 +421,153 @@ def judge_command(sandbox, args, mode, shell_mode="strict", unrestricted=False,
     return "allow", ""
 
 
-def judge_shell(mode, unrestricted=False, interactive=True):
+# 持久 shell 的自主度（对齐 Trae 的 AutoRunCommandsConfigV2 / command_policy）：
+#   ask       每次都问
+#   whitelist 只读命令段全部命中白名单才放行（默认）
+#   auto      不做分析，直接放行
+SHELL_AUTONOMY_MODES = ("ask", "whitelist", "auto")
+
+
+SHELL_AUTONOMY_DEFAULT = "whitelist"
+
+
+# 内置只读白名单：glob 匹配「单段命令」（已按 ; | && || 换行拆开）。
+# 匹配前先拒绝重定向 / 子表达式 / 脚本块 / 命令串联，所以这里只列查看类命令。
+SHELL_ALLOW_DEFAULT = (
+    # 目录 / 文件查看
+    "dir", "dir *", "ls", "ls *", "gci", "gci *", "get-childitem*",
+    "cat", "cat *", "type", "type *", "gc *", "get-content*",
+    "get-item *", "get-itemproperty*", "test-path*", "resolve-path*",
+    "pwd", "get-location*", "where.exe*", "get-command*",
+    # 磁盘 / 进程 / 服务等只读查询
+    "get-psdrive*", "get-volume*", "get-disk*", "get-partition*",
+    "get-process*", "get-service*",
+    # 搜索 / 统计
+    "select-string*", "sls *", "findstr*", "rg", "rg *", "grep *",
+    "select-object*", "sort-object*", "where-object*", "group-object*",
+    "measure-object*", "format-table*", "format-list*",
+    # git 只读
+    "git status*", "git diff*", "git log*", "git show*", "git branch*",
+    "git rev-parse*", "git ls-files*", "git remote*", "git config --get*",
+    # 版本 / 包信息（只读）
+    "node --version*", "node -v*", "python --version*", "python -v*",
+    "py --version*", "npm ls*", "npm list*", "npm view*",
+    "pip list*", "pip show*", "pip freeze*",
+    "ruff check*", "ruff --version*", "pytest --collect-only*",
+)
+
+
+_SHELL_BAD_RE = re.compile(r"[><$`{}()&]")
+
+
+def normalize_shell_autonomy(raw):
+    m = str(raw or "").strip().lower()
+    return m if m in SHELL_AUTONOMY_MODES else SHELL_AUTONOMY_DEFAULT
+
+
+def _split_shell_command(cmd):
+    """把命令行拆成段（; | 换行），引号内与括号 / 脚本块内的分隔符不拆。"""
+    segs, buf, quote = [], [], ""
+    depth = 0
+    s = str(cmd or "")
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in "({[":
+            depth += 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in ")}]":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+            i += 1
+            continue
+        if depth == 0 and ch in ";\n|":
+            segs.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        if ch == "&" and i + 1 < len(s) and s[i + 1] == "&":
+            segs.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        buf.append(ch)
+        i += 1
+    segs.append("".join(buf))
+    return [x.strip() for x in segs if x.strip()]
+
+
+def _unquoted(text):
+    """去掉引号里的内容，只留会被 shell 解释的部分（危险字符只看这里）。"""
+    out, quote = [], ""
+    for ch in str(text or ""):
+        if quote:
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _shell_tokens(seg):
+    toks = []
+    for m in re.findall(r'"([^"]*)"|\'([^\']*)\'|(\S+)', str(seg or "")):
+        t = m[0] or m[1] or m[2]
+        if t:
+            toks.append(t)
+    return toks
+
+
+def _shell_segment_allowed(seg, allow, deny):
+    """单段命令能否免审批。返回 (ok, reason)。"""
+    low = str(seg or "").lower()
+    for pat in deny or ():
+        if pat and fnmatch.fnmatch(low, str(pat).lower()):
+            return False, "命中禁止清单：%s" % pat
+    if _SHELL_BAD_RE.search(_unquoted(seg)):
+        return False, "含重定向 / 子表达式 / 脚本块 / 命令串联"
+    for pat in (allow or SHELL_ALLOW_DEFAULT):
+        if pat and fnmatch.fnmatch(low, str(pat).lower()):
+            for t in _shell_tokens(seg):
+                if t.startswith("-"):
+                    continue
+                if is_secret_path(t):
+                    return False, "要读取密钥 / 凭据文件：%s" % t
+            return True, ""
+    return False, "不在只读白名单：%s" % str(seg)[:80]
+
+
+def judge_shell(mode, unrestricted=False, interactive=True, sandbox="", args=None,
+                autonomy=None, allow=None, deny=None):
     """持久 shell 的审批预判。
 
-    它等于「任意命令执行」，没法像 run_command 那样按可执行白名单 / 风险分类，
-    所以沿用 Agent 的现有分档，但把基线当作高危：
-      - full / 完全放权 → 放行
-      - ask            → 每次问
-      - ai             → 视为高危，问一次
-      - custom         → 由 .gm/agent-rules.json 的 tools 段决定；未命中默认问
-    工具级规则（deny/allow/ask）在调用方已经先跑过，这里只处理兜底。
+    非执行动作（read / status / close / interrupt）只是取输出 / 收尾，不需要确认。
+    执行动作按「持久 shell 自主度」判定（对齐 Trae 的 run-command 策略）：
+      ask       每次都问
+      whitelist 只读命令段全部命中白名单才放行（默认）
+      auto      不做分析，直接放行
+    工具级规则（deny / allow / ask）在调用方已经先跑过，这里只处理兜底。
     """
+    a = args if isinstance(args, dict) else {}
+    action = str(a.get("action") or "run").strip().lower()
+    if action in ("read", "status", "close", "interrupt"):
+        return "allow", ""
     if unrestricted:
         return "allow", ""
     m = normalize_approval(mode)
@@ -431,7 +577,40 @@ def judge_shell(mode, unrestricted=False, interactive=True):
         return "deny", "无人值守模式下不自动执行持久 shell"
     if m == "ask":
         return "ask", "手动审批：持久 shell 可执行任意命令，需你确认"
-    return "ask", "持久 shell 属于高危操作（任意命令），需要确认"
+    if args is None:
+        return "ask", "持久 shell 属于高危操作（任意命令），需要确认"
+    if m == "custom":
+        return "ask", "自定义规则未覆盖该命令：%s" % str(a.get("command") or "")
+    if action == "input":
+        return "ask", "向运行中的进程写输入可能执行任意命令，需要确认"
+    cmd = str(a.get("command") or "").strip()
+    segs = _split_shell_command(cmd)
+    if not segs:
+        return "ask", "持久 shell 缺少 command"
+    auto_mode = normalize_shell_autonomy(autonomy)
+    if auto_mode == "ask":
+        return "ask", "持久 shell：按你的设置，每次执行都要确认"
+    if auto_mode == "auto":
+        for seg in segs:
+            for pat in deny or ():
+                if pat and fnmatch.fnmatch(seg.lower(), str(pat).lower()):
+                    return "ask", "命中禁止清单：%s（需要你确认）" % pat
+        return "allow", ""
+    # 用户自己写的白名单：整条命令命中就放行（禁止清单仍然优先）。
+    # 给「带脚本块的只读统计」留一个显式的信任入口，内置白名单仍按段做结构检查。
+    if allow:
+        cmd_low = cmd.lower()
+        for pat in deny or ():
+            if pat and fnmatch.fnmatch(cmd_low, str(pat).lower()):
+                return "ask", "命中禁止清单：%s" % pat
+        for pat in allow:
+            if pat and fnmatch.fnmatch(cmd_low, str(pat).lower()):
+                return "allow", ""
+    for seg in segs:
+        ok, why = _shell_segment_allowed(seg, allow, deny)
+        if not ok:
+            return "ask", "持久 shell：%s" % why
+    return "allow", ""
 
 
 def _approval_notice(tool, args):
@@ -445,15 +624,58 @@ def _approval_notice(tool, args):
         return str(tool or "")
 
 
-def new_approval(sid, tool, args):
+def new_approval(sid, tool, args, reason=""):
     aid = "p_" + uuid.uuid4().hex[:10]
     with _approvals_lock:
         _APPROVALS[aid] = {"event": threading.Event(), "ok": None, "sid": sid,
                            "tool": tool, "args": args, "remember": False,
-                           "ts": time.time()}
+                           "reason": str(reason or ""), "ts": time.time()}
     from app import session_status
     session_status.mark(sid, "approval", _approval_notice(tool, args))
     return aid
+
+
+def _brief_args(args):
+    """快照用的参数摘要：只保留卡片上会展示的字段，不把整份文件内容塞给前端。"""
+    if not isinstance(args, dict):
+        return {}
+    out = {}
+    for key in ("path", "src", "dst", "argv", "cmd", "command", "cwd", "action",
+                "query", "url", "server", "tool", "name", "symbol", "new_name",
+                "message", "summary", "agent"):
+        if key not in args:
+            continue
+        val = args.get(key)
+        if isinstance(val, list):
+            out[key] = [str(x)[:200] for x in val[:40]]
+        elif isinstance(val, str):
+            out[key] = val[:500]
+        elif isinstance(val, (int, float, bool)) or val is None:
+            out[key] = val
+    return out
+
+
+def pending_approvals(sid=None):
+    """仍在等用户点「允许 / 拒绝」的审批。
+
+    审批卡只活在 SSE 事件里：断线 / 刷新 / 重开窗口后前端就拿不到了，
+    但后端还在 wait_approval 里等。前端用这份快照把卡重建出来。
+    """
+    want = str(sid or "").strip()
+    rows = []
+    with _approvals_lock:
+        for aid, item in _APPROVALS.items():
+            if item.get("event") is not None and item["event"].is_set():
+                continue
+            if want and str(item.get("sid") or "") != want:
+                continue
+            rows.append({"kind": "approval", "sid": item.get("sid") or "",
+                         "aid": aid, "name": item.get("tool") or "",
+                         "args": _brief_args(item.get("args")),
+                         "reason": item.get("reason") or "",
+                         "at": float(item.get("ts") or 0)})
+    rows.sort(key=lambda r: r["at"])
+    return rows
 
 
 def resolve_approval(aid, ok, remember=False):

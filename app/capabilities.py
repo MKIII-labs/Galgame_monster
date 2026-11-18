@@ -34,17 +34,22 @@ class Capability:
     permission: str = "read"
     handler: object = None
     chat: bool = True          # 是否允许在主对话里直接调用
+    required: list = field(default_factory=list)   # 必填参数（schema 里是完整 JSON Schema 时用）
 
 
 _CAPS = {}
 _lock = threading.Lock()
 
 
-def capability(cid, description, schema=None, permission="read", chat=True):
+def capability(cid, description, schema=None, permission="read", chat=True, required=None):
     """注册一个能力。handler 签名：fn(args: dict, ctx: dict) -> str
 
     chat=False 的能力只给任务引擎用（例如文件工具，它仍走 Agent 的沙箱开关，
-    不能在对话里绕过「Agent 是否开启」。
+    不能在对话里绕过「Agent 是否开启」）。
+
+    schema 的值可以是简写类型（str / int? / list），也可以是一段完整的 JSON Schema
+    （dict）——后者用于参数结构复杂的工具（如记忆 ops），让程序侧把模板定死。
+    required 显式声明必填参数；不传时按简写类型的「?」后缀推断。
     """
     if permission not in ("read", "write"):
         raise ValueError("permission 只能是 read / write：%s" % permission)
@@ -56,7 +61,8 @@ def capability(cid, description, schema=None, permission="read", chat=True):
             _CAPS[cid] = Capability(id=cid, description=description,
                                     schema=dict(schema or {}),
                                     permission=permission, handler=fn,
-                                    chat=bool(chat))
+                                    chat=bool(chat),
+                                    required=list(required or []))
         return fn
 
     return deco

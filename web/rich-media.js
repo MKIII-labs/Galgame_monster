@@ -17,7 +17,70 @@
   const libLoading = new Set();
   let theming = false;
 
-  const isDark = () => (typeof isDarkTheme === 'function' ? isDarkTheme() : false);
+  /* 图表 / 流程图跟应用主题走：直接从 tokens.css 的语义变量取值，
+     这样雾光、扁平明暗切换后不用再维护第二份配色。 */
+  function cssVar(name, fallback) {
+    try {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return v || fallback;
+    } catch (e) { return fallback; }
+  }
+
+  function themedAxis() {
+    const line = cssVar('--border', '#e1e4e9');
+    const dim = cssVar('--text-dim', '#5b6169');
+    return {
+      axisLine: { lineStyle: { color: line } },
+      axisTick: { lineStyle: { color: line } },
+      axisLabel: { color: dim },
+      splitLine: { lineStyle: { color: cssVar('--border-subtle', '#eff1f4') } },
+      nameTextStyle: { color: dim },
+    };
+  }
+
+  function chartTheme() {
+    return {
+      color: [
+        cssVar('--cat-1', '#6b8afd'), cssVar('--cat-4', '#14b8a6'),
+        cssVar('--cat-2', '#8b5cf6'), cssVar('--cat-6', '#0ea5e9'),
+      ],
+      backgroundColor: 'transparent',
+      textStyle: { color: cssVar('--text', '#1b1e23'),
+                   fontFamily: cssVar('--font', 'system-ui') },
+      title: { textStyle: { color: cssVar('--text', '#1b1e23') },
+               subtextStyle: { color: cssVar('--text-dim', '#5b6169') } },
+      legend: { textStyle: { color: cssVar('--text-dim', '#5b6169') } },
+      categoryAxis: themedAxis(),
+      valueAxis: themedAxis(),
+      tooltip: {
+        backgroundColor: cssVar('--bg-elevated', '#ffffff'),
+        borderColor: cssVar('--border', '#e1e4e9'),
+        textStyle: { color: cssVar('--text', '#1b1e23') },
+      },
+    };
+  }
+
+  function mermaidVars() {
+    const text = cssVar('--text', '#1b1e23');
+    return {
+      fontFamily: cssVar('--font', 'system-ui'),
+      fontSize: '13px',
+      background: cssVar('--bg-elevated', '#ffffff'),
+      mainBkg: cssVar('--bg-elevated', '#ffffff'),
+      primaryColor: cssVar('--accent-soft', 'rgba(77, 107, 254, .12)'),
+      primaryTextColor: text,
+      primaryBorderColor: cssVar('--accent', '#4d6bfe'),
+      secondaryColor: cssVar('--bg-hover', '#eef0f3'),
+      tertiaryColor: cssVar('--bg-input', '#f7f8fa'),
+      lineColor: cssVar('--border-strong', '#c3c8cf'),
+      textColor: text,
+      nodeTextColor: text,
+      clusterBkg: cssVar('--bg-side', '#f6f7f9'),
+      clusterBorder: cssVar('--border', '#e1e4e9'),
+      edgeLabelBackground: cssVar('--bg-elevated', '#ffffff'),
+      titleColor: text,
+    };
+  }
 
   function whenLib(name, cb, tries) {
     const n = tries || 0;
@@ -109,7 +172,8 @@
       body.innerHTML = '';
       let chart;
       try {
-        chart = window.echarts.init(body, isDark() ? 'dark' : null, { renderer: 'canvas' });
+        window.echarts.registerTheme('gm', chartTheme());   // 每次重画都取当前主题变量
+        chart = window.echarts.init(body, 'gm', { renderer: 'canvas' });
         chart.setOption(opt, true);
       } catch (e) {
         if (chart) { try { chart.dispose(); } catch (err) { /* 忽略 */ } }
@@ -144,7 +208,9 @@
         m.initialize({
           startOnLoad: false,
           securityLevel: 'strict',
-          theme: isDark() ? 'dark' : 'default',
+          // base 主题 + 应用设计令牌：雾光 / 明暗切换后重画就是同一套配色
+          theme: 'base',
+          themeVariables: mermaidVars(),
         });
       } catch (e) { /* 重复 initialize 不影响渲染 */ }
       const id = 'gm-mmd-' + Math.random().toString(36).slice(2);

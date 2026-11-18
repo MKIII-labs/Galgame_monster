@@ -13,6 +13,8 @@
 
 # 临时审计 / 探针产物
 /.tmp_audit/
+/.gm-tmp/
+/.screenshots/
 /_probe.pdf
 /scripts/_tmp_*.py
 

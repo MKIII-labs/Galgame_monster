@@ -24,7 +24,7 @@ import time
 from contextlib import ExitStack
 from unittest.mock import patch
 
-from app import agent, llm, store
+from app import agent, llm, store, winproc
 from app.config import get_api_conf, load_config
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -406,6 +406,7 @@ def _check_command(workdir, spec):
     try:
         p = subprocess.run(argv, cwd=workdir, capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
+                           creationflags=winproc.no_window(),
                            timeout=int(spec.get("timeout") or 120))
     except subprocess.TimeoutExpired:
         return _fail(name, "命令超时")
@@ -550,11 +551,13 @@ def env_info(meta=None):
         pass
     try:
         out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5,
+                             creationflags=winproc.no_window())
         if out.returncode == 0:
             info["git_commit"] = out.stdout.strip()
         out = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5,
+                             creationflags=winproc.no_window())
         if out.returncode == 0:
             info["git_dirty"] = bool(out.stdout.strip())
     except Exception:                        # noqa: BLE001  没装 git 也继续

@@ -202,15 +202,16 @@
   async function doExport() {
     if (!_payload) { await doPreview(); }
     if (!_payload) return;
-    setStatus('正在生成文件…');
+    setStatus('请选择保存位置…');
     const btn = _panel.querySelector('.share-go');
     if (btn) { btn.disabled = true; btn.classList.add('busy'); }
     try {
       const r = await api('/api/share/export', Object.assign({}, _payload,
-        { format: _state.format, redact: _state.redact }));
+        { format: _state.format, redact: _state.redact, save_as: true }));
+      if (r && r.canceled) { setStatus('已取消保存'); return; }
       if (!r || !r.ok) throw new Error((r && r.error) || '导出失败');
       showResult(r);
-      setStatus('');
+      setStatus(r.save_error || '');
     } catch (e) {
       setStatus('导出失败：' + (e && e.message ? e.message : e));
     } finally {
@@ -261,8 +262,23 @@
       toast('已删除分享文件');
     };
     acts.appendChild(del);
+    // 用户「另存为」的位置优先；没有就在导出目录里定位
+    const savedTo = r.saved_to || '';
+    const reveal = el('button', 'share-btn ghost', '打开文件夹');
+    reveal.type = 'button';
+    reveal.onclick = async () => {
+      try {
+        const res = await api('/api/share/reveal',
+          savedTo ? { path: savedTo } : { name: r.name });
+        if (!res || !res.ok) throw new Error((res && res.error) || '打开失败');
+      } catch (e) {
+        toast(e && e.message ? e.message : '打开失败');
+      }
+    };
+    acts.appendChild(reveal);
     box.appendChild(acts);
-    box.appendChild(el('div', 'share-result-path', r.path || ''));
+    box.appendChild(el('div', 'share-result-path',
+      savedTo ? '已保存到：' + savedTo : (r.path || '')));
   }
 
   function close() {

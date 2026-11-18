@@ -10,6 +10,28 @@ from app.api import sessions as api
 from app.sessions import slim_sessions
 
 
+def test_slim_sessions_drops_attachment_text():
+    """前端 payload 不带附件正文：只保留 name/size/chars 等展示字段。"""
+    data = {"current": "s1", "sessions": [{
+        "id": "s1", "title": "t", "messages": [{
+            "role": "user", "content": "看这份讲义",
+            "docs": [{"name": "a.pdf", "file": "f1.pdf", "chars": 1234,
+                      "text": "很长的正文" * 100}],
+            "doc_text": "旧的兼容字段正文",
+            "refs": [{"path": "x.py", "text": "引用正文"}],
+        }],
+    }]}
+    msg = slim_sessions(data)["sessions"][0]["messages"][0]
+    assert "doc_text" not in msg
+    assert msg["docs"][0]["name"] == "a.pdf"
+    assert msg["docs"][0]["chars"] == 1234
+    assert "text" not in msg["docs"][0]
+    assert msg["refs"][0]["path"] == "x.py"      # 引用正文不在本次裁剪范围内
+    # 原始数据不能被改写（服务端后续还要用它构建上下文）
+    assert data["sessions"][0]["messages"][0]["docs"][0]["text"]
+    assert data["sessions"][0]["messages"][0]["doc_text"]
+
+
 class FakeHandler:
     def __init__(self, body=None):
         self.body = body or {}
@@ -49,9 +71,8 @@ def store(monkeypatch):
     monkeypatch.setattr(api, "set_current", lambda sid: data.update({"current": sid}))
     monkeypatch.setattr(api, "new_id", lambda: "s_new")
     monkeypatch.setattr(api, "delete_session_uploads", lambda sid: None)
-    monkeypatch.setattr(api.saves, "drop_saves", lambda sid: None)
-    # 新建会话会写开局存档 / 跑 SessionStart 钩子：测试里都关掉，避免碰真实 data/
-    monkeypatch.setattr(api.saves, "add_save", lambda *a, **k: None)
+    monkeypatch.setattr(api.branch_lib, "drop_legacy_saves", lambda sid: None)
+    # 新建会话会跑 SessionStart 钩子：测试里关掉，避免碰真实 data/
     import app.hooks as hooks
     monkeypatch.setattr(hooks, "session_start", lambda *a, **k: "")
     return data, saved
@@ -141,14 +162,3 @@ def test_messages_missing_session(store):
     api._api_session_messages(h)
     code, obj = h.last
     assert code == 404 and obj["ok"] is False
-
-
-def test_search_filters_by_scope(store):
-    data, _ = store
-    data["sessions"][0]["gal_scope"] = "gal"
-    h = FakeHandler({"q": "会话"})
-    api._api_session_search(h)
-    obj = h.last[1]
-    ids = [x["id"] for x in obj["items"]]
-    assert ids == ["s_b"]                 # A 是 gal_scope=gal，不进 main 列表
-    assert obj["items"][0]["msg_count"] == 0

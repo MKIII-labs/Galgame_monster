@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import ast
 import os
 import re
 import subprocess
@@ -47,6 +48,10 @@ PLAN_STATUSES = ("pending", "doing", "done", "blocked")
 
 
 _ASKS = {}
+
+# 提问卡随回答提交的附件摘要（qid -> {images, docs, names}）：
+# wait_answers 之后由 chat.py 取走，用来提醒模型可以用 attachment_read 回看。
+_ASK_ATT = {}
 
 
 _asks_lock = threading.Lock()
@@ -170,6 +175,49 @@ def wait_plan_review(rid, timeout=PLAN_REVIEW_TIMEOUT, stop_event=None):
 def _plan_txt(v, limit=PLAN_MAX_TEXT):
     t = str(v or "").strip()
     return (t[:limit] + "…") if len(t) > limit else t
+
+
+def _format_retro_dict(obj):
+    """把模型偶尔直接传的 dict 复盘收敛成三段可读文本。"""
+    spec = (
+        ("实际结果", ("实际结果", "结果")),
+        ("与计划的偏差", ("与计划的偏差", "与计划偏差", "偏差")),
+        ("可复用经验", ("可复用经验", "经验")),
+    )
+    lines = []
+    for label, names in spec:
+        val = ""
+        for name in names:
+            val = str((obj or {}).get(name) or "").strip()
+            if val:
+                break
+        if val:
+            lines.append("%s：%s" % (label, val))
+    if not lines:
+        return _plan_txt(str(obj or ""), PLAN_MAX_RETRO)
+    return _plan_txt("\n".join(lines), PLAN_MAX_RETRO)
+
+
+def _plan_retro(v, base=""):
+    """复盘统一成「实际结果 / 与计划的偏差 / 可复用经验」三段文本。
+
+    兼容三种输入：dict、Python repr 字符串（历史数据常见）、普通文本。
+    普通文本保持原样，避免破坏已有 plan_patch 语义。
+    """
+    raw = v if v not in (None, "") else base
+    if isinstance(raw, dict):
+        return _format_retro_dict(raw)
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                obj = ast.literal_eval(s)
+                if isinstance(obj, dict):
+                    return _format_retro_dict(obj)
+            except (ValueError, SyntaxError):
+                pass
+        return _plan_txt(s, PLAN_MAX_RETRO)
+    return _plan_txt(raw, PLAN_MAX_RETRO)
 
 
 def _plan_status(v):
@@ -357,11 +405,17 @@ def normalize_plan(args, base=None):
     return {
         "goal": _plan_txt(args.get("goal") or base.get("goal"), 200),
         "done_when": _plan_done_when(args.get("done_when") or base.get("done_when")),
+        # 用户确认过的完成判据（不可删）与历次修订记录：随计划一起持久化，
+        # plan_patch 改 done_when 时据此拦截与留痕。
+        "done_when_locked": [str(x) for x in (base.get("done_when_locked") or [])
+                             if str(x).strip()][:8],
+        "done_when_rev": [dict(x) for x in (base.get("done_when_rev") or [])
+                          if isinstance(x, dict)][-10:],
         "revision": revision,
         "milestones": milestones,
         "steps": flat,
         "log": _plan_log(base.get("log"), args.get("log")),
-        "retro": _plan_txt(args.get("retro") or base.get("retro"), PLAN_MAX_RETRO),
+        "retro": _plan_retro(args.get("retro"), base.get("retro")),
         "note": _plan_txt(args.get("note"), PLAN_MAX_TEXT),
     }, ""
 
@@ -374,6 +428,17 @@ def apply_plan_patch(plan, args):
     if not isinstance(plan, dict) or not (plan.get("steps")):
         return None, "还没有计划：先调用 update_plan 建立计划，再用 plan_patch 调整。", ""
     args = args if isinstance(args, dict) else {}
+    reason = _plan_txt(args.get("reason"), PLAN_MAX_VERIFY)
+    old_dw = [str(x) for x in (plan.get("done_when") or []) if str(x).strip()]
+    locked = [str(x) for x in (plan.get("done_when_locked") or []) if str(x).strip()]
+    new_dw = args.get("done_when")
+    # 用户确认过的完成判据不可删：删除等于偷偷降低验收标准，必须先问用户。
+    if isinstance(new_dw, list):
+        keep = {str(x).strip() for x in new_dw if str(x).strip()}
+        removed = [x for x in locked if x not in keep]
+        if removed:
+            return None, ("不能删除用户已确认的完成判据：%s。"
+                          "确需调整请先向用户确认。" % "、".join(removed[:3])), ""
     milestones = [dict(m) for m in (plan.get("milestones") or []) if isinstance(m, dict)]
     mids = {m.get("id") for m in milestones}
     steps = [dict(s) for s in (plan.get("steps") or []) if isinstance(s, dict)]
@@ -486,13 +551,24 @@ def apply_plan_patch(plan, args):
     newp, err = normalize_plan(payload, base=plan)
     if err:
         return None, err, ""
-    reason = _plan_txt(args.get("reason"), PLAN_MAX_VERIFY)
+    if isinstance(new_dw, list) and newp.get("done_when") != old_dw:
+        _rev = [dict(x) for x in (plan.get("done_when_rev") or [])
+                if isinstance(x, dict)][-9:]
+        _rev.append({"at": int(time.time()), "old": old_dw,
+                     "new": list(newp.get("done_when") or []),
+                     "reason": reason or "调整完成判据"})
+        newp["done_when_rev"] = _rev
+    # 锁定项只保留仍在新判据里的（合法改动不会删锁定项，这里只是收敛脏数据）
+    _keep = {str(x).strip() for x in (newp.get("done_when") or [])}
+    newp["done_when_locked"] = [x for x in locked if x in _keep]
     if reason:
         newp["log"]["decisions"] = (newp["log"]["decisions"]
                                     + [{"at": int(time.time()), "text": reason}])[-PLAN_LOG_MAX:]
     summary = ("已更新计划 v%d：%d 个里程碑 / %d 步"
                % (newp.get("revision") or 1, len(newp.get("milestones") or []),
                   len(newp.get("steps") or [])))
+    if isinstance(new_dw, list) and newp.get("done_when") != old_dw:
+        summary += "（完成判据已修订）"
     if reason:
         summary += "；变更原因：" + reason
     return newp, "", summary
@@ -636,8 +712,12 @@ def dismiss_ask(qid, note="（由 AI 自行决定）"):
     return True
 
 
-def submit_answers(qid, answers):
-    """提交整组回答（与问题一一对应；未答的传空串）。也可只传一个字符串。"""
+def submit_answers(qid, answers, attachments=None):
+    """提交整组回答（与问题一一对应；未答的传空串）。也可只传一个字符串。
+
+    attachments 是随回答提交的附件摘要（提问卡里选的图片 / 文档），
+    由 chat.py 在 wait_answers 之后取走，塞进工具结果提醒模型回看。
+    """
     with _asks_lock:
         item = _ASKS.get(qid)
     if not item:
@@ -647,8 +727,17 @@ def submit_answers(qid, answers):
     if not isinstance(answers, (list, tuple)):
         answers = [answers]
     item["answers"] = ["" if a is None else str(a) for a in answers]
+    if attachments:
+        with _asks_lock:
+            _ASK_ATT[str(qid)] = attachments
     item["event"].set()
     return True
+
+
+def ask_attachments(qid):
+    """取走这条提问随回答提交的附件摘要；没有则返回 None。"""
+    with _asks_lock:
+        return _ASK_ATT.pop(str(qid or ""), None)
 
 
 def wait_answers(qid, timeout=None, stop_event=None):
@@ -682,6 +771,45 @@ def wait_answers(qid, timeout=None, stop_event=None):
         _ASKS.pop(qid, None)
     session_status.clear(item.get("sid"), "ask")
     return item.get("answers")
+
+
+def pending_asks(sid=None):
+    """仍在等用户回答的提问（断线 / 刷新后重建提问卡用）。"""
+    want = str(sid or "").strip()
+    now = time.time()
+    rows = []
+    with _asks_lock:
+        for qid, item in _ASKS.items():
+            if item.get("event") is not None and item["event"].is_set():
+                continue
+            exp = float(item.get("expires_at") or 0)
+            if exp and exp < now:
+                continue
+            if want and str(item.get("sid") or "") != want:
+                continue
+            rows.append({"kind": "ask", "sid": item.get("sid") or "", "qid": qid,
+                         "questions": item.get("questions") or [],
+                         "expires_at": exp,
+                         "at": float(item.get("created_at") or 0)})
+    rows.sort(key=lambda r: r["at"])
+    return rows
+
+
+def pending_plan_reviews(sid=None):
+    """仍在等用户批准的计划（断线 / 刷新后重建计划审批卡用）。"""
+    want = str(sid or "").strip()
+    rows = []
+    with _PLAN_REVIEWS_LOCK:
+        for rid, item in _PLAN_REVIEWS.items():
+            if item.get("event") is not None and item["event"].is_set():
+                continue
+            if want and str(item.get("sid") or "") != want:
+                continue
+            rows.append({"kind": "plan_review", "sid": item.get("sid") or "", "rid": rid,
+                         "plan": item.get("plan") or {},
+                         "at": float(item.get("ts") or 0)})
+    rows.sort(key=lambda r: r["at"])
+    return rows
 
 
 # ============================================================

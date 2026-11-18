@@ -143,6 +143,6 @@ def _api_ide_replace(h):
         _rollback(undo_ops)
         return h._json({"ok": False, "error": "写入失败：%s" % e}, 400)
     agent.invalidate_tree(sb)
-    token = agent.register_undo((s or {}).get("id") or "", undo_ops, "全局替换")
+    token = agent.register_undo((s or {}).get("id") or "", undo_ops, "全局替换", root=sb)
     return h._json({"ok": True, "total": total, "files": written, "token": token,
                     "skipped": skipped, "truncated": truncated})

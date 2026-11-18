@@ -64,6 +64,7 @@
   margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
 }
 .skill-count { font-size: 11.5px; color: var(--text-dim); }
+.skill-foot-actions { display: flex; gap: 2px; flex-wrap: wrap; justify-content: flex-end; }
 .link-btn {
   padding: 2px 4px; border: 0; border-radius: 4px;
   background: transparent; color: var(--accent);
@@ -110,3 +111,52 @@
   font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
   resize: vertical;
 }
+
+/* ---------- 校验结果 ---------- */
+.skill-lint { display: flex; flex-direction: column; gap: 4px; margin-top: -2px; }
+.slint-item {
+  font-size: 11.5px; line-height: 1.5; padding: 4px 8px;
+  border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim);
+}
+.slint-item.error {
+  color: #c0392b; border-color: rgba(192, 57, 43, .35); background: rgba(192, 57, 43, .06);
+}
+.slint-item.warn {
+  color: #b9770e; border-color: rgba(185, 119, 14, .35); background: rgba(185, 119, 14, .06);
+}
+.slint-item.info { color: var(--text-dim); }
+
+/* ---------- 试触发 ---------- */
+.skill-trigger {
+  margin-top: 12px; padding: 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+}
+.skill-trigger-head { font-size: 11.5px; color: var(--text-dim); margin-bottom: 6px; }
+.skill-trigger-row { display: flex; gap: 6px; }
+.skill-trigger-row .field-input { flex: 1; min-width: 0; }
+.skill-trigger-out { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; font-size: 11.5px; }
+.strig-hit { padding: 3px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--text); }
+.strig-cur { padding: 3px 8px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); }
+.strig-none { color: var(--text-dim); }
+
+/* ---------- 参考文件 ---------- */
+.skill-refs {
+  margin-top: 12px; padding: 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+}
+.skill-refs-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 11.5px; color: var(--text-dim);
+}
+.skill-ref-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.skill-ref-item {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px;
+  border: 1px solid var(--border); border-radius: 6px; background: transparent;
+  color: var(--text); font: inherit; font-size: 11.5px; cursor: pointer;
+}
+.skill-ref-item:hover { background: var(--bg-hover); }
+.skill-ref-item.active { background: var(--accent-soft); border-color: var(--accent); }
+.skill-ref-size { color: var(--text-dim); font-size: 10.5px; }
+.skill-ref-empty { font-size: 11.5px; color: var(--text-dim); }
+.skill-ref-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.skill-ref-actions { display: flex; gap: 6px; }

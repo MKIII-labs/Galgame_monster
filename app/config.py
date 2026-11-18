@@ -28,7 +28,7 @@ DEFAULT_CONFIG = {
     "chat_fallback": [],
     # 每日 token 上限：0 = 不限；达到后拒绝发起新请求（按本地用量流水统计）
     "usage_daily_tokens": 0,
-    # 分级模型调度：轻量任务（摘要 / 记忆挑选 / GAL 判定 / 语音矫正）可选用的「小模型」。
+    # 分级模型调度：轻量任务（摘要 / 记忆挑选 / 语音矫正）可选用的「小模型」。
     # 三项都留空 = 沿用主 chat 模型（默认，行为与从前一致）。
     "light_url": "", "light_api_key": "", "light_model": "",
     # 模型分级策略：off = 纯 API（忽略本地 light，也不启用增量压缩）；
@@ -64,6 +64,9 @@ DEFAULT_CONFIG = {
     # 回到底部 / 点「回到底部」后恢复。关闭后只更新折叠头统计，不再自动滚动
     #（当前步骤高亮与自动展开 / 收起仍然生效）。
     "ui_process_follow": True,
+    # 设置页的可见级别：basic（基础）/ advanced（进阶）/ expert（专家）。
+    # 只影响设置页显示与编辑入口，不改已保存配置；危险项在低级别下隐藏。
+    "settings_level": "advanced",
     # 自动召回的注入预算：高置信的前 N 段内联正文，其余只给 path:行号按需读。
     # 0 = 不设预算（旧行为：最多 5 段全部内联）。
     "auto_context_budget_chars": 8000,
@@ -246,7 +249,7 @@ DEFAULT_CONFIG = {
     "speech_denoise": False,         # 语音输入是否开启流式降噪（DPDFNet）
     "speech_denoise_model": "",      # 降噪模型路径；留空则用 data/models/dpdfnet_baseline.onnx
     "speech_final_model_dir": "",    # 两遍识别的精修模型目录；留空则用 data/models 下的默认目录
-    "ui_mode": "solo",               # 界面模式：solo（纯对话）| ide（工作区）| gal（演出）| hall（功能大厅）| work（工作台）| plugins（插件）
+    "ui_mode": "solo",               # 界面模式：solo（纯对话）| ide（工作区）| hall（功能大厅）| work（工作台）| plugins（插件）
     "session_group_mode": "flat",    # 会话记录：flat = 平铺（默认）；dir = 按沙箱目录分组
     "session_group_pins": [],        # 置顶的分组 key（归一化后的沙箱路径），只影响排序
     "session_group_names": {},       # 分组显示名别名：key -> 名字（不改磁盘目录）
@@ -256,33 +259,7 @@ DEFAULT_CONFIG = {
     "reminder_system_enabled": True,   # 同时弹 Windows 系统通知（程序关闭也能弹）
     "reminder_calendar_enabled": True, # 日程到点提醒
     "auto_chat_enabled": True,         # 允许 AI 主动聊天（每个会话仍需单独开启）
-    "theme": "light",                # 默认浅色（VS Code Light+）
     "ide_whitespace": "all",         # 空白字符可视化：none | selection | trailing | boundary | all
-    # ---- GAL 演出模式（见 docs/GAL_MODE_DESIGN.md）----
-    "gal_emotion_multi": False,      # 情绪字段是否用多标签数组（默认单值）
-    "gal_options_instant": True,     # 点选项是否立即发送（否则填回输入框）
-    "gal_tts_priority": "sprite",    # 台词发声优先级：sprite=绑定音频优先 | tts
-    # ---- GAL 演出皮肤 / 节奏 / 特效 ----
-    "gal_theme": "sakura",           # 演出主题：sakura 樱粉 | night 夜蓝 | washi 和风纸 | mono 极简黑白 | cyber 霓虹夜景 | pixel 像素复古
-    "gal_typewriter": True,          # 打字机逐字显示
-    "gal_cps": 12,                   # 打字机速度（字符/秒）
-    "gal_seg_mode": "single",         # 对白展示：single 单行推进（默认，= 新世界观感）| append 逐段追加
-    "gal_auto": False,               # 单行推进时：语音播完自动切下一段
-    "gal_min_show": 0.6,             # 每段最短展示秒数（自动推进用）
-    "gal_fx": True,                  # 关键词特效（*闪光* / *震动* 等）
-    "gal_ui_sfx": True,              # 选项界面音效（悬停轻响 / 确认实响，WebAudio 现场合成）
-    "gal_nudge": True,               # 本轮没给选项时，在段末提示玩家可主动发言（文案由 AI 按场景生成）
-    "gal_show_think": False,         # 是否显示 AI 思考过程（关闭时只显示「思考中…」，更不破坏沉浸感）
-    "gal_think": False,              # GAL 是否**启用**深度思考（默认关：实测首 token 差约 10 倍）
-    "gal_show_exec": True,           # 是否显示 AI 行为（搜索/工具等，以「幕间」呈现）
-    # 下面三项由演出界面直接消费：显示状态参数 / GAL 允许联网 / 自动隐藏鼠标指针
-    "gal_show_stats": True,
-    "gal_search": False,
-    "gal_hide_cursor": True,
-    "gal_dialog_max": 46,            # 对白框最大高度（占舞台高度百分比，30–70）
-    "gal_sprite_fx": True,           # 立绘进出场 / 换人过渡动画
-    "gal_bar_auto": True,            # 顶部工具条沉浸式淡出（鼠标移入才实显）
-    "gal_bgm_volume": 0.5,           # 舞台 BGM 音量（0–1）
     # ---- 界面：可收起的区域（输入框 / 侧栏 / IDE 文件管理区）----
     "composer_collapsed": False,      # 输入框是否收起
     "sidebar_collapsed": False,       # 左侧会话栏是否收起
@@ -291,19 +268,6 @@ DEFAULT_CONFIG = {
     # 大厅模块内部的 AI 开关（id -> bool）；默认开启，可在模块里关掉独自游玩
     "hall_ai_enabled": {},
     "hall_stock_ai_count": 3,         # 模拟股市：AI 对手人数（1–3）
-    # ---- GAL AI 自动写剧本 ----
-    "gal_auto_script": False,        # 总开关：由 AI 依据角色设定与用户画像自己编剧情并推进
-    "gal_auto_script_acts": 5,       # 大纲幕数（1–12）
-    "gal_auto_script_rounds": 4,     # 每幕最多回合数（1–12）
-    # ---- GAL 台词朗读（TTS）----
-    "tts_enabled": False,            # 是否朗读台词
-    "tts_provider": "edge",           # edge（免费·免密钥）| openai（兼容 /v1/audio/speech）| gpt-sovits（本地 HTTP）
-    "tts_url": "",                   # edge 忽略；openai 留空用 api.openai.com；gpt-sovits 留空用 127.0.0.1:9880
-    "tts_api_key": "",
-    "tts_model": "",                 # openai 用，如 tts-1 / gpt-4o-mini-tts
-    "tts_voice": "",                 # edge: zh-CN-XiaoxiaoNeural 等；openai: alloy 等；留空用各自默认
-    "tts_speed": 1.0,
-    "tts_max_len": 80,               # 单句最大字数（按标点切句）
     # ---- IDE 内联补全（Tab 补全）----
     # 默认开，但没有配置 light_model 时不会触发（避免用主模型每 350ms 烧一次 token）。
     "ide_ai_complete": True,
@@ -335,12 +299,11 @@ DEFAULT_CONFIG = {
     "read_outline_min_lines": 600,
     # 验收：不再「开工前强制定义机检项」——标准会随产物漂移，而且容易为了过闸凑一条。
     # 现在只在多步任务没定义时软提醒一次；收尾由验收子代理按实际产物核对。
-    # ---- 验收子代理（可信保真闸门）----
-    # finish 之前另起一个独立 AI：与主模型同等工具权限，自己做核对后打分。
-    # 覆盖所有任务（不再只限视觉）；没有证据的「通过」不算通过，客观事实会给分数封顶。
+    # ---- 验收子代理（逐项证据 + 客观硬伤）----
+    # finish 之前另起一个独立 AI：与主模型同等工具权限，自己核对产物。
+    # 覆盖所有任务；没有证据的「通过」不算通过，客观硬伤直接判不通过，不再打分。
     # 每回合最多复核几次；连续失败到第 3 次时允许模型用 quality_waiver 收尾。
     "agent_acceptance_review": True,
-    "agent_acceptance_min": 70,
     "agent_acceptance_max_reviews": 2,
     "agent_acceptance_rounds": 12,     # 验收代理自己的工具轮次；0 = 不限
     "agent_acceptance_timeout": 0,     # 单次验收超时秒数；0 = 用内置 180 秒
@@ -436,12 +399,6 @@ DEFAULT_CONFIG = {
     # 每个代理各拿一份 git worktree，跑完产补丁、审批后回写主沙箱；always = 一律隔离。
     # 非 git 沙箱自动退回上面的「串行写 + 冲突提示」，不做半套隔离。
     "agent_worktree_isolation": "auto",
-    # ---- 通用还原质量（参考物 vs 产物）----
-    # 只在「本轮用过 image_compare 且最佳总分 < agent_fidelity_min」时生效，
-    # 与任务领域无关：off = 不拦；nudge = 第一次 finish 提醒一次；strict = 未达标一直拦。
-    # 模型可以在 finish 里传 quality_waiver 说明为什么不再迭代。
-    "agent_fidelity_gate": "nudge",
-    "agent_fidelity_min": 70,
     # 原生视觉附图：see_image 默认把沙箱图片直接附到本轮上下文（主模型自己看像素），
     # 而不是只返回一段文字描述。需要聊天模型支持图片；失败时请关掉此开关。
     "agent_native_vision": True,
@@ -475,9 +432,20 @@ DEFAULT_CONFIG = {
     #              standard（允许 | 与沙箱内重定向，每段仍过白名单）
     #              trusted（额外允许 ; && || 串联，仅建议手动会话使用）
     "agent_shell_mode": "standard",
+    # 持久 shell 自主度（对齐 Trae 的 AutoRunCommandsConfigV2）：
+    #   ask       每次执行都问
+    #   whitelist 只读命令段全部命中白名单才免审批（默认）
+    #   auto      不分析，直接放行
+    # 白名单 / 禁止清单为 glob 列表（匹配单段命令）；白名单留空 = 用内置只读命令。
+    "agent_shell_autonomy": "whitelist",
+    "agent_shell_allow": [],
+    "agent_shell_deny": [],
     # OS 级命令沙箱（Windows AppContainer）：开启后命令只能读写沙箱目录与已授权的
-    # 工具链目录，越界由内核拒绝；首次授权需要一次管理员确认。
+    # 工具链目录，越界由内核拒绝。
     "agent_os_sandbox": True,
+    # 授权失败时是否允许弹 UAC 提权（默认关：Trae 的命令链路不发系统授权弹窗）。
+    # 关掉时授权失败就退回普通子进程执行，仍受沙箱路径规则与审批约束。
+    "agent_sandbox_elevate": False,
     # 写后自动格式化：off（默认）| auto（有 ruff / prettier 就用）
     # 只调用本机已安装的工具，不用 npx 临时下载；失败一律保留原文件。
     "agent_formatter": "off",
@@ -494,6 +462,10 @@ DEFAULT_CONFIG = {
     "plugins_enabled": False,
     # 单个插件的停用名单（目录包 / 单文件插件的 id）；启停后需重启进程
     "plugins_disabled": [],
+    # 插件市场索引：留空 = 用随包的 resources/plugins/market.json。
+    # 填 https:// 地址则拉远端索引，并缓存 plugin_index_ttl 秒（断网时回退旧缓存）。
+    "plugin_index_url": "",
+    "plugin_index_ttl": 3600,
     # ---- MCP（外部工具服务）----
     # 默认关闭：stdio server 是任意代码、权限与主进程相同；远程 server 意味着数据出境。
     # 每个 server 形如：
@@ -560,6 +532,11 @@ DEFAULT_CONFIG = {
     "computer_auto_shot": True,
     # 扩展桥配对密钥：首次生成后持久保存（扩展设置里粘贴一次即可）
     "computer_bridge_key": "",
+    # ---- 手机访问（局域网远控，见 docs/MOBILE_REMOTE_DESIGN.md）----
+    # 默认关闭：开启后才在局域网监听一个 HTTPS 端口（主服务仍只监听回环）。
+    "mobile_enabled": False,
+    "mobile_port": 57890,
+    "mobile_device_days": 180,      # 设备授权有效期（天），到期需重新配对
     # ---- 图片生成（本地 ComfyUI）----
     # 默认关闭：需要单独安装 ComfyUI、下载 FLUX 3 Image Klein 权重与工作流；
     # 不开启时接口直接报错，不占资源，也不影响其他功能。
@@ -603,6 +580,15 @@ _OBSOLETE_KEYS = {
     "hall_ai_count",             # 大厅改用 hall_ai_enabled（按人开关）
     "gal_auto_script_replan",    # 从未被读取
     "chat_protocol",             # 聊天侧协议由地址自动判断，不再单独配置
+    # GAL 演出模式已下线（2026-11-15）：整组配置保存时清掉
+    "gal_emotion_multi", "gal_theme", "gal_typewriter", "gal_cps", "gal_seg_mode",
+    "gal_auto", "gal_min_show", "gal_fx", "gal_ui_sfx", "gal_nudge",
+    "gal_show_think", "gal_think", "gal_show_exec", "gal_show_stats", "gal_search",
+    "gal_hide_cursor", "gal_dialog_max", "gal_sprite_fx", "gal_bar_auto",
+    "gal_bgm_volume", "gal_auto_script", "gal_auto_script_acts", "gal_auto_script_rounds",
+    # GAL 台词朗读（TTS）已下线：旧配置保存时清掉
+    "tts_enabled", "tts_provider", "tts_url", "tts_api_key", "tts_model",
+    "tts_voice", "tts_speed", "tts_max_len", "gal_tts_priority",
 }
 
 

@@ -21,6 +21,10 @@ from app.sessions import find_session, load_sessions, save_sessions
 from app.store import _lock
 
 FENCE = "```memory"
+# 模型有时不写围栏，而是照自己训练里的习惯吐 <memory>…</memory> 包裹 JSON。
+# 不认它就会把整块标记原样落库、显示给用户（还会成为下一轮的模仿样本）。
+MEM_TAG_OPEN = "<memory>"
+MEM_TAG_CLOSE = "</memory>"
 # DeepSeek 原生工具调用标记（U+FF5C 全角竖线）：模型有时会吐这个而不是 ```tool 围栏，
 # 不认它就会「整块标记直接显示给用户 + 工具不执行 + 本轮静默结束」，表现为「输出中断」。
 DSML_OPEN = "<\uff5c\uff5cDSML\uff5c\uff5c calls>"
@@ -68,7 +72,7 @@ def _scope_nodes(s, key):
     return (load_kb(key) or {}).get("nodes", [])
 
 
-def _profile_guidance(s, scopes):
+def _profile_guidance(s, scopes, native=False):
     """把「用户画像」的学习指令作为额外准则注入（若有用户画像作用域）"""
     if not any("用户画像" in label for _, label in scopes):
         return ""
@@ -89,8 +93,14 @@ def _profile_guidance(s, scopes):
         text = text[:1600] + "…"
     text += ("\n注意：画像是长期事实，不是任务工作区；一次性的任务进展写本会话记忆，"
              "不要写进画像。")
-    return ("\n\n## 用户画像的额外准则（来自「设置 → 用户画像」的学习指令）\n"
-            "注意：输出格式**只以上面的 ```memory 块为准**，本节里若出现其它格式一律忽略。\n" + text)
+    if native:
+        head = ("\n\n## 用户画像的额外准则（来自「设置 → 用户画像」的学习指令）\n"
+                "注意：输出格式**只以上面的 `memory_apply` 工具参数为准**，"
+                "本节里若出现其它格式一律忽略。\n")
+    else:
+        head = ("\n\n## 用户画像的额外准则（来自「设置 → 用户画像」的学习指令）\n"
+                "注意：输出格式**只以上面的 ```memory 块为准**，本节里若出现其它格式一律忽略。\n")
+    return head + text
 
 
 def _kb_guidance(scopes):
@@ -129,8 +139,12 @@ def _guidance_lists_profile(s, scopes):
 
 
 def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=True,
-                      parts=False):
+                      parts=False, native=False):
     """生成「记忆工具」说明；没有可写作用域时返回空串。
+
+    native=True：本轮会下发 `memory_apply` 原生工具，模板与校验交给程序侧，
+    提示词只说明「什么时候调用、参数怎么填」，不再要求模型手写 JSON 围栏。
+    native=False：退回文本协议（```memory 块），模型自己写整段 JSON。
 
     parts=True 时返回 (静态说明, 动态条目)：
     - 静态说明只随配置变化，可以放进 system 吃前缀缓存；
@@ -182,27 +196,54 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
         for n in recent:
             rows.append("%s | %s | %s" % (label, n.get("id", ""), n.get("title", "")))
 
-    lines = [
-        "## 记忆工具（你拥有读写权限）",
-        "你可以在回复**末尾**追加一个 ```memory 代码块来增删改记忆条目。后端会自动执行它，"
-        "并把这个块从你的回复中移除——用户看不到它，所以不要向用户解释这个格式。",
-        "**不要再说「我无法记录 / 我没有记忆能力」**：需要记录时直接执行，然后自然地告诉用户「已记下」；"
-        "也不要嘴上说记住了却没有输出这个块。",
-        "",
-        "## 作用域选择（先读这一节）",
-        "- **默认写本会话记忆**（session）：任务目标与进展、已确认的决定、文件路径 / 参数 / 结论、"
-        "未完成事项、用户纠正过的点。即使只对本会话成立，也必须写 session。",
-        "- **用户画像**只放跨会话稳定成立的偏好 / 身份 / 长期目标；不要把任务进展写进去。**本会话记忆不受此限**。",
-        "- **知识库**只在内容明确属于该库主题时写；拿不准就先写本会话记忆，需要长期保留再同步。",
-        "- 对话历史随时可能被压缩。后面还要用到的信息，现在就写进本会话记忆，不要依赖聊天记录。",
-        "",
-        "可用作用域：" + scope_desc,
-        "输出格式（只有确实需要变更时才输出；没有变更就完全不要输出这个块）：",
-        "```memory",
-        '{"ops":[{"scope":"<作用域ID>","op":"add|update|delete|link|unlink|append_note",'
-        '"id":"","title":"","content":"","category":"","tags":[],"aliases":[],"size":0,"color":"",'
-        '"from":"","to":"","relation":"","fact":"","directed":true}]}',
-        "```",
+    if native:
+        lines = [
+            "## 记忆工具（你拥有读写权限）",
+            "你可以调用工具 `memory_apply` 增删改记忆条目：参数 `ops` 是操作数组，"
+            "后端会按顺序执行并把结果返回给你。需要记录时直接调用，不要只说「我记住了」。",
+            "**不要再说「我无法记录 / 我没有记忆能力」**：需要记录时调用工具，"
+            "然后自然地告诉用户「已记下」；也不要嘴上说记住了却没有调用。",
+            "",
+            "## 作用域选择（先读这一节）",
+            "- **默认写本会话记忆**（session）：任务目标与进展、已确认的决定、文件路径 / 参数 / 结论、"
+            "未完成事项、用户纠正过的点。即使只对本会话成立，也必须写 session。",
+            "- **用户画像**只放跨会话稳定成立的偏好 / 身份 / 长期目标；不要把任务进展写进去。**本会话记忆不受此限**。",
+            "- **知识库**只在内容明确属于该库主题时写；拿不准就先写本会话记忆，需要长期保留再同步。",
+            "- 对话历史随时可能被压缩。后面还要用到的信息，现在就写进本会话记忆，不要依赖聊天记录。",
+            "",
+            "可用作用域：" + scope_desc,
+            "调用方式（只有确实需要变更时才调用；没有变更就不要调用）：",
+            'memory_apply({"ops":[{"scope":"<作用域ID>","op":"add|update|delete|link|unlink|append_note",'
+            '"id":"","title":"","content":"","category":"","tags":[],"aliases":[],"size":0,"color":"",'
+            '"from":"","to":"","relation":"","fact":"","directed":true}]})',
+            "一次最多 20 条，同一数组内按顺序执行（要连的新节点先 add 再 link）。"
+            "如果本轮工具不可用（服务商拒绝 / 只支持文本协议），"
+            "再退回「回复末尾追加 ```memory 代码块（内容同样是 {\"ops\":[...]}）」这一种写法。",
+        ]
+    else:
+        lines = [
+            "## 记忆工具（你拥有读写权限）",
+            "你可以在回复**末尾**追加一个 ```memory 代码块来增删改记忆条目。后端会自动执行它，"
+            "并把这个块从你的回复中移除——用户看不到它，所以不要向用户解释这个格式。",
+            "**不要再说「我无法记录 / 我没有记忆能力」**：需要记录时直接执行，然后自然地告诉用户「已记下」；"
+            "也不要嘴上说记住了却没有输出这个块。",
+            "",
+            "## 作用域选择（先读这一节）",
+            "- **默认写本会话记忆**（session）：任务目标与进展、已确认的决定、文件路径 / 参数 / 结论、"
+            "未完成事项、用户纠正过的点。即使只对本会话成立，也必须写 session。",
+            "- **用户画像**只放跨会话稳定成立的偏好 / 身份 / 长期目标；不要把任务进展写进去。**本会话记忆不受此限**。",
+            "- **知识库**只在内容明确属于该库主题时写；拿不准就先写本会话记忆，需要长期保留再同步。",
+            "- 对话历史随时可能被压缩。后面还要用到的信息，现在就写进本会话记忆，不要依赖聊天记录。",
+            "",
+            "可用作用域：" + scope_desc,
+            "输出格式（只有确实需要变更时才输出；没有变更就完全不要输出这个块）：",
+            "```memory",
+            '{"ops":[{"scope":"<作用域ID>","op":"add|update|delete|link|unlink|append_note",'
+            '"id":"","title":"","content":"","category":"","tags":[],"aliases":[],"size":0,"color":"",'
+            '"from":"","to":"","relation":"","fact":"","directed":true}]}',
+            "```",
+        ]
+    lines += [
         "字段说明：",
         "- scope：只填作用域 ID（如 `session` 或 `kb:xxx`），**不要带 `scope=` 前缀**",
         "- add：title 必填（≤20 字），content 写具体；category 可选（喜好 / 禁忌 / 事实 / 结论 / 交流风格）",
@@ -238,7 +279,7 @@ def build_tool_prompt(s, include_profile=True, include_kb=True, include_session=
         "确实找不到相关条目才跳过，不要因为「关系不明确」就一条都不连。"
         "from / to 必须已存在；要连的节点若还没有，先 add 再 link（同一块内按顺序执行）。",
     ]
-    extra = (_profile_guidance(s, scopes) + _kb_guidance(scopes)).strip()
+    extra = (_profile_guidance(s, scopes, native=native) + _kb_guidance(scopes)).strip()
     if extra:
         lines += ["", extra]
     # ---- 动态段：条数 / 超限整理提示 / 现有条目清单 ----
@@ -301,12 +342,44 @@ def _fence_at_line_start(buf, i, prev_char="\n"):
     return (not seg.strip()) and prev_char == "\n"
 
 
+# 已落库 / 正在展示的 <memory> 控制块清理：只删「像 ops JSON」的内容，
+# 正常讨论这个标签时（例如本文档这样的说明）不误伤。
+_MEM_TAG_PAIR_RE = re.compile(r"<\s*memory\s*>([\s\S]*?)<\s*/\s*memory\s*>", re.I)
+_MEM_TAG_TAIL_RE = re.compile(r"<\s*memory\s*>\s*(?=[\{[])[\s\S]*$", re.I)
+
+
+def strip_memory_tags(text):
+    """删掉模型手写的 <memory>…</memory> 控制块（含未闭合的 JSON 尾巴）。
+
+    用于三层兜底：落库前的正文清洗、存量会话清理脚本、前端渲染。
+    判定「像控制块」= 块内出现 ops 或直接以 { / [ 开头；其余内容原样保留。
+    """
+    s = str(text or "")
+    if "<" not in s or "memory" not in s.lower():
+        return s
+
+    def _drop(m):
+        body = m.group(1)
+        if "ops" in body or body.lstrip()[:1] in ("{", "["):
+            return ""
+        return m.group(0)
+
+    s = _MEM_TAG_PAIR_RE.sub(_drop, s)
+    # 未闭合：<memory> 后紧跟 JSON，一直到文本末尾
+    return _MEM_TAG_TAIL_RE.sub("", s)
+
+
 class MemoryExtractor:
     """从流式文本里摘出 ```memory 代码块：块内内容不对外展示，只作为 ops"""
 
     def __init__(self, fence=FENCE, openers=None):
-        # 起止候选：默认只用 `fence`；Agent 复用本类时会额外认 DeepSeek 原生工具标记
-        self.openers = list(openers) if openers else [(fence, "```")]
+        # 起止候选：默认认 ```memory 围栏与 <memory> 标签；Agent 复用本类时
+        # 会额外认 DeepSeek 原生工具标记。
+        # 每项是 (起始标记, 收尾标记[, 是否跳过起始行])：
+        # - 围栏写法 ````memory` 后面那行是语言名，必须跳过；
+        # - `<memory>` 是 XML 标签，内容紧跟其后，不能跳行。
+        self.openers = list(openers) if openers else [(fence, "```"),
+                                                      (MEM_TAG_OPEN, MEM_TAG_CLOSE, False)]
         self.visible = []          # 已展示的文本片段
         self.block_text = ""       # 控制块内容
         self.closed = False        # 控制块是否正常闭合
@@ -315,6 +388,7 @@ class MemoryExtractor:
         self._block = []           # 块内容分片
         self._in_block = False
         self._closer = "```"       # 当前块用哪个收尾标记
+        self._skip_line = True     # 当前块是否跳过起始行（围栏的语言名行）
 
     def feed(self, chunk):
         self._buf += chunk or ""
@@ -341,35 +415,44 @@ class MemoryExtractor:
                 self._in_block = False
                 self.closed = True
                 continue
-            hit = None                              # (位置, 起始标记, 收尾标记)
+            hit = None                              # (位置, 起始标记, 收尾标记, 是否跳行)
             low = self._buf.lower()
-            for op, cl in self.openers:
+            for spec in self.openers:
+                op, cl = spec[0], spec[1]
+                skip_line = spec[2] if len(spec) > 2 else True
                 # ``` 围栏必须在行首；否则是正文里的字面量，跳过它继续找。
-                # DSML 这类原生标记不做行首约束，避免漏检（回归）。
+                # DSML / <memory> 这类原生标记不做行首约束，避免漏检（回归）。
                 line_only = op.startswith("```")
                 i = low.find(op.lower())
                 while i >= 0 and line_only and not _fence_at_line_start(self._buf, i, self._prev_char):
                     i = low.find(op.lower(), i + 1)
                 if i >= 0 and (hit is None or i < hit[0]):
-                    hit = (i, op, cl)
+                    hit = (i, op, cl, skip_line)
             if hit:
-                i, op, cl = hit
+                i, op, cl, skip_line = hit
                 after = self._buf[i + len(op):]
-                nl = after.find("\n")
-                if nl < 0:
-                    # 语言名那一行还没结束，先按住
-                    if i > 0:
-                        emit(self._buf[:i])
-                    self._buf = self._buf[i:]
-                    break
-                emit(self._buf[:i])
-                self._buf = after[nl + 1:]
+                if skip_line:
+                    nl = after.find("\n")
+                    if nl < 0:
+                        # 语言名那一行还没结束，先按住
+                        if i > 0:
+                            emit(self._buf[:i])
+                        self._buf = self._buf[i:]
+                        break
+                    emit(self._buf[:i])
+                    self._buf = after[nl + 1:]
+                else:
+                    # XML 标签：内容紧跟其后，不跳过任何一行
+                    emit(self._buf[:i])
+                    self._buf = after
                 self._in_block = True
                 self._closer = cl
+                self._skip_line = skip_line
                 continue
             # 未出现完整起止标记：把可能是半截标记的尾巴按住
             keep = 0
-            for op, _cl in self.openers:
+            for spec in self.openers:
+                op = spec[0]
                 for k in range(1, min(len(op), len(self._buf)) + 1):
                     if self._buf[-k:].lower() == op[:k].lower():
                         keep = max(keep, k)
@@ -452,10 +535,7 @@ def apply_chat_ops(sid, ops):
     if not s:
         return None
     # 剧场会话只允许写本会话记忆：即使模型误写了画像/知识库作用域，这里也拒绝
-    if (s.get("gal_scope") or "main") == "gal":
-        scopes = writable_scopes(s, include_profile=False, include_kb=False)
-    else:
-        scopes = writable_scopes(s)
+    scopes = writable_scopes(s)
     if not scopes:
         return None
     allowed = [k for k, _ in scopes if k != "session"]
@@ -483,6 +563,33 @@ def apply_chat_ops(sid, ops):
     return {"applied": total, "summary": summary, "undo": token,
             "scopes": [label for _k, label in scopes], "problems": uniq[:3],
             "changed": changed or {}}
+
+
+def merge_notes(notes):
+    """把同一回合里多次 memory_apply 的结果合并成一张「已写入」卡片。
+
+    undo 取**最早**那次的 token：它的快照在这批写入之前，撤销可以把整轮还原。
+    """
+    items = [n for n in (notes or []) if isinstance(n, dict)]
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+    out = dict(items[0])
+    summaries, problems, changed = [], [], {}
+    for n in items:
+        if n.get("summary"):
+            summaries.append(n["summary"])
+        problems.extend(n.get("problems") or [])
+        for scope, part in (n.get("changed") or {}).items():
+            dst = changed.setdefault(scope, {})
+            for kind, ids in (part or {}).items():
+                dst.setdefault(kind, set()).update(ids or ())
+    out["summary"] = "；".join(summaries)
+    out["problems"] = list(dict.fromkeys(problems))[:3]
+    out["changed"] = changed
+    out["applied"] = sum(int(n.get("applied") or 0) for n in items)
+    return out
 
 
 def undo(token, sid, msg_index=None):

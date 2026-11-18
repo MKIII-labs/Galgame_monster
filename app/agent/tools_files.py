@@ -58,9 +58,9 @@ def _t_list_dir(root, args, allow_outside=False):
         return "不是目录：" + _rel(root, p), None
     # 沙箱外目录：列表里直接给绝对路径。否则模型拿到 ../xxx 再去 read_file，
     # 相对路径会被 resolve_path 拒掉（只有绝对路径能跨沙箱），看起来就像「时好时坏」。
-    root_real = _real(root)
-    outside = bool(allow_outside) and not (
-        p == root_real or p.startswith(root_real + os.sep))
+    root_real = _real(root) if root else ""
+    outside = (not root) or (bool(allow_outside) and not (
+        p == root_real or p.startswith(root_real + os.sep)))
     rows = []
     for name in sorted(os.listdir(p)):
         if name in BLOCKED_SEGMENTS and name not in READ_ONLY_SEGMENTS:
@@ -641,28 +641,32 @@ def missing_written_files(sid, root, limit=50):
     with _undo_lock:
         items = [v for v in _UNDO.values() if v.get("sid") == sid]
     items.sort(key=lambda v: v.get("ts") or 0, reverse=True)
-    out, seen = [], set()
+    # 同一个文件可能被写过多次：只看**最后一次操作**。
+    # 写完又主动 delete 的（最后一条 after_existed=False）不算「丢失」，
+    # 否则临时文件 / 中间产物会让验收永远判不通过。
+    latest = {}
     for item in items:
-        for op in item.get("ops") or []:
-            if op.get("kind") != "restore" or not op.get("after_existed"):
+        for op in reversed(item.get("ops") or []):
+            if op.get("kind") != "restore" or not op.get("path"):
                 continue
             p = op.get("path")
-            if not p:
-                continue
             try:
                 key = os.path.normcase(_real(p))
             except OSError:
                 continue
-            if key in seen:
-                continue
-            seen.add(key)
-            rel = _recover_rel(root, p)
-            if not rel:
-                continue
-            if not os.path.exists(p):
-                out.append(rel)
-                if len(out) >= limit:
-                    return out
+            latest.setdefault(key, op)
+    out = []
+    for op in latest.values():
+        if not op.get("after_existed"):
+            continue                     # 最后一步是删除（或写失败）：不是丢失
+        p = op.get("path")
+        rel = _recover_rel(root, p)
+        if not rel:
+            continue
+        if not os.path.exists(p):
+            out.append(rel)
+            if len(out) >= limit:
+                break
     return out
 
 

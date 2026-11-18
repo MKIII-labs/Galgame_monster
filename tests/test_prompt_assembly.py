@@ -6,17 +6,12 @@ from app import agent
 from app import prompt_assembly as pa
 
 
-NEUTRAL_CHAR = {"name": "测试角色", "profile": "普通设定。"}
-
-
 @pytest.fixture
 def fake_kb(monkeypatch):
-    """把回忆检索 / 规则常驻换成可控桩"""
+    """把回忆检索换成可控桩"""
     monkeypatch.setattr(pa, "retrieve_memory",
                         lambda s, q, exclude_pinned=False, skip_profile=False,
                         include_kbs=True, include_session=True: ("【回忆】某条记忆", 1))
-    monkeypatch.setattr(pa, "pinned_block",
-                        lambda s, include_kbs=True: ("【硬性规则】某条规则", 2))
     return monkeypatch
 
 
@@ -113,20 +108,6 @@ def test_base_system_prompt_empty_everything(monkeypatch):
     assert pa.base_system_prompt({}, "") == ("", 0)
 
 
-def test_base_system_prompt_passes_exclude_pinned(fake_kb):
-    seen = {}
-
-    def spy(s, q, exclude_pinned=False, skip_profile=False, include_kbs=True,
-            include_session=True):
-        seen["v"] = exclude_pinned
-        return "", 0
-    fake_kb.setattr(pa, "retrieve_memory", spy)
-    pa.base_system_prompt({}, "q", gal_mode=True)
-    assert seen["v"] is True                 # GAL 模式下要排除常驻规则，避免重复
-    pa.base_system_prompt({}, "q", gal_mode=False)
-    assert seen["v"] is False
-
-
 def test_base_system_prompt_skips_profile_when_tool_text(fake_kb):
     """有「记忆工具说明」时不再单独列画像条目（同批条目已由其列出，去重省 token）"""
     seen = {}
@@ -147,34 +128,6 @@ def test_tool_prompt_swallows_error(monkeypatch):
         raise RuntimeError("坏了")
     monkeypatch.setattr(pa.mem_tool, "build_tool_prompt", boom)
     assert pa.tool_prompt({}) == ""          # 出错不能把整轮聊天带崩
-
-
-def test_gal_round_prompt_contains_all_sections(fake_kb, monkeypatch):
-    monkeypatch.setattr(pa.gal, "build_prompt",
-                        lambda *a, **k: "【契约】舞台: %s" % k.get("stage"))
-    monkeypatch.setattr(pa.gal, "build_node_prompt", lambda node, r: "【节点】%s/%s" % (node["id"], r))
-    s = {"gal_stats": [{"key": "生命", "value": 40}], "gal_bg": "bg.jpg", "gal_bgm": "b",
-         "gal_round": 2, "gal_auto_outline": "全剧走向XYZ", "gal_recap": "前情ABC"}
-    gp = pa.gal_round_prompt(NEUTRAL_CHAR, s, {"id": "a1"}, gal_auto=True,
-                             emotion_multi=True, agent_on=True, fx=[], mem_on=True)
-    for kw in ("【契约】", "【节点】a1/2", "自行编剧", "全剧走向XYZ", "【硬性规则】",
-               "导演纪律", "实质推进", "前情ABC"):
-        assert kw in gp, "GAL 提示缺 %s" % kw
-
-
-def test_gal_round_prompt_minimal(fake_kb):
-    gp = pa.gal_round_prompt(NEUTRAL_CHAR, {})
-    assert gp                                     # 没有节点/剧本也不能是空串
-    assert "本段故事由你" not in gp               # 非自动剧本时不出现
-    assert "前情提要" not in gp                   # 没有 recap 时不出现
-    assert "导演纪律" in gp                       # 但导演纪律永远在
-
-
-def test_gal_round_prompt_survives_pinned_error(monkeypatch):
-    monkeypatch.setattr(pa, "pinned_block",
-                        lambda s, include_kbs=True: (_ for _ in ()).throw(RuntimeError("炸")))
-    gp = pa.gal_round_prompt(NEUTRAL_CHAR, {})
-    assert "导演纪律" in gp                       # 常驻注入失败也要能继续演出
 
 
 # ============================================================
@@ -217,7 +170,7 @@ def test_system_clock_off_by_default(monkeypatch):
     monkeypatch.setattr(pa, "retrieve_memory",
                         lambda s, q, exclude_pinned=False, skip_profile=False, include_kbs=True, include_session=True: ("", 0))
     text, _ = pa.base_system_prompt({}, "q", profile_manual="只有偏好")
-    assert "【当前时间】" not in text             # 不传 clock 时不注入（GAL 就是这么调的）
+    assert "【当前时间】" not in text             # 不传 clock 时不注入
 
 
 def test_system_clock_treats_itself_as_authoritative():

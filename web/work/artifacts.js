@@ -18,7 +18,7 @@ function workRenderArtifacts() {
   if (badge) badge.textContent = String(WORK.artifacts.length);
   if (!WORK.artifacts.length) {
     box.appendChild(workEmpty('还没有产物',
-      WORK.showWorking ? '任务写出的文件会出现在这里' : '点右上角「交付物」可显示临时文件'));
+      WORK.showWorking ? '任务写出的文件会出现在这里' : '点「显示临时文件」可查看工作区临时文件'));
     return;
   }
   // 按任务分组：同一个任务产出的文件放在一起，先看交付物再看是谁做的

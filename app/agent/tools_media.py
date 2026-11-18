@@ -4,24 +4,64 @@ import base64
 import io
 import json
 import os
+import re
 from app import webprobe
 from app import visual_qa
 from app import assets
 from app import audio
 from app import mesh
+from app.computer import shots as computer_shots
 
+# 工具结果里的本机绝对图片路径（visual_check / render_views 现在返回的是 data/visual 下的绝对路径）
+_ABS_SHOT_RE = re.compile(r"[A-Za-z]:[\\/][^\s()（）\"'`]+?\.(?:png|jpe?g|webp|bmp)", re.I)
+
+
+def _mirror_shots(text, root):
+    """把工具结果里的截图复制到沙箱 .gm/screenshots/ 并改写成相对路径。
+
+    前端工具卡只认沙箱相对路径（rich-media 带鉴权换 blob），绝对路径会渲染失败；
+    复制一份后用户在项目目录里也能直接找到图。
+    """
+    if not text or not root:
+        return text
+    rels = []
+    seen = {}
+
+    def _rep(m):
+        p = m.group(0)
+        if p in seen:                    # 同一张图在正文/JSON 里出现多次：只复制一份
+            return seen[p]
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+        except OSError:
+            return p
+        rel = computer_shots.save_png(base64.b64encode(data).decode("ascii"), root, "qa")
+        if not rel:
+            return p
+        seen[p] = rel
+        rels.append(rel)
+        return rel
+
+    out = _ABS_SHOT_RE.sub(_rep, text)
+    if rels and not re.search(r"(?m)^截图：", out):
+        out += "\n\n截图：" + rels[0]
+    return out
 
 
 def _t_render_check(root, args, allow_outside=False):
     """在无头浏览器里真的打开沙箱内的 HTML，回传可判定的渲染问题。
 
     只接受沙箱内的 .html / .htm（见 app/webprobe.py）；不联网、不安装依赖。
-    screenshot=true 时额外截图交给视觉模型描述 —— 每张约 1600 token，按需再开。
+    screenshot=true 时额外截图：一份存在沙箱 .gm/screenshots/（对话里直接可见），
+    同时交给视觉模型描述画面 —— 每张约 1600 token，按需再开。
     """
     from .sandbox import resolve_path
     p = resolve_path(root, args.get("path"))
     shot = str(args.get("screenshot", "")).strip().lower() in ("1", "true", "yes", "on")
-    text = webprobe.check(p, viewport=args.get("viewport"), screenshot=shot)
+    text = webprobe.check(
+        p, viewport=args.get("viewport"), screenshot=shot,
+        shot_sink=(lambda b64: computer_shots.save_png(b64, root, "render")) if shot else None)
     return text, None
 
 
@@ -43,7 +83,7 @@ def _t_visual_check(root, args, caps=None):
         baseline=str(args.get("baseline") or ""),
         save_baseline=bool(args.get("save_baseline", False)),
     )
-    return text, None
+    return _mirror_shots(text, root), None
 
 
 def _t_render_views(root, args, caps=None):
@@ -57,7 +97,7 @@ def _t_render_views(root, args, caps=None):
         sid=(caps or {}).get("sid") or "",
         timeout=int(args.get("timeout") or 90),
     )
-    return text, None
+    return _mirror_shots(text, root), None
 
 
 def _t_geometry_compare(root, args, allow_outside=False):

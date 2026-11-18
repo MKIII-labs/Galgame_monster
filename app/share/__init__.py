@@ -7,23 +7,56 @@
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
+import threading
 import time
 import uuid
 
+from app import winproc
 from app.store import DATA_DIR
 
 from . import package as pkg
 
-SHARE_DIR = os.path.join(DATA_DIR, "shares")
-EXPORT_DIR = os.path.join(SHARE_DIR, "exports")
+SHARE_DIR = os.path.join(DATA_DIR, "shares")          # 内部预览页（不面向用户）
 IMPORT_DIR = os.path.join(SHARE_DIR, "imported")
+_LEGACY_EXPORT_DIR = os.path.join(SHARE_DIR, "exports")
+
+_DOWNLOADS_GUID = "{374DE290-123F-4565-9164-39C4925E467B}"
+
+
+def _downloads_dir():
+    """用户「下载」文件夹：优先读注册表（用户可能把它移到别的盘）。"""
+    try:
+        import winreg
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as k:
+            raw, _type = winreg.QueryValueEx(k, _DOWNLOADS_GUID)
+        path = os.path.expandvars(str(raw or ""))
+        if path and os.path.isdir(path):
+            return path
+    except (OSError, ImportError, ValueError):
+        pass
+    home = os.path.expanduser("~")
+    for name in ("Downloads", "下载"):
+        cand = os.path.join(home, name)
+        if os.path.isdir(cand):
+            return cand
+    return home
+
+
+# 导出产物放在「下载」里，不塞进项目目录：用户点开就能找到。
+DEFAULT_EXPORT_DIR = os.path.join(_downloads_dir(), "Galgame Monster 分享")
+EXPORT_DIR = DEFAULT_EXPORT_DIR
 
 MAX_HTML = 8 * 1024 * 1024
 _ID_RE = re.compile(r"^[A-Za-z0-9_\-]{6,40}$")
 _EXPORT_RE = re.compile(r"^sh_[a-f0-9]{8,16}\.(?:html|png|gmshare)$")
 _TITLE_RE = re.compile(r"<title[^>]*>([\s\S]{0,200}?)</title>", re.I)
 
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
 
 
 # ---------------- 旧版：本机预览页 ----------------
@@ -95,11 +128,135 @@ def preview(payload):
             "bytes": len(html.encode("utf-8")), "title": title}
 
 
-def export(payload, fmt="html"):
-    """生成产物文件，返回 {ok, name, path, size, kind, report}。"""
+def _migrate_legacy_exports():
+    """老版本把导出放在 data/shares/exports；搬到下载目录，避免散落在项目里。"""
+    if os.path.abspath(EXPORT_DIR) != os.path.abspath(DEFAULT_EXPORT_DIR):
+        return                      # 测试 / 自定义目录不迁移
+    try:
+        names = os.listdir(_LEGACY_EXPORT_DIR)
+    except OSError:
+        return
+    for n in names:
+        if not _EXPORT_RE.match(n):
+            continue
+        dst = os.path.join(EXPORT_DIR, n)
+        if os.path.exists(dst):
+            continue
+        try:
+            # 项目在 D:、下载常在 C:，os.replace 跨盘会失败，必须用 shutil.move
+            shutil.move(os.path.join(_LEGACY_EXPORT_DIR, n), dst)
+        except OSError:
+            pass
+    try:
+        os.rmdir(_LEGACY_EXPORT_DIR)        # 只剩空目录时顺手清掉
+    except OSError:
+        pass
+
+
+def ensure_export_dir():
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    _migrate_legacy_exports()
+    return EXPORT_DIR
+
+
+def export_path(name):
+    """按导出名返回绝对路径；非法名 / 文件不存在返回空串。"""
+    n = str(name or "")
+    if not _EXPORT_RE.match(n):
+        return ""
+    path = os.path.join(EXPORT_DIR, n)
+    return path if os.path.isfile(path) else ""
+
+
+_EXT_OF = {"html": ".html", "png": ".png", "package": ".gmshare"}
+_FILETYPES_OF = {
+    "html": [["HTML 文件", "*.html"]],
+    "png": [["PNG 图片", "*.png"]],
+    "package": [["分享包", "*.gmshare"]],
+}
+_PICK_MARK = "__GM_PICK__"
+_PICK_LOCK = threading.Lock()
+
+# 与「选择 Agent 沙箱目录」同一套做法：独立 Python 子进程 + 先声明 per-monitor DPI
+# 感知，窗口才不会在缩放屏上发虚；也不经过 PowerShell，不会触发系统安全警告。
+_SAVE_PICKER_CODE = (
+    "import sys, json, ctypes\n"
+    "try: ctypes.windll.shcore.SetProcessDpiAwareness(2)\n"
+    "except Exception: pass\n"
+    "try: ctypes.windll.user32.SetProcessDPIAware()\n"
+    "except Exception: pass\n"
+    "import tkinter as tk\n"
+    "from tkinter import filedialog\n"
+    "r = tk.Tk(); r.withdraw()\n"
+    "try: r.attributes('-topmost', True)\n"
+    "except Exception: pass\n"
+    "conf = json.loads(sys.argv[3])\n"
+    "p = filedialog.asksaveasfilename(initialdir=sys.argv[1] or None,\n"
+    "    initialfile=sys.argv[2] or '', title=conf['title'],\n"
+    "    defaultextension=conf['ext'], filetypes=conf['types']) or ''\n"
+    "sys.stdout.write('\\n" + _PICK_MARK + "' + p + '\\n')\n"
+    "sys.stdout.flush()\n"
+)
+
+
+def default_name(fmt="html"):
+    return "分享-%s%s" % (time.strftime("%Y%m%d-%H%M%S"), _EXT_OF.get(fmt, ".html"))
+
+
+def ask_save_path(default_file, fmt="html"):
+    """弹出系统「另存为」窗口（与选沙箱目录同一个 Tk 选择框）。
+
+    返回：选中路径 / ""（用户取消或已有窗口开着）/ None（窗口没打开成功，调用方走默认目录）。
+    """
+    if not _PICK_LOCK.acquire(blocking=False):
+        return ""                       # 已经有一个选择框开着，别叠第二个
+    try:
+        start = EXPORT_DIR if os.path.isdir(EXPORT_DIR) else _downloads_dir()
+        conf = json.dumps({"title": "保存分享文件",
+                           "ext": _EXT_OF.get(fmt, ".html"),
+                           "types": _FILETYPES_OF.get(fmt, _FILETYPES_OF["html"])},
+                          ensure_ascii=False)
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", _SAVE_PICKER_CODE, start, default_file, conf],
+                capture_output=True, text=True, timeout=600,
+                creationflags=winproc.no_window())
+        except subprocess.TimeoutExpired:
+            print("[分享] 另存为窗口超时，按取消处理")
+            return ""
+        except Exception as e:          # noqa: BLE001
+            print("[分享] 另存为窗口打开失败：%s" % e)
+            return None
+        # 本机有些软件会往子进程 stdout 打日志：只认带标记的那一行
+        for line in reversed((proc.stdout or "").splitlines()):
+            if line.startswith(_PICK_MARK):
+                path = line[len(_PICK_MARK):].strip().strip('"').strip("'")
+                return os.path.abspath(path) if path else ""
+        return None
+    finally:
+        _PICK_LOCK.release()
+
+
+def _save_target(path, fmt):
+    """补全扩展名并确保目录存在；返回绝对路径。"""
+    target = os.path.abspath(str(path))
+    ext = _EXT_OF.get(fmt, ".html")
+    if not target.lower().endswith(ext):
+        target += ext
+    parent = os.path.dirname(target)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    return target
+
+
+def export(payload, fmt="html", save_path=""):
+    """生成产物文件，返回 {ok, name, path, size, kind, report, saved_to?}。
+
+    save_path 非空时在生成后再复制一份到用户选择的位置（导出记录仍保留在导出目录）。
+    """
     fmt = str(fmt or "html").lower()
     html, rep, sections, title = build_document(payload)
-    os.makedirs(EXPORT_DIR, exist_ok=True)
+    ensure_export_dir()
     sid = "sh_" + uuid.uuid4().hex[:10]
     report = {
         "secrets": rep.get("secrets", 0) + rep.get("kv", 0),
@@ -137,8 +294,18 @@ def export(payload, fmt="html"):
         size = len(html.encode("utf-8"))
         with open(os.path.join(EXPORT_DIR, name), "w", encoding="utf-8") as f:
             f.write(html)
-    return {"ok": True, "name": name, "path": os.path.join(EXPORT_DIR, name),
-            "size": int(size or 0), "kind": fmt, "report": report}
+    source = os.path.join(EXPORT_DIR, name)
+    result = {"ok": True, "name": name, "path": source,
+              "size": int(size or 0), "kind": fmt, "report": report}
+    if save_path:
+        try:
+            target = _save_target(save_path, fmt)
+            shutil.copy2(source, target)
+            result["saved_to"] = target
+        except OSError as e:
+            result["saved_to"] = ""
+            result["save_error"] = "复制到你选择的位置失败：%s" % e
+    return result
 
 
 def _kind_of(name):

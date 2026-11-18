@@ -426,7 +426,7 @@ def _do_press(ctrl, key, hwnd=None):
 # 截图
 # ============================================================
 
-def shot(key):
+def shot(key, sandbox=None):
     if not enabled():
         return "⚠️ 桌面操作未开启。"
     ctrl, err = _window(key)
@@ -450,11 +450,17 @@ def shot(key):
         except OSError:
             pass
     try:
+        from app.computer.shots import save_png
+        rel = save_png(b64, sandbox, "win")
+    except Exception:
+        rel = ""
+    try:
         from app.webprobe import _describe_shot
         desc = _describe_shot(b64)
     except Exception as e:
         desc = "⚠️ 视觉描述不可用：%s" % e
-    return "【窗口截图 %d KB】\n%s" % (len(b64) // 1024, desc)
+    pic = ("\n![实机截图](%s)" % rel) if rel else ""
+    return "【窗口截图 %d KB】%s\n%s" % (len(b64) // 1024, pic, desc)
 
 
 def read_value(key, ref):

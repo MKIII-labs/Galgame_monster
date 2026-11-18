@@ -219,6 +219,19 @@ function notifyOnce(key, title, text, kind, target) {
   showSystemNotify(title, text, kind, target);
 }
 
+/* 轻量对账：只拉「待审批 / 待回答」快照（/api/state 会读整份会话，太重）。
+   断线、休眠、切回前台时用它兜底，避免错过清理事件后一直留着假橙点。 */
+async function syncPendingState() {
+  try {
+    const res = await fetch('/api/pending', { headers: { 'X-Auth-Token': TOKEN } });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data || !data.ok) return;
+    state.pending = (data.pending && typeof data.pending === 'object') ? data.pending : {};
+    if (typeof renderSessions === 'function') renderSessions();
+  } catch (e) { /* 对账失败不影响主流程 */ }
+}
+
 function startEvents() {
   if (AUTO.ctrl) { try { AUTO.ctrl.abort(); } catch (e) { /* ignore */ } }
   AUTO.ctrl = new AbortController();
@@ -261,7 +274,7 @@ function startEvents() {
 }
 
 /* 提问卡 / 审批卡是否正摆在用户眼前：是就别弹系统通知。
-   Solo 之外（IDE / GAL / 工作台）看不到聊天区，窗口隐藏或失焦也算看不到。 */
+   Solo 之外（IDE / 工作台）看不到聊天区，窗口隐藏或失焦也算看不到。 */
 function pendingCardVisible(sid) {
   if (typeof state === 'undefined' || state.uiMode !== 'solo') return false;
   if (sid && sid !== state.sessions.current) return false;
@@ -280,7 +293,18 @@ function notifySessionPending(sid, kind, text, at) {
 
 function handleAutoEvent(obj) {
   if (!obj || !obj.type) return;
+  // 手机配对请求：桌面立刻弹确认（与手机上的 6 位校验码核对）
+  if (obj.type === 'mobile_pair') {
+    if (typeof showMobilePairPrompt === 'function') showMobilePairPrompt(obj);
+    return;
+  }
   // 会话运行态（待审批 / 待回答）：更新侧栏圆点；看不到那张卡时再弹系统通知
+  if (obj.type === 'session_pending_snapshot') {
+    // SSE（重）连上时服务端先发全量快照：以它为准，清掉断线期间错过的假待办
+    state.pending = (obj.pending && typeof obj.pending === 'object') ? obj.pending : {};
+    if (typeof renderSessions === 'function') renderSessions();
+    return;
+  }
   if (obj.type === 'session_pending') {
     const sid = String(obj.sid || '');
     if (sid) {
@@ -323,7 +347,6 @@ function handleAutoEvent(obj) {
       if (obj.context && typeof renderContextBar === 'function') {
         renderContextBar(obj.context);   // 内部会同步压缩分隔线
       }
-      if (state.uiMode === 'gal') toast('已压缩较早的历史，点进度条「详情」可查看摘要');
     }
     return;
   }
@@ -331,8 +354,7 @@ function handleAutoEvent(obj) {
   if (obj.type === 'context_compressing') {
     const cur = (state.sessions || {}).current;
     if (!obj.session_id || obj.session_id === cur) {
-      if (state.uiMode === 'gal') toast('上下文接近上限，正在后台压缩较早的历史');
-      else compressPending();
+      compressPending();
     }
     return;
   }
@@ -386,18 +408,13 @@ async function openPathInApp(path) {
   }
 }
 
-// 把一条「不是用户触发」的消息插进当前视图（solo 加气泡 / GAL 加对白段）
+// 把一条「不是用户触发」的消息插进当前视图（solo 加气泡）
 function appendAutoMessage(text, tag) {
   if (!text) return;
   // 同步进前端会话数据，避免「DOM 有、内存没有」导致后续按 index 的操作错位
   const s = (typeof curSession === 'function') ? curSession() : null;
   if (s && Array.isArray(s.messages)) {
     s.messages.push({ role: 'assistant', content: text, auto: true });
-  }
-  if (state.uiMode === 'gal') {
-    const name = (typeof galState !== 'undefined' && galState.charName) || '';
-    galAddSegment({ speaker: name, text: tag ? ('【' + tag + '】' + text) : text });
-    return;
   }
   try {
     appendAi(safeRenderMarkdown(text), text, undefined);

@@ -377,11 +377,32 @@ def _clean_aliases(v):
     return out[:8]
 
 
+KINDS = ("fact", "preference", "person", "event", "task", "concept")
+# 老数据没有 kind：按分类关键字推导（只影响展示与筛选，不改写磁盘内容）
+_KIND_BY_CAT = (
+    ("preference", re.compile(r"喜好|偏好|禁忌|习惯|口味|喜欢|讨厌|雷点")),
+    ("person", re.compile(r"人物|角色|朋友|家人|同事|客户|联系人")),
+    ("event", re.compile(r"事件|日程|计划|经历|发生|会议|提醒|行程")),
+    ("task", re.compile(r"任务|待办|todo", re.I)),
+    ("concept", re.compile(r"概念|定理|定义|原理|知识|公式|教材|学科|方法")),
+)
+
+
+def infer_kind(category):
+    """分类 → 节点类型；识别不了按「事实」。"""
+    cat = str(category or "")
+    for kind, pat in _KIND_BY_CAT:
+        if pat.search(cat):
+            return kind
+    return "fact"
+
+
 def make_node(title, content="", category="其他", tags=None, source=None, size=None,
-              color=None, aliases=None):
+              color=None, aliases=None, kind=None):
     now = time.time()
     node = {"id": _node_id(), "title": (title or "").strip()[:120], "content": content or "",
             "category": category or "其他", "tags": tags or [], "aliases": _clean_aliases(aliases),
+            "kind": kind if kind in KINDS else infer_kind(category),
             "locked": False, "notes": [], "x": None, "y": None,
             "created_at": now, "updated_at": now, "source": source}
     if size is not None:

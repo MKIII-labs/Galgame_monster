@@ -46,6 +46,25 @@ def _isolate_session_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_config_file(tmp_path, monkeypatch):
+    """测试不读写真实的 data/config.json。
+
+    2026-11-14 实际踩过：一个用例把 chat_model 写成 x 并落进真实配置，
+    导致上游 400（model names are deepseek-flash, deepseek-v4-pro）。
+    这里统一把配置文件、设置历史目录指到 tmp。
+    """
+    try:
+        from app import config as cfg_mod
+        from app import settings_center
+    except Exception:                       # 模块不可用时无需隔离
+        return
+    path = str(tmp_path / "config.json")
+    monkeypatch.setattr(cfg_mod, "CONFIG_FILE", path)
+    monkeypatch.setattr(settings_center, "CONFIG_FILE", path)
+    monkeypatch.setattr(settings_center, "HISTORY_DIR", str(tmp_path / "settings_history"))
+
+
+@pytest.fixture(autouse=True)
 def _no_hybrid_by_default(monkeypatch):
     """测试默认按「纯 API」跑（hybrid_mode=off）。
 

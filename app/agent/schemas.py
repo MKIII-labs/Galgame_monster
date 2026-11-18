@@ -35,10 +35,15 @@ def _tool_search_schema():
         ["query"])
 
 
+def _fn_name(tool):
+    return str((tool.get("function") or {}).get("name") or "")
+
+
 def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                         computer_on=False, lsp_on=False, git_commit_mode="off",
                         plan_mode=False, allow_groups=None, unlocked=None,
-                        allowed_tools=None):
+                        allowed_tools=None, disallowed_tools=None,
+                        allowed_mcp_servers=None, read_only=False):
     """生成 OpenAI 兼容的 tools 列表。
 
     原生 function name 不允许点号，所以能力名里的 `.` 换成 `_`
@@ -51,13 +56,21 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
     lsp_on：是否挂 LSP 工具（关掉后模型只能用正则版 find_symbol）。
     git_commit_mode：off = 完全不给 git_commit；ask / auto 只是审批策略不同。
     allowed_tools：按旧工具名授权的子集（子代理 / 巡检）；meta 只暴露被授权的 action。
+    disallowed_tools：拒绝清单，优先级高于 allowed_tools；meta 会展开成对应 action。
+    allowed_mcp_servers：只允许这些 MCP server 的工具（子代理 frontmatter.mcpServers）。
+    read_only：未选择沙箱目录时的只读模式 —— 去掉所有需要根目录的工具
+    （写 / 命令 / 搜索 / Git / LSP / 可视化产物…），只留下绝对路径读取类。
     """
     out = []
     if agent_on:
         out += [
-            _fn_tool("list_dir", "列出目录内容", {"path": {"type": "string"}}, ["path"]),
+            _fn_tool("list_dir", "列出目录内容",
+                     {"path": {"type": "string",
+                               "description": "目录路径；未选择沙箱目录时用绝对路径"}},
+                     ["path"]),
             _fn_tool("read_file", "读取文件（带行号；单次最多 1MB，超过用 start / limit 分段）",
-                     {"path": {"type": "string"},
+                     {"path": {"type": "string",
+                               "description": "文件路径；未选择沙箱目录时用绝对路径"},
                       "start": {"type": "integer", "description": "起始行，从 1 开始"},
                       "limit": {"type": "integer", "description": "最多读多少行"},
                       "raw": {"type": "boolean",
@@ -66,7 +79,7 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
             _fn_tool("read_files",
                      "一次读取多个文件（最多 16 个）。要看多个文件时优先用它，少跑几轮",
                      {"paths": {"type": "array", "items": {"type": "string"},
-                                "description": "文件路径列表（沙箱内相对路径）"},
+                                "description": "文件路径列表（未选择沙箱目录时用绝对路径）"},
                       "start": {"type": "integer", "description": "起始行，从 1 开始"},
                       "limit": {"type": "integer", "description": "每个文件最多读多少行"},
                       "raw": {"type": "boolean",
@@ -320,7 +333,8 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      "它不消耗视觉模型调用。"
                      "可以用 paths 一次传多张（最多 %d 张）做同请求对照，"
                      "回答里用「第 N 张」区分" % SEE_MAX_IMAGES,
-                     {"path": {"type": "string", "description": "沙箱内的单张图片"},
+                     {"path": {"type": "string",
+                               "description": "单张图片；未选择沙箱目录时用绝对路径"},
                       "paths": {"type": "array", "items": {"type": "string"},
                                 "description": "可选：多张图片（与 path 合并，最多 %d 张）"
                                                % SEE_MAX_IMAGES},
@@ -354,8 +368,10 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      "并列出差距最大的三项。它只做像素 / 形状统计，不理解语义、不判断好不好看；"
                      "用于「还原得像不像」的机检与迭代排序。背景尽量干净，"
                      "有地面 / 阴影 / 图注时用 region 裁到主体或局部",
-                     {"reference": {"type": "string", "description": "参考图（沙箱内路径）"},
-                      "candidate": {"type": "string", "description": "产物图（沙箱内路径）"},
+                     {"reference": {"type": "string",
+                                    "description": "参考图（未选沙箱目录时用绝对路径）"},
+                      "candidate": {"type": "string",
+                                    "description": "产物图（未选沙箱目录时用绝对路径）"},
                       "region": {"type": "array", "items": {"type": "number"},
                                  "description": "可选：两张图共用的裁剪区域 [x, y, w, h]，0–1 归一化"},
                       "max_side": {"type": "integer",
@@ -368,7 +384,8 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      "面板切分是启发式，仅供对照参考。"
                      "渲染 / 截图落盘后先跑它：blank_score 能直接判断是不是白图，"
                      "不用花一次视觉模型调用去「看一眼」",
-                     {"path": {"type": "string", "description": "沙箱内的图片路径"},
+                     {"path": {"type": "string",
+                               "description": "图片路径；未选择沙箱目录时用绝对路径"},
                       "region": {"type": "array", "items": {"type": "number"},
                                  "description": "可选：只分析这块区域 [x, y, w, h]，0–1 归一化"},
                       "panels": {"type": "string",
@@ -763,7 +780,7 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
         "用户可以在「设置 → 子代理」里新建或修改代理，指定工具、模型与写权限。"
         "多个独立任务放进 agents 数组会并行执行；需要串行交接时用 pipeline。"
         "单次并行数量由设置里的 agent_explore_max 决定（默认 8，硬上限 12）。"
-        "每个代理只回传 600 字以内结论与证据。")
+        "每个代理回传交付清单：结果、证据、未完成/未验证、产物、下一步。")
     try:
         from app import agent_defs as _agent_defs
         _rows = [a for a in _agent_defs.list_agents()
@@ -876,14 +893,36 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
         "声明本轮任务已完成并交付（**显式收尾开关**）。只有确实做完、或确实要交给用户"
         "拍板时才调用；调用后本轮立刻结束。还有计划步骤没做完、或还要读 / 写 / 跑命令时"
         "**不要**调用它，直接继续干活。仅写正文、不调任何工具就停下会被系统判成「未完成」"
-        "并要求你继续，所以收尾时请显式调用它。",
+        "并要求你继续，所以收尾时请显式调用它。"
+        "如果上一轮验收驳回的 blocking 项在实际环境下确实不该判不通过，"
+        "用 challenges 带类型与证据申诉，由验收代理裁决；不要默默放弃或空口豁免。",
         {"summary": {"type": "string",
-                     "description": "一句话说明交付了什么 / 结论"},
+                     "description": "面向用户的交付说明：交付了什么 / 如何验证 / 还有什么没做。"
+                                    "不要写沙箱路径、临时脚本、目录项数量这类内部细节"},
+         "details": {"type": "string",
+                     "description": "可选：内部操作明细（删了哪些临时文件、目录项变化、"
+                                    "跑过的关键命令 / 校验）。只在完成卡的「操作明细」里折叠展示，"
+                                    "不要写进 summary"},
          "incomplete": {"type": "array", "items": {"type": "string"},
                         "description": "确实做不了、留给用户的后续事项（可选）"},
          "quality_waiver": {"type": "string",
-                            "description": "可选：本轮用过 image_compare 但分数仍低于阈值时，"
-                                           "写清为什么不再继续迭代（不写则可能被质量闸门拦下）"}},
+                            "description": "可选：验收子代理连续驳回 3 次或无法验证时，"
+                                           "写清为什么按现状收尾（不写则会被继续驳回）"},
+         "challenges": {"type": "array", "items": {
+             "type": "object",
+             "properties": {
+                 "criterion": {"type": "string",
+                               "description": "要申诉的验收项原文（对准最近一次未通过的 blocking 项）"},
+                 "type": {"type": "string",
+                          "enum": ["env_impossible", "not_in_user_scope",
+                                   "plan_drift", "already_covered"],
+                          "description": "申诉类型：环境不可行 / 不在用户要求内 / 计划已漂移 / 已被其他项覆盖"},
+                 "evidence": {"type": "string",
+                              "description": "证据：为什么这一项在实际环境下不该判不通过"}},
+             "required": ["criterion", "type", "evidence"]},
+             "description": "可选：验收被驳回后对某条 blocking 项申诉（每回合最多 2 条、"
+                            "同一项 1 次）。验收代理逐条裁决：接受则降级为建议，"
+                            "拒绝则不再对同一项返工，改由用户裁决"}},
         []))
     out.append(_fn_tool(
         "update_plan",
@@ -1109,9 +1148,15 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                 continue
         props, required = {}, []
         for key, spec in (cap.schema or {}).items():
+            if isinstance(spec, dict):
+                # 完整 JSON Schema：参数结构由能力自己定死（嵌套对象 / 枚举）
+                props[key] = spec
+                continue
             props[key] = {"type": _json_type(spec)}
             if not str(spec or "").strip().endswith("?"):
                 required.append(key)
+        if cap.required:
+            required = list(cap.required)
         out.append(_fn_tool(cap.id.replace(".", "_"), cap.description,
                             props, required or None))
     # 插件工具（data/plugins/*.py 用 @agent_tool 注册）；插件默认关闭
@@ -1132,11 +1177,31 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                 _req.append(_k)
         out.append(_fn_tool(_nm, _desc, _props, _req or None))
     # 外部 MCP 工具：默认只挂两个元工具，模型显式解锁后下一轮才挂具体 server 的工具
+    _mcp_prefixes = ()
+    if allowed_mcp_servers is not None:
+        try:
+            from app import mcp
+            for _s in allowed_mcp_servers:
+                mcp.activate(_s)
+            _mcp_prefixes = tuple(mcp.server_prefix(s) for s in allowed_mcp_servers
+                                  if str(s or "").strip())
+        except Exception:                  # noqa: BLE001  MCP 不可用时不影响内置工具
+            _mcp_prefixes = ()
     try:
         from app import mcp
         out += mcp.tool_schemas()
     except Exception:                     # noqa: BLE001  外部服务故障不影响内置工具
         pass
+    if allowed_mcp_servers is not None:
+        # 子代理只允许 frontmatter.mcpServers 里声明的 server；没声明就一个都不给。
+        out = [t for t in out
+               if not _fn_name(t).startswith("mcp__")
+               or (_mcp_prefixes and _fn_name(t).startswith(_mcp_prefixes))]
+    if read_only:
+        # 未选沙箱目录：只保留不依赖根目录的工具（读文件 / 看图 / 附件等）。
+        # 先过滤再生成 meta，避免 edit / run / git 这类 action 还被枚举出来。
+        from .groups import SANDBOX_ONLY_TOOLS
+        out = [t for t in out if _fn_name(t) not in SANDBOX_ONLY_TOOLS]
     # 工具分层：低频工具组默认不下发（省掉每轮重发的 schema），
     # 命中意图域（allow_groups）或模型用 tool_search 解锁后才挂上。
     if allowed_tools is not None:
@@ -1150,15 +1215,27 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
             elif _n:
                 _allow.add(_n)
         out = [t for t in out
-               if str((t.get("function") or {}).get("name") or "") in _allow]
+               if _fn_name(t) in _allow
+               or (_mcp_prefixes and _fn_name(t).startswith(_mcp_prefixes))]
     else:
         hide = hidden_tools(allow_groups, unlocked)
         if hide:
             before = len(out)
             out = [t for t in out
-                   if str((t.get("function") or {}).get("name") or "") not in hide]
+                   if _fn_name(t) not in hide]
             if len(out) < before:
                 out.append(_tool_search_schema())
+    # 拒绝清单最后生效：即使 allowed_tools / MCP 放行，也不能出现在 schema 里。
+    _deny = set()
+    for _n in disallowed_tools or []:
+        _n = str(_n or "").strip()
+        if _n in tool_meta.META:
+            _deny.update(legacy for legacy, _r, _m
+                         in tool_meta.META[_n]["actions"].values())
+        elif _n:
+            _deny.add(_n)
+    if _deny:
+        out = [t for t in out if _fn_name(t) not in _deny]
     # /plan 规划轮**不再**裁剪工具目录（对齐 DSH：The tool catalog stays the same across
     # modes for request-cache stability）。tools 在请求最前面，增减一次就让整段前缀 miss；
     # plan 模式的行为约束交给提示词，写操作仍由运行时按 PLAN_MODE_TOOLS 拒绝。

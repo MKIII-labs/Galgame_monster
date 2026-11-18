@@ -31,6 +31,45 @@ def test_approval_notice_uses_call_summary(monkeypatch):
     agent.wait_approval(aid2, timeout=0.2)
 
 
+# ---------------------------------------------------------------- 待处理交互快照
+def test_pending_approvals_snapshot():
+    """断线 / 刷新后要能重新拿到「在等什么」：大字段不进快照，解决后立即消失。"""
+    aid = agent.new_approval("s_pending", "write_file",
+                             {"path": "a.py", "content": "x" * 5000},
+                             "会覆盖已有文件")
+    rows = agent.pending_approvals("s_pending")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["kind"] == "approval" and row["aid"] == aid
+    assert row["name"] == "write_file"
+    assert row["args"] == {"path": "a.py"}
+    assert row["reason"] == "会覆盖已有文件"
+    assert agent.pending_approvals("other_session") == []
+
+    assert any(it["kind"] == "approval" and it["aid"] == aid
+               for it in agent.pending_interactions("s_pending"))
+    agent.resolve_approval(aid, False)
+    agent.wait_approval(aid, timeout=0.2)
+    assert agent.pending_approvals("s_pending") == []
+
+
+def test_stream_alive_ignores_zombie_lease(monkeypatch):
+    """没有 job 的租约不能再永远算「生成中」；等用户交互时则必须算活着。"""
+    import app.session_status as st
+
+    ev = object()
+    monkeypatch.setitem(chat.ACTIVE_STREAMS, "s_wait", ev)
+    chat.JOBS.pop("s_wait", None)
+    chat.LEASE_STARTED.pop("s_wait", None)
+    monkeypatch.setattr(st, "_pending",
+                        {"s_wait": {"kind": "ask", "n": 1, "at": time.time(), "text": ""}})
+    assert chat.stream_alive("s_wait") is True
+
+    monkeypatch.setattr(st, "_pending", {})
+    assert chat.stream_alive("s_wait", idle=300) is False
+    chat.ACTIVE_STREAMS.pop("s_wait", None)
+
+
 # ---------------------------------------------------------------- 写后自检
 def test_post_write_check_python(tmp_path):
     p = tmp_path / "a.py"
@@ -779,4 +818,56 @@ def test_run_command_streams_output_via_sink(tmp_path):
     assert any("L2" in c for c in got)
     # 最终结果仍是完整输出（增量推流不影响回灌给模型的内容）
     assert "L0" in text and "L2" in text
+
+
+# ---------------- 未选沙箱：只读模式 ----------------
+
+def test_read_only_without_sandbox_reads_absolute_only(tmp_path):
+    """没有沙箱目录：绝对路径可读；相对路径 / 写入仍要求先选目录。"""
+    import pytest
+
+    f = tmp_path / "a.txt"
+    f.write_text("hi", encoding="utf-8")
+    got = agent.resolve_path("", str(f), for_read=True)
+    assert got.replace("\\", "/").endswith("/a.txt")
+    with pytest.raises(agent.SandboxError):
+        agent.resolve_path("", "a.txt", for_read=True)
+    with pytest.raises(agent.SandboxError):
+        agent.resolve_path("", str(f))       # 写入仍要求沙箱
+
+
+def test_read_only_schema_hides_sandbox_tools():
+    """只读模式：读文件 / 列目录 / 看图保留，写 / 命令 / 搜索 / Git 不下发。"""
+    from app.agent.schemas import native_tool_schemas
+
+    schemas = native_tool_schemas(agent_on=True, read_only=True)
+    names = {t["function"]["name"] for t in schemas}
+    assert "read" in names
+    read_meta = next(t for t in schemas if t["function"]["name"] == "read")
+    acts = read_meta["function"]["parameters"]["properties"]["action"]["enum"]
+    assert "list" in acts and "file" in acts and "files" in acts
+    assert "search" not in acts and "semantic" not in acts and "map" not in acts
+    for forbidden in ("edit", "run", "git", "asset", "workflow"):
+        assert forbidden not in names
+    # visual 只保留图片几何对照（纯读图片），不保留 render / qa / views / scene
+    visual = next((t for t in schemas if t["function"]["name"] == "visual"), None)
+    if visual:
+        vacts = visual["function"]["parameters"]["properties"]["action"]["enum"]
+        assert set(vacts) <= {"geometry"}
+    assert "see_image" in names or "image" in names
+    if "image" in names:
+        image = next(t for t in schemas if t["function"]["name"] == "image")
+        iacts = image["function"]["parameters"]["properties"]["action"]["enum"]
+        assert "see" in iacts and "compare" in iacts and "analyze" in iacts
+    assert "search_files" not in names and "write_file" not in names
+
+
+def test_prompt_tells_read_only_without_sandbox():
+    from app.agent.prompt import build_agent_prompt
+
+    p = build_agent_prompt({"agent_enabled": True, "sandbox": ""}, native_tools=True)
+    assert "绝对路径" in p
+    assert "read_file" in p
+    assert "选择工作目录" in p
+    assert "读（绝对路径）" in p
 

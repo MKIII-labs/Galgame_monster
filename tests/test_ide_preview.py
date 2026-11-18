@@ -127,7 +127,7 @@ class _DevHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if path == "/":
+        if path in ("/", "/index.html"):
             self._send("<html><body><h1>dev</h1></body></html>")
         elif path == "/next":
             self._send("<html><body><h2>next</h2></body></html>")
@@ -164,6 +164,38 @@ def test_dev_proxy_injects_bridge_and_forwards_assets():
         preview.stop()
         srv.shutdown()
         srv.server_close()
+
+
+def test_split_target_path():
+    assert preview._split_target_path("/") == ("", "/")
+    assert preview._split_target_path("/index.html") == ("", "/index.html")
+    assert preview._split_target_path("/app/") == ("/app", "/")
+    assert preview._split_target_path("/v1.2/") == ("/v1.2", "/")
+    assert preview._split_target_path("/app/index.html") == ("/app", "/index.html")
+
+
+def test_dev_proxy_keeps_target_page_path():
+    """带路径的 dev server 地址：代理地址要停在那一页，不能丢掉 /index.html。"""
+    srv, origin = _dev_server()
+    try:
+        base = preview.start_dev(origin + "/index.html")
+        assert base.endswith("/index.html")
+        status, body, _ = _get(base)
+        assert status == 200 and b"<h1>dev</h1>" in body
+        # 同一个 dev server 再打开根路径：复用服务，但地址回到 /
+        base_root = preview.start_dev(origin + "/")
+        assert base_root.endswith("/")
+        status, body, _ = _get(base_root)
+        assert status == 200 and b"<h1>dev</h1>" in body
+    finally:
+        preview.stop()
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_dev_proxy_file_url_hint():
+    with pytest.raises(ValueError, match="path"):
+        preview.start_dev("file:///D:/tmp/index.html")
 
 
 def test_dev_proxy_passes_websocket_upgrade():
@@ -286,6 +318,17 @@ def test_open_preview_tool_static_and_dev(tmp_path):
         url = text.split("GM_PREVIEW_URL:", 1)[1].split()[0]
         status, body, _ = _get(url)
         assert status == 200 and b"<h1>dev</h1>" in body
+        # 带页面路径的地址：代理必须停在 /index.html，而不是丢掉路径回到根
+        text, _, _ = agent.run_tool(
+            str(tmp_path), "open_preview", {"url": origin + "/index.html"})
+        url = text.split("GM_PREVIEW_URL:", 1)[1].split()[0]
+        assert url.endswith("/index.html")
+        status, body, _ = _get(url)
+        assert status == 200 and b"<h1>dev</h1>" in body
+        # file:// 报错必须给出可执行的替代方案（用 path 参数）
+        text, _, _ = agent.run_tool(
+            str(tmp_path), "open_preview", {"url": "file:///D:/tmp/index.html"})
+        assert "path" in text and "http" in text
     finally:
         srv.shutdown()
         srv.server_close()

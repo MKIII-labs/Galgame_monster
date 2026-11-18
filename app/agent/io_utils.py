@@ -138,6 +138,58 @@ def _preview_paths(op):
     return []
 
 
+_PREVIEW_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _read_disk_state(path):
+    """读当前磁盘状态：("file", bytes) | ("missing", None) | ("dir", None) | ("error", None)。
+
+    超过 8MB 的文件返回 ("file", None)：调用方不做内容对比，避免把大文件整个读进内存。
+    """
+    try:
+        if os.path.isdir(path):
+            return "dir", None
+        if not os.path.exists(path):
+            return "missing", None
+        if os.path.getsize(path) > _PREVIEW_MAX_BYTES:
+            return "file", None
+        with open(path, "rb") as f:
+            return "file", f.read()
+    except FileNotFoundError:
+        return "missing", None
+    except OSError:
+        return "error", None
+
+
+def _preview_text(data):
+    """bytes → 文本（尽量 UTF-8 / GBK）；二进制或过大返回 None。"""
+    if data is None or len(data) > 512 * 1024:
+        return None
+    if b"\x00" in data[:4096]:
+        return None
+    for enc in ("utf-8", "gbk"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def _preview_stat(old, new):
+    """回滚会带来的增删行数；非文本 / 读不到时返回 (0, 0)。"""
+    try:
+        from app import diffview
+        a = "" if old is None else _preview_text(old)
+        b = "" if new is None else _preview_text(new)
+        if a is None or b is None:
+            return 0, 0
+        d = diffview.build(a, b, 3, stat_only=True)
+        return int(d.get("adds") or 0), int(d.get("dels") or 0)
+    except Exception:                     # noqa: BLE001 统计失败不影响回退
+        return 0, 0
+
+
+
 def _preview_display(path, root):
     """展示路径：沙箱内给相对路径，沙箱外给绝对路径。"""
     if not path:
@@ -196,7 +248,12 @@ def read_text(sandbox, rel):
     if _looks_binary(p):
         raise SandboxError("这是二进制文件，无法在编辑器里打开")
     text, enc, size, truncated = _read_text_file(p, limit=2 * 1024 * 1024)
-    return {"text": text, "encoding": enc, "size": size, "truncated": truncated}
+    try:
+        mtime = os.path.getmtime(p)
+    except OSError:
+        mtime = 0
+    return {"text": text, "encoding": enc, "size": size, "truncated": truncated,
+            "mtime": mtime}
 
 
 def _write_enc(p):
@@ -211,13 +268,29 @@ def _write_enc(p):
     return "utf-8"
 
 
-def write_text(sandbox, rel, content):
-    """保存文本到文件（保持原编码）"""
+def write_text(sandbox, rel, content, base_mtime=None):
+    """保存文本到文件（保持原编码）。
+
+    base_mtime：编辑器打开文件时记下的修改时间。传入时会先比对磁盘，
+    文件已被其它程序改过就返回 {"conflict": True, "mtime": 当前值}，不覆盖。
+    """
     from .sandbox import (SandboxError, _rel, _sandbox_root, resolve_path)
     p = resolve_path(sandbox, rel)
     if os.path.isdir(p):
         raise SandboxError("目标是目录，不能写入")
     enc = _write_enc(p)
+    if base_mtime is not None and os.path.isfile(p):
+        try:
+            cur = os.path.getmtime(p)
+        except OSError:
+            cur = None
+        try:
+            expect = float(base_mtime)
+        except (TypeError, ValueError):
+            expect = None
+        if cur is not None and expect is not None and abs(cur - expect) > 1e-6:
+            return {"encoding": enc, "path": _rel(_sandbox_root(sandbox), p),
+                    "conflict": True, "mtime": cur}
     parent = os.path.dirname(p)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -225,4 +298,8 @@ def write_text(sandbox, rel, content):
     with WRITE_LOCK:
         with open(p, "w", encoding=enc, newline="") as f:
             f.write(content if content is not None else "")
-    return {"encoding": enc, "path": _rel(_sandbox_root(sandbox), p)}
+    try:
+        mtime = os.path.getmtime(p)
+    except OSError:
+        mtime = 0
+    return {"encoding": enc, "path": _rel(_sandbox_root(sandbox), p), "mtime": mtime}

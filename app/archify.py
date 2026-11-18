@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import time
 
+from app import winproc
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILL_DIR = os.path.join(ROOT, "vendor", "archify")
 BIN = os.path.join(SKILL_DIR, "bin", "archify.mjs")
@@ -100,7 +102,7 @@ def _run(args, cwd, timeout):
         p = subprocess.run(
             [node, BIN] + list(args), cwd=cwd, env=_env(),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout)
+            timeout=timeout, creationflags=winproc.no_window())
     except subprocess.TimeoutExpired:
         return None, "", "Archify 超时（%s 秒）" % timeout
     except OSError as e:

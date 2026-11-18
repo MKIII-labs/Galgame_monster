@@ -21,9 +21,8 @@ const HK_STORE_KEY = 'hotkeys_v1';
    localStorage，可以被 scripts/hotkeys_test.js 直接 require 做单元测试。
    本文件在浏览器里先加载 hk-core.js，顶层 const/function 同域可用。 */
 
-// 「?」清单里的分组（顺序即展示顺序）
+// 「?」清单里的分组（顺序即展示顺序）。GAL 入口已下线，其快捷键分组一并移除。
 const HK_SCOPES = [
-  { id: 'gal', name: 'GAL 演出' },
   { id: 'ide', name: 'IDE 工作区' },
   { id: 'editor', name: '编辑器（VS Code）' },
   { id: 'composer', name: '输入框' },
@@ -33,18 +32,12 @@ const HK_SCOPES = [
 /* keys：默认按键（可给多个候选，任一命中即可）；fixed 不可改键；
    hold = 按住生效；dyn = 运行时动态判定；both 只做展示、不参与分发 */
 const HK_DEFS = [
-  { id: 'gal.advance', scope: 'gal', name: '推进对话（打字中先补全）', keys: ['Space', 'Enter', 'NumpadEnter'] },
-  { id: 'gal.fast',    scope: 'gal', name: '按住快进', keys: ['ControlLeft', 'ControlRight'], hold: true, fixed: true },
-  { id: 'gal.auto',    scope: 'gal', name: '自动播放开关', keys: ['KeyA'] },
-  { id: 'gal.review',  scope: 'gal', name: '打开回顾', keys: ['ArrowUp'] },
-  { id: 'gal.option',  scope: 'gal', name: '选择第 N 个选项', keys: [], dyn: true, fixed: true },
-  { id: 'gal.esc',     scope: 'gal', name: '关闭最上层浮层', keys: ['Escape'], fixed: true, displayOnly: true },
-
   { id: 'ide.save',    scope: 'ide', name: '保存当前文件', keys: ['Ctrl+KeyS', 'Meta+KeyS'] },
   { id: 'ide.open',    scope: 'ide', name: '快速打开文件', keys: ['Ctrl+KeyP', 'Meta+KeyP'] },
   { id: 'ide.palette', scope: 'ide', name: '命令面板', keys: ['Ctrl+Shift+KeyP', 'Meta+Shift+KeyP'] },
   { id: 'ide.sidebar', scope: 'ide', name: '收起 / 展开文件管理区', keys: ['Ctrl+KeyB', 'Meta+KeyB'] },
   { id: 'ide.terminal', scope: 'ide', name: '打开 / 关闭终端', keys: ['Ctrl+Backquote', 'Meta+Backquote'] },
+  { id: 'ide.terminalNew', scope: 'ide', name: '新建终端', keys: ['Ctrl+Shift+Backquote', 'Meta+Shift+Backquote'] },
 
   /* ---- 运行 / 调试 ----
      这些键由 gal-ide.js 的调试面板实现（不是 Monaco 动作），所以放在 ide 作用域：

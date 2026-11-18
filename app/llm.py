@@ -284,6 +284,9 @@ def _strip_ctrl_markers(text):
     for m in (mem_tool.DSML_OPEN, mem_tool.DSML_CLOSE, mem_tool.FENCE, "```tool"):
         if m:
             s = s.replace(m, "")
+    # <memory>…</memory> 是模型自创的记忆协议写法：正常情况下会被 MemoryExtractor
+    # 摘走；这里兜底，防止未闭合 / 换行异常的块原样落库成为下一轮的模仿样本。
+    s = mem_tool.strip_memory_tags(s)
     # 伪工具标签一律清掉：它们落库后会作为「示例」出现在下一轮历史里，
     # 模型会照着继续吐同样的标签（自激循环）。这里用白名单规则，不再枚举写法。
     return _strip_unknown_tags(s)
@@ -723,7 +726,7 @@ def _http_failure(status, detail_raw):
 
 
 def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event=None,
-                emit=None, on_visible=None, on_flush=None, allow_tool=True,
+                emit=None, on_visible=None, allow_tool=True,
                 tools=None, timeout=(10, 300), max_tokens=None, kind=None,
                 idle_timeout=None, stall_timeout=None, temperature=None,
                 on_tool_ready=None):
@@ -735,8 +738,7 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
     - think:      直接并进请求体的思考参数（由 config.thinking_payload 生成）
     - tools:      原生 function calling 的工具 schema；不传则只用文本协议
     - emit(obj):  推一条 SSE 事件
-    - on_visible: 处理「已摘除 memory / tool 块」的可见文本（GAL 逐段揭示走这里）
-    - on_flush(): 流结束后收尾（GAL 兜底分段要把剩下的吐干净）
+    - on_visible: 处理「已摘除 memory / tool 块」的可见文本
     - idle_timeout: 原始数据看门狗（秒）。连续这么久连一个 `data:` 行都收不到就中止；
       0 / None 按配置 `chat_stream_idle_timeout`，配 0 = 不限。
     - stall_timeout: 空转看门狗（秒）。**收到过 data 行、但连续这么久没有思考 / 正文 /
@@ -750,8 +752,6 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
     """
     emit = emit or (lambda obj: None)
     on_visible = on_visible or (lambda text: None)
-    if on_flush is None:
-        on_flush = lambda: None                                    # noqa: E731
     _cfg = load_config()
     # 原始数据看门狗：只认 `data:` 行，注释行 / 空行不算「上游还活着」。
     if idle_timeout is None:
@@ -1388,7 +1388,6 @@ def stream_chat(api_key, api_url, api_model, messages, *, think=None, stop_event
     if leftover and not mem_mx.ops():
         mem_mx.visible.append(leftover)
         on_visible(leftover)
-    on_flush()                                         # GAL：吐出兜底分段里剩下的内容
     # 兜底：模型有时只吐了标记头/尾却没给完整块（例如原生标记没闭合），
     # 这些标记不该留在会话里——否则下一轮模型会照着历史继续吐同样的格式
     raw_visible = mem_mx.visible_text()

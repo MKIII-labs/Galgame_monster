@@ -2,7 +2,6 @@
 """真实对话冒烟（**opt-in**：会联网并消耗 token，因此不放进 pytest / dev_check）
 
     python scripts/chat_smoke.py            # 普通对话一轮
-    python scripts/chat_smoke.py --gal      # 再补一轮 GAL 演出
 
 流程：起临时服务 → 新建临时会话 → 发消息并读完整个 SSE 流 → 校验事件序列与正文
       → 删掉临时会话 → 把「当前会话」还原成原来那条。
@@ -86,8 +85,7 @@ def check_common(evs, label):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gal", action="store_true", help="额外跑一轮 GAL 演出")
-    args = ap.parse_args()
+    ap.parse_args()
 
     srv, port = create_server(port=0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -122,41 +120,6 @@ def main():
         types, text = check_common(evs, "普通")
         print("      事件类型：%s" % "、".join(sorted(set(types))))
         print("      正文：%s" % text[:80].replace("\n", " "))
-
-        # ---- 可选：GAL 演出 ----
-        if args.gal:
-            print("\n== GAL 演出模式 ==")
-            chars = post("/api/gal/characters", {}) or []
-            if isinstance(chars, dict):
-                chars = chars.get("characters") or []
-            cid = (chars[0] or {}).get("id") if chars else None
-            print("      角色：%s" % cid)
-            if not cid:
-                _ok(False, "GAL：找不到可用角色")
-            else:
-                evs2 = read_stream(base, H, {"session_id": sid, "mode": "gal",
-                                             "gal_character_id": cid,
-                                             "content": "我推开门走进去。"})
-                t2 = [e.get("type") for e in evs2]
-                check_common(evs2, "GAL")
-                galish = [x for x in t2 if str(x).startswith("gal_")]
-                _ok(bool(galish), "GAL：出现了 gal_* 演出事件", "、".join(galish) or "（无）")
-                print("      事件序列：%s" % " → ".join(t2))
-                # 对白归属抽查：GAL 契约要求每段对白都标 speaker（空 speaker 前端不显示任何名字，
-                # 多人场景就分不清谁在说）。信息性统计，不做硬断言（模型输出本身有波动）。
-                try:
-                    with open(os.path.join(ROOT, "data", "sessions.json"),
-                              "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    s = next((x for x in (data.get("sessions") or []) if x.get("id") == sid), None)
-                    segs = [seg for m in ((s or {}).get("messages") or [])
-                            if m.get("role") == "assistant" and m.get("gal")
-                            for seg in (m["gal"].get("dialog") or [])]
-                    no_who = [x for x in segs if not str(x.get("speaker") or "").strip()
-                              and not x.get("narration")]
-                    print("      对白归属：共 %d 段，未标 speaker 的 %d 段" % (len(segs), len(no_who)))
-                except Exception as e:
-                    print("      对白归属抽查跳过：%s" % e)
     finally:
         # ---- 清理：删临时会话 + 还原当前会话 ----
         if sid:

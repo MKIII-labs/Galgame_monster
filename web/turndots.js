@@ -66,46 +66,81 @@ function tdRender() {
     tx.textContent = it.text;
     row.appendChild(no);
     row.appendChild(tx);
-    row.onclick = () => tdJump(it.idx);
+    row.onclick = () => tdGoto(it.idx);
     if (typeof makeClickable === 'function') {
-      makeClickable(row, () => tdJump(it.idx), '第 ' + it.n + ' 条提问：' + it.text.slice(0, 20));
+      makeClickable(row, () => tdGoto(it.idx), '第 ' + it.n + ' 条提问：' + it.text.slice(0, 20));
     }
     list.appendChild(row);
   });
   if (tdState.active >= 0) tdMarkActive(tdState.active);
+  _tdDotSig = '';                 // 消息集合可能变了，导轨下一帧重建
   tdSyncDots();
 }
 
-/* 圆点只对应「面板当前可见的那几条」：往上滑时圆点跟着换成更早的提问。
-   面板没打开（高度为 0）时退化成最近 TD_LIMIT 条。 */
+/* 当前读到哪一条提问：以聊天可视区顶部那条为准。
+   以前这里只认「最后一次点击 / 悬停」，滚走之后高亮还停在旧位置，
+   看起来就像特效跟错了地方。 */
+function tdActiveIdx() {
+  const chat = $('#chat');
+  if (!chat) return -1;
+  const box = chat.getBoundingClientRect();
+  const line = box.top + Math.min(48, box.height * 0.18);
+  let hit = -1;
+  let first = -1;
+  chat.querySelectorAll('.msg.user[data-idx]').forEach((row) => {
+    const i = Number(row.dataset.idx);
+    if (!Number.isFinite(i)) return;
+    if (first < 0) first = i;
+    if (row.getBoundingClientRect().top <= line) hit = i;
+  });
+  return hit >= 0 ? hit : first;
+}
+
+/* 圆点覆盖整段对话，最多 TD_LIMIT 个：问题多时以当前位置为中心取窗口，
+   保证「当前」那个点一定在导轨上。 */
+function tdDotWindow(active) {
+  const items = tdItems();
+  if (items.length <= TD_LIMIT) return items;
+  let at = items.findIndex((it) => it.idx >= active);
+  if (at < 0) at = items.length - 1;
+  const half = Math.floor(TD_LIMIT / 2);
+  const from = Math.max(0, Math.min(at - half, items.length - TD_LIMIT));
+  return items.slice(from, from + TD_LIMIT);
+}
+
+let _tdDotSig = '';
+
 function tdSyncDots() {
   const rail = $('#td-rail');
-  const list = $('#td-list');
-  if (!rail || !list) return;
-  const rows = Array.prototype.slice.call(list.querySelectorAll('.td-row'));
-  let picked;
-  if (list.clientHeight > 0) {
-    const box = list.getBoundingClientRect();
-    picked = rows.filter((r) => {
-      const b = r.getBoundingClientRect();
-      return b.bottom > box.top && b.top < box.bottom;
+  if (!rail) return;
+  const active = tdActiveIdx();
+  if (active >= 0) tdState.active = active;
+  const picked = tdDotWindow(tdState.active);
+  // 滚动时每帧只更新高亮；圆点集合没变就不重建 DOM，避免 hover 闪烁
+  const sig = picked.map((it) => it.idx + ':' + it.text.length).join(',');
+  if (sig !== _tdDotSig) {
+    _tdDotSig = sig;
+    rail.innerHTML = '';
+    picked.forEach((it) => {
+      const dot = document.createElement('span');
+      dot.className = 'td-dot';
+      dot.dataset.idx = String(it.idx);
+      dot.title = '第 ' + it.n + ' 条：' + it.text.slice(0, 40);
+      dot.onclick = () => tdGoto(it.idx);
+      rail.appendChild(dot);
     });
-  } else {
-    picked = rows.slice(-TD_LIMIT);
   }
-  if (picked.length > TD_LIMIT) picked = picked.slice(0, TD_LIMIT);
-  rail.innerHTML = '';
-  picked.forEach((r) => {
-    const idx = r.dataset.idx;
-    const dot = document.createElement('span');
-    dot.className = 'td-dot';
-    dot.dataset.idx = idx;
-    dot.title = r.dataset.tip || '';
-    dot.onclick = () => tdJump(Number(idx));
-    dot.onmouseenter = () => tdMarkActive(Number(idx));
-    rail.appendChild(dot);
-  });
-  if (tdState.active >= 0) tdMarkActive(tdState.active);
+  tdMarkActive(tdState.active);
+}
+
+/* 目标不在当前渲染窗口、或还没从后端加载时，交给 ssFocusMessage 先补数据再定位；
+   它不可用才退回 tdJump。 */
+function tdGoto(idx) {
+  if (typeof ssFocusMessage === 'function') {
+    ssFocusMessage(idx).catch(() => tdJump(idx));
+    return;
+  }
+  tdJump(idx);
 }
 
 /* 跳到某条消息：以目标为第一行开窗重排（比整段插到最前面稳，也更快），
@@ -157,8 +192,14 @@ function tdOpen(on) {
   if (tdState.open) {
     tdRender();
     tdFit();
+    // 打开时把「当前读到的那条」滚到面板中间，而不是永远停在最新一条
     const list = $('#td-list');
-    if (list) list.scrollTop = list.scrollHeight;   // 默认停在最新一条
+    const act = list && list.querySelector('.td-row[data-idx="' + tdState.active + '"]');
+    if (list && act) {
+      list.scrollTop = Math.max(0, act.offsetTop - list.clientHeight / 2 + act.offsetHeight / 2);
+    } else if (list) {
+      list.scrollTop = list.scrollHeight;
+    }
     tdSyncDots();
   }
 }
@@ -291,6 +332,15 @@ function bindTurnDots() {
       if (raf) return;
       raf = requestAnimationFrame(() => { raf = 0; tdSyncDots(); });
     });
+  }
+  // 聊天区滚动：高亮跟着「当前读到的那条提问」走（这是导轨的主语义）
+  const chat = $('#chat');
+  if (chat) {
+    let raf2 = 0;
+    chat.addEventListener('scroll', () => {
+      if (raf2) return;
+      raf2 = requestAnimationFrame(() => { raf2 = 0; tdSyncDots(); });
+    }, { passive: true });
   }
 }
 

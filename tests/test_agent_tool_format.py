@@ -475,7 +475,7 @@ def test_truncation_action_splits_window_and_output_cap():
     """窗口满和输出额度用完必须分开：前者先压缩，后者直接续写。"""
     from app.api.chat import _truncation_action
     base = dict(finish_reason="length", has_calls=False, stopped=False,
-                gal=False, nudged=False, window_limited=False,
+                nudged=False, window_limited=False,
                 window_compressed=False)
     assert _truncation_action(**base) == "nudge"
     assert _truncation_action(**dict(base, window_limited=True)) == "compress_nudge"
@@ -484,7 +484,6 @@ def test_truncation_action_splits_window_and_output_cap():
     assert _truncation_action(**dict(base, finish_reason="stop")) == "none"
     assert _truncation_action(**dict(base, has_calls=True)) == "none"
     assert _truncation_action(**dict(base, nudged=True)) == "none"
-    assert _truncation_action(**dict(base, gal=True)) == "none"
 
 
 def test_break_continue_action_requires_visible_and_no_calls():
@@ -503,11 +502,10 @@ def test_break_continue_action_requires_visible_and_no_calls():
 def test_pseudo_final_action_retries_once_then_stops():
     """占位正文：先提醒一次，再犯就收尾，不能进自动续跑。"""
     from app.api.chat import _pseudo_final_action
-    base = dict(is_pseudo=True, stopped=False, gal=False, nudged=False)
+    base = dict(is_pseudo=True, stopped=False, nudged=False)
     assert _pseudo_final_action(**base) == "retry"
     assert _pseudo_final_action(**dict(base, nudged=True)) == "stop"
     assert _pseudo_final_action(**dict(base, is_pseudo=False)) == "none"
-    assert _pseudo_final_action(**dict(base, gal=True)) == "none"
     assert _pseudo_final_action(**dict(base, stopped=True)) == "none"
 
 
@@ -515,12 +513,11 @@ def test_stop_hook_action_blocks_at_most_limit_times():
     """Stop hook：能拦收尾，但每回合只能拦 MAX_STOP_HOOK_BLOCKS 次。"""
     from app.api.chat import _stop_hook_action, MAX_STOP_HOOK_BLOCKS
     base = dict(decision="block", used=0, limit=MAX_STOP_HOOK_BLOCKS,
-                stopped=False, gal=False)
+                stopped=False)
     assert _stop_hook_action(**base) == "block"
     assert _stop_hook_action(**dict(base, used=MAX_STOP_HOOK_BLOCKS)) == "none"
     assert _stop_hook_action(**dict(base, decision="")) == "none"
     assert _stop_hook_action(**dict(base, stopped=True)) == "none"
-    assert _stop_hook_action(**dict(base, gal=True)) == "none"
 
 
 def test_stream_prefetch_runs_reads_but_not_after_write(monkeypatch):

@@ -227,6 +227,33 @@ def rename_path(relpath, new_name):
     return True, new_rel
 
 
+def move_note(relpath, target_dir):
+    """把笔记移动到另一个目录（target_dir="" 表示根目录）。
+
+    双链按「笔记名」解析，移动不会断链，因此不需要改写其它笔记。
+    """
+    p = _safe(relpath, must_exist=True)
+    if not p or not os.path.isfile(p):
+        return False, "笔记不存在"
+    tdir = str(target_dir or "").strip().replace("\\", "/").strip("/")
+    if tdir:
+        d = _safe(tdir)
+        if not d or not os.path.isdir(d):
+            return False, "目标文件夹不存在"
+    else:
+        d = NOTES_DIR
+    new_path = os.path.join(d, os.path.basename(p))
+    if os.path.abspath(new_path) == os.path.abspath(p):
+        return True, _rel(p)
+    if os.path.exists(new_path):
+        return False, "目标位置已有同名笔记"
+    try:
+        os.rename(p, new_path)
+    except OSError as e:
+        return False, "移动失败：%s" % e
+    return True, _rel(new_path)
+
+
 # ============================================================
 # 双链 / 图谱 / 反链 / 搜索
 # ============================================================

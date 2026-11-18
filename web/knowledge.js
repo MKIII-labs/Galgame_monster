@@ -8,6 +8,8 @@ let kbGraphRO = null;      // 图谱容器尺寸监听：canvas 必须跟随容�
 let kbEdgeFrom = null;   // 「新增连线」的起点节点 id
 let kbSaveTimer = null;
 let kbLoadSeq = 0;      // 加载代次，防止异步竞态
+let kbDrawSeq = 0;      // 绘制代次：等 vis 加载完再画时，防止旧请求画到新库上
+let kbVisPromise = null; // vis-network 按需加载（冷启动时不再直接回退列表）
 let kbView = 'graph';   // graph | list：手动切换，列表视图不依赖 vis-network
 
 function kbMeta(id) {
@@ -120,7 +122,7 @@ function hexAlpha(hex, a) {
 }
 
 /* 图谱通用配色：统一从 CSS token 读取，避免 JS 里再维护一份明暗两套颜色。
-   知识库、笔记图谱、GAL 关系图都用这一份；主题切换后重绘即可生效。 */
+   知识库、笔记图谱都用这一份；主题切换后重绘即可生效。 */
 function graphTheme() {
   const cs = getComputedStyle(document.documentElement);
   const pick = (name, fallback) => {
@@ -171,6 +173,7 @@ function graphNodeColor(hex, th) {
 function kbPhysicsOptions() {
   const g = Object.assign({}, KB_GRAPH_DEFAULT, (state.kbData && state.kbData.graph) || {});
   return {
+    enabled: true,
     // fit 交给 drawKbGraph 在稳定后显式执行：
     // vis 默认会在 stabilization 结束时自动 fit，把随后的 focus 覆盖掉。
     stabilization: { enabled: true, fit: false },
@@ -263,7 +266,7 @@ function applySessions(r, opts) {
   if (!r) return;
   if (r.sessions) applySessionsPayload(r.sessions, opts);
   renderSessions();
-  // 当前会话可能被后端切走（存档恢复 / 删除等）：排队栏也要跟着换会话
+  // 当前会话可能被后端切走（分支 / 删除等）：排队栏也要跟着换会话
   if (typeof renderSendQueue === 'function') renderSendQueue();
   if ('context' in r) renderContextBar(r.context);
 }
@@ -283,6 +286,7 @@ function refreshKbSelect(selected) {
   sel.innerHTML = html;
   sel.value = selected || state.kbCurrent || 'session';
   renderKbAiTarget();
+  kbRenderLibList();
 }
 
 // 明确标出 AI 每轮实际会写入哪些目标，避免"看错地方"
@@ -314,7 +318,43 @@ async function openKbModal(initialKey) {
   $('#sess-ai-write').checked = !s || s.ai_write !== false;
   showWithAnim($('#kb-modal'));
   replayFadeIn($('#kb-graph'));
+  ensureKbVis();                 // 与接口请求并行：冷启动时不用等图谱库加载完才开始拉数据
   await loadKbGraph(key);
+}
+
+/* vis-network 是首屏后空闲加载的，冷启动时用户可能抢在它前面打开知识库。
+   这里按需拉取并等待；加载期间画骨架，失败才回退列表（旧行为是一发现没加载就回退）。 */
+function ensureKbVis() {
+  if (window.vis && window.vis.Network) return Promise.resolve(true);
+  if (kbVisPromise) return kbVisPromise;
+  if (typeof window.loadLazyLib !== 'function') return Promise.resolve(false);
+  const p = window.loadLazyLib('vis');
+  const wait = (p && typeof p.then === 'function')
+    ? p
+    // 兼容旧版 loader（不返回 Promise）：轮询到出现或超时
+    : new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = () => {
+        if (window.vis && window.vis.Network) return resolve(true);
+        if (Date.now() - t0 > 8000) return resolve(false);
+        setTimeout(tick, 80);
+      };
+      tick();
+    });
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(false), 8000));
+  kbVisPromise = Promise.race([wait, timeout])
+    .then(function (v) { return v !== false && !!(window.vis && window.vis.Network); })
+    .catch(function () { return false; })
+    .then(function (ok) {
+      if (!ok) kbVisPromise = null;   // 失败 / 超时允许下次重试
+      return ok;
+    });
+  return kbVisPromise;
+}
+
+function kbGraphSkeleton(msg) {
+  return '<div class="kb-graph-loading"><span class="kb-graph-spin"></span><span>' +
+    escapeHtml(msg || '正在加载图谱…') + '</span></div>';
 }
 
 // 供工作台「记忆」跳转：打开指定知识库并定位到节点
@@ -368,11 +408,9 @@ function closeKbModal() {
 }
 
 /* 「AI 读取这个知识库要花多少 token」的预估。
-   必须把三个口径分开写，否则很容易被读成「每轮都花这么多」：
+   必须把口径分开写，否则很容易被读成「每轮都花这么多」：
    · 整库规模 = 库里有多少（不是单次成本）
-   · 日常每轮 = 检索式注入，有 INJECT_MAX_TOKENS 上限，整库不会全塞进去
-   · GAL 编剧 = world_text 全量一次性（另有字数上限）
-   · 规则类 = GAL 里每轮常驻，不占检索预算 */
+   · 日常每轮 = 检索式注入，有 INJECT_MAX_TOKENS 上限，整库不会全塞进去 */
 function kbFmtNum(n) {
   const v = Number(n) || 0;
   return v >= 10000 ? (v / 10000).toFixed(1) + ' 万' : String(v);
@@ -392,9 +430,6 @@ async function renderKbTokenEst(ids) {
   if (!r || !r.ok) { box.classList.add('hidden'); return; }
   const t = r.total || {};
   const cap = Number(r.inject_max_tokens) || 3000;
-  const worldChars = Number(r.world_max_chars) || 9000;
-  const density = t.chars ? (t.tokens / t.chars) : 0.5;   // 用这个库自己的字/token 密度折算上限
-  const worldTokens = Math.round(worldChars * density);
   const lines = [];
   lines.push('<div><b>整库规模</b>：' + (t.libraries || list.length) + ' 个库 · '
     + (t.nodes || 0) + ' 条 · ' + kbFmtNum(t.chars) + '字 ≈ ' + kbFmtNum(t.tokens)
@@ -406,12 +441,6 @@ async function renderKbTokenEst(ids) {
     const idxBytes = Number(r.memory_index_max_bytes) || 25000;
     lines.push('<div><b>常驻索引</b>：标题清单最多 ' + idxLines + ' 行 / '
       + kbFmtNum(idxBytes) + ' 字节（只列标题与一行钩子，正文仍按需检索）</div>');
-  }
-  lines.push('<div><b>GAL 编剧一次性</b>：整库上限 ' + kbFmtNum(worldChars) + ' 字 ≈ '
-    + kbFmtNum(worldTokens) + ' token，每次生成只喂一次</div>');
-  if (t.pinned_nodes) {
-    lines.push('<div class="kb-token-warn"><b>规则类</b>：' + t.pinned_nodes + ' 条 ≈ '
-      + kbFmtNum(t.pinned_tokens) + ' token —— GAL 模式每轮常驻注入，不占检索上限</div>');
   }
   lines.push('<div class="kb-token-hint">按中英混排折算的估算值，实际计费以接口返回的 usage 为准。</div>');
   box.innerHTML = lines.join('');
@@ -482,16 +511,12 @@ function renderKbBindList() {
   renderKbBadge();
   renderKbTokenEst(bound);        // 「AI 读取预估」跟着绑定变化刷新
   renderMemTokenEst();            // 会话记忆 / 用户画像的注入量估算
-  // 会话级「读取用户画像」：默认开；GAL 剧场有自己的读画像开关，这里隐藏
+  // 会话级「读取用户画像」：默认开
   const upEl = $('#sess-use-profile');
   if (upEl) upEl.checked = !s || s.use_profile !== false;
-  const upRow = $('#kb-use-profile-row');
-  if (upRow) upRow.classList.toggle('hidden', !!(s && s.gal_scope === 'gal'));
-  // 会话级「读取会话记忆 / 知识库」：默认开；GAL 剧场用 gal_use_kb 单独控制，这里隐藏
+  // 会话级「读取会话记忆 / 知识库」：默认开
   const umEl = $('#sess-use-memory');
   if (umEl) umEl.checked = !s || s.use_memory !== false;
-  const umRow = $('#kb-use-memory-row');
-  if (umRow) umRow.classList.toggle('hidden', !!(s && s.gal_scope === 'gal'));
 }
 
 const KB_HINT_KEY = 'kb_hint_seen';
@@ -576,6 +601,10 @@ async function loadKbGraph(key) {
   if (!Array.isArray(state.kbData.families)) state.kbData.families = [];
   refreshKbFamilySelect();
   syncGraphSliders();
+  const kindSel = $('#kb-kind');
+  if (kindSel) kindSel.value = '';
+  kbRenderLibList();
+  // 节点列表由 drawKbGraph() 首行统一刷新，这里不再重复渲染一遍
   // 图谱初始化（vis-network）不便宜：让弹窗先完成一次绘制，再画图
   requestAnimationFrame(() => {
     if (token === kbLoadSeq) drawKbGraph();
@@ -816,18 +845,304 @@ function renderKbList(el, nodes, allNodes, family) {
   });
 }
 
-// 切换「图谱 / 列表」视图
+/* ---------- 节点类型（数据模型升级：老数据按分类推导，不迁移也不丢字段） ---------- */
+const KB_KINDS = [
+  { v: 'fact', label: '事实' }, { v: 'preference', label: '偏好' },
+  { v: 'person', label: '人物' }, { v: 'event', label: '事件' },
+  { v: 'task', label: '任务' }, { v: 'concept', label: '概念' },
+];
+const KB_KIND_BY_CAT = [
+  ['preference', /喜好|偏好|禁忌|习惯|口味|喜欢|讨厌|雷点/],
+  ['person', /人物|角色|朋友|家人|同事|客户|联系人/],
+  ['event', /事件|日程|计划|经历|发生|会议|提醒|行程/],
+  ['task', /任务|待办|todo/i],
+  ['concept', /概念|定理|定义|原理|知识|公式|教材|学科|方法/],
+];
+function kbKindOf(n) {
+  const k = n && n.kind;
+  if (k && KB_KINDS.some((x) => x.v === k)) return k;
+  const cat = String((n && n.category) || '');
+  for (let i = 0; i < KB_KIND_BY_CAT.length; i++) {
+    if (KB_KIND_BY_CAT[i][1].test(cat)) return KB_KIND_BY_CAT[i][0];
+  }
+  return 'fact';
+}
+function kbKindLabel(v) {
+  const it = KB_KINDS.find((x) => x.v === v);
+  return it ? it.label : '事实';
+}
+function kbFmtWhen(ts) {
+  const t = Number(ts) || 0;
+  if (!t) return '';
+  const d = new Date(t * 1000);
+  const diff = Date.now() - t * 1000;
+  if (diff < 60000) return '刚刚';
+  if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前';
+  return (d.getMonth() + 1) + '-' + d.getDate();
+}
+function kbSourceLabel(n) {
+  if (!n) return '';
+  if (typeof n.source_msg === 'number') return '对话写入';
+  if (n.source) return '导入/手动';
+  return '手动';
+}
+
+/* 当前库 + 主题 + 类型 + 搜索词 过滤后的节点 */
+function kbVisibleNodes() {
+  const data = state.kbData || { nodes: [] };
+  const family = currentKbFamily();
+  const memberSet = family ? new Set(family.members || []) : null;
+  const q = (($('#kb-search') && $('#kb-search').value) || '').trim().toLowerCase();
+  const kind = ($('#kb-kind') && $('#kb-kind').value) || '';
+  return (data.nodes || []).filter((n) => {
+    if (memberSet && !memberSet.has(n.id)) return false;
+    if (kind && kbKindOf(n) !== kind) return false;
+    if (!q) return true;
+    return [n.title, n.content, n.category]
+      .concat(n.tags || [], n.aliases || [])
+      .some((x) => String(x || '').toLowerCase().indexOf(q) >= 0);
+  });
+}
+
+function kbSortedNodes(list) {
+  const mode = ($('#kb-sort') && $('#kb-sort').value) || 'updated';
+  const arr = list.slice();
+  arr.sort((a, b) => {
+    if (!!b.star !== !!a.star) return (b.star ? 1 : 0) - (a.star ? 1 : 0);
+    if (mode === 'title') return String(a.title || '').localeCompare(String(b.title || ''), 'zh');
+    const key = mode === 'created' ? 'created_at' : 'updated_at';
+    return (Number(b[key]) || 0) - (Number(a[key]) || 0);
+  });
+  return arr;
+}
+
+/* 左栏：知识库列表（本会话记忆 / 用户画像 / 各个库） */
+function kbRenderLibList() {
+  const box = $('#kb-lib-list');
+  if (!box) return;
+  const s = curSession();
+  const cur = (state.kbData && state.kbCurrent === 'session')
+    ? (state.kbData.nodes || []).length : ((s && s.mem_count) || 0);
+  const rows = [{ id: 'session', name: '本会话记忆', count: cur, icon: 'chat' }];
+  (state.kbs || []).forEach((k) => {
+    rows.push({ id: k.id, name: k.name, count: Number(k.node_count) || 0,
+                icon: k.name === '用户画像' ? 'brain' : 'library' });
+  });
+  box.innerHTML = rows.map((r) =>
+    '<button type="button" class="kb-lib-row' + (state.kbCurrent === r.id ? ' active' : '') +
+    '" data-kb="' + escapeHtml(r.id) + '" title="' + escapeHtml(r.name) + '">' +
+    '<svg class="ic"><use href="#i-' + r.icon + '"/></svg>' +
+    '<span class="kb-lib-name">' + escapeHtml(r.name) + '</span>' +
+    '<span class="kb-lib-num">' + (r.count ? r.count : '') + '</span></button>').join('');
+  box.querySelectorAll('.kb-lib-row').forEach((btn) => {
+    btn.onclick = async () => {
+      const key = btn.dataset.kb;
+      if (key === state.kbCurrent) return;
+      await saveKbGraph();
+      const sel = $('#kb-select');
+      if (sel) sel.value = key;
+      loadKbGraph(key);
+    };
+  });
+}
+
+/* 左栏：节点列表（搜索 / 类型 / 主题 / 排序） */
+function kbRenderNodeList() {
+  const box = $('#kb-node-list');
+  if (!box) return;
+  const all = (state.kbData && state.kbData.nodes) || [];
+  const list = kbSortedNodes(kbVisibleNodes());
+  const cnt = $('#kb-node-count');
+  if (cnt) cnt.textContent = String(list.length) + (list.length !== all.length ? '/' + all.length : '');
+  if (!list.length) {
+    box.innerHTML = '<div class="hint kb-list-empty">'
+      + (all.length ? '没有匹配的节点' : '这个库还没有节点') + '</div>';
+    return;
+  }
+  const ch = (state.kbChanged && state.kbChanged[state.kbCurrent]) || null;
+  const addNodes = new Set((ch && ch.node_add) || []);
+  const updNodes = new Set((ch && ch.node_update) || []);
+  box.innerHTML = list.map((n) => {
+    const kind = kbKindOf(n);
+    const cls = ['kb-node-row'];
+    if (n.id === state.kbSelNode) cls.push('active');
+    if (addNodes.has(n.id)) cls.push('is-new');
+    else if (updNodes.has(n.id)) cls.push('is-chg');
+    if (n.locked) cls.push('locked');
+    const tags = (n.tags || []).slice(0, 2).map((t) =>
+      '<span class="kb-tag">' + escapeHtml(String(t)) + '</span>').join('');
+    return '<div class="' + cls.join(' ') + '" data-id="' + escapeHtml(String(n.id)) +
+      '" title="' + escapeHtml(String(n.content || '').slice(0, 160)) + '">' +
+      '<span class="kb-kind k-' + kind + '">' + kbKindLabel(kind) + '</span>' +
+      '<div class="kb-node-main"><b>' + (n.star ? '★ ' : '') +
+      escapeHtml(String(n.title || '(无标题)')) + '</b>' +
+      '<span class="kb-node-sub">' + (n.locked ? '锁定 · ' : '') +
+      kbFmtWhen(n.updated_at || n.created_at) + '</span></div>' +
+      (tags ? '<span class="kb-node-tags">' + tags + '</span>' : '') +
+      '</div>';
+  }).join('');
+  box.querySelectorAll('.kb-node-row').forEach((el) => {
+    el.onclick = () => {
+      const n = all.find((x) => x.id === el.dataset.id);
+      if (!n) return;
+      showNodeForm(n);
+      if (kbView === 'graph' && kbNetwork) kbFocusNodeNow(n.id, 1.15, [n.id]);
+    };
+    el.oncontextmenu = (e) => {
+      e.preventDefault();
+      const n = all.find((x) => x.id === el.dataset.id);
+      if (!n) return;
+      n.star = !n.star;
+      n.updated_at = Date.now() / 1000;
+      scheduleKbSave();
+      kbRenderNodeList();
+      toast(n.star ? '已标星' : '已取消标星');
+    };
+  });
+}
+
+/* 中栏：时间线视图（按创建时间分组） */
+function kbRenderTimeline(el, nodes) {
+  if (!nodes.length) {
+    el.innerHTML = kbEmptyHtml('history', '这个知识库还没有节点 —— 可以在对话里让 AI 记，或点上方「节点」手动新增。');
+    return;
+  }
+  const sorted = nodes.slice().sort((a, b) =>
+    (Number(b.created_at || b.updated_at) || 0) - (Number(a.created_at || a.updated_at) || 0));
+  const groups = [];
+  sorted.forEach((n) => {
+    const ts = Number(n.created_at || n.updated_at) || 0;
+    const d = ts ? new Date(ts * 1000) : null;
+    const key = d
+      ? (d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-'
+         + String(d.getDate()).padStart(2, '0'))
+      : '未知时间';
+    let g = groups.find((x) => x.key === key);
+    if (!g) { g = { key: key, items: [] }; groups.push(g); }
+    g.items.push(n);
+  });
+  el.innerHTML = '<div class="kb-timeline">' + groups.map((g) =>
+    '<section class="kb-tl-group"><h4>' + escapeHtml(g.key) +
+    '<span>' + g.items.length + ' 条</span></h4>' +
+    g.items.map((n) => {
+      const kind = kbKindOf(n);
+      const body = String(n.content || '');
+      return '<article class="kb-tl-item" data-id="' + escapeHtml(String(n.id)) + '">' +
+        '<span class="kb-kind k-' + kind + '">' + kbKindLabel(kind) + '</span>' +
+        '<div class="kb-tl-main"><b>' + escapeHtml(String(n.title || '(无标题)')) + '</b>' +
+        (body ? '<p>' + escapeHtml(body.slice(0, 180)) + (body.length > 180 ? '…' : '') + '</p>' : '') +
+        '<div class="kb-tl-meta">' + escapeHtml(String(n.category || '')) +
+        ' · ' + kbSourceLabel(n) + '</div></div>' +
+        '<time>' + kbFmtWhen(n.created_at || n.updated_at) + '</time></article>';
+    }).join('') + '</section>').join('') + '</div>';
+  el.querySelectorAll('.kb-tl-item').forEach((it) => {
+    it.onclick = () => {
+      const n = nodes.find((x) => x.id === it.dataset.id);
+      if (n) showNodeForm(n);
+    };
+  });
+}
+
+// 切换「图谱 / 列表 / 时间线」视图
 function kbSetView(view) {
-  kbView = (view === 'list') ? 'list' : 'graph';
+  kbView = (view === 'list' || view === 'timeline') ? view : 'graph';
   kbHideBulk();
-  const bg = $('#kb-view-graph'), bl = $('#kb-view-list');
-  if (bg) bg.classList.toggle('active', kbView === 'graph');
-  if (bl) bl.classList.toggle('active', kbView === 'list');
+  [['graph', '#kb-view-graph'], ['list', '#kb-view-list'], ['timeline', '#kb-view-timeline']]
+    .forEach((pair) => {
+      const b = $(pair[1]);
+      if (b) b.classList.toggle('active', kbView === pair[0]);
+    });
+  const g = $('#kb-graph');
+  if (g) {
+    g.classList.toggle('kb-as-list', kbView === 'list');
+    g.classList.toggle('kb-as-timeline', kbView === 'timeline');
+  }
   drawKbGraph();
+}
+
+/* 已有坐标的节点占多数时，给缺坐标的节点补一个近似位置，让整图可以静态出图。
+   返回 false 表示「坐标太少，还是交给物理布局」，避免凭一两个点猜出难看的图。 */
+function kbSeedMissingPositions(list, edges, viewW, viewH) {
+  if (!Array.isArray(list) || !list.length) return false;
+  const hasXY = (n) => n && typeof n.x === 'number' && typeof n.y === 'number'
+    && isFinite(n.x) && isFinite(n.y);
+  const fixed = list.filter(hasXY);
+  if (!fixed.length) return false;
+  if (fixed.length < Math.max(3, Math.ceil(list.length * 0.5))) return false;
+  const missing = list.filter((n) => !hasXY(n));
+  if (!missing.length) return true;
+  const byId = {};
+  fixed.forEach((n) => { byId[n.id] = n; });
+  const adj = {};
+  (edges || []).forEach((e) => {
+    (adj[e.from] = adj[e.from] || []).push(e.to);
+    (adj[e.to] = adj[e.to] || []).push(e.from);
+  });
+  let cx = 0, cy = 0;
+  fixed.forEach((n) => { cx += n.x; cy += n.y; });
+  cx /= fixed.length; cy /= fixed.length;
+  missing.forEach((n, i) => {
+    const near = (adj[n.id] || []).map((id) => byId[id]).filter(Boolean);
+    if (near.length) {
+      let x = 0, y = 0;
+      near.forEach((m) => { x += m.x; y += m.y; });
+      n.x = x / near.length + ((i % 5) - 2) * 22;
+      n.y = y / near.length + ((i % 3) - 1) * 22;
+    } else {
+      const a = i * 2.39996;            // 黄金角：孤立节点均匀铺开，不叠在一起
+      const r = 90 + i * 10;
+      n.x = cx + Math.cos(a) * r;
+      n.y = cy + Math.sin(a) * r;
+    }
+  });
+  // 静态布局不做物理稳定，历史坐标里叠在一起的节点会一直叠着：
+  // 这里做一次确定性的「分离」（所有节点各退一半），既保留原有结构，也不会每次打开都漂。
+  // vis.fit 会把坐标压缩到画布大小，而节点半径是像素，所以阈值要按估算的缩放比例放大。
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  list.forEach((n) => {
+    if (!hasXY(n)) return;
+    minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
+    minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
+  });
+  const vw = Number(viewW) || 600, vh = Number(viewH) || 500;
+  const sx = (vw - 80) / Math.max(1, maxX - minX);
+  const sy = (vh - 80) / Math.max(1, maxY - minY);
+  const fitScale = Math.max(0.15, Math.min(1, Math.min(sx, sy)));
+  // 节点很多时减少分离轮数：静态布局本身仍比跑物理便宜，但不能把主线程占太久
+  const maxIt = list.length > 400 ? 6 : (list.length > 150 ? 20 : 80);
+  for (let it = 0; it < maxIt; it++) {
+    let moved = false;
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      for (let j = i + 1; j < list.length; j++) {
+        const b = list[j];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        let d = Math.sqrt(dx * dx + dy * dy);
+        const need = ((Number(a.size) || 16) + (Number(b.size) || 16) + 12) / fitScale;
+        if (d >= need) continue;
+        if (d < 0.01) {
+          dx = (String(a.id).length % 7) - 3 || 1;
+          dy = (String(b.id).length % 5) - 2 || 1;
+          d = Math.sqrt(dx * dx + dy * dy);
+        }
+        const push = (need - d) / 2;
+        a.x += dx / d * push;
+        a.y += dy / d * push;
+        b.x -= dx / d * push;
+        b.y -= dy / d * push;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return true;
 }
 
 function drawKbGraph() {
   const el = $('#kb-graph');
+  const seq = ++kbDrawSeq;              // 等 vis 加载完再画时，旧绘制不能覆盖新库
+  kbRenderNodeList();                   // 左栏节点列表与图谱共用同一份数据
   const oldTip = document.getElementById('kb-change-tip');
   if (oldTip) oldTip.remove();          // 每次重绘先清掉旧的「AI 改动」提示条
   if (kbGraphRO) { try { kbGraphRO.disconnect(); } catch (e) { /* 忽略 */ } kbGraphRO = null; }
@@ -841,6 +1156,9 @@ function drawKbGraph() {
   const visibleNodes = memberSet ? nodesData.filter((n) => memberSet.has(n.id)) : nodesData;
   const visibleEdges = memberSet
     ? edgesData.filter((e) => memberSet.has(e.from) && memberSet.has(e.to)) : edgesData;
+  // 已有坐标的节点足够多时，把缺坐标的节点补到邻居附近，然后整图静态渲染：
+  // 不再跑物理稳定，打开更快、也不会出现「整张图先漂一下」。
+  const staticLayout = kbSeedMissingPositions(visibleNodes, visibleEdges, el.clientWidth, el.clientHeight);
 
   // 兜底视图：图谱库缺失或渲染异常时，用列表把节点显示出来（仍可点选编辑），
   // 避免"数据写进去了但界面一片空白"。
@@ -868,14 +1186,26 @@ function drawKbGraph() {
     renderKbList(el, visibleNodes, nodesData, family);
     return;
   }
-  if (!window.vis || !window.vis.Network || !window.vis.DataSet) {
-    fallback('图谱库 vis-network 未加载（本地文件缺失且 CDN 不可用）；已切换为列表视图，可正常查看与编辑。');
+  if (kbView === 'timeline') {
+    state.kbPendingFocus = null;
+    kbRenderTimeline(el, visibleNodes);
     return;
   }
-  if (!nodesData.length) {          // 空库：给明确空态，否则会渲染出一片空白画布，像是坏了
+  if (!nodesData.length) {          // 空库：不需要等图谱库，直接给空态
     state.kbPendingFocus = null;
     el.innerHTML = kbEmptyHtml('brain', '这个知识库还是空的 —— '
       + '可以点上方「节点」手动新增，也可以直接在对话里让 AI 自己记（它会用记忆工具写进来）。');
+    return;
+  }
+  if (!window.vis || !window.vis.Network || !window.vis.DataSet) {
+    // 冷启动时 vis 可能还在后台下载：先出骨架，等库就绪再重画；
+    // 只有真的加载失败（本地缺失 + CDN 全挂）才回退列表。
+    el.innerHTML = kbGraphSkeleton();
+    ensureKbVis().then((ok) => {
+      if (seq !== kbDrawSeq || !isOpen($('#kb-modal'))) return;
+      if (ok) drawKbGraph();
+      else fallback('图谱库加载失败（本地文件缺失且 CDN 不可用）；已切换为列表视图，可正常查看与编辑。');
+    });
     return;
   }
   if (family && !visibleNodes.length) {
@@ -974,7 +1304,8 @@ function drawKbGraph() {
   try {
     const ds = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(allEdges) };
     kbNetwork = new vis.Network(el, ds, {
-    physics: kbPhysicsOptions(),
+    // 已有坐标的库直接静态渲染：省掉物理稳定，首帧即最终布局
+    physics: staticLayout ? { enabled: false } : kbPhysicsOptions(),
     interaction: { hover: true, multiselect: true },
     nodes: { borderWidthSelected: 4 },   // 选中的节点（含搜索命中）描边更粗
     locale: 'cn',
@@ -1045,8 +1376,13 @@ function drawKbGraph() {
     clearTimeout(settleTimer);
     try { kbApplyPendingFocus(); } catch (e) { /* 忽略 */ }
   };
-  settleTimer = setTimeout(settle, 1200);
-  kbNetwork.once('stabilizationIterationsDone', settle);
+  if (staticLayout) {
+    // physics 已关闭：下一帧直接 fit / focus，不再等 1.2s 稳定
+    requestAnimationFrame(settle);
+  } else {
+    settleTimer = setTimeout(settle, 1200);
+    kbNetwork.once('stabilizationIterationsDone', settle);
+  }
   } catch (err) {
     kbNetwork = null;
     fallback('图谱渲染失败：' + (err && err.message ? err.message : String(err)) + '；已切换为列表视图。');
@@ -1097,6 +1433,9 @@ function showNodeForm(node) {
     state.kbSelNode = null;
     $('#kb-node-form').classList.add('hidden');
     $('#kb-node-empty').classList.remove('hidden');
+    const metaEl0 = $('#kd-meta');
+    if (metaEl0) metaEl0.textContent = '';
+    kbRenderNodeList();
     return;
   }
   state.kbSelNode = node.id;
@@ -1104,10 +1443,22 @@ function showNodeForm(node) {
   $('#kb-node-form').classList.remove('hidden');
   $('#kb-node-empty').classList.add('hidden');
   $('#kd-title').value = node.title || '';
+  const kindEl = $('#kd-kind');
+  if (kindEl) kindEl.value = kbKindOf(node);
   $('#kd-category').value = node.category || '';
   $('#kd-content').value = node.content || '';
   $('#kd-tags').value = (node.tags || []).join(', ');
   $('#kd-aliases').value = (node.aliases || []).join(', ');
+  const metaEl = $('#kd-meta');
+  if (metaEl) {
+    const bits = [];
+    if (node.created_at) bits.push('创建 ' + kbFmtWhen(node.created_at));
+    if (node.updated_at) bits.push('更新 ' + kbFmtWhen(node.updated_at));
+    bits.push(kbSourceLabel(node));
+    if (node.star) bits.push('已标星');
+    bits.push('ID ' + String(node.id || '').slice(0, 8));
+    metaEl.textContent = bits.join(' · ');
+  }
   renderKbLinks(node);
   const sz = (typeof node.size === 'number' && node.size > 0) ? node.size : 16;
   $('#kd-size').value = sz;
@@ -1122,6 +1473,7 @@ function showNodeForm(node) {
     originBtn.title = ok ? '回到写下这条记忆的那条回复' : '';
   }
   renderKbNotes(node);
+  kbRenderNodeList();
 }
 
 // 回到写下这条记忆的那条回复。消息数组不删（压缩只移动 summary_upto），下标稳定。
@@ -1220,6 +1572,8 @@ function applyNodeForm() {
   const n = state.kbData.nodes.find((x) => x.id === state.kbSelNode);
   if (!n) return;
   n.title = $('#kd-title').value.trim() || n.title;
+  const kindEl = $('#kd-kind');
+  if (kindEl) n.kind = kindEl.value || kbKindOf(n);
   n.category = $('#kd-category').value.trim() || '其他';
   n.content = $('#kd-content').value;
   n.tags = $('#kd-tags').value.split(',').map((t) => t.trim()).filter(Boolean);
@@ -1237,6 +1591,7 @@ function applyNodeForm() {
     drawKbGraph();
   }
   scheduleKbSave();
+  kbRenderNodeList();
   toast('已应用');
 }
 
@@ -1350,6 +1705,7 @@ function deleteKbNode() {
 
 function scheduleKbSave() {
   clearTimeout(kbSaveTimer);
+  kbRenderNodeList();                 // 新增 / 改名 / 删除后左栏立即同步
   kbSaveTimer = setTimeout(saveKbGraph, 700);
 }
 
@@ -1604,6 +1960,7 @@ async function saveKbGraph() {
       renderKbBindList();
     }
   }
+  kbRenderLibList();
 }
 
 /* ---------- 节点搜索：输入关键字 → 高亮命中 + 逐个定位 ---------- */
@@ -1767,6 +2124,7 @@ async function kbGlobalSearch(q) {
 
 function applyKbSearch() {
   const q = ($('#kb-search') && $('#kb-search').value || '').trim();
+  kbRenderNodeList();                 // 左栏列表始终跟着搜索词/类型过滤
   const scopeEl = $('#kb-search-scope');
   if (scopeEl && scopeEl.value === 'global') {
     kbHits = [];
@@ -1891,7 +2249,12 @@ function bindKbResizer() {
 }
 
 function bindKbEvents() {
-  $('#btn-kb').onclick = () => openKbModal();
+  const kbBtn = $('#btn-kb');
+  kbBtn.onclick = () => openKbModal();
+  // 悬停即预取图谱库：点击时大概率已经就绪，冷启动不再看到骨架
+  kbBtn.addEventListener('pointerenter', () => {
+    if (!window.vis) ensureKbVis();
+  }, { once: true });
   $('#btn-close-kb').onclick = closeKbModal;
   // 刷新 = 从磁盘重新加载（只读，不会覆盖已写入的内容）
   const bulkFamily = $('#kb-bulk-family');
@@ -1924,6 +2287,12 @@ function bindKbEvents() {
   if (viewGraph) viewGraph.onclick = () => kbSetView('graph');
   const viewList = $('#kb-view-list');
   if (viewList) viewList.onclick = () => kbSetView('list');
+  const viewTimeline = $('#kb-view-timeline');
+  if (viewTimeline) viewTimeline.onclick = () => kbSetView('timeline');
+  const kindFilter = $('#kb-kind');
+  if (kindFilter) kindFilter.onchange = () => kbRenderNodeList();
+  const sortSel = $('#kb-sort');
+  if (sortSel) sortSel.onchange = () => kbRenderNodeList();
   $('#ke-add').onclick = addKbEdge;
   $('#ke-cancel').onclick = hideEdgeForm;
   $('#kd-save').onclick = applyNodeForm;
@@ -1965,6 +2334,7 @@ function bindKbEvents() {
   if (familySel) familySel.onchange = () => {
     state.kbFamily = familySel.value;
     refreshKbFamilySelect();
+    kbRenderNodeList();
     drawKbGraph();
   };
   $('#kf-save').onclick = saveKbFamily;

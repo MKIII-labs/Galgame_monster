@@ -78,19 +78,8 @@ def main():
 
     print("\n== POST（路由字典派发） ==")
     post("/api/kb/list", {})
-    post("/api/gal/characters", {})
-    post("/api/gal/backgrounds", {})
-    post("/api/gal/bgms", {})
-    post("/api/gal/tts/voices", {})
     post("/api/notes/tree", {})
     post("/api/balance", {})
-    post("/api/save/list", {"id": "s_not_exist"})
-    # 不存在的会话：应用返回 404 + 业务错误体（证明 handler 正常执行过）
-    r = post("/api/gal/script", {"action": "stat", "id": "s_not_exist"}, expect=404)
-    try:
-        _ok(r.json().get("ok") is False, "gal/script 返回业务错误体而非崩溃")
-    except Exception:
-        _ok(False, "gal/script 返回体不是 JSON")
     post("/api/no-such-route", {}, expect=404)
 
     srv.shutdown()

@@ -8,7 +8,7 @@
 from app import agent_defs, explore
 
 
-def resolve(raw, limit=12):
+def resolve(raw, limit=12, sandbox=""):
     """[{agent, task}] -> (roles, questions, problems)。
 
     limit 由调用方传入（默认取 explore 的硬上限 12）；运行时通常来自
@@ -24,7 +24,7 @@ def resolve(raw, limit=12):
         if not aid or not task:
             continue
         try:
-            spec = agent_defs.get_agent(aid)
+            spec = agent_defs.get_agent(aid, sandbox=sandbox)
         except Exception as e:                   # noqa: BLE001  单个定义坏了不影响其他
             bad.append("%s：%s" % (aid, e))
             continue
@@ -61,7 +61,8 @@ def _run_pipeline(ids, task, ctx):
     for i, aid in enumerate(ids[:6]):
         roles, questions, bad = resolve([{"agent": aid,
                                           "task": task if i == 0 else
-                                          "%s\n\n上一步输出：\n%s" % (task, prior[:2000])}])
+                                          "%s\n\n上一步输出：\n%s" % (task, prior[:2000])}],
+                                        sandbox=(ctx or {}).get("sandbox") or "")
         if not questions:
             outs.append("### %d. %s\n失败：%s" % (i + 1, aid, "；".join(bad) or "无法解析"))
             ok_all = False
@@ -69,6 +70,7 @@ def _run_pipeline(ids, task, ctx):
         c = dict(ctx or {})
         c["roles"] = roles
         c["allow_write"] = False
+        c["group"] = str(c.get("group") or "串行小队")
         if prior:
             c["parent_brief"] = prior[:4000]
         res = explore.run({"goal": task, "agents": questions}, c)
@@ -104,7 +106,8 @@ def run(args, ctx):
                 "agents": [{"agent": a, "task": task} for a in ids],
                 "bad": [], "tokens": tokens}
     roles, questions, bad = resolve(args.get("agents"),
-                                    _limit(ctx))
+                                    _limit(ctx),
+                                    sandbox=(ctx or {}).get("sandbox") or "")
     if not questions:
         return {"ok": False, "text": "", "batch": "", "agents": [], "bad": bad,
                 "tokens": 0,
@@ -112,6 +115,8 @@ def run(args, ctx):
     c = dict(ctx or {})
     c["roles"] = roles
     c["allow_write"] = False
+    # 事件分组：前端按 group 建独立卡片（探索 / 子代理 / 自动复核…）
+    c["group"] = str(c.get("group") or "子代理小队")
     payload = {
         "goal": args.get("goal") or "",
         "agents": questions,

@@ -6,22 +6,30 @@ from app.uploads import (_MIME_BY_EXT, _upload_path, delete_session_uploads, dro
 from app.store import _lock
 from app.export_md import (_md_name, session_markdown)
 from app.config import load_config, save_config
-from app.sessions import (ensure_session_kb_fields, find_session, invalidate_compression,
+from app.sessions import (DOC_TEXT_COMPAT_MAX, MAX_INLINE_DOC_CHARS, drop_session_files,
+                          ensure_session_kb_fields, find_session, invalidate_compression,
                           load_sessions, new_id, reorder_sessions, sandbox_group,
-                          save_sessions, set_current, trim_compress_marks, trim_qmarks)
+                          save_sessions, set_current, slim_message_for_client,
+                          trim_compress_marks, trim_qmarks)
 from app.registry import route
-from app import (docparse, gal, saves)
+from app import (agent, branch as branch_lib, docparse)
 from app.imaging import recognize_image_auto, vision_available
 
 def _api_session_new(h):
         body = h._body()
-        gal_scope = "gal" if str(body.get("gal_scope") or "") == "gal" else "main"
         data = load_sessions()
         s = {"id": new_id(),
-             "title": str(body.get("title") or ("GAL 剧场" if gal_scope == "gal" else "新对话")).strip()[:60],
+             "title": str(body.get("title") or "新对话").strip()[:60],
              "updated_at": time.time(), "messages": []}
         ensure_session_kb_fields(s)
-        s["gal_scope"] = gal_scope
+        # 首页 / 草案直接开启 Agent：建会话时一并带入，省掉「先建空会话再开关」。
+        if body.get("agent_enabled"):
+            s["agent_enabled"] = True
+        _sb = str(body.get("sandbox") or "").strip()
+        if _sb:
+            _val = agent.clean_sandbox(_sb)
+            if _val and os.path.isdir(_val):
+                s["sandbox"] = _val
         # SessionStart：钩子可以给新会话注入一段长期上下文（跟着会话保存）
         try:
             from app import hooks as _hooks
@@ -30,36 +38,19 @@ def _api_session_new(h):
             _sctx = ""
         if _sctx:
             s["hook_session_context"] = _sctx[:6000]
-        if gal_scope == "gal":
-            s["gal_enabled"] = True
-            s["kb_ids"] = []
-            s["gal_use_profile"] = bool(body.get("gal_use_profile"))
-            s["gal_use_kb"] = bool(body.get("gal_use_kb"))
-            s["gal_use_rules"] = bool(body.get("gal_use_rules"))
         data["sessions"].insert(0, s)
         data["current"] = s["id"]
         with _lock:
             save_sessions(data)
-        try:
-            saves.add_save(s["id"], s, label="开局", manual=True)   # 留一个「回到开局」的锚点
-        except Exception as e:
-            print(f"[存档] 开局档失败：{e}")
         h._ok_sessions(data)
 
 
 def _session_texts(m):
-    """一条消息里可搜索的文本：普通正文 + GAL 对白 / 旁白。"""
+    """一条消息里可搜索的文本：正文 + 工具 / 思考之外的历史片段。"""
     out = []
     t = m.get("content")
     if isinstance(t, str) and t.strip():
         out.append(t)
-    for seg in (m.get("gal") or {}).get("dialog") or []:
-        if not isinstance(seg, dict):
-            continue
-        for k in ("speech", "narration"):
-            v = seg.get(k)
-            if isinstance(v, str) and v.strip():
-                out.append(v)
     return out
 
 
@@ -67,12 +58,9 @@ def _api_session_search(h):
         """会话搜索：匹配标题与对话正文，返回命中的会话与片段（q 为空时返回最近会话）。"""
         body = h._body()
         q = str(body.get("q") or "").strip().lower()
-        scope = "gal" if str(body.get("scope") or "") == "gal" else "main"
         data = load_sessions()
         items = []
         for s in data.get("sessions") or []:
-            if (s.get("gal_scope") or "main") != scope:
-                continue
             title = str(s.get("title") or "新对话")
             title_hit = bool(q) and q in title.lower()
             hits = []
@@ -200,7 +188,8 @@ def _api_session_group(h):
                 save_sessions(data)
             for sid in drop:
                 delete_session_uploads(sid)      # 附件
-                saves.drop_saves(sid)            # 存档
+                branch_lib.drop_legacy_saves(sid)   # 旧版存档残留
+                drop_session_files(sid)          # 快照 / 事件流 / 轨迹 / 终端会话
             if key:                              # 分组没了，展示元数据一并清掉
                 cfg["session_group_pins"] = [x for x in (cfg.get("session_group_pins") or [])
                                              if x != key]
@@ -224,7 +213,8 @@ def _api_session_delete(h):
         with _lock:
             save_sessions(data)
         delete_session_uploads(drop_id)      # 连带清理该会话的图片附件
-        saves.drop_saves(drop_id)            # 及其存档文件
+        branch_lib.drop_legacy_saves(drop_id)   # 旧版存档残留
+        drop_session_files(drop_id)          # 快照 / 事件流 / 轨迹 / 终端会话
         h._ok_sessions(data)
 
 
@@ -305,7 +295,8 @@ def _api_session_messages(h):
         before = max(0, min(before, total))
         limit = max(1, min(limit, 200))
         start = max(0, before - limit)
-        h._json({"ok": True, "messages": msgs[start:before],
+        h._json({"ok": True,
+                 "messages": [slim_message_for_client(x) for x in msgs[start:before]],
                  "from": start, "before": before, "total": total})
 
 
@@ -320,9 +311,6 @@ def _api_session_clear(h):
             s["summary_upto"] = 0
             s["compress_marks"] = []
             s["qmarks"] = []                                     # 提问标记随消息一起清空
-            s["gal_stats"] = []                                  # 舞台状态参数随对话一起清空
-            s["gal_bg"] = ""                                     # 手动选定的背景也清掉
-            s["gal_bgm"] = ""                                    # BGM 也停掉
             s.pop("plan", None)                                  # 新任务不能沿用旧计划
             s.pop("acceptance", None)                            # 验收项也随任务清空
             s.pop("task_goal", None)                             # 目标钉住也随任务清空
@@ -368,7 +356,6 @@ def _api_message_withdraw(h):
             else:
                 trim_compress_marks(s, drop_after=idx)        # 删除点之后的标记丢弃
                 trim_qmarks(s, drop_after=idx - 1)            # 标记下标 >= idx 的全部丢弃
-            s["gal_stats"] = gal.stats_from_messages(s["messages"])   # 状态参数跟着对话一起回滚
             s["updated_at"] = time.time()
             with _lock:
                 save_sessions(data)
@@ -430,8 +417,10 @@ def _parse_stored_doc(sid, meta):
         txt = (txt or "").strip()
         return "" if txt.startswith(("⚠️", "❌")) else txt
 
+    # 手动「重新解析」：绕过抽取缓存，按当前模型/参数重跑一遍
     return docparse.extract_pages(str(meta.get("name") or ""), raw,
-                                  ocr=(_ocr if vision_available() else None))
+                                  ocr=(_ocr if vision_available() else None),
+                                  use_cache=False)
 
 
 def _api_attach_reparse(h):
@@ -452,6 +441,10 @@ def _api_attach_reparse(h):
         if meta is None:
             return h._json({"ok": False, "error": "找不到附件"}, 404)
         text, warn, pages = _parse_stored_doc(sid, meta)
+        if text and len(text) > MAX_INLINE_DOC_CHARS:
+            text = text[:MAX_INLINE_DOC_CHARS]
+            warn = ((warn + "；") if warn else "") + \
+                "正文过长，只保留前 %d 字" % MAX_INLINE_DOC_CHARS
         if text:
             meta["chars"] = len(text)
             meta["text"] = text
@@ -460,8 +453,10 @@ def _api_attach_reparse(h):
             meta.pop("error", None)
             if warn:
                 meta["warn"] = warn
-            if doc_index == 0:
-                msgs[index]["doc_text"] = text      # 兼容只看 doc_text 的旧逻辑
+            # 小文档保留一份 doc_text 兼容旧逻辑；大文档只留 docs[0].text，
+            # 否则同一篇正文会在 sessions.json 里序列化两次。
+            if doc_index == 0 and len(text) <= DOC_TEXT_COMPAT_MAX:
+                msgs[index]["doc_text"] = text
             with _lock:
                 save_sessions(data)
             return h._json({"ok": True, "chars": len(text), "warn": warn})

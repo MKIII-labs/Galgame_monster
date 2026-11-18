@@ -29,6 +29,8 @@ import threading
 import time
 import uuid
 
+from app import winproc
+
 # 脚本里可以调用的工具：全部只读、无副作用
 ALLOWED_TOOLS = {
     "list_dir", "read_file", "search_files", "search_code", "repo_map",
@@ -475,7 +477,8 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
                            allow_cmd=allow_cmd, allow_outside=allow_outside,
                            extra_allow=(work,)),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", bufsize=1)
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=winproc.no_window())
     except Exception as e:
         shutil.rmtree(work, ignore_errors=True)
         return "❌ run_script：启动失败：%s" % e, {"calls": 0}
@@ -646,7 +649,7 @@ def _exec_tool(sandbox, tool, args, caps, allowed):
         # 脚本内写入也要登记撤销：否则 Code Mode 打开写权限后无法回退
         if is_write and undo and (caps or {}).get("sid"):
             try:
-                agent.register_undo(caps["sid"], undo, tool)
+                agent.register_undo(caps["sid"], undo, tool, root=sandbox)
             except Exception:
                 pass
         ok = not str(text).lstrip().startswith("❌")

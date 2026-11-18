@@ -18,9 +18,10 @@ META = {
                 "search 正则搜 / semantic 语义搜 / map 仓库结构 / "
                 "mcp_list 列 MCP 资源 / mcp_read 读 MCP 资源 / preview 打开网页预览。",
         "params": {
-            "path": {"type": "string", "description": "文件或目录（沙箱内相对路径）"},
+            "path": {"type": "string",
+                     "description": "文件或目录（未选沙箱目录时用绝对路径）"},
             "paths": {"type": "array", "items": {"type": "string"},
-                      "description": "批量读取的文件列表（最多 16 个）"},
+                      "description": "批量读取的文件列表（最多 16 个；未选沙箱目录时用绝对路径）"},
             "start": {"type": "integer", "description": "起始行，从 1 开始"},
             "limit": {"type": "integer", "description": "最多读取 / 返回多少行"},
             "raw": {"type": "boolean", "description": "true = 返回原文（不加行号）"},

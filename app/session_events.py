@@ -44,6 +44,19 @@ MAX_BYTES = 32 * 1024 * 1024      # 单文件上限：超过后滚动，避免�
 _SID_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
+def drop_last(sid):
+    """删除会话时清掉进程内缓存，避免 _LAST 无限增长。"""
+    s = str(sid or "").strip()
+    if not s:
+        return
+    with _LAST_LOCK:
+        _LAST.pop(s, None)
+    with _SEQ_LOCK:
+        _SEQ.pop(s, None)
+    _ISSUES.pop(s, None)
+    _WARNED.discard(s)
+
+
 def _next_seq(sid, path=None):
     """全局单调的事件序号。
 

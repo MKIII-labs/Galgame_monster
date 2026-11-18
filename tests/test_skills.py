@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Skill：frontmatter 解析、增删改、索引与按需读取。"""
+"""Skill：frontmatter 解析、三层加载、触发、校验、导入导出与按需读取。"""
+import io
 import os
+import zipfile
 
 import pytest
 
@@ -9,7 +11,9 @@ from app import capabilities, skills
 PRESET_IDS = ["code-review", "debug-helper", "decision-compare", "doc-digest",
               "study-coach", "writing-polish",
               "spec-clarify", "verify-first", "safe-refactor", "repo-onboarding",
-              "commit-pr", "data-analysis", "translate", "visual-restore"]
+              "commit-pr", "data-analysis", "translate", "visual-restore",
+              "read-before-write", "asset-pipeline", "computer-use",
+              "workflow-orchestrator"]
 
 
 @pytest.fixture
@@ -23,9 +27,10 @@ def skill_dir(tmp_path, monkeypatch):
     return tmp_path / "skills"
 
 
-def _write(sid, name, desc="说明", body="## 步骤\n1. 先做这个", enabled=True):
-    text = ("---\nname: %s\ndescription: %s\nenabled: %s\n---\n\n%s\n"
-            % (name, desc, "true" if enabled else "false", body))
+def _write(sid, name, desc="说明", body="## 步骤\n1. 先做这个", enabled=True, keywords=""):
+    kw = ("keywords: %s\n" % keywords) if keywords else ""
+    text = ("---\nname: %s\ndescription: %s\n%senabled: %s\n---\n\n%s\n"
+            % (name, desc, kw, "true" if enabled else "false", body))
     err = skills.save(sid, text)
     assert err == "", err
 
@@ -156,6 +161,17 @@ def test_skill_read_unknown_name(skill_dir):
     assert "没有这个 Skill" in text
 
 
+def test_skill_read_reference_file(skill_dir):
+    from app import skill_caps  # noqa: F401
+    _write("a", "甲")
+    skills.save_reference("a", "g.md", "参考内容")
+    text, _ = capabilities.invoke("skill.read", {"name": "甲", "file": "g.md"})
+    assert "【参考文件：g.md】" in text and "参考内容" in text
+    text, _ = capabilities.invoke("skill.read", {"name": "甲", "file": "nope.md"})
+    assert text.startswith("❌") and "g.md" in text
+    assert skills.stats()["a"]["count"] == 1      # 读正文 / 参考文件都会计数
+
+
 def test_skills_text_in_prompt():
     from app import prompt_assembly as pa
     plain, _ = pa.base_system_prompt({"scene": "general"}, "你好")
@@ -174,8 +190,144 @@ def test_presets_are_valid():
         it = skills._read(path, sid)
         assert it["name"], sid
         assert it["description"], sid
-        assert len(it["description"]) <= 60, sid      # L1 每个只占一行
+        assert len(it["description"]) <= 160, sid    # L1 每个只占一行
+        assert "当" in it["description"], sid          # 新规范：只写触发条件
         assert it["enabled"] is True, sid
+
+
+def test_presets_trigger_on_coding_request(skill_dir):
+    """播种后的预设能被「改文件 + 验证」这类请求触发到。"""
+    skills.seed_defaults()
+    ids = [sid for sid, _name, _score in
+           skills.trigger_matches("帮我修改这个文件并跑测试验证", limit=6)]
+    assert "read-before-write" in ids
+    assert "verify-first" in ids
+
+
+def test_preset_references_are_copied(skill_dir):
+    """预设带 references/ 时，播种要把参考文件一起复制（否则 L3 永远读不到）。"""
+    assert skills.seed_defaults() == len(PRESET_IDS)
+    it = skills.get("code-review")
+    assert [f["name"] for f in it["files"]] == ["review-checklist.md"]
+    assert "并发" in skills.read_reference("code-review", "review-checklist.md")
+
+
+def test_reference_save_read_delete(skill_dir):
+    _write("a", "甲")
+    assert skills.save_reference("a", "guide.md", "# 指南\n细节") == ""
+    assert [f["name"] for f in skills.get("a")["files"]] == ["guide.md"]
+    assert "细节" in skills.read_reference("a", "references/guide.md")   # 带前缀也能读
+    assert skills.read_reference("a", "guide.txt") == ""                # 不存在的文件
+    assert skills.delete_reference("a", "guide.md") == ""
+    assert skills.get("a")["files"] == []
+
+
+def test_reference_rejects_path_traversal(skill_dir):
+    _write("a", "甲")
+    for bad in ("../x.md", "a/b.md", ".hidden.md", "x.exe", ""):
+        assert skills.save_reference("a", bad, "x").startswith("❌")
+        assert skills.read_reference("a", bad) == ""
+
+
+def test_trigger_matches_and_hint(skill_dir):
+    _write("review", "代码审查", "当要求审查代码时使用", keywords="审查, diff")
+    hits = skills.trigger_matches("帮我审查这次 diff")
+    assert hits and hits[0][0] == "review"
+    assert "代码审查" in skills.trigger_hint("帮我审查这次 diff")
+    assert skills.trigger_matches("今天天气不错") == []
+
+
+def test_lint_flags_description_and_long_body(skill_dir):
+    text = ("---\nname: 甲\ndescription: 先做这个再那个，步骤分三步\n---\n\n正文")
+    items = skills.lint_text(text, "a")
+    assert any(x["field"] == "description" and x["level"] == "warn" for x in items)
+
+    good = ("---\nname: 甲\ndescription: 当用户要求审查时使用\nkeywords: 审查\n"
+            "when_not: 纯问答\n---\n\n"
+            "## 何时用\n- 审查\n\n## 不适用\n- 纯问答\n\n## 核心步骤\n1. 读\n\n"
+            "## 输出格式\n- 表\n\n## 失败处理\n- 说明\n\n## 常见错误\n- 猜\n")
+    assert [x for x in skills.lint_text(good, "a") if x["level"] != "ok"] == []
+
+    long_body = "x" * (skills.BODY_LIMIT + 10)
+    items = skills.lint_text(
+        "---\nname: 甲\ndescription: 当用户要求审查时使用\n---\n\n" + long_body)
+    assert any(x["field"] == "body" for x in items)
+
+
+def test_lint_recommends_new_spec_sections(skill_dir):
+    text = "---\nname: 甲\ndescription: 当用户要求审查时使用\n---\n\n正文"
+    items = skills.lint_text(text, "a")
+    assert any(x["field"] == "body" and "何时用" in x["message"] for x in items)
+    assert any(x["field"] == "when_not" for x in items)
+
+
+def test_template_contains_new_spec_sections():
+    text = skills.template("测试")
+    assert "when_not:" in text
+    assert "## 不适用" in text and "## 失败处理" in text
+
+
+def test_export_import_zip_roundtrip(skill_dir):
+    _write("a", "甲")
+    skills.save_reference("a", "g.md", "参考内容")
+    data = skills.export_zip("a")
+    sid, err = skills.import_zip(data, "imported")
+    assert err == "" and sid == "imported"
+    assert [f["name"] for f in skills.get(sid)["files"]] == ["g.md"]
+    assert "参考内容" in skills.read_reference(sid, "g.md")
+
+
+def test_import_zip_rejects_zip_slip(skill_dir):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("../evil.md", "x")
+        z.writestr("SKILL.md", "---\nname: x\ndescription: 当需要时使用\n---\n")
+    sid, err = skills.import_zip(buf.getvalue())
+    assert sid == "" and err.startswith("❌")
+
+
+def test_import_folder(skill_dir, tmp_path):
+    src = tmp_path / "src"
+    (src / "references").mkdir(parents=True)
+    (src / "SKILL.md").write_text(
+        "---\nname: 导入的技能\ndescription: 当需要导入时使用\n---\n\n正文\n",
+        encoding="utf-8")
+    (src / "references" / "x.md").write_text("参考", encoding="utf-8")
+    sid, err = skills.import_folder(str(src))
+    assert err == "" and sid
+    assert [f["name"] for f in skills.get(sid)["files"]] == ["x.md"]
+
+
+def test_record_use_updates_stats(skill_dir):
+    _write("a", "甲")
+    skills.record_use("a")
+    skills.record_use("a")
+    assert skills.stats()["a"]["count"] == 2
+
+
+def test_preset_upgrade_overwrites_with_backup(tmp_path, monkeypatch):
+    """预设规范升级：覆盖本地旧预设，但先留一份 .bak。"""
+    root = tmp_path / "skills"
+    presets = tmp_path / "presets" / "demo"
+    presets.mkdir(parents=True)
+    (presets / "SKILL.md").write_text(
+        "---\nname: 新版\ndescription: 当需要新版时使用\n---\n\n新正文\n",
+        encoding="utf-8")
+    local = root / "demo"
+    local.mkdir(parents=True)
+    (local / "SKILL.md").write_text(
+        "---\nname: 旧版\ndescription: 旧说明\n---\n\n旧正文\n", encoding="utf-8")
+    monkeypatch.setattr(skills, "SKILLS_DIR", str(root))
+    monkeypatch.setattr(skills, "PRESETS_DIR", str(tmp_path / "presets"))
+    monkeypatch.setattr(skills, "_cache", {"sig": None, "items": []})
+    cfg = {"skills_disabled": []}
+    monkeypatch.setattr(skills, "load_config", lambda: cfg)
+    monkeypatch.setattr(skills, "save_config", lambda c: cfg.update(c))
+
+    skills.seed_defaults()
+    assert skills.get("demo")["name"] == "新版"
+    assert cfg["skills_preset_version"] == skills.PRESET_VERSION
+    assert any(n.startswith("SKILL.md.bak-") for n in os.listdir(local))
 
 
 def test_seed_defaults_copies_once(skill_dir):

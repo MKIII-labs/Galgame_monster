@@ -47,8 +47,13 @@ def preview_undo(sid, tokens=None, scope=None, root=""):
 
     与 undo() 的执行顺序一致：token 从后往前、每个 token 的 ops 也从后往前；
     同一路径第一次命中的状态就是最终状态（后面的操作先被撤销）。
+
+    每条文件记录除了 action / kind，还带：
+    - conflict：当前磁盘与「AI 写完后的内容」不一致（用户手改 / 删掉 / 重建）；
+    - skipped：磁盘已经是目标状态，回滚时会跳过；
+    - adds / dels：文本增删行数（给回退弹窗做 diff 提示）。
     """
-    from .io_utils import (_preview_display, _preview_paths)
+    from .io_utils import (_preview_display, _preview_paths, _read_disk_state)
     from .state import (_TURNS, _turns_lock)
     ensure_undo_loaded(sid)
     picked = list(tokens or [])
@@ -57,7 +62,8 @@ def preview_undo(sid, tokens=None, scope=None, root=""):
             item = _TURNS.get(sid)
             picked = list(item.get("tokens") or []) if item else []
     files, seen = [], set()
-    skipped = 0
+    skipped, conflicts = 0, 0
+    adds_total, dels_total = 0, 0
     for token in reversed(picked):
         with _undo_lock:
             item = _UNDO.get(token)
@@ -65,14 +71,92 @@ def preview_undo(sid, tokens=None, scope=None, root=""):
             skipped += 1                 # 已撤销 / 快照过期：实际回滚也会跳过
             continue
         for op in reversed(item.get("ops") or []):
+            if op.get("kind") == "restore" and op.get("path"):
+                key = os.path.normcase(os.path.abspath(op["path"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                info = _preview_restore(op, root, token)
+                if info is None:
+                    continue
+                files.append(info)
+                if info.get("conflict"):
+                    conflicts += 1
+                if info.get("skipped"):
+                    skipped += 1
+                else:
+                    adds_total += int(info.get("adds") or 0)
+                    dels_total += int(info.get("dels") or 0)
+                continue
+            # 目录 / 移动等非文件快照：沿用旧的推导（不做磁盘对比）
             for p, action, kind in _preview_paths(op):
                 key = os.path.normcase(os.path.abspath(p))
                 if key in seen:
                     continue
                 seen.add(key)
+                if kind == "file" and action == "modify" and not os.path.exists(p):
+                    action = "create"
+                elif kind == "file" and action == "delete" and not os.path.exists(p):
+                    continue
                 files.append({"path": _preview_display(p, root),
-                              "action": action, "kind": kind})
-    return {"ok": True, "files": files, "skipped": skipped, "total": len(picked)}
+                              "action": action, "kind": kind,
+                              "conflict": False, "skipped": False, "reason": ""})
+    return {"ok": True, "files": files, "skipped": skipped, "total": len(picked),
+            "conflicts": conflicts, "adds": adds_total, "dels": dels_total}
+
+
+def _preview_restore(op, root, token):
+    """单个 restore 快照的预览：目标状态 vs 当前磁盘。"""
+    from .io_utils import _preview_display, _preview_stat, _read_disk_state
+    path = op.get("path") or ""
+    if not path:
+        return None
+    target_exists = bool(op.get("existed"))
+    target = op.get("data") if target_exists else None
+    after_known = "after" in op
+    after_exists = bool(op.get("after_existed")) if after_known else True
+    after = op.get("after") if after_exists else None
+
+    state, current = _read_disk_state(path)
+    if state == "dir":
+        return None                       # 目标路径变成了目录：不猜，交给用户手动处理
+    cur_exists = state == "file"
+
+    info = {"path": _preview_display(path, root), "kind": "file",
+            "conflict": False, "skipped": False, "reason": "", "token": token,
+            "adds": 0, "dels": 0}
+    if target_exists and cur_exists:
+        if target is not None and current == target:
+            info.update(action="modify", skipped=True, reason="内容相同，无需还原")
+            return info
+        info["action"] = "modify"
+        info["adds"], info["dels"] = _preview_stat(target, current)
+    elif target_exists and not cur_exists:
+        info["action"] = "create"
+        info["adds"], _ = _preview_stat(None, target)
+        if state == "error":
+            info.update(conflict=True, reason="无法读取当前文件")
+        elif after_known and after_exists:
+            info.update(conflict=True, reason="文件已被删除")
+    elif not target_exists and cur_exists:
+        info["action"] = "delete"
+        _, info["dels"] = _preview_stat(current, None)
+        if after_known and after_exists and after is not None and current != after:
+            info.update(conflict=True, reason="你手动改过这个文件，删除会丢掉这些改动")
+    else:
+        info.update(action="modify", skipped=True, reason="文件已不存在")
+        return info
+
+    if cur_exists and after_known and after_exists and after is not None:
+        if current is not None and current != after:
+            info.update(conflict=True,
+                        reason=(info.get("reason")
+                                or "你手动改过这个文件，回退会覆盖"))
+        elif current is None:
+            info.update(reason="文件较大，未做内容对比")
+    elif cur_exists and after_known and not after_exists:
+        info.update(conflict=True, reason="文件已存在，但快照里没有它")
+    return info
 
 
 def list_steps(sid):
@@ -177,10 +261,14 @@ def _trim_undo(sid):
             mine.remove(victim)
 
 
-def register_undo(sid, undo_ops, label):
-    """把一次写操作的撤销信息登记进内存，返回 token"""
+def register_undo(sid, undo_ops, label, root=""):
+    """把一次写操作的撤销信息登记进内存，返回 token。
+
+    root 是工作区根目录：给了就把写前 / 写后内容同步到影子 git 仓库
+    （``agent/snapshot.py``，检查点去重 + 可追溯）；没给就只走内存 / 磁盘快照。
+    """
     from .read_tracking import turn_note
-    from .state import _ensure_loaded
+    from .state import _ensure_loaded, _TURNS, _turns_lock
     if not undo_ops:
         return None
     _ensure_loaded(sid)
@@ -190,6 +278,33 @@ def register_undo(sid, undo_ops, label):
         _UNDO[token] = {"sid": sid, "ops": undo_ops, "label": label,
                         "ts": time.time(), "undone": False}
     turn_note(sid, token)            # 先记进本轮：本轮 token 不参与淘汰
+    with _turns_lock:
+        turn_item = _TURNS.get(sid)
+        turn = str((turn_item or {}).get("id") or "")
+        need_base = bool(turn_item) and not turn_item.get("snap_before")
+    if root:
+        try:
+            from . import snapshot
+            if turn and need_base:
+                base = snapshot.checkpoint(root, "before-chat-turn-" + turn,
+                                           turn=turn, label="turn-begin", files=[])
+                if base:
+                    with _turns_lock:
+                        if _TURNS.get(sid) is turn_item:
+                            turn_item["snap_before"] = True
+            files = [{"path": op["path"],
+                      "before": (op.get("data") if op.get("existed") else None),
+                      "after": (op.get("after") if op.get("after_existed") else None)}
+                     for op in undo_ops
+                     if op.get("kind") == "restore" and op.get("path")]
+            tag = snapshot.checkpoint(
+                root, "toolcall-%s-%s" % (turn or "t0", token),
+                turn=turn, label=label, files=files)
+            if tag:
+                with _undo_lock:
+                    _UNDO[token]["snapshot"] = tag
+        except Exception as e:                # noqa: BLE001 快照失败不能影响写入
+            print("[快照] 检查点登记失败：%s" % e)
     _trim_undo(sid)
     _persist_undo(sid)
     return token
@@ -227,11 +342,26 @@ def undo_old_content(token, abs_path):
     return None
 
 
+def _at_target(op):
+    """文件是否已经是「撤销后」的状态（内容相同 / 本来就不存在）。"""
+    if op.get("kind") != "restore" or not op.get("path"):
+        return False
+    path = op["path"]
+    if not op.get("existed"):
+        return not os.path.exists(path)
+    try:
+        with open(path, "rb") as f:
+            return f.read() == (op.get("data") or b"")
+    except OSError:
+        return False
+
+
 def undo(token):
     """撤回一次写操作：按相反顺序还原文件。
 
     不再 pop：保留条目并标记 undone，才能支持 redo；
     重复调用同一条会返回 False，不会二次还原。
+    已经是目标状态的文件会跳过（用户手改后又改回来 / 重复回退）。
     """
     from .sandbox import invalidate_tree
     with _undo_lock:
@@ -243,6 +373,8 @@ def undo(token):
         kind = op.get("kind")
         try:
             if kind == "restore":
+                if _at_target(op):
+                    continue
                 if op.get("existed"):
                     parent = os.path.dirname(op["path"])
                     if parent:

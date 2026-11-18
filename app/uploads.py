@@ -13,6 +13,19 @@ from app.sessions import load_sessions
 # 聊天图片附件：落盘到 data/uploads/<会话>/，消息里只存引用
 # ============================================================
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+# 启动清理跳过最近 10 分钟改动过的文件/目录：清理已改为后台执行，
+# 避免和「刚启动就上传附件」抢同一个文件。
+SWEEP_MIN_AGE = 600
+
+
+def _recent(path, min_age=0):
+    """最近改动过的文件/目录不参与启动清理（min_age=0 时不做时间过滤）。"""
+    if min_age <= 0:
+        return False
+    try:
+        return time.time() - os.path.getmtime(path) < min_age
+    except OSError:
+        return True
 
 _UPLOAD_EXT = {
     "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
@@ -218,8 +231,11 @@ def _session_file_is_default():
         return False
 
 
-def sweep_uploads():
+def sweep_uploads(min_age=0):
     """启动时清理孤儿附件：会话已删除的目录移入隔离区，会话还在的删掉没被引用的文件。
+
+    min_age：只清理至少这么多秒没改动过的文件/目录。启动清理在后台线程里跑，
+    传 SWEEP_MIN_AGE 避免和「刚启动就上传附件」抢同一个文件；默认 0 保持旧行为。
 
     安全开关（任意一个命中就完全不清理）：
     - ``GM_NO_SWEEP=1``：测试 / 脚本显式关闭；
@@ -263,6 +279,8 @@ def sweep_uploads():
             continue
         if dname not in alive:
             # 会话列表里没有这个目录：先隔离，不删除
+            if _recent(dpath, min_age):
+                continue
             if _quarantine_dir(dpath):
                 quarantined += 1
             continue
@@ -270,8 +288,11 @@ def sweep_uploads():
         for fname in os.listdir(dpath):
             if fname in keep:
                 continue
+            fp = os.path.join(dpath, fname)
+            if _recent(fp, min_age):
+                continue
             try:
-                os.remove(os.path.join(dpath, fname))
+                os.remove(fp)
                 removed_files += 1
             except OSError:
                 pass

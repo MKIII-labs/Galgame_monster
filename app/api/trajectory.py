@@ -30,8 +30,28 @@ def _api_trajectory(h):
         return h._json({"ok": False, "error": "缺少会话 id"}, 400)
     view = trajectory.build(
         sid, before=body.get("before") or None,
-        limit_turns=max(0, min(_int(body, "limit", 30), 200)))
+        limit_turns=max(0, min(_int(body, "limit", 8), 200)))
     return h._json({"ok": True, "view": view, "rev": trajectory.revision(sid)})
+
+
+@route("/api/trajectory/cell")
+def _api_trajectory_cell(h):
+    """按 refs 取单条记录的完整正文（列表只回预览）。"""
+    body = h._body()
+    sid = _sid(body)
+    if not sid:
+        return h._json({"ok": False, "error": "缺少会话 id"}, 400)
+    try:
+        res = trajectory.cell_detail(
+            sid, refs=body.get("refs") or {}, kind=str(body.get("kind") or ""),
+            seg=body.get("seg") or None,
+            schema_ref=body.get("schema_ref") or 0,
+            tool_name=str(body.get("tool_name") or ""),
+            trace_id=str(body.get("trace_id") or ""),
+            record_id=str(body.get("record_id") or ""))
+    except Exception as e:               # noqa: BLE001
+        return h._json({"ok": False, "error": str(e)}, 500)
+    return h._json(res)
 
 
 @route("/api/trajectory/rev")

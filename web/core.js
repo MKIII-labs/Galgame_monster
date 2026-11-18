@@ -4,14 +4,27 @@
 'use strict';
 
 const TOKEN = window.__TOKEN__ || '';
-const $ = (s) => document.querySelector(s);
+const DRAFT_SID = '__draft__';    // 「新对话」的本地草案：发出第一条消息前不落库
+const $ = (s) => document.querySelector(s)
+  || (typeof window.__gmDetachedEl === 'function' ? window.__gmDetachedEl(s) : null);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 
-// 主题清单：dark=深色底（用于图表配色 / color-scheme / 应用标题栏）；title=标题栏底色
+// 界面设计风格（style）与具体主题（theme）：
+//   aurora = 雾光（网页级光雾视觉，单一模式）
+//   flat   = 现代扁平化（经典界面，light / dark 两种模式）
+// dark=深色底（用于图表配色 / color-scheme / 应用标题栏）；title=窗口标题栏底色
 const THEME_META = {
-  'light': { dark: false, title: '#ffffff' },
-  'dark':  { dark: true,  title: '#1a1b1e' },
+  'aurora': { style: 'aurora', dark: false, title: '#f4f6ff' },
+  'light':  { style: 'flat',   dark: false, title: '#ffffff' },
+  'dark':   { style: 'flat',   dark: true,  title: '#1a1b1e' },
 };
+// 把任意历史值归一为当前支持的主题；缺省用雾光
+function normalizeTheme(theme) {
+  return THEME_META[theme] ? theme : 'aurora';
+}
+function themeStyle(theme) {
+  return THEME_META[normalizeTheme(theme)].style;
+}
 // 当前主题是否深色底（图表 / 图谱等需要按明暗配色的地方统一用这个判断）
 function isDarkTheme() {
   const t = document.documentElement.getAttribute('data-theme');
@@ -30,10 +43,19 @@ function isImeComposing(e) {
   return __imeComposing || !!(e && (e.isComposing || e.keyCode === 229));
 }
 
+// 焦点是否在输入类元素里（快捷键让路判断用）
+function isTypingTarget(el) {
+  const t = el || document.activeElement;
+  return !!(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable));
+}
+
 const state = {
   config: null,
   profile: null,
   sessions: { current: null, sessions: [] },
+  // 首页 / 草案状态下的 Agent 开关：还没有真实会话，先记在这里，
+  // 第一条消息落库时随 /api/session/new 一起创建，不必先建一个空会话。
+  draftAgent: { enabled: false, sandbox: '' },
   streaming: false,
   stopping: false,           // 已点「停止」，正在等后端收尾
   streams: {},               // sid -> { host, row, stopping }：每个会话一条独立的流
@@ -89,6 +111,8 @@ const state = {
   reviewCardBtns: {},        // token -> [聊天卡片上的按钮]
   changeCards: [],           // 聊天流里的「文件改动声明」：{ row, items, el, open, sid }
   lastPlan: [],              // 最近一次 update_plan 的步骤（提示栏展开任务项用）
+  sessionPlan: null,         // 当前会话最新的完整计划（右侧检查器「计划」页用）
+  sessionPlanReview: '',     // 待审批计划卡的 rid（空 = 没有待审批）
   ideDiffDoc: null,          // IDE 内嵌审阅的合成文档（行号 / 折叠条定位）
   ideReviewDoc: null,        // Solo 弹窗里的同一份
   idePaletteMode: 'file',
@@ -101,7 +125,7 @@ const state = {
    前端把数组补齐成「全局下标」：老消息位置放 null，按下标访问的撤回 / 编辑 /
    版本预览等逻辑不用改；已展开过的旧消息优先保留，避免每次刷新回到 80 条。 */
 /* opts.keepCurrent（默认 true）：只更新会话数据，不把界面切到服务端 current。
-   只有「用户主动切会话 / 新建 / 删除 / 存档恢复」这类显式导航才传 false。
+   只有「用户主动切会话 / 新建 / 删除 / 分支切换」这类显式导航才传 false。
    背景任务完成、/api/state 轮询、事件推送都走默认值，避免通知弹出的同时界面被切走。 */
 function applySessionsPayload(payload, opts) {
   if (!payload || !Array.isArray(payload.sessions)) return payload;
@@ -152,7 +176,7 @@ function applySessionsPayload(payload, opts) {
   state.sessions = payload;
   // 界面当前会话优先：除非调用方明确要求跟随服务端（切会话 / 新建 / 删除 / 恢复）
   if (keepCurrent && uiCurrent
-      && payload.sessions.some((s) => s.id === uiCurrent)) {
+      && (uiCurrent === DRAFT_SID || payload.sessions.some((s) => s.id === uiCurrent))) {
     payload.current = uiCurrent;
   }
   // 切会话时收掉旁注卡片并中止进行中的旁注（旁注不跨会话）
@@ -394,7 +418,10 @@ function makeDraggable(winEl, handleEl) {
   };
   handleEl.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
-    if (e.target.closest('button, a, input, select, textarea, .tab')) return;   // 标题栏里的控件不触发拖动
+    // 标题栏里的控件不触发拖动；.settings-search 里的结果项是 div，
+    // 不排除的话 pointerdown 会把指针捕获到标题栏，click 被重定向到标题栏，
+    // 搜索结果的点击跳转永远收不到事件。
+    if (e.target.closest('button, a, input, select, textarea, .tab, .settings-search')) return;
     const p = parse(winEl.style.transform);
     ox = p[0]; oy = p[1];
     sx = e.clientX; sy = e.clientY;
@@ -450,6 +477,68 @@ function icon(name, cls) {
    点「确定」得到原始输入，取消 / 关闭 / Esc / 点遮罩得到 null。
    ============================================================ */
 let __promptResolve = null;
+let __confirmEl = null;
+let __confirmClose = null;
+
+/* 站内确认框：替代原生 confirm —— 和全站弹窗同一套外观，Enter 确定 / Esc 取消。
+   返回 Promise<boolean>；连续调用时上一个按「取消」收尾，避免 Promise 悬着。 */
+function appConfirm(message, opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    if (__confirmEl && __confirmClose) { const prevClose = __confirmClose; prevClose(false); }
+    const mask = document.createElement('div');
+    mask.className = 'cf-mask';
+    const card = document.createElement('div');
+    card.className = 'cf-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    const text = document.createElement('div');
+    text.className = 'cf-text';
+    text.textContent = String(message == null ? '' : message);
+    const acts = document.createElement('div');
+    acts.className = 'cf-actions';
+    const no = document.createElement('button');
+    no.type = 'button';
+    no.className = 'cf-no';
+    no.textContent = o.cancelText || '取消';
+    const yes = document.createElement('button');
+    yes.type = 'button';
+    yes.className = 'cf-yes' + (o.danger ? ' danger' : '');
+    yes.textContent = o.okText || '确定';
+    acts.appendChild(no);
+    acts.appendChild(yes);
+    card.appendChild(text);
+    card.appendChild(acts);
+    mask.appendChild(card);
+    document.body.appendChild(mask);
+    __confirmEl = mask;
+
+    const prevFocus = document.activeElement;
+    const done = (v) => {
+      if (__confirmEl === mask) { __confirmEl = null; __confirmClose = null; }
+      document.removeEventListener('keydown', onKey, true);
+      mask.remove();
+      if (prevFocus && prevFocus.focus) {
+        try { prevFocus.focus(); } catch (e) { /* 元素可能已经不在文档里 */ }
+      }
+      resolve(!!v);
+    };
+    __confirmClose = done;
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); }
+      else if (e.key === 'Enter' && !isImeComposing(e)) {
+        if (e.target === no) return;          // 焦点在「取消」上：交给原生 click
+        e.preventDefault();
+        done(true);
+      }
+    };
+    no.onclick = () => done(false);
+    yes.onclick = () => done(true);
+    mask.addEventListener('mousedown', (e) => { if (e.target === mask) done(false); });
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(() => { try { yes.focus(); } catch (e) { /* 忽略 */ } }, 20);
+  });
+}
 
 function appPrompt(message, defaultValue) {
   const modal = $('#input-modal');

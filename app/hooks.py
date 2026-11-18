@@ -30,6 +30,8 @@ import sys
 import threading
 import time
 
+from app import winproc
+
 CONFIG_TTL = 3.0          # 配置缓存：钩子在一轮里会被调很多次，没必要每次都读盘
 DEFAULT_TIMEOUT = 10
 MAX_OUTPUT = 6000
@@ -173,7 +175,8 @@ def _run_one(h, event, payload, timeout):
     try:
         p = subprocess.run(cmd, shell=True, cwd=cwd, env=env, timeout=timeout,
                            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           creationflags=winproc.no_window())
     except subprocess.TimeoutExpired:
         return {"error": "hook 超时（%ss）：%s" % (timeout, cmd)}
     except OSError as e:

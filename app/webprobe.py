@@ -372,11 +372,16 @@ def _describe_shot(b64):
 # 5. 对外入口
 # ============================================================
 
-def check(abs_path, viewport=None, screenshot=False, timeout=90):
-    """对沙箱里的一个 HTML 做渲染自检，返回给模型看的文本。"""
+def check(abs_path, viewport=None, screenshot=False, timeout=90, shot_sink=None):
+    """对沙箱里的一个 HTML 做渲染自检，返回给模型看的文本。
+
+    shot_sink：可选回调 `sink(b64) -> 相对路径`。传入时把截图交给调用方落盘
+    （沙箱 .gm/screenshots），并在报告末尾附一行「截图：<相对路径>」，
+    前端工具卡会把这张图直接渲染出来。
+    """
     edge = edge_path()
     if not edge:
-        return ("⚠️ 没找到 Edge / Chrome，无法做渲染自检。"
+        return ("❌ 没找到 Edge / Chrome，无法做渲染自检。"
                 "可以设环境变量 GAL_EDGE 指向浏览器可执行文件。")
     if not os.path.isfile(abs_path):
         return "❌ 文件不存在：%s" % abs_path
@@ -394,7 +399,7 @@ def check(abs_path, viewport=None, screenshot=False, timeout=90):
         data = extract_probe(dom)
         if data is None:
             tail = (err or "").strip().splitlines()[-3:]
-            return ("⚠️ 浏览器没有回传探针结果（页面可能拒绝加载或浏览器会话异常）。\n"
+            return ("❌ 浏览器没有回传探针结果（页面可能拒绝加载或浏览器会话异常）。\n"
                     "浏览器 stderr：%s\n"
                     "可先自己用浏览器打开 %s 看是否正常，或稍后重试。"
                     % (" / ".join(tail) or "（空）", name))
@@ -404,6 +409,13 @@ def check(abs_path, viewport=None, screenshot=False, timeout=90):
                         os.path.join(work, "shot.png"), timeout)
             if b64:
                 report += "\n\n【视觉模型看到的画面】\n" + _describe_shot(b64)
+                if shot_sink:
+                    try:
+                        rel = shot_sink(b64) or ""
+                    except Exception:          # noqa: BLE001  截图落盘失败不影响自检
+                        rel = ""
+                    if rel:
+                        report += "\n\n截图：" + rel
             else:
                 report += "\n\n【截图】⚠️ 浏览器没有产出截图文件（本机无头会话偶发失效，见 NOTE 43.58）"
         return report

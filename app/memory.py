@@ -8,6 +8,7 @@
 """
 import glob
 import hashlib
+import json
 import os
 import re
 import threading
@@ -532,6 +533,69 @@ def _cap_forget(args, ctx):
     return ("已删除记忆 %s" % mid) if forget(mid) else ("❌ 找不到记忆：%s" % mid)
 
 
+def _cap_apply(args, ctx):
+    """原生工具 memory_apply：让程序负责模板、校验与执行，模型只填 ops。"""
+    ctx = ctx if isinstance(ctx, dict) else {}
+    sid = str(ctx.get("session_id") or "")
+    if not sid:
+        return "❌ 没有会话上下文，无法写入记忆。"
+    ops = args.get("ops")
+    if isinstance(ops, str):
+        try:
+            ops = json.loads(ops)
+        except Exception:
+            return "❌ ops 必须是操作数组。"
+    if isinstance(ops, dict):
+        ops = ops.get("ops")
+    if not isinstance(ops, list) or not ops:
+        return "❌ ops 必须是非空数组。"
+    ops = [o for o in ops if isinstance(o, dict)][:20]
+    if not ops:
+        return "❌ ops 里没有可执行的操作。"
+    from app import mem_tool
+    try:
+        note = mem_tool.apply_chat_ops(sid, ops)
+    except Exception as e:                       # noqa: BLE001
+        return "❌ 记忆写入失败：%s" % e
+    if not note:
+        return "没有产生变更：作用域不可写、目标条目不存在或内容与现有条目一致。"
+    ctx["mem_note"] = note                       # 对话层据此推「已写入」卡片并落库
+    text = "已执行：%s" % (note.get("summary") or "无变更")
+    if note.get("problems"):
+        text += "\n未生效：" + "；".join(note["problems"])
+    return text
+
+
+_MEMORY_OP_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scope": {"type": "string",
+                  "description": "作用域 ID：session（本会话）或 kb:xxx（知识库 / 用户画像）"},
+        "op": {"type": "string",
+               "enum": ["add", "update", "delete", "link", "unlink", "append_note"],
+               "description": "add 新增；update 修改；delete 删除；append_note 追加时间线；"
+                              "link / unlink 建立或断开关系"},
+        "id": {"type": "string", "description": "update / delete / append_note 定位条目（优先）"},
+        "title": {"type": "string", "description": "add 必填（≤20 字）；也可用标题定位旧条目"},
+        "content": {"type": "string", "description": "正文 / 追加内容（append_note 必填）"},
+        "category": {"type": "string",
+                     "description": "喜好 / 禁忌 / 事实 / 结论 / 交流风格"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "aliases": {"type": "array", "items": {"type": "string"},
+                    "description": "别名 / 简称（≤8 个），提升检索命中"},
+        "size": {"type": "integer", "description": "8–60，只表达节点大小"},
+        "color": {"type": "string",
+                  "description": "红 / 橙 / 黄 / 绿 / 青 / 蓝 / 紫 / 粉 / 灰"},
+        "from": {"type": "string", "description": "link / unlink 起点（条目 id 或标题）"},
+        "to": {"type": "string", "description": "link / unlink 终点（条目 id 或标题）"},
+        "relation": {"type": "string", "description": "关系词，见系统提示里的词表"},
+        "fact": {"type": "string", "description": "link 必填：一句话写清关系为什么成立"},
+        "directed": {"type": "boolean", "description": "不填时相关 / 同义 / 对立自动双向"},
+    },
+    "required": ["scope", "op"],
+}
+
+
 capability("memory.search", "检索长期记忆（手动记录与任务结果）",
            {"query": "str", "scope": "str?", "limit": "int?"}, permission="read")(_cap_search)
 capability("memory.remember", "记住一条信息，写回本会话记忆并同步索引",
@@ -539,3 +603,9 @@ capability("memory.remember", "记住一条信息，写回本会话记忆并同�
             "tags": "str?"}, permission="write")(_cap_remember)
 capability("memory.forget", "删除一条手动记忆，需要 id",
            {"id": "str"}, permission="write")(_cap_forget)
+capability("memory.apply",
+           "增删改记忆条目（本会话记忆 / 知识库 / 用户画像）。参数 ops 是操作数组，按顺序执行，"
+           "一次最多 20 条；已有条目 id 与可写作用域见系统提示。",
+           {"ops": {"type": "array", "items": _MEMORY_OP_ITEM_SCHEMA,
+                    "description": "操作数组"}},
+           permission="write", required=["ops"])(_cap_apply)

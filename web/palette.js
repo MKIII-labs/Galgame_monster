@@ -53,15 +53,19 @@
       run: () => { if (typeof newSession === 'function') newSession(); },
     });
     out.push({
+      group: '操作', label: '搜索会话', sub: '按标题 / 内容搜索历史会话',
+      run: () => { if (typeof ssOpen === 'function') ssOpen(); },
+    });
+    out.push({
       group: '操作', label: '打开设置', sub: 'Ctrl+, / 设置',
       run: () => { const b = $('#btn-settings'); if (b) b.click(); },
     });
     out.push({
-      group: '操作', label: '切换主题', sub: '浅色 / 深色',
+      group: '操作', label: '切换界面风格 / 氛围', sub: '雾光氛围 · 扁平化深浅',
       run: () => { const b = $('#btn-theme'); if (b) b.click(); },
     });
     // 侧栏底部工具：窄屏（底部导航）下这些入口可能收进命令面板，保证全部可达
-    [['存档 / 倒带', 'btn-saves'], ['知识库 / 记忆图谱', 'btn-kb'],
+    [['知识库 / 记忆图谱', 'btn-kb'],
       ['笔记库', 'btn-notes'], ['刷新页面', 'btn-reload']].forEach(([label, id]) => {
       out.push({
         group: '工具', label, sub: '打开对应工具',

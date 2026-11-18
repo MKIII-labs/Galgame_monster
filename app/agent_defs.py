@@ -13,6 +13,9 @@ from app.skills import _parse          # 与 SKILL.md 同一套 frontmatter 语�
 from app.store import DATA_DIR
 
 AGENTS_DIR = os.path.join(DATA_DIR, "agents")
+# 兼容 Trae / Claude 的目录约定：项目级优先，其次本应用 data/agents，最后用户级。
+USER_AGENTS_DIR = os.path.join(os.path.expanduser("~"), ".trae-cn", "agents")
+PROJECT_AGENTS_REL = os.path.join(".trae", "agents")
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 # v1 允许的工具：只读、不落地、不改仓库
@@ -38,8 +41,9 @@ MAX_TURNS_LIMIT = 10
 BUILTINS = {
     "researcher": {
         "name": "资料调研员",
-        "description": "只联网检索外部资料，结论必须带来源 URL，不碰本地代码",
-        "tools": ["web_search", "fetch_url", "research_note"],
+        "description": "只联网查外部资料（官方文档/规格/参数/版本），结论带来源 URL。"
+                       "用于外部事实调研；不用于代码审查、实现或本地排错。",
+        "tools": ["web_search", "fetch_url", "research_note", "explore"],
         "model": "",
         "max_turns": 6,
         "prompt": (
@@ -48,12 +52,41 @@ BUILTINS = {
             "参考实现。每条结论后面必须带来源 URL；系统会核对这些 URL 是否真的来自本批"
             "搜索结果，编造链接会被打回。优先官方文档 / 规范 / 源码仓库；论坛二手转述"
             "只作补充。关键参数尽量找第二个独立来源；冲突时把两边都写出来。"
-            "查不到的不要猜，写「未查清」并列出还缺什么。结论控制在 600 字以内。"
-            "最后一行写：置信度: high|medium|low；未查清: ...（没有就写「无」）。"),
+            "查不到的不要猜，写「未查清」并列出还缺什么。"),
+    },
+    "finder": {
+        "name": "定位侦察",
+        "description": "只读定位入口、定义、调用链与符号位置，结论带文件:行号。"
+                       "用于快速找到代码在哪；不用于精读、改代码或外部资料调研。",
+        "tools": ["list_dir", "search_code", "find_symbol", "repo_map", "code_context",
+                  "git_status", "git_log", "git_diff", "explore"],
+        "model": "",
+        "max_turns": 5,
+        "prompt": (
+            "你是主代理派出的定位侦察。只读，不写文件、不执行命令。"
+            "优先用 search_code / find_symbol / repo_map 找到入口、定义、调用链和符号位置；"
+            "找到目标就停，不要通读整文件。每条结论后用（文件:行号）标注证据。"
+            "没找到就写「未查清」并说明还缺什么。交付时写清：结果、证据、未找到的部分。"),
+    },
+    "reader": {
+        "name": "精读侦察",
+        "description": "只读精读指定代码片段，提炼事实、分支、边界与数据流，结论带文件:行号。"
+                       "用于理解具体实现；不用于全仓定位、改代码或外部资料调研。",
+        "tools": ["list_dir", "read_file", "read_files", "search_files", "search_code",
+                  "code_context", "git_status", "git_log", "git_diff", "explore"],
+        "model": "",
+        "max_turns": 5,
+        "prompt": (
+            "你是主代理派出的精读侦察。只读，不写文件、不执行命令。"
+            "围绕分配的问题读取相关片段，提炼事实、分支、边界条件和数据流；"
+            "优先用 read_file 的 start/limit 只读相关段，不要通读整文件。"
+            "每条结论后用（文件:行号）标注证据；没读到的范围要明确写出来。"
+            "交付时写清：关键事实、证据、没读到的范围。"),
     },
     "reviewer": {
         "name": "代码审查员",
-        "description": "只读代码，找缺陷、风险与回归点，不改文件",
+        "description": "只读代码审查：正确性、边界、并发、回归风险，问题带文件:行号。"
+                       "用于审查 diff/文件/PR；不用于安全审计（security）、运行时调试（debugger）或直接改代码。",
         "tools": ["list_dir", "read_file", "read_files", "search_files", "search_code",
                   "code_context", "find_symbol", "repo_map", "check_code",
                   "git_status", "git_diff", "git_log"],
@@ -64,11 +97,12 @@ BUILTINS = {
             "围绕分配的任务检查：逻辑错误、边界条件、并发/异常路径、明显的回归风险。"
             "每条问题都必须给出证据（文件:行号 + 关键代码片段），没有证据的猜测不要写。"
             "按严重程度排序，最多 8 条；没有问题就明确说「未发现问题」并说明检查范围。"
-            "结论控制在 600 字以内。最后一行写：置信度: high|medium|low；未查清: ..."),
+            "结论写到够用即可。"),
     },
     "fidelity-reviewer": {
         "name": "还原复核员",
-        "description": "对照参考物与产物，用客观指标 + 视觉检查列出最大差距，不改产物",
+        "description": "只读对照参考物与产物，用 image_compare / mesh_inspect / see_image 列最大差距。"
+                       "用于视觉/3D 还原复核；不用于纯代码逻辑或没有参考物的设计探索。",
         "tools": ["image_compare", "see_image", "mesh_inspect", "read_file",
                   "list_dir", "search_files"],
         "model": "",
@@ -86,12 +120,12 @@ BUILTINS = {
             "（指标名或图片位置）、建议改法；"
             "5) 不要泛泛评价「不够精致」，不要重写产物；没有明显差距就写"
             "「未发现明显差距」并说明检查范围。"
-            "输出：总分 + 指标摘要 + 差距清单。最后一行写："
-            "置信度: high|medium|low；未查清: ..."),
+            "输出：总分 + 指标摘要 + 差距清单。"),
     },
     "critic": {
         "name": "反证者",
-        "description": "核对其它代理给出的结论与证据，判断是否站得住",
+        "description": "只读核对其它子代理的结论与证据：引用是否存在、是否支持结论、有无冲突。"
+                       "用于二次验证；不用于重新探索整个问题。",
         "tools": ["list_dir", "read_file", "search_files", "search_code",
                   "code_context", "find_symbol", "git_status", "git_diff"],
         "model": "",
@@ -107,7 +141,8 @@ BUILTINS = {
     },
     "planner": {
         "name": "规划者",
-        "description": "把任务拆成可执行步骤，指出风险与验收方式，不改文件",
+        "description": "只读规划：读必要文件后拆 3–6 个可验证步骤，标风险与需用户拍板点。"
+                       "用于动手前的方案设计；不用于执行、代码审查或 bug 定位。",
         "tools": ["list_dir", "read_file", "read_files", "search_files",
                   "search_code", "code_context", "find_symbol", "repo_map",
                   "git_status", "git_diff"],
@@ -117,12 +152,12 @@ BUILTINS = {
         "prompt": (
             "你是规划者。先读必要的文件确认现状，再把任务拆成 3–6 个可独立验证的步骤。"
             "每一步写清：做什么、改哪些文件、怎么验证；标出风险与需要用户拍板的点。"
-            "不要写文件、不要执行命令。结论控制在 500 字以内，按编号列表输出。"
-            "最后一行写：置信度: high|medium|low；未查清: ..."),
+            "不要写文件、不要执行命令。按编号列表输出。"),
     },
     "implementer": {
         "name": "实现者",
-        "description": "在沙箱内改文件落实方案；每次写入仍要用户审批",
+        "description": "在沙箱内改文件落实已明确的方案，每次写入走审批。"
+                       "用于实现/修复；不用于只读调研、安全审计或大范围重构设计。",
         "tools": ["list_dir", "read_file", "read_files", "search_files", "search_code",
                   "code_context", "find_symbol", "impact", "repo_map",
                   "check_code", "lsp_diagnostics",
@@ -136,11 +171,12 @@ BUILTINS = {
             "被拒绝就停下说明原因，不要换写法绕过。"
             "动手前先读相关文件确认现状；改完列出改了哪些文件、关键改动在哪几行，"
             "并说明你怎么验证的（跑测试 / 检查输出）。不要改与任务无关的文件。"
-            "结论控制在 600 字以内。最后一行写：置信度: high|medium|low；未查清: ..."),
+            "结论写到够用即可。"),
     },
     "tester": {
         "name": "测试工程师",
-        "description": "只读代码与测试，指出该补哪些用例、边界与复现步骤",
+        "description": "只读分析测试覆盖与缺口，给出该补的用例、边界与复现步骤。"
+                       "用于补测试/评估覆盖；不用于实际改代码（implementer）。",
         "tools": ["list_dir", "read_file", "read_files", "search_files", "search_code",
                   "code_context", "find_symbol", "repo_map", "check_code",
                   "lsp_diagnostics", "git_status", "git_diff"],
@@ -153,11 +189,12 @@ BUILTINS = {
             "② 最值得补的用例（正常 / 边界 / 异常 / 并发），每条写清输入、预期与验证方式；"
             "③ 如果已经出问题，给出最小复现步骤。"
             "尽量指出应该改哪个测试文件、哪个断言，不要空泛地说「增加测试」。"
-            "结论控制在 600 字以内。最后一行写：置信度: high|medium|low；未查清: ..."),
+            "结论写到够用即可。"),
     },
     "debugger": {
         "name": "调试员",
-        "description": "根据报错或症状定位根因，给出最小修复方案，不改文件",
+        "description": "只读定位可复现问题的根因：症状→调用链→证据→最小修复方案。"
+                       "用于运行时排错；不用于直接改代码或纯静态代码审查。",
         "tools": ["list_dir", "read_file", "read_files", "search_files", "search_code",
                   "code_context", "find_symbol", "impact", "repo_map",
                   "lsp_diagnostics", "lsp_definition", "lsp_references",
@@ -170,11 +207,12 @@ BUILTINS = {
             "按「症状 → 可能的调用链 → 证据 → 根因」的顺序排查，不要一上来就给结论。"
             "每条判断都要有文件:行号或日志证据；不确定就列出待验证的假设。"
             "最后给最小修复方案（改哪个函数、为什么、可能的副作用），不要顺手重构。"
-            "结论控制在 600 字以内。最后一行写：置信度: high|medium|low；未查清: ..."),
+            "结论写到够用即可。"),
     },
     "security": {
         "name": "安全审查员",
-        "description": "只读审查注入、路径穿越、密钥泄露与权限边界",
+        "description": "只读安全审查：注入、路径穿越、密钥泄露、权限边界，只报可利用问题。"
+                       "用于安全敏感改动；不用于通用代码质量审查。",
         "tools": ["list_dir", "read_file", "read_files", "search_files", "search_code",
                   "code_context", "find_symbol", "repo_map", "git_diff", "git_log"],
         "model": "",
@@ -186,11 +224,12 @@ BUILTINS = {
             "不可信输入直接进 shells / 文件系统 / SQL、以及错误信息泄露内部路径。"
             "只报有实际利用路径的问题，按严重程度（高 / 中 / 低）排序，"
             "每条写清触发条件与最小修复方向；不要堆砌泛泛的「建议加校验」。"
-            "结论控制在 600 字以内。最后一行写：置信度: high|medium|low；未查清: ..."),
+            "结论写到够用即可。"),
     },
     "documenter": {
         "name": "文档编写员",
-        "description": "读代码后更新 README / 注释 / 使用说明，可写但每次写入要审批",
+        "description": "读代码后更新 README/注释/使用说明，写入走审批。"
+                       "用于文档补齐；不用于代码实现或安全审查。",
         "tools": ["list_dir", "read_file", "read_files", "search_files", "search_code",
                   "code_context", "find_symbol", "repo_map",
                   "git_status", "git_diff",
@@ -204,12 +243,12 @@ BUILTINS = {
             "动笔前先读实现与现有文档，只写代码里能验证的事实，不编造参数和行为。"
             "优先改最小范围：补缺失段落、修过时描述、加一段可复制的示例；"
             "不要重写整篇文档，也不要改与文档无关的代码。"
-            "改完列出动了哪些文件与关键段落。结论控制在 500 字以内。"
-            "最后一行写：置信度: high|medium|low；未查清: ..."),
+            "改完列出动了哪些文件与关键段落。"),
     },
     "explainer": {
         "name": "代码讲解员",
-        "description": "面向新人的模块讲解：调用关系、数据流与关键设计",
+        "description": "只读讲解模块：入口、调用关系、数据流、关键设计，结论带文件:行号。"
+                       "用于理解代码；不用于改代码或排错。",
         "tools": ["list_dir", "read_file", "read_files", "search_files", "search_code",
                   "code_context", "find_symbol", "repo_map",
                   "lsp_definition", "lsp_references", "lsp_hover", "lsp_symbols",
@@ -223,9 +262,14 @@ BUILTINS = {
             "关键状态与副作用是什么、哪些设计是刻意的取舍。"
             "每个结论都带文件:行号；先给一张「调用关系」文字图（几行即可），再展开细节。"
             "面向没读过这个仓库的人，术语第一次出现时解释一句。"
-            "结论控制在 700 字以内。最后一行写：置信度: high|medium|low；未查清: ..."),
+            "结论写到够用即可。"),
     },
 }
+
+
+# scout 与 specialist 合并：searcher 复用 researcher，worker 复用 implementer。
+# 用户/项目里显式定义同名文件时，文件优先，不走别名。
+ALIASES = {"searcher": "researcher", "worker": "implementer"}
 
 
 class AgentDefError(ValueError):
@@ -252,11 +296,31 @@ def _tools_list(raw):
     return out
 
 
+def _csv_list(raw):
+    """逗号分隔的名单（MCP server 名可能含空格，不能按空白切）。"""
+    text = str(raw or "").strip().strip("[]")
+    out = []
+    for p in re.split(r"[,，]", text):
+        p = p.strip().strip("'\"")
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def _meta_get(meta, key, default=None):
+    """frontmatter 解析会把键转小写；camelCase 字段要兼容两种写法。"""
+    if not isinstance(meta, dict):
+        return default
+    if key in meta:
+        return meta[key]
+    return meta.get(str(key).lower(), default)
+
+
 def _render(meta, prompt):
     lines = ["---"]
-    for key in ("name", "description", "tools", "model", "max_turns",
-                "permission", "enabled"):
-        val = meta.get(key)
+    for key in ("name", "description", "tools", "disallowedTools", "model",
+                "max_turns", "permission", "mcpServers", "enabled"):
+        val = _meta_get(meta, key)
         if isinstance(val, list):
             val = ", ".join(val)
         if val is None or val == "":
@@ -268,7 +332,7 @@ def _render(meta, prompt):
     return "\n".join(lines) + "\n"
 
 
-def _normalize(aid, meta, body, builtin=False):
+def _normalize(aid, meta, body, builtin=False, path=""):
     if not _ID_RE.match(aid):
         raise AgentDefError("id 只能包含字母、数字、下划线和短横线（≤32）")
     name = str(meta.get("name") or aid).strip()[:40]
@@ -276,6 +340,11 @@ def _normalize(aid, meta, body, builtin=False):
     tools = _tools_list(meta.get("tools"))
     if not tools:
         raise AgentDefError("%s 缺少 tools" % aid)
+    disallowed = _tools_list(_meta_get(meta, "disallowedTools"))
+    effective = [t for t in tools if t not in set(disallowed)]
+    if not effective:
+        raise AgentDefError("%s 的 tools 与 disallowedTools 抵消后为空" % aid)
+    mcp_servers = _csv_list(_meta_get(meta, "mcpServers"))
     permission = str(meta.get("permission") or "readonly").strip().lower()
     if permission not in ("readonly", "write"):
         raise AgentDefError("permission 只能是 readonly / write：%s" % permission)
@@ -300,13 +369,16 @@ def _normalize(aid, meta, body, builtin=False):
         "name": name,
         "description": desc,
         "tools": tools,
+        "effective_tools": effective,
+        "disallowed_tools": disallowed,
+        "mcp_servers": mcp_servers,
         "model": str(meta.get("model") or "").strip()[:80],
         "max_turns": turns,
         "permission": permission,
         "enabled": enabled,
         "prompt": prompt,
         "builtin": bool(builtin),
-        "path": _path(aid),
+        "path": path or _path(aid),
     }
 
 
@@ -325,52 +397,72 @@ def _builtin(aid):
     return obj
 
 
-def get_agent(aid):
-    """按 id 取代理；用户文件覆盖内置；不存在 / 已停用返回 None。"""
+def _scope_dirs(sandbox=""):
+    """代理目录，按优先级从高到低：项目 > 本应用 data/agents > 用户级。"""
+    dirs = []
+    sb = str(sandbox or "").strip()
+    if sb:
+        dirs.append(os.path.join(sb, PROJECT_AGENTS_REL))
+    dirs.append(AGENTS_DIR)
+    dirs.append(USER_AGENTS_DIR)
+    return dirs
+
+
+def _read_agent_file(path, aid):
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read()
+    meta, body = _parse(raw)
+    obj = _normalize(aid, meta, body, builtin=False, path=path)
+    obj["text"] = raw
+    return obj
+
+
+def get_agent(aid, sandbox=""):
+    """按 id 取代理；项目 > data/agents > 用户级 > 内置；不存在 / 已停用返回 None。"""
     aid = str(aid or "").strip()
     if not _ID_RE.match(aid):
         return None
-    path = _path(aid)
-    if os.path.isfile(path):
+    for folder in _scope_dirs(sandbox):
+        path = os.path.join(folder, aid + ".md")
+        if not os.path.isfile(path):
+            continue
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = f.read()
+            obj = _read_agent_file(path, aid)
         except OSError as e:
             raise AgentDefError("读取 %s 失败：%s" % (aid, e))
-        meta, body = _parse(raw)
-        obj = _normalize(aid, meta, body, builtin=False)
-        obj["text"] = raw
         return obj if obj["enabled"] else None
+    _alias = ALIASES.get(aid)
+    if _alias:
+        return get_agent(_alias, sandbox=sandbox)
     if aid in BUILTINS:
         obj = _builtin(aid)
         return obj if obj["enabled"] else None
     return None
 
 
-def list_agents():
-    """内置 + 用户文件；用户文件同 id 覆盖内置。读取失败的文件也会列出并带 error。"""
+def list_agents(sandbox=""):
+    """内置 + 项目 / 本应用 / 用户文件；高优先级同名覆盖低优先级。"""
     rows = {}
     for aid in BUILTINS:
         rows[aid] = _builtin(aid)
-    if os.path.isdir(AGENTS_DIR):
-        for fn in sorted(os.listdir(AGENTS_DIR)):
+    for folder in reversed(_scope_dirs(sandbox)):
+        if not os.path.isdir(folder):
+            continue
+        for fn in sorted(os.listdir(folder)):
             if not fn.endswith(".md"):
                 continue
             aid = fn[:-3]
             if not _ID_RE.match(aid):
                 continue
+            path = os.path.join(folder, fn)
             try:
-                with open(os.path.join(AGENTS_DIR, fn), "r", encoding="utf-8") as f:
-                    raw = f.read()
-                meta, body = _parse(raw)
-                obj = _normalize(aid, meta, body, builtin=False)
-                obj["text"] = raw
-                rows[aid] = obj
+                rows[aid] = _read_agent_file(path, aid)
             except (OSError, AgentDefError) as e:
                 rows[aid] = {
                     "id": aid, "name": aid, "description": "", "tools": [],
+                    "effective_tools": [], "disallowed_tools": [], "mcp_servers": [],
                     "model": "", "max_turns": DEFAULT_MAX_TURNS, "enabled": False,
-                    "prompt": "", "builtin": False, "text": "", "path": _path(aid),
+                    "prompt": "", "builtin": False, "text": "", "path": path,
                     "error": str(e),
                 }
     return [rows[k] for k in sorted(rows)]
@@ -436,7 +528,9 @@ def delete_agent(aid):
 def role_spec(agent):
     """转成 explore 需要的角色配置。"""
     return {"name": agent.get("name") or agent.get("id") or "",
-            "tools": list(agent.get("tools") or []),
+            "tools": list(agent.get("effective_tools") or agent.get("tools") or []),
+            "disallowed_tools": list(agent.get("disallowed_tools") or []),
+            "mcp_servers": list(agent.get("mcp_servers") or []),
             "prompt": agent.get("prompt") or "",
             "model": agent.get("model") or "",
             "allow_write": str(agent.get("permission") or "readonly") == "write",

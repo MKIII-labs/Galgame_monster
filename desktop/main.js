@@ -25,6 +25,47 @@ app.setPath('userData', PROFILE_DIR);
 // 退出诊断：窗口「自己消失」时只有这份日志能说明原因
 // （渲染进程崩溃 / 页面按钮触发 / 系统关闭 / 第二个实例抢锁）。
 const DLOG = path.join(ROOT, 'data', 'desktop.log');
+
+// 窗口尺寸记忆：默认 1440×960，之后按上次关闭时的大小/位置恢复。
+// 以前每次启动都回 1280×860，调好的布局重启就丢，右侧对话栏尤其显得挤。
+// maximized：上次关窗时是不是最大化。没记录过（老版本文件只有宽高）按「最大化」处理，
+// 因为用户从快捷方式启动时期望的是铺满，而不是一个孤零零的 1440×960 小窗。
+const WIN_STATE = path.join(PROFILE_DIR, 'window-state.json');
+const DEFAULT_BOUNDS = { width: 1440, height: 960 };
+
+function loadWindowState() {
+  try {
+    const b = JSON.parse(fs.readFileSync(WIN_STATE, 'utf8'));
+    if (!b || !(b.width > 0) || !(b.height > 0)) return null;
+    const out = { width: Math.round(b.width), height: Math.round(b.height) };
+    if (Number.isFinite(b.x) && Number.isFinite(b.y)) {
+      // 拔掉外接屏后记录的位置可能已经在屏幕外：这时只保留尺寸，让系统重新居中
+      const { screen } = require('electron');
+      const area = screen.getDisplayMatching({
+        x: b.x, y: b.y, width: out.width, height: out.height,
+      }).workArea;
+      const onScreen = b.x < area.x + area.width - 120 && b.x + out.width > area.x + 120
+        && b.y < area.y + area.height - 80 && b.y + out.height > area.y + 40;
+      if (onScreen) { out.x = Math.round(b.x); out.y = Math.round(b.y); }
+    }
+    out.maximized = b.maximized !== false;    // 老文件没有这个字段 → 最大化
+    return out;
+  } catch (e) {
+    return null;                    // 没有记录或文件损坏：用默认尺寸
+  }
+}
+
+function saveBounds() {
+  try {
+    if (!win || win.isDestroyed() || win.isMinimized() || win.isFullScreen()) return;
+    const b = (win.getNormalBounds && win.getNormalBounds()) || win.getBounds();
+    b.maximized = win.isMaximized();          // 下次启动照这个状态还原
+    fs.writeFileSync(WIN_STATE, JSON.stringify(b));
+  } catch (e) {
+    /* 记不住尺寸不影响使用 */
+  }
+}
+
 function dlog(msg) {
   try {
     fs.appendFileSync(DLOG, '[' + new Date().toISOString() + '] ' + msg + '\n');
@@ -92,11 +133,11 @@ function setupPermissions() {
 }
 
 function createWindow() {
-  win = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 960,
-    minHeight: 600,
+  const opts = {
+    width: DEFAULT_BOUNDS.width,
+    height: DEFAULT_BOUNDS.height,
+    minWidth: 1024,
+    minHeight: 640,
     icon: ICON,
     frame: false,              // 无系统标题栏：由页面里的 #titlebar 顶上
     show: false,               // ready-to-show 再显示，避免白屏闪一下
@@ -110,11 +151,22 @@ function createWindow() {
       backgroundThrottling: false,
       spellcheck: false,
     },
-  });
+  };
+  const state = loadWindowState();
+  if (state) {
+    // maximized 不是 BrowserWindow 的选项，单独取出来；宽高是「还原后」的尺寸
+    const { maximized, ...bounds } = state;
+    Object.assign(opts, bounds);
+  }
+  win = new BrowserWindow(opts);
 
   win.loadURL(APP_URL);
-  win.once('ready-to-show', () => win.show());
-  win.on('close', () => dlog('window close'));
+  win.once('ready-to-show', () => {
+    // 最大化要在 show 之前做：否则会先闪一下 1440×960 再铺满
+    if (!state || state.maximized) win.maximize();
+    win.show();
+  });
+  win.on('close', () => { saveBounds(); dlog('window close'); });
   win.on('closed', () => { dlog('window closed'); win = null; });
   win.webContents.on('render-process-gone', (_e, d) => {
     dlog('render-process-gone ' + JSON.stringify(d || {}));
@@ -128,6 +180,9 @@ function createWindow() {
   };
   win.on('maximize', () => pushMax(true));
   win.on('unmaximize', () => pushMax(false));
+  // 启动即最大化时，maximize 事件可能早于页面绑定监听（消息会丢），
+  // 首帧加载完再补推一次当前状态，保证顶栏图标和窗口一致。
+  win.webContents.on('did-finish-load', () => pushMax(win && win.isMaximized()));
 
   // 系统全屏状态回推：用户按系统快捷键 / 阅读器点 ⤢ 都走这里同步 UI
   const pushFull = (v) => {

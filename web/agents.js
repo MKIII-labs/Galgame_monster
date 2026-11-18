@@ -7,7 +7,8 @@
 
   function template() {
     return '---\nname: 新代理\ndescription: 一句话说明它负责什么\n'
-      + 'tools: read_file, search_code\nmodel: \nmax_turns: 6\n'
+      + 'tools: read_file, search_code\ndisallowedTools: \nmcpServers: \n'
+      + 'model: \nmax_turns: 6\n'
       + 'permission: readonly\n---\n'
       + '你是……（写清任务、边界、输出格式与证据要求）\n';
   }

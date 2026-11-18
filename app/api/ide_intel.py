@@ -165,7 +165,7 @@ def _api_ide_lsp_rename(h):
         return h._json({"ok": False, "error": "写入失败：%s" % e}, 400)
     agent.invalidate_tree(sb)
     token = agent.register_undo((s or {}).get("id") or "",
-                                undo_ops, "重命名为 " + new_name)
+                                undo_ops, "重命名为 " + new_name, root=sb)
     return h._json({"ok": True, "files": written, "count": len(written),
                     "token": token, "note": note})
 

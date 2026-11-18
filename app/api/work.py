@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """工作台 API：任务 / 产物 / 场景（由 app.registry 自注册）"""
 import base64
+import datetime as _dt
 import json
 import mimetypes
 import os
+import re
 
-from app import agent, calendar, capabilities, scenes, task_engine, work_extras
+from app import agent, calendar, capabilities, llm, mem_tool, scenes, task_engine, work_extras
+from app.config import get_api_conf
 from app.registry import route
 from app.sessions import find_session, load_sessions, save_sessions
 from app.store import DATA_DIR
@@ -38,6 +41,221 @@ def _blocked_by(tid):
         if len(out) >= 3:
             break
     return out
+
+
+# ---------------------------------------------------------------- AI 工作助手
+# 只做「建议」：计划 / 任务拆解 / 复盘都返回结构化结果，写不写由前端等用户确认。
+# 模型不可用时返回本地规则兜底（ai=false），保证工作台基础功能不受影响。
+
+_OPEN_STATES = ("pending", "running", "paused", "failed")
+
+
+def _day_range(days=1):
+    start = _dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp()
+    return start, start + max(1, int(days)) * 86400
+
+
+def _fmt_ts(ts, fmt="%m-%d %H:%M"):
+    try:
+        return _dt.datetime.fromtimestamp(float(ts)).strftime(fmt)
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _assist_json(prompt, max_tokens=900):
+    """调用当前聊天模型并解析 JSON。返回 (data, error)。"""
+    api_key, api_url, api_model = get_api_conf("chat")
+    if not api_key:
+        return None, "未配置聊天 API 密钥"
+    try:
+        raw = llm._quick_chat(
+            api_key, api_url, api_model,
+            [{"role": "system", "content": "你是个人工作助理。只输出 JSON，不要解释，不要 Markdown 围栏。"},
+             {"role": "user", "content": prompt}],
+            max_tokens=max_tokens, source="work", temperature=0.3, use_cache=False) or ""
+    except Exception as e:                       # noqa: BLE001  模型失败要能降级
+        return None, "调用失败：%s" % e
+    data = mem_tool._loads_loose(raw)
+    if not isinstance(data, dict):
+        return None, "模型没有返回 JSON"
+    return data, ""
+
+
+def _assist_text(prompt, max_tokens=900):
+    """调用聊天模型取纯文本（复盘这种本来就要求 Markdown 的场景）。"""
+    api_key, api_url, api_model = get_api_conf("chat")
+    if not api_key:
+        return "", "未配置聊天 API 密钥"
+    try:
+        txt = llm._quick_chat(
+            api_key, api_url, api_model,
+            [{"role": "system", "content": "你是个人工作助理，回答简洁、只依据用户给的数据。"},
+             {"role": "user", "content": prompt}],
+            max_tokens=max_tokens, source="work", temperature=0.4, use_cache=False) or ""
+        return txt.strip(), ""
+    except Exception as e:                       # noqa: BLE001
+        return "", "调用失败：%s" % e
+
+
+def _plan_fallback(tasks):
+    """本地兜底：按优先级 / 截止时间挑 3 个最该推进的任务。"""
+    def key(t):
+        due = float(t.get("due_at") or 0)
+        return (-int(t.get("priority") or 0), due if due else 9e18,
+                -float(t.get("updated_at") or 0))
+    top = sorted([t for t in tasks if t.get("status") in _OPEN_STATES], key=key)[:3]
+    return {
+        "focus": [{"id": t.get("id"), "why": "按优先级与截止时间排在最前"} for t in top],
+        "blocks": [],
+        "note": "先用本地规则列出今天最值得推进的任务；配置聊天模型后可生成时间块。",
+    }
+
+
+def _assist_plan():
+    tasks = task_engine.list_tasks(limit=120)
+    start, end = _day_range(1)
+    events = calendar.list_events(start, end)
+    ev_lines = []
+    for e in events[:20]:
+        t0 = _fmt_ts(e.get("occurrence_at"), "%H:%M")
+        t1 = _fmt_ts(e.get("end_at"), "%H:%M")
+        ev_lines.append("%s-%s %s" % (t0, t1, e.get("title") or ""))
+    task_lines = []
+    for t in tasks[:100]:
+        prog = t.get("progress") or {}
+        task_lines.append("%s | %s | %s | P%s | %s | %s/%s" % (
+            t.get("id"), (t.get("title") or "")[:60], t.get("status") or "pending",
+            int(t.get("priority") or 0),
+            _fmt_ts(t.get("due_at"), "%m-%d %H:%M") or "无截止",
+            int(prog.get("done") or 0), int(prog.get("total") or 0)))
+    weekday = "一二三四五六日"[_dt.date.today().weekday()]
+    prompt = (
+        "今天是 %s（周%s）。\n\n今天的日程：\n%s\n\n未完成任务（id | 标题 | 状态 | 优先级 | 截止 | 步骤进度）：\n%s\n\n"
+        "请给出今日计划，只输出这个 JSON：\n"
+        '{"focus":[{"id":"任务id","why":"一句话理由"}],'
+        '"blocks":[{"start":"09:30","end":"10:30","title":"做什么","task_id":"任务id或空"}],'
+        '"note":"一句提醒"}\n'
+        "要求：focus 1-3 个，只能从上面的任务 id 里选；blocks 0-4 个，时间在 08:00-22:00 之间、"
+        "start < end、避开已有日程；没有合适内容时用空数组，不要编造任务 id。"
+    ) % (_dt.date.today().strftime("%Y-%m-%d"), weekday,
+         "\n".join(ev_lines) or "（无）", "\n".join(task_lines) or "（无）")
+    data, err = _assist_json(prompt, max_tokens=900)
+    fallback = _plan_fallback(tasks)
+    if not data:
+        fallback["note"] = (err + "；" + fallback["note"]) if err else fallback["note"]
+        return {"ok": True, "ai": False, "plan": fallback, "message": err}
+    by_id = {t.get("id"): t for t in tasks}
+    focus = []
+    for item in (data.get("focus") if isinstance(data.get("focus"), list) else [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        tid = str(item.get("id") or "").strip()
+        if tid not in by_id:
+            continue
+        focus.append({"id": tid, "why": str(item.get("why") or "").strip()[:80]})
+    blocks = []
+    for item in (data.get("blocks") if isinstance(data.get("blocks"), list) else [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        m0 = re.match(r"^(\d{1,2}):(\d{2})$", str(item.get("start") or "").strip())
+        m1 = re.match(r"^(\d{1,2}):(\d{2})$", str(item.get("end") or "").strip())
+        if not m0 or not m1:
+            continue
+        a = int(m0.group(1)) * 60 + int(m0.group(2))
+        b = int(m1.group(1)) * 60 + int(m1.group(2))
+        if not (8 * 60 <= a < b <= 22 * 60):
+            continue
+        tid = str(item.get("task_id") or "").strip()
+        blocks.append({"start": m0.group(0).zfill(5) if len(m0.group(0)) == 4 else m0.group(0),
+                       "end": m1.group(0).zfill(5) if len(m1.group(0)) == 4 else m1.group(0),
+                       "title": str(item.get("title") or "专注工作").strip()[:60],
+                       "task_id": tid if tid in by_id else ""})
+    plan = {"focus": focus, "blocks": blocks,
+            "note": str(data.get("note") or "").strip()[:120]}
+    if not focus and not blocks:
+        plan = fallback
+        return {"ok": True, "ai": True, "plan": plan, "message": "模型没有给出可用计划"}
+    return {"ok": True, "ai": True, "plan": plan}
+
+
+def _assist_breakdown(body):
+    title = str(body.get("title") or "").strip()
+    if not title:
+        return {"ok": False, "error": "缺少任务标题"}
+    intent = str(body.get("intent") or "").strip()[:800]
+    existing = []
+    tid = str(body.get("task_id") or "").strip()
+    if tid:
+        task = task_engine.get_task(tid)
+        if task:
+            existing = [str(s.get("title") or "") for s in (task.get("steps") or [])
+                        if s.get("title")]
+    prompt = (
+        "任务：%s\n补充说明：%s\n已有步骤：%s\n\n"
+        "请把它拆成 2-6 个可执行步骤，只输出 JSON：\n"
+        '{"steps":["步骤1","步骤2"],"note":"一句提醒"}\n'
+        "要求：每个步骤不超过 40 字、动词开头、能在一轮内完成；不要重复已有步骤。"
+    ) % (title, intent or "（无）", "、".join(existing) or "（无）")
+    data, err = _assist_json(prompt, max_tokens=600)
+    steps = []
+    if data:
+        raw = data.get("steps")
+        if isinstance(raw, list):
+            for s in raw[:8]:
+                s = str(s or "").strip()
+                if s:
+                    steps.append(s[:60])
+    if not steps:
+        # 本地兜底：按行拆分补充说明，再不行给一个通用三段式
+        steps = [x.strip()[:60] for x in re.split(r"[\n；;]", intent) if x.strip()][:6]
+        if not steps:
+            steps = ["梳理目标与所需材料", "完成主要工作", "检查结果并交付"]
+        return {"ok": True, "ai": False, "steps": steps,
+                "note": (err + "；" if err else "") + "这是本地兜底步骤，可继续编辑。"}
+    return {"ok": True, "ai": True, "steps": steps,
+            "note": str(data.get("note") or "").strip()[:120]}
+
+
+def _assist_review(body):
+    days = max(1, min(30, int(body.get("days") or 7)))
+    stats = work_extras.summary(days)
+    done_tasks = [t for t in task_engine.list_tasks(status="done", limit=200)
+                  if float(t.get("finished_at") or 0) >= float(stats.get("start_at") or 0)]
+    done_titles = [t.get("title") or "" for t in done_tasks[:12] if t.get("title")]
+    status_count = stats.get("status_count") or {}
+    prompt = (
+        "近 %s 天工作数据：\n"
+        "- 新建任务 %s 个，完成 %s 个，逾期 %s 个\n"
+        "- 专注 %s 分钟 / %s 段\n"
+        "- 状态分布：%s\n"
+        "- 高频标签：%s\n"
+        "- 最近完成：%s\n\n"
+        "请写一份简洁的工作复盘，Markdown，300-450 字，分「进展 / 卡点 / 下一步」三节；"
+        "只依据上面的数据，不要编造。"
+    ) % (days, sum(stats.get("created_by_day") or []), len(done_tasks),
+         stats.get("overdue") or 0, stats.get("focus_minutes") or 0,
+         stats.get("focus_sessions") or 0,
+         "、".join("%s %s" % (k, v) for k, v in status_count.items()) or "无",
+         "、".join("%s×%s" % (k, v) for k, v in (stats.get("tag_count") or [])) or "无",
+         "、".join(done_titles) or "无")
+    data, err = _assist_json(prompt, max_tokens=900)
+    text = str((data or {}).get("markdown") or "").strip() if data else ""
+    if not text:
+        text, err2 = _assist_text(prompt, max_tokens=900)
+        if text:
+            return {"ok": True, "ai": True, "markdown": text}
+        err = err2 or err
+    if not text:
+        text = ("## 近 %s 天复盘\n\n"
+                "### 进展\n- 新建任务 %s 个，完成 %s 个。\n- 专注 %s 分钟 / %s 段。\n\n"
+                "### 卡点\n- 当前逾期 %s 个任务。\n\n"
+                "### 下一步\n- 先处理逾期任务，再按优先级推进进行中的工作。\n"
+                % (days, sum(stats.get("created_by_day") or []), len(done_tasks),
+                   stats.get("focus_minutes") or 0, stats.get("focus_sessions") or 0,
+                   stats.get("overdue") or 0))
+        return {"ok": True, "ai": False, "markdown": text,
+                "message": err or "模型不可用，已生成本地摘要"}
+    return {"ok": True, "ai": True, "markdown": text}
 
 
 @route("/api/scene")
@@ -83,6 +301,20 @@ def _api_work_caps(h):
         items.append({"id": cap.id, "desc": cap.description,
                       "perm": cap.permission})
     return h._json({"ok": True, "items": items})
+
+
+@route("/api/work/assist")
+def _api_work_assist(h):
+    """AI 工作助手：只返回建议，写入动作仍由用户在界面上确认。"""
+    body = h._body()
+    op = str(body.get("op") or "plan_today").strip()
+    if op == "plan_today":
+        return h._json(_assist_plan())
+    if op == "breakdown":
+        return h._json(_assist_breakdown(body))
+    if op == "review":
+        return h._json(_assist_review(body))
+    return _bad(h, "未知操作：%s" % op)
 
 
 @route("/api/work/tasks")

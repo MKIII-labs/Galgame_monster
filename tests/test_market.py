@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""插件市场：DSH 索引的搜索 / 分页 / 缓存与离线回退（本地 Skill 模块已移除）。"""
+"""插件市场：DSH 索引的搜索 / 分页 / 缓存与离线回退；官方市场索引的本地 / 远端读取。"""
 import json
 import os
 
@@ -32,6 +32,23 @@ class _Resp:
 
     def json(self):
         return self._data
+
+
+class _Handler:
+    """最小 API handler 桩：只需要 _body / _json。"""
+
+    def __init__(self, body):
+        self.body = body
+        self.payload = None
+        self.code = 200
+
+    def _body(self):
+        return self.body
+
+    def _json(self, obj, code=200):
+        self.payload = obj
+        self.code = code
+        return obj
 
 
 @pytest.fixture
@@ -76,21 +93,7 @@ def test_dsh_without_cache_raises(cache, monkeypatch):
 def test_market_api_rejects_local_ops(cache):
     from app.api import market as api_market
 
-    class _H:
-        def __init__(self, body):
-            self.body = body
-            self.payload = None
-            self.code = 200
-
-        def _body(self):
-            return self.body
-
-        def _json(self, obj, code=200):
-            self.payload = obj
-            self.code = code
-            return obj
-
-    h = _H({"op": "list"})
+    h = _Handler({"op": "list"})
     api_market._api_market(h)
     assert h.code == 400
     assert h.payload["ok"] is False
@@ -100,3 +103,100 @@ def test_route_registered():
     from app.api import market as api_market          # noqa: F401  触发自注册
     from app.registry import get
     assert get("POST", "/api/market") is not None
+
+
+# ------------------------------------------------------------
+# 官方插件市场索引
+# ------------------------------------------------------------
+INDEX_RAW = {
+    "schema": 1,
+    "updated": "2026-11-01",
+    "items": [
+        {"id": "alpha", "name": "阿尔法", "version": "1.0.0", "author": "me",
+         "description": "示例", "permissions": ["read"],
+         "url": "https://x/alpha.zip", "sha256": "A" * 64, "size": "1024"},
+        {"id": "beta", "name": "贝塔", "url": "http://x/beta.zip", "sha256": "bad"},
+        {"id": "bad id", "name": "坏"},
+    ],
+}
+
+
+@pytest.fixture
+def index_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(market, "PLUGIN_INDEX_FILE", str(tmp_path / "market.json"))
+    monkeypatch.setattr(market, "PLUGIN_INDEX_CACHE",
+                        str(tmp_path / "cache" / "plugin_index.json"))
+    monkeypatch.setattr(market, "load_config",
+                        lambda: {"plugin_index_url": "", "plugin_index_ttl": 3600})
+    return tmp_path
+
+
+def test_plugin_index_local(index_env):
+    (index_env / "market.json").write_text(json.dumps(INDEX_RAW), encoding="utf-8")
+    out = market.plugin_index()
+    assert out["source"] == "local"
+    assert out["error"] == ""
+    assert out["updated"] == "2026-11-01"
+    # 非法 id 被丢弃；http 下载地址与非法 sha256 被清空
+    assert [i["id"] for i in out["items"]] == ["alpha", "beta"]
+    assert out["items"][0]["sha256"] == "a" * 64
+    assert out["items"][0]["size"] == 1024
+    assert out["items"][1]["url"] == ""
+    assert out["items"][1]["sha256"] == ""
+
+
+def test_plugin_index_local_broken(index_env):
+    (index_env / "market.json").write_text("{bad", encoding="utf-8")
+    out = market.plugin_index()
+    assert out["items"] == []
+    assert out["error"]
+    (index_env / "market.json").write_text('{"items": {}}', encoding="utf-8")
+    assert market.plugin_index()["error"]
+
+
+def test_plugin_index_remote_cache_and_fallback(index_env, monkeypatch):
+    monkeypatch.setattr(market, "load_config",
+                        lambda: {"plugin_index_url": "https://x/index.json",
+                                 "plugin_index_ttl": 3600})
+    calls = []
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        return _Resp(INDEX_RAW)
+
+    monkeypatch.setattr(market.requests, "get", fake_get)
+    out = market.plugin_index()
+    assert out["source"] == "remote"
+    assert out["stale"] is False
+    assert [i["id"] for i in out["items"]] == ["alpha", "beta"]
+    assert os.path.isfile(market.PLUGIN_INDEX_CACHE)
+
+    market.plugin_index()                       # TTL 内命中缓存，不再请求
+    assert len(calls) == 1
+
+    def boom(*a, **k):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(market.requests, "get", boom)
+    out2 = market.plugin_index(force=True)      # 断网：回退缓存
+    assert out2["stale"] is True
+    assert out2["error"]
+    assert len(out2["items"]) == 2
+
+
+def test_plugin_index_rejects_http(index_env, monkeypatch):
+    monkeypatch.setattr(market, "load_config",
+                        lambda: {"plugin_index_url": "http://x/index.json",
+                                 "plugin_index_ttl": 3600})
+    with pytest.raises(RuntimeError):
+        market.plugin_index()
+
+
+def test_market_api_official(index_env):
+    from app.api import market as api_market
+
+    (index_env / "market.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+    h = _Handler({"op": "official"})
+    api_market._api_market(h)
+    assert h.payload["ok"] is True
+    assert h.payload["items"] == []
+    assert h.payload["source"] == "local"

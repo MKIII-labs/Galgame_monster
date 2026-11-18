@@ -111,6 +111,25 @@ def test_missing_written_files(tmp_path):
     assert agent.missing_written_files(sid, str(tmp_path)) == []
 
 
+def test_missing_written_files_skips_file_deleted_on_purpose(tmp_path):
+    """写完又主动删掉的临时文件不算丢失：只看这个文件的最后一次操作。"""
+    sid = "s_recover"
+    p = tmp_path / "tmp.txt"
+    p.write_bytes(b"x")
+    agent._UNDO["a_tmp"] = {
+        "sid": sid, "ts": 2, "label": "write_file", "undone": False,
+        "ops": [{"kind": "restore", "path": str(p), "existed": False,
+                 "data": b"", "after": b"x", "after_existed": True}],
+    }
+    agent._UNDO["a_del"] = {
+        "sid": sid, "ts": 3, "label": "delete_file", "undone": False,
+        "ops": [{"kind": "restore", "path": str(p), "existed": True,
+                 "data": b"x", "after": b"", "after_existed": False}],
+    }
+    p.unlink()
+    assert agent.missing_written_files(sid, str(tmp_path)) == []
+
+
 def test_undo_step_refuses_missing(tmp_path):
     sid = "s_recover"
     token, p = _add(tmp_path, sid)

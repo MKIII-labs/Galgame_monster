@@ -6,7 +6,7 @@
  例如 misc 里既 import 了 `save_config`，又有同名的路由函数。）"""
 import pytest
 
-from app.api import gal_character, gal_media, hall, kb, misc, notes, savepoints, sandbox
+from app.api import hall, kb, misc, notes, sandbox
 
 
 class FakeHandler:
@@ -54,15 +54,21 @@ def test_misc_state_runs():
 def test_misc_state_reports_streaming_sessions():
     """断线重连要靠 streaming 判断任务结束没，不能只凭 attach 失败就收尾。"""
     import threading
+    import time
 
     from app.store import ACTIVE_STREAMS
+    from app.api.chat import LEASE_STARTED
     h = FakeHandler()
     ACTIVE_STREAMS["s_test"] = threading.Event()
+    # 现在 stream_alive 不再把「只有 ACTIVE_STREAMS、没有 JOBS」的条目直接算活：
+    # 要么有 job，要么在 LEASE_STARTED 的 30 秒装配窗口内。这里模拟后者。
+    LEASE_STARTED["s_test"] = time.time()
     try:
         misc._api_state(h)
         assert "s_test" in h.last()[1]["streaming"]
     finally:
         ACTIVE_STREAMS.pop("s_test", None)
+        LEASE_STARTED.pop("s_test", None)
 
 
 def test_misc_usage_runs():
@@ -96,12 +102,6 @@ def test_kb_list_and_missing_get():
     h2 = FakeHandler({"id": "kb_not_exist"})
     kb._api_kb_get(h2)
     assert h2.last()[0] in (200, 404)          # 不存在也不能崩
-
-
-def test_savepoints_list_runs():
-    h = FakeHandler({"id": "s_not_exist"})
-    savepoints._api_save_list(h)
-    assert h.last()[0] == 200
 
 
 def test_session_search_matches_title_and_body(monkeypatch):
@@ -170,36 +170,25 @@ def test_kb_save_stores_families_and_layout(monkeypatch):
     assert saved["layout_mode"] == "physics"
 
 
-def test_gal_characters_runs():
-    h = FakeHandler()
-    gal_character._api_gal_characters(h)
-    code, obj = h.last()
-    assert code == 200
-    assert isinstance(obj, (list, dict))
-
-
-def test_gal_backgrounds_runs():
-    h = FakeHandler()
-    gal_media._api_gal_backgrounds(h)
-    assert h.last()[0] == 200
-
-
-def test_misc_save_config_does_not_recurse(monkeypatch):
-    """防回归：misc 里 import 的 save_config(cfg) 必须指向 app.config，
-    不能被同名的路由函数遮蔽（否则把自己当参数传进去 → AttributeError）。"""
-    from app import config as cfg_mod
+def test_misc_save_config_delegates_to_settings_center(monkeypatch):
+    """防回归：/api/config 必须走设置中心的 save_patch（校验 + 历史），
+    不能自己直接写文件；misc 里也不能把同名路由函数当配置传进去。"""
+    from app import settings_center
     from app.api import misc as misc_mod
 
     seen = {}
 
-    def fake_save_config(cfg):
-        seen["cfg"] = cfg
+    def fake_save_patch(patch, source=""):
+        seen["patch"], seen["source"] = patch, source
+        return {"ok": True, "history_id": "h1", "changed": ["chat_model"]}
 
-    monkeypatch.setattr(misc_mod, "save_config", fake_save_config)
+    monkeypatch.setattr(settings_center, "save_patch", fake_save_patch)
     h = FakeHandler({"chat_model": "x"})
     misc_mod._api_save_config(h)
-    assert seen.get("cfg", {}).get("chat_model") == "x"
-    assert h.last()[0] == 200
+    assert seen["patch"]["chat_model"] == "x"
+    assert seen["source"] == "api/config"
+    code, obj = h.last()
+    assert code == 200 and obj.get("ok") is True
 
 
 # ---------------- 功能大厅：图寻游戏 ----------------

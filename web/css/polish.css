@@ -474,6 +474,9 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
   overscroll-behavior-y: contain;      /* 滚到顶/底不再把整页橡皮筋带动 */
   scroll-padding-bottom: 24px;
 }
+/* 跟随中关掉浏览器的滚动锚定：位置由 follow.js 自己算，避免两套补偿叠加后
+   出现「先被浏览器顶走、再被脚本拉回」的抖动。不跟随时保留锚定，读历史更稳。 */
+#chat.following { overflow-anchor: none; }
 
 /* --- 视图切换：面板淡入（只动 opacity，见 gal-ide.js 的说明） --- */
 @keyframes panelIn {
@@ -482,6 +485,28 @@ details.fold .fold-body p:last-child { margin-bottom: 0; }
 }
 .panel-in { animation: panelIn var(--dur-2) var(--ease-out); }
 .chat-fade { animation: panelIn var(--dur-2) var(--ease-out); }
+
+/* --- 页面切换：顶层只动主内容区（View Transitions，见 page-transition.js） ---
+   给 #main 单独命名，侧栏 / 顶栏不参与动画；root 默认交叉淡化关掉，避免双重淡入。 */
+#main { view-transition-name: gm-main; }
+::view-transition-old(root),
+::view-transition-new(root) { animation: none; }
+::view-transition-old(gm-main) { animation: gmPageOut 120ms var(--ease) both; }
+::view-transition-new(gm-main) { animation: gmPageIn 180ms var(--ease-out) both; }
+@keyframes gmPageOut { to { opacity: 0; } }
+@keyframes gmPageIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+/* 内层页面（大厅模块 / 工作台视图 / 设置页签 / 大面板）：只淡入 + 轻微上移 */
+.page-in { animation: gmPageIn 160ms var(--ease-out); }
+/* 首进骨架：放在面板内容区，替掉「正在加载…」的白屏 */
+.page-skeleton {
+  padding: var(--sp-5) var(--sp-6);
+  min-height: 120px;
+}
+.page-skeleton .sk-line { height: 13px; }
+.page-skeleton .sk-line:first-child { height: 20px; }
 
 /* --- 统一按钮手感：hover / active 都有短过渡，不再「瞬跳」 --- */
 button {
@@ -499,9 +524,6 @@ button:disabled { cursor: not-allowed; }
 .tool-head:active,
 .subagent-top:active,
 .set-card-head:active { background: var(--bg-active); }
-.mode-card { transition: background var(--t) var(--ease), border-color var(--t) var(--ease),
-                         transform var(--t-press) var(--ease), box-shadow var(--t) var(--ease); }
-.mode-card:active { transform: scale(.985); }
 
 /* --- 发送按钮：点击后进入「受理中」转圈，响应头回来即复原 --- */
 .send { position: relative; }
@@ -529,5 +551,8 @@ button:disabled { cursor: not-allowed; }
 /* --- 减弱动效：新增的入场动画一并不播 --- */
 @media (prefers-reduced-motion: reduce) {
   .panel-in, .chat-fade { animation: none; }
+  .page-in { animation: none; }
+  ::view-transition-old(gm-main),
+  ::view-transition-new(gm-main) { animation: none; }
   .send.is-busy::after { animation-duration: 1.6s; }   /* 仍保留「在处理」的信号 */
 }

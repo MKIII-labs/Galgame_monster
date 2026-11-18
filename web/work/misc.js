@@ -113,6 +113,13 @@ async function workOpenMemory(query, includeMirror) {
       '共 ' + (stats.total || 0) + ' 条' + (by ? ' · ' + by : '')));
     body.appendChild(workElNew('div', 'work-hint',
       '这里只做全局搜索；编辑画像 / 知识库 / 笔记请走侧栏对应入口。'));
+    const openWs = workElNew('button', 'work-btn ghost', '打开知识库工作区');
+    openWs.title = '在本会话记忆 / 用户画像 / 通用知识库里查看与编辑';
+    openWs.onclick = () => {
+      workCloseDialog();
+      if (typeof openKbModal === 'function') openKbModal('session');
+    };
+    body.appendChild(openWs);
 
     const mirror = document.createElement('input');
     mirror.type = 'checkbox';

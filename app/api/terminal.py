@@ -40,11 +40,16 @@ def _api_term_start(h):
     box, err = _sandbox_of(sid)
     if err:
         return _fail(h, err)
+    # 重启某个终端：先关掉指定的那个，再新建一个（不动同会话的其它终端）
+    old_tid = str(body.get("tid") or "")
+    if old_tid:
+        terminal.drop(old_tid)
     try:
         t = terminal.start(sid, box,
                            cols=_int(body.get("cols"), 120, 20, 500),
                            rows=_int(body.get("rows"), 30, 5, 200),
-                           force=bool(body.get("force")))
+                           force=bool(body.get("force")),
+                           fresh=bool(body.get("new")) or bool(old_tid))
     except terminal.TerminalError as e:
         return _fail(h, str(e))
     except Exception as e:                       # noqa: BLE001

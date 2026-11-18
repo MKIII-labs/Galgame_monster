@@ -96,6 +96,17 @@ function workTaskCard(t) {
   meta.textContent = bits.join(' · ');
   card.appendChild(meta);
 
+  // 每张任务卡一个 AI 拆解入口：直接跳到右侧助手并生成步骤
+  const aiBtn = workElNew('button', 'work-task-ai', '✦');
+  aiBtn.type = 'button';
+  aiBtn.title = '让 AI 拆解这个任务';
+  aiBtn.onclick = (e) => {
+    e.stopPropagation();
+    if (typeof workAiBreakdown === 'function') workAiBreakdown(t.id);
+  };
+  aiBtn.onkeydown = (e) => e.stopPropagation();
+  card.appendChild(aiBtn);
+
   card.onclick = () => workOpenTask(t.id);
   card.tabIndex = 0;
   card.setAttribute('role', 'button');

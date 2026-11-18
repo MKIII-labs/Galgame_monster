@@ -97,7 +97,6 @@ RECORDS = []
 def _boot(monkeypatch, messages):
     """起假模型 + 重定向会话文件 + 起 httpd + 开 Edge，返回 (ev, sid, close)。"""
     import app.usage as U
-    import app.saves as SA
     from app import httpd
     from app.computer.cdp import CDP
 
@@ -126,7 +125,6 @@ def _boot(monkeypatch, messages):
             monkeypatch.setattr(mod, "load_config", patch)
     monkeypatch.setattr(C, "save_config", lambda c: None)
     monkeypatch.setattr(U, "record_usage", lambda *a, **k: None)
-    monkeypatch.setattr(SA, "add_save", lambda *a, **k: None)
     RECORDS.clear()
     monkeypatch.setattr(chat_mod, "record_usage",
                         lambda rec, *a, **k: RECORDS.append(rec))

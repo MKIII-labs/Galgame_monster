@@ -3,10 +3,10 @@
    ------------------------------------------------------------
    两个 tab：
      已安装：Python 工具插件（启停 / 详情 / 卸载）+ MCP 服务器开关
-     发现：内置官方插件（可安装）+ DSH 生态索引（只读）
-   支持安装：内置源 / 本地目录 / zip / https Git 仓库。
+     发现：官方市场（可安装）+ 内置官方插件 + DSH 生态索引（只读）
+   支持安装：官方市场 / 内置源 / 本地目录 / zip / https Git 仓库。
    插件是任意 Python 代码：安装与启用都要确认，且重启应用后才加载。
-   后端：/api/plugins（app/api/plugins.py）、/api/market（DSH 索引）
+   后端：/api/plugins（app/api/plugins.py）、/api/market（市场索引）
    ============================================================ */
 'use strict';
 
@@ -19,6 +19,7 @@ function marketMount(root) {
     catalog: [],
     mcp: { enabled: false, tool_mode: 'lazy', servers: [] },
     dsh: { items: [], page: 1, total: 0, categories: {}, updated: '', stale: false, error: '' },
+    market: { items: [], updated: '', stale: false, error: '', source: '', loading: false, loaded: false },
     source: 'builtin',          // builtin | dsh
     q: '',
     cat: '',
@@ -37,7 +38,7 @@ function marketMount(root) {
   title.textContent = '插件';
   const desc = document.createElement('p');
   desc.className = 'hint';
-  desc.textContent = '管理 Python 工具插件与 MCP 服务器；也可以从内置源、本地目录、zip、Git 或单文件 .py 安装。'
+  desc.textContent = '管理 Python 工具插件与 MCP 服务器；也可以从官方市场、内置源、本地目录、zip、Git 或单文件 .py 安装。'
     + '插件以你的权限运行，安装/启用前请确认来源；装完要重启应用才加载。';
   hero.appendChild(title);
   hero.appendChild(desc);
@@ -70,6 +71,7 @@ function marketMount(root) {
   pluginTitle.textContent = '工具插件';
   const pluginList = document.createElement('div');
   pluginList.className = 'mk-list';
+  if (typeof gmSkeleton === 'function') gmSkeleton(pluginList, 3);   // 首次列表请求先铺骨架
 
   const mcpTitle = document.createElement('h4');
   mcpTitle.className = 'mk-section';
@@ -92,7 +94,7 @@ function marketMount(root) {
   const srcBuiltin = document.createElement('button');
   srcBuiltin.type = 'button';
   srcBuiltin.className = 'mk-tab active';
-  srcBuiltin.textContent = '官方插件';
+  srcBuiltin.textContent = '官方 / 市场';
   const srcDsh = document.createElement('button');
   srcDsh.type = 'button';
   srcDsh.className = 'mk-tab';
@@ -114,12 +116,24 @@ function marketMount(root) {
   dirBtn.type = 'button';
   dirBtn.className = 'mk-btn';
   dirBtn.textContent = '打开插件目录';
+  const marketRefBtn = document.createElement('button');
+  marketRefBtn.type = 'button';
+  marketRefBtn.className = 'mk-btn';
+  marketRefBtn.textContent = '刷新市场';
   installBar.appendChild(localBtn);
   installBar.appendChild(remoteBtn);
   installBar.appendChild(dirBtn);
+  installBar.appendChild(marketRefBtn);
 
   const builtinBox = document.createElement('div');
   builtinBox.className = 'mk-grid';
+
+  const marketGrid = document.createElement('div');
+  marketGrid.className = 'mk-grid';
+  if (typeof gmSkeleton === 'function') gmSkeleton(marketGrid, 3);
+
+  const marketMeta = document.createElement('div');
+  marketMeta.className = 'mk-meta';
 
   const dshBar = document.createElement('div');
   dshBar.className = 'mk-toolbar hidden';
@@ -161,7 +175,8 @@ function marketMount(root) {
     + '<p class="mk-guide-step"><b>最快 3 步</b>：① 到「已安装」打开总开关（默认关闭）→ '
     + '② 选一种方式安装 → ③ 重启应用；状态显示「已加载」才算成功。</p>'
     + '<table class="mk-guide-table"><thead><tr><th>方式</th><th>怎么装</th><th>要求</th></tr></thead><tbody>'
-    + '<tr><td>内置官方</td><td>「官方插件」卡片点安装</td><td>随项目发布；当前内置源为空</td></tr>'
+    + '<tr><td>官方市场</td><td>「官方 / 市场」卡片点安装</td><td>索引给出 https zip 地址，下载后校验 sha256</td></tr>'
+    + '<tr><td>内置源</td><td>「官方 / 市场」里的内置卡片点安装</td><td>随项目发布；当前内置源为空</td></tr>'
     + '<tr><td>本地目录</td><td>「从本地目录安装」选目录</td><td>目录里有 plugin.json + 入口 .py</td></tr>'
     + '<tr><td>zip</td><td>「从 zip / Git 安装」填 .zip 路径</td><td>根目录（或只多套一层）有 plugin.json</td></tr>'
     + '<tr><td>Git</td><td>同上，填 https:// 仓库地址</td><td>公开仓库；根目录（或一层子目录）有 plugin.json</td></tr>'
@@ -201,6 +216,8 @@ function marketMount(root) {
   discoverPanel.appendChild(sources);
   discoverPanel.appendChild(installBar);
   discoverPanel.appendChild(builtinBox);
+  discoverPanel.appendChild(marketGrid);
+  discoverPanel.appendChild(marketMeta);
   discoverPanel.appendChild(dshBar);
   discoverPanel.appendChild(dshNotice);
   discoverPanel.appendChild(dshMeta);
@@ -285,23 +302,73 @@ function marketMount(root) {
 
   /* ---------- 发现渲染 ---------- */
   function renderBuiltin() {
-    builtinBox.innerHTML = S.catalog.length
-      ? S.catalog.map((it) => ('<div class="mk-card">'
+    builtinBox.classList.toggle('hidden', !S.catalog.length);
+    if (!S.catalog.length) {
+      builtinBox.innerHTML = '';
+      return;
+    }
+    builtinBox.innerHTML = S.catalog.map((it) => ('<div class="mk-card">'
+      + '<div class="mk-card-head"><span class="mk-name">' + escapeHtml(it.name) + '</span>'
+      + (it.version ? '<span class="mk-ver">v' + escapeHtml(it.version) + '</span>' : '')
+      + '<span class="mk-badge">' + (it.installed ? '已安装' : '内置') + '</span></div>'
+      + '<p class="mk-desc">' + escapeHtml(it.description || '无描述') + '</p>'
+      + (it.permissions.length ? '<div class="mk-tags">'
+        + it.permissions.map((x) => '<span class="mk-tag warn">' + escapeHtml(x) + '</span>').join('')
+        + '</div>' : '')
+      + '<div class="mk-card-foot"><span class="mk-cat">' + escapeHtml(it.id) + '</span>'
+      + '<span class="mk-actions">'
+      + (it.installed
+        ? '<button type="button" class="mk-btn" disabled>已安装</button>'
+        : '<button type="button" class="mk-btn primary" data-act="install-builtin" data-id="'
+          + escapeHtml(it.id) + '">安装</button>')
+      + '</span></div></div>')).join('');
+  }
+
+  function fmtSize(n) {
+    const v = Number(n) || 0;
+    if (v <= 0) return '';
+    if (v < 1024 * 1024) return Math.max(1, Math.round(v / 1024)) + ' KB';
+    return (v / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  function renderMarket() {
+    if (S.market.loading) return;
+    const installed = new Set((S.plugins.plugins || []).map((p) => p.id));
+    const items = S.market.items || [];
+    if (!items.length) {
+      marketGrid.innerHTML = '<p class="mk-empty">'
+        + escapeHtml(S.market.error || '市场里还没有插件。') + '</p>';
+      marketMeta.textContent = '';
+      return;
+    }
+    marketGrid.innerHTML = items.map((it) => {
+      const has = installed.has(it.id);
+      const size = fmtSize(it.size);
+      return '<div class="mk-card">'
         + '<div class="mk-card-head"><span class="mk-name">' + escapeHtml(it.name) + '</span>'
         + (it.version ? '<span class="mk-ver">v' + escapeHtml(it.version) + '</span>' : '')
-        + '<span class="mk-badge">' + (it.installed ? '已安装' : '官方') + '</span></div>'
+        + '<span class="mk-badge' + (has ? ' on' : '') + '">' + (has ? '已安装' : '市场')
+        + '</span></div>'
         + '<p class="mk-desc">' + escapeHtml(it.description || '无描述') + '</p>'
+        + (it.author ? '<div class="mk-sub">' + escapeHtml(it.author) + '</div>' : '')
         + (it.permissions.length ? '<div class="mk-tags">'
           + it.permissions.map((x) => '<span class="mk-tag warn">' + escapeHtml(x) + '</span>').join('')
           + '</div>' : '')
-        + '<div class="mk-card-foot"><span class="mk-cat">' + escapeHtml(it.id) + '</span>'
-        + '<span class="mk-actions">'
-        + (it.installed
-          ? '<button type="button" class="mk-btn" disabled>已安装</button>'
-          : '<button type="button" class="mk-btn primary" data-act="install-builtin" data-id="'
-            + escapeHtml(it.id) + '">安装</button>')
-        + '</span></div></div>')).join('')
-      : '<p class="mk-empty">内置源为空。可以用「从本地目录安装」或「从 zip / Git 安装」。</p>';
+        + '<div class="mk-card-foot"><span class="mk-cat">' + escapeHtml(it.id)
+        + (size ? ' · ' + size : '') + '</span><span class="mk-actions">'
+        + (has ? '<button type="button" class="mk-btn" disabled>已安装</button>'
+          : (it.url
+            ? '<button type="button" class="mk-btn primary" data-act="install-market" data-id="'
+              + escapeHtml(it.id) + '">安装</button>'
+            : '<button type="button" class="mk-btn" disabled>暂无下载</button>'))
+        + '</span></div></div>';
+    }).join('');
+    const bits = [S.market.source === 'local' ? '随包索引' : '官方市场'];
+    if (S.market.updated) bits.push('更新于 ' + S.market.updated);
+    bits.push('共 ' + items.length + ' 个');
+    if (S.market.stale) bits.push('离线缓存');
+    if (S.market.error) bits.push(S.market.error);
+    marketMeta.textContent = bits.join(' · ');
   }
 
   function fillDshCats() {
@@ -363,7 +430,10 @@ function marketMount(root) {
     const builtin = src === 'builtin';
     srcBuiltin.classList.toggle('active', builtin);
     srcDsh.classList.toggle('active', !builtin);
-    builtinBox.classList.toggle('hidden', !builtin);
+    builtinBox.classList.toggle('hidden', !builtin || !S.catalog.length);
+    marketGrid.classList.toggle('hidden', !builtin);
+    marketMeta.classList.toggle('hidden', !builtin);
+    marketRefBtn.classList.toggle('hidden', !builtin);
     dshBar.classList.toggle('hidden', builtin);
     dshNotice.classList.toggle('hidden', builtin);
     dshMeta.classList.toggle('hidden', builtin);
@@ -379,6 +449,7 @@ function marketMount(root) {
     S.mcp = r.mcp || S.mcp;
     renderInstalled();
     renderBuiltin();
+    if (S.market.loaded) renderMarket();
   }
 
   async function loadPlugins() {
@@ -386,6 +457,27 @@ function marketMount(root) {
       applyPayload(await api('/api/plugins', { op: 'list' }));
     } catch (e) {
       pluginList.innerHTML = '<p class="mk-empty">读取失败：' + escapeHtml(e.message) + '</p>';
+    }
+  }
+
+  async function loadMarket(force) {
+    if (S.market.loading) return;
+    S.market.loading = true;
+    if (!S.market.items.length && typeof gmSkeleton === 'function') gmSkeleton(marketGrid, 3);
+    try {
+      const r = await api('/api/market', { op: 'official', refresh: !!force });
+      S.market.items = r.items || [];
+      S.market.updated = r.updated || '';
+      S.market.stale = !!r.stale;
+      S.market.error = r.error || '';
+      S.market.source = r.source || '';
+    } catch (e) {
+      S.market.items = [];
+      S.market.error = e.message;
+    } finally {
+      S.market.loading = false;
+      S.market.loaded = true;
+      renderMarket();
     }
   }
 
@@ -529,6 +621,15 @@ function marketMount(root) {
     install('builtin', { id: btn.dataset.id }, it.name);
   });
 
+  marketGrid.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act="install-market"]');
+    if (!btn) return;
+    const it = S.market.items.find((x) => x.id === btn.dataset.id);
+    if (!it || !it.url) return;
+    install('url', { url: it.url, sha256: it.sha256, size: it.size }, it.name);
+  });
+  marketRefBtn.onclick = () => loadMarket(true);
+
   localBtn.onclick = async () => {
     try {
       const pick = await api('/api/sandbox/pick', {});
@@ -589,6 +690,7 @@ function marketMount(root) {
 
   marketRefreshFn = loadPlugins;
   loadPlugins();
+  loadMarket(false);
 }
 
 /* 进入插件页：首次挂载；之后只刷新已安装列表 */

@@ -2,6 +2,7 @@
 """会话读写、精简与旧格式解析"""
 import os
 import re
+import shutil
 import time
 
 from app.store import (SESSION_FILE, LEGACY_HISTORY, DATA_DIR, read_json, write_json,
@@ -11,7 +12,11 @@ from app.store import (SESSION_FILE, LEGACY_HISTORY, DATA_DIR, read_json, write_
 # 不再为了一个 current 字段把 20MB 的 sessions.json 全量重写（实测 230ms）。
 CURRENT_FILE = os.path.join(DATA_DIR, "current_session.json")
 # 切会话/首屏只回最近这么多条消息；更早的用 /api/session/messages 按需拉。
-MSG_WINDOW = 80
+MSG_WINDOW = 40
+# 旧逻辑只认 doc_text：小文档保留一份兼容副本，大文档不再重复存（见 session_compact）
+DOC_TEXT_COMPAT_MAX = 200_000
+# 单份附件正文最多内联多少字；重解析附件时也要守住，否则会重新撑大 sessions.json
+MAX_INLINE_DOC_CHARS = 2_000_000
 # 每个会话最多保存多少个「提问标记」：悬浮按钮太多会挡住聊天区
 MAX_QMARKS = 20
 # 单会话快照目录（跟 SESSION_FILE 同目录：测试把 SESSION_FILE 指到临时目录时也隔离）
@@ -32,6 +37,50 @@ def _store_path(sid):
     return os.path.join(_store_dir(), _safe_sid(sid) + ".json")
 
 
+def _backup_corrupt_session_file():
+    """sessions.json 存在但解析不出会话时，先复制一份再重建。
+
+    以前 read_json 失败会直接返回空，load_sessions 随即新建会话并覆盖原文件，
+    一次临时占用或半截写入就能把整份历史静默清空。
+    """
+    try:
+        if not os.path.exists(SESSION_FILE) or os.path.getsize(SESSION_FILE) <= 2:
+            return
+        dst = "%s.corrupt-%d" % (SESSION_FILE, int(time.time()))
+        shutil.copy2(SESSION_FILE, dst)
+        print("[会话] sessions.json 读取失败，已备份到 %s" % os.path.basename(dst))
+    except Exception as e:                # noqa: BLE001  备份失败不能影响启动
+        print("[会话] 备份损坏的 sessions.json 失败：%s" % e)
+
+
+def drop_session_files(sid):
+    """删除会话时清理所有派生数据：单会话快照、事件流、轨迹、终端会话。
+
+    只删 sessions 列表里的条目会留下几十 MB 的孤儿文件，且磁盘上仍能被恢复出来。
+    """
+    s = str(sid or "").strip()
+    if not s:
+        return
+    safe = _safe_sid(s)
+    try:
+        os.remove(_store_path(s))
+    except OSError:
+        pass
+    shutil.rmtree(os.path.join(os.path.dirname(SESSION_FILE), "sessions", safe),
+                  ignore_errors=True)
+    for mod, fn in (("trajectory", "drop"), ("session_events", "drop_last"),
+                    ("terminal", "drop_by_sid")):
+        try:
+            m = __import__("app." + mod, fromlist=[fn])
+            getattr(m, fn)(s)
+        except Exception:                # noqa: BLE001  清理失败不影响删除结果
+            pass
+    try:
+        drop_cache(_store_path(s))
+    except Exception:                    # noqa: BLE001
+        pass
+
+
 def ensure_session_kb_fields(s):
     s.setdefault("memory", {"nodes": [], "edges": []})
     s.setdefault("kb_ids", [])
@@ -42,26 +91,6 @@ def ensure_session_kb_fields(s):
     s.setdefault("sandbox", "")            # Agent 的沙箱目录（绝对路径）
     s.setdefault("auto_chat", False)           # 主动聊天：AI 隔一段时间主动发消息
     s.setdefault("scene", "general")           # 场景包：general | office | study | life
-    # ---- GAL 演出模式（见 docs/GAL_MODE_DESIGN.md）----
-    s.setdefault("gal_enabled", False)      # 该会话是否以 GAL 模式对话
-    # 记忆范围：main = Solo/IDE 共用；gal = 剧场专用（独立记忆，不继承主会话）
-    s.setdefault("gal_scope", "main")
-    # 剧场可以从全局记忆里「读」什么（默认全关；写入始终只进本会话）
-    s.setdefault("gal_use_profile", False)  # 读用户画像
-    s.setdefault("gal_use_kb", False)       # 读本会话绑定的知识库
-    s.setdefault("gal_use_rules", False)    # 读全局规则（角色 / 文风 / 约束）
-    s.setdefault("gal_character_id", "")    # 当前角色 id
-    s.setdefault("gal_bg", "")              # 当前舞台背景（相对路径）
-    s.setdefault("gal_bgm", "")             # 当前舞台 BGM（相对路径）
-    s.setdefault("gal_stats", [])           # 当前舞台状态参数
-    s.setdefault("gal_map", {})             # 当前舞台方位（{place, marks:[{name,pos}]}）
-    s.setdefault("gal_node_id", "")         # 剧情节点（P4 使用）
-    s.setdefault("gal_round", 0)            # 当前节点内回合数（P4 使用）
-    # ---- GAL AI 自动写剧本（每个会话独立保存 AI 生成的剧本）----
-    s.setdefault("gal_auto_on", False)      # 该会话是否启用 AI 自动剧本
-    s.setdefault("gal_auto_story", {})      # AI 生成的剧本（结构与 story.json 一致）
-    s.setdefault("gal_auto_outline", "")    # 全剧走向摘要（注入用）
-    s.setdefault("gal_auto_acts_done", 0)   # 已演出完成的幕数
     if not isinstance(s.get("memory"), dict):
         s["memory"] = {"nodes": [], "edges": []}
     s["memory"].setdefault("nodes", [])
@@ -386,14 +415,22 @@ def _merge_store_snapshots(data):
     return recovered
 
 
-def _mark_resume_pending(data):
+def _mark_resume_pending(data, live_ids=None):
     """把上次中断留下的 `_progress` 快照转成「可继续任务」状态。
 
-    只在进程启动后第一次加载时做一次；正常结束的回合，收尾会删掉这条快照，
-    所以这里命中的一定是「上次进程中途退出」。
+    只在进程启动时做一次（由 `startup_recover` 调用）；正常结束的回合，收尾会删掉
+    这条快照，所以这里命中的一定是「上次进程中途退出」。
+
+    live_ids：当前确实有活跃流的会话。即使被误调用（例如别的入口重新触发了恢复），
+    也不能把正在生成的那条进度快照标成中断 —— 否则流式循环下一次落库会因为
+    `_progress` 被清掉而新建第二条 assistant，表现为同一轮输出出现多段重复气泡。
     """
-    dirty = False
+    live = {str(x) for x in (live_ids or ())}
+    dirty = 0
     for s in data.get("sessions") or []:
+        sid = str(s.get("id") or "")
+        if sid and sid in live:
+            continue
         msgs = s.get("messages") or []
         if not msgs:
             continue
@@ -407,8 +444,76 @@ def _mark_resume_pending(data):
                 "action": "resume",
             }
             s["resume_pending"] = True
-            dirty = True
-    return dirty
+            dirty += 1
+    if dirty:
+        print("[会话] 断点恢复：%d 个会话标记为可继续" % dirty)
+    return dirty > 0
+
+
+def _collapse_resume_duplicates(data):
+    """合并「断点恢复误标」留下的重复 assistant 消息。
+
+    现场（2026-11-14 00:29 / 00:30）：运行中的进度快照被误标成 resume，
+    流式循环下一次落库时又新建一条完整快照，于是同一轮回答变成
+    「408 字 → 4498 字 → 11822 字」三条相邻 assistant，后一条包含前一条。
+
+    只合并同时满足这些条件的相邻消息，避免误伤正常历史：
+      · 两条都是 assistant，中间没有 user；
+      · 前一条带 interrupted 或 end_reason.kind == 'resume'；
+      · 后一条正文严格更长，且以前一条正文为前缀。
+    保留后一条（内容、工具、计划、blocks 都更完整）。
+    """
+    changed = 0
+    for s in data.get("sessions") or []:
+        msgs = s.get("messages") or []
+        before = len(msgs)
+        i = 0
+        while i + 1 < len(msgs):
+            a, b = msgs[i], msgs[i + 1]
+            if not (isinstance(a, dict) and isinstance(b, dict)):
+                i += 1
+                continue
+            ac = str(a.get("content") or "")
+            bc = str(b.get("content") or "")
+            is_resume_dup = (
+                a.get("role") == "assistant" and b.get("role") == "assistant"
+                and (a.get("interrupted") or (a.get("end_reason") or {}).get("kind") == "resume")
+                and ac and bc.startswith(ac) and len(bc) >= len(ac)
+            )
+            if is_resume_dup:
+                msgs.pop(i)
+                changed += 1
+                continue
+            i += 1
+        if len(msgs) != before:
+            s["messages"] = msgs
+    if changed:
+        print("[会话] 合并断点重复消息：%d 条" % changed)
+    return changed > 0
+
+
+def startup_recover(live_ids=None):
+    """进程启动时的会话恢复：合并重复消息 + 标记可继续的断点。
+
+    只在这里调用一次（`app/httpd.py` 的 create_server），不再挂在
+    `load_sessions()` 里 —— 否则任意一次加载失败重试都可能在生成过程中
+    把正在写的进度快照误标成中断。
+    """
+    data = load_sessions()
+    changed = _collapse_resume_duplicates(data)
+    if _mark_resume_pending(data, live_ids=live_ids):
+        changed = True
+    if changed:
+        # 历史数据修复前先留一份整份备份（26MB 级；只在真有变更时写一次）
+        try:
+            import shutil
+            bak = SESSION_FILE + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
+            if not os.path.exists(bak):
+                shutil.copyfile(SESSION_FILE, bak)
+        except OSError as e:
+            print("[会话] 备份失败（继续写入）：%s" % e)
+        save_sessions(data)
+    return data
 
 
 def reap_orphan_progress(data, live_ids):
@@ -466,6 +571,13 @@ def _apply_current(data):
 def load_sessions():
     global _MERGED
     data = read_json(SESSION_FILE)
+    if not (isinstance(data, dict) and data.get("sessions")) and os.path.exists(SESSION_FILE):
+        # 可能是杀软/另一个句柄短暂占用：重试一次再判定损坏，避免把「暂时读不到」
+        # 当成空文件直接覆盖。真损坏时先备份，原来的历史至少还能人工恢复。
+        time.sleep(0.05)
+        data = read_json(SESSION_FILE)
+        if not (isinstance(data, dict) and data.get("sessions")):
+            _backup_corrupt_session_file()
     if isinstance(data, dict) and data.get("sessions"):
         for s in data["sessions"]:
             s.setdefault("id", new_id())
@@ -485,9 +597,9 @@ def load_sessions():
                 # 2) 没有快照可用的会话，再看事件流是否更新
                 if _store_mode() == "events":
                     _merge_events_once(data, skip=recovered)
-                if _mark_resume_pending(data):
-                    # 走 save_sessions 而不是 write_json：这次变更也要进事件流
-                    save_sessions(data)
+                # 断点恢复不在这里做：见 startup_recover()。load_sessions 会被
+                # 生成中的落库反复调用，任何一次异常重试都不该把正在写的
+                # _progress 快照误标成「上次运行中途退出」。
             except Exception:
                 _MERGED = False
                 raise
@@ -609,6 +721,24 @@ def _payload_msg_window(default=MSG_WINDOW):
         return default
 
 
+def slim_message_for_client(m):
+    """前端展示用的消息：剥掉只有服务端上下文才需要的附件正文。
+
+    `docs[].text` / `doc_text` 可能是几十万字（一本教材），前端只用
+    name / size / chars / file；预览走 /api/attach/get，正文由服务端在
+    发请求时注入 —— 放进 payload 只是白白撑大首屏流量。
+    """
+    if not isinstance(m, dict):
+        return m
+    out = dict(m)
+    out.pop("doc_text", None)
+    docs = out.get("docs")
+    if isinstance(docs, list) and docs:
+        out["docs"] = [{k: v for k, v in d.items() if k != "text"}
+                       if isinstance(d, dict) else d for d in docs]
+    return out
+
+
 def slim_sessions(data, msg_limit=None):
     """只保留当前会话的消息，其余会话 messages 置为 None（前端切换时再按需拉取），
     避免每次进页面都把全部历史塞进 payload。
@@ -636,7 +766,7 @@ def slim_sessions(data, msg_limit=None):
             except (TypeError, ValueError):
                 limit = MSG_WINDOW
             start = max(0, len(msgs) - limit) if limit > 0 else 0
-            item["messages"] = msgs[start:]
+            item["messages"] = [slim_message_for_client(x) for x in msgs[start:]]
             item["msg_start"] = start
         else:
             item["messages"] = None
@@ -667,19 +797,6 @@ def slim_sessions(data, msg_limit=None):
         item["approval_mode"] = s.get("approval_mode", "ai")
         item["auto_chat"] = s.get("auto_chat", False)
         item["scene"] = s.get("scene", "general")
-        item["gal_enabled"] = s.get("gal_enabled", False)
-        item["gal_scope"] = s.get("gal_scope", "main")
-        item["gal_use_profile"] = s.get("gal_use_profile", False)
-        item["gal_use_kb"] = s.get("gal_use_kb", False)
-        item["gal_use_rules"] = s.get("gal_use_rules", False)
-        item["gal_character_id"] = s.get("gal_character_id", "")
-        item["gal_bg"] = s.get("gal_bg", "")
-        item["gal_bgm"] = s.get("gal_bgm", "")
-        item["gal_stats"] = s.get("gal_stats", [])
-        item["gal_map"] = s.get("gal_map") or {}
-        item["gal_node_id"] = s.get("gal_node_id", "")
-        item["gal_round"] = s.get("gal_round", 0)
-        item["gal_auto_on"] = s.get("gal_auto_on", False)
         item["mem_count"] = len((s.get("memory") or {}).get("nodes", []))
         out["sessions"].append(item)
     return out

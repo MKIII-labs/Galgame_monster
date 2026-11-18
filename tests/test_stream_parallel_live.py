@@ -91,7 +91,6 @@ def test_parallel_sessions_keep_streaming():
         pytest.skip("本机没有 Edge")
 
     import app.usage as U
-    import app.saves as SA
     from app import httpd
     from app.computer.cdp import CDP
 
@@ -130,7 +129,6 @@ def test_parallel_sessions_keep_streaming():
             if hasattr(mod, "load_config"):
                 mp.setattr(mod, "load_config", patch)
         mp.setattr(U, "record_usage", lambda *a, **k: None)
-        mp.setattr(SA, "add_save", lambda *a, **k: None)
         mp.setattr(chat_mod, "record_usage", lambda *a, **k: None)
 
         srv, app_port = httpd.create_server("127.0.0.1", 0)

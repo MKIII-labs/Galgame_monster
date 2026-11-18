@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(ROOT, "web")
 DATA_DIR = os.path.join(ROOT, "data")             # 运行时数据（整目录 gitignore）
@@ -29,6 +29,39 @@ ACTIVE_STREAMS = {}  # session_id -> threading.Event
 PENDING_STOPS = {}   # session_id -> 请求停止的时间戳（请求还没登记流时先记下）
 _PENDING_LOCK = threading.Lock()
 PENDING_STOP_TTL = 120.0
+
+# 会话即时开关（agent_enabled / sandbox）：设置接口写入，正在进行的回合每轮取走一次。
+# 只用于「同一轮回复中途改设置」；持久化仍以 sessions.json 为准，取走后自动删除，
+# 避免下次回合读到过期值。
+LIVE_SESSION_FLAGS = {}
+
+
+def set_live_flags(sid, flags):
+    """记录一次「本轮生效」的会话开关；下一次回合取走。"""
+    key = str(sid or "").strip()
+    if not key or not isinstance(flags, dict) or not flags:
+        return
+    with _lock:
+        LIVE_SESSION_FLAGS[key] = dict(flags)
+
+
+def take_live_flags(sid):
+    """取走并清除该会话的即时开关；没有返回 None。"""
+    key = str(sid or "").strip()
+    if not key:
+        return None
+    with _lock:
+        return LIVE_SESSION_FLAGS.pop(key, None)
+
+
+def peek_live_flags(sid):
+    """读该会话的即时开关但不消费（落库时用来避免把刚改的开关写回旧值）。"""
+    key = str(sid or "").strip()
+    if not key:
+        return None
+    with _lock:
+        row = LIVE_SESSION_FLAGS.get(key)
+        return dict(row) if isinstance(row, dict) else None
 
 
 def request_stop(sid):

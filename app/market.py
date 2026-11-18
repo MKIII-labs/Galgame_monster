@@ -1,18 +1,24 @@
 # -*- coding: utf-8 -*-
-"""插件市场：DSH 生态只读索引。
+"""插件市场：DSH 生态只读索引 + 官方插件市场索引。
 
-数据来自 awesome-dsh-plugin.com 的公开 JSON，服务端分页 + 缓存。
+DSH：数据来自 awesome-dsh-plugin.com 的公开 JSON，服务端分页 + 缓存。
 这些是 Cordis/TypeScript 插件，跑不进本项目运行时，所以这里只展示、不安装。
+
+官方市场：索引里的条目带 https 下载地址 + sha256，安装走 plugin_manager.install_url。
+索引地址由 config.plugin_index_url 指定；留空时读随包的 resources/plugins/market.json。
 
 （原先的「本地 Skill 管理」已移除：Skill 的增删启停统一在 设置 → Skill 里做。）
 """
+import json
 import os
+import re
 import threading
 import time
 
 import requests
 
-from app.store import DATA_DIR, read_json, write_json
+from app.config import load_config
+from app.store import DATA_DIR, RESOURCES_DIR, read_json, write_json
 
 CACHE_FILE = os.path.join(DATA_DIR, "cache", "dsh_plugins.json")
 
@@ -153,3 +159,124 @@ def dsh_page(q="", category="", page=1, size=24, force=False):
         "error": meta.get("error") or "",
         "cached_at": meta.get("cached_at") or 0,
     }
+
+
+# ------------------------------------------------------------
+# 官方插件市场（可安装）：索引 → 缓存 → 前端卡片
+# ------------------------------------------------------------
+PLUGIN_INDEX_FILE = os.path.join(RESOURCES_DIR, "plugins", "market.json")
+PLUGIN_INDEX_CACHE = os.path.join(DATA_DIR, "cache", "plugin_index.json")
+PLUGIN_INDEX_TTL = 3600
+PLUGIN_INDEX_MAX_BYTES = 2 * 1024 * 1024
+
+_PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+_INDEX_LOCK = threading.Lock()
+
+
+def _clean_plugin(it):
+    """索引条目 → 前端字段。id / https 地址 / sha256 不合法就丢弃对应字段。"""
+    if not isinstance(it, dict):
+        return None
+    pid = str(it.get("id") or "").strip()
+    if not _PLUGIN_ID_RE.match(pid):
+        return None
+    url = str(it.get("url") or "").strip()
+    if url and not url.lower().startswith("https://"):
+        url = ""
+    sha = str(it.get("sha256") or "").strip().lower()
+    if not _SHA256_RE.match(sha):
+        sha = ""
+    try:
+        size = max(0, int(it.get("size") or 0))
+    except (TypeError, ValueError):
+        size = 0
+    return {
+        "id": pid,
+        "name": str(it.get("name") or pid),
+        "version": str(it.get("version") or ""),
+        "author": str(it.get("author") or ""),
+        "description": str(it.get("description") or ""),
+        "permissions": [str(x) for x in (it.get("permissions") or [])][:12],
+        "homepage": str(it.get("homepage") or ""),
+        "url": url,
+        "sha256": sha,
+        "size": size,
+    }
+
+
+def _validate_index(data):
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        raise ValueError("索引格式不对（需要 items 数组）")
+    items, seen = [], set()
+    for it in data["items"]:
+        row = _clean_plugin(it)
+        if row and row["id"] not in seen:
+            seen.add(row["id"])
+            items.append(row)
+    return {"items": items, "updated": str(data.get("updated") or "")}
+
+
+def _fetch_plugin_index(url):
+    if not url.lower().startswith("https://"):
+        raise ValueError("索引地址必须是 https://")
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    if len(r.content or b"") > PLUGIN_INDEX_MAX_BYTES:
+        raise ValueError("索引文件过大")
+    return r.json()
+
+
+def plugin_index(force=False):
+    """返回市场索引 {items, updated, stale, source, error}。
+
+    config.plugin_index_url 为空 → 直接读随包索引（本地文件很小，不做缓存）；
+    否则按 TTL 缓存远端索引，拉取失败时回退旧缓存并标记 stale；
+    从未成功拉取过才抛 RuntimeError。
+    """
+    cfg = load_config()
+    url = str(cfg.get("plugin_index_url") or "").strip()
+    if not url:
+        try:
+            with open(PLUGIN_INDEX_FILE, "r", encoding="utf-8") as f:
+                data = _validate_index(json.load(f))
+        except (OSError, ValueError) as e:
+            return {"items": [], "updated": "", "stale": False, "source": "local",
+                    "error": "读取随包索引失败：%s" % e}
+        return {**data, "stale": False, "source": "local", "error": ""}
+
+    try:
+        ttl = max(0, int(cfg.get("plugin_index_ttl", PLUGIN_INDEX_TTL)))
+    except (TypeError, ValueError):
+        ttl = PLUGIN_INDEX_TTL
+    now = time.time()
+
+    def cached():
+        c = read_json(PLUGIN_INDEX_CACHE, default=None)
+        if isinstance(c, dict) and c.get("url") == url and isinstance(c.get("data"), dict):
+            return c
+        return None
+
+    def ok(data, stale=False, error=""):
+        return {**data, "stale": stale, "source": "remote", "error": error}
+
+    if not force:
+        c = cached()
+        if c and now - float(c.get("at") or 0) < ttl:
+            return ok(c["data"])
+    with _INDEX_LOCK:
+        if not force:
+            c = cached()
+            if c and now - float(c.get("at") or 0) < ttl:
+                return ok(c["data"])
+        try:
+            data = _validate_index(_fetch_plugin_index(url))
+            os.makedirs(os.path.dirname(PLUGIN_INDEX_CACHE), exist_ok=True)
+            write_json(PLUGIN_INDEX_CACHE, {"at": now, "url": url, "data": data})
+            return ok(data)
+        except Exception as e:                      # noqa: BLE001  网络/格式都可能失败
+            c = cached()
+            if c:
+                return ok(c["data"], stale=True, error=str(e))
+            raise RuntimeError("拉取插件市场索引失败：%s" % e)

@@ -5,7 +5,9 @@ import mimetypes
 import os
 import queue
 import secrets
+import sys
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
@@ -22,24 +24,21 @@ from app import agent
 from app import events
 from app import scheduler
 from app import share
+from app import winproc
 
 
 # ---- 以下模块由 P1 重构从本文件抽出（原为同文件的模块级函数） ----
-from app.uploads import sweep_uploads
+from app.uploads import SWEEP_MIN_AGE, sweep_uploads
 
 from app import calendar as calendar_lib, db, memory, task_engine
 from app.registry import get as route_get
 
 from app.api import misc
 from app.api import sessions
-from app.api import savepoints
+from app.api import branch as branch_api
 from app.api import kb
 from app.api import notes
 from app.api import anno as anno_api          # noqa: F401  统一批注 / 文献条目 / 导出
-from app.api import gal_character
-from app.api import gal_script
-from app.api import gal_media
-from app.api import gal_tts
 from app.api import sandbox
 from app.api import media_in
 from app.api import terminal as term_api        # noqa: F401  自注册 /api/ide/term/* 路由
@@ -63,11 +62,13 @@ from app.api import calendar as calendar_api  # noqa: F401
 from app.api import workflow as workflow_api  # noqa: F401
 from app.api import memory as memory_api      # noqa: F401
 from app.api import backup as backup_api  # noqa: F401
+from app.api import storage as storage_api  # noqa: F401  本地存储维护（压缩会话正文）
 from app.api import bili as bili_api  # noqa: F401
 from app.api import hall_stock as hall_stock_api  # noqa: F401
 from app.api import hall_interview as hall_interview_api  # noqa: F401
 from app.api import dojo as dojo_api  # noqa: F401
 from app.api import skills as skills_api  # noqa: F401
+from app.api import settings_center as settings_api  # noqa: F401  设置中心：保存/历史/回滚
 from app.api import market as market_api  # noqa: F401  插件市场：DSH 生态只读索引
 from app.api import plugins as plugins_api  # noqa: F401  插件：工具插件 / MCP / 内置发现源
 from app.api import explore as explore_api  # noqa: F401  后台探索批次：前端轮询进度
@@ -77,6 +78,7 @@ from app.api import aside as aside_api  # noqa: F401  自注册 /api/aside/strea
 from app.api import share as share_api  # noqa: F401  自注册 /api/share/save 路由（分享页落盘）
 from app.api import reader as reader_api  # noqa: F401  自注册 /api/reader/* 路由（PDF 沉浸式阅读）
 from app.api import computer_bridge
+from app.api import mobile as mobile_api  # noqa: F401  自注册 /api/mobile/* 路由（手机访问）
 
 TOKEN = secrets.token_urlsafe(24)
 
@@ -396,6 +398,9 @@ class Handler(BaseHTTPRequestHandler):
                 return fn(self)
             if path == "/api/state":
                 return misc._api_state(self)
+            if path == "/api/pending":
+                from app import session_status
+                return self._json({"ok": True, "pending": session_status.snapshot()})
             if path == "/api/stt/status":
                 return self._json({"ok": True, "speech": speech.status()})
             if path == "/api/usage":
@@ -421,6 +426,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")   # 无 Content-Length 的流：靠关连接结束
             self.end_headers()
             self.wfile.write(b": connected\n\n")
+            # 连上就先对一次账：断线 / 休眠期间错过的「待审批 / 待回答」清理事件
+            # 不会重放，前端只靠增量事件会一直留着假橙点。
+            try:
+                from app import session_status
+                snap = {"type": "session_pending_snapshot",
+                        "pending": session_status.snapshot()}
+                self.wfile.write(("data: " + json.dumps(snap, ensure_ascii=False)
+                                  + "\n\n").encode("utf-8"))
+            except Exception as e:            # noqa: BLE001  快照失败不影响推送
+                print("[事件] 待办快照发送失败：%s" % e)
             self.wfile.flush()
             while True:
                 try:
@@ -518,11 +533,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/kb/export": kb._api_kb_export,
             "/api/memory/get": kb._api_memory_get,
             "/api/memory/save": kb._api_memory_save,
-            "/api/save/list": savepoints._api_save_list,
-            "/api/save/make": savepoints._api_save_make,
-            "/api/save/restore": savepoints._api_save_restore,
-            "/api/save/branch": savepoints._api_save_branch,
-            "/api/save/delete": savepoints._api_save_delete,
+            "/api/save/branch": branch_api._api_session_branch,
             "/api/memory/undo": kb._api_memory_undo,
             "/api/context/compress": kb._api_context_compress,
             "/api/context/summary": kb._api_context_summary,
@@ -549,39 +560,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/sandbox/reveal": sandbox._api_sandbox_reveal,
             "/api/sandbox/search": sandbox._api_sandbox_search,
             "/api/sandbox/open_vscode": sandbox._api_sandbox_open_vscode,
-            "/api/gal/characters": gal_character._api_gal_characters,
-            "/api/gal/character/get": gal_character._api_gal_character_get,
-            "/api/gal/character/save": gal_character._api_gal_character_save,
-            "/api/gal/character/delete": gal_character._api_gal_character_delete,
-            "/api/gal/asset": gal_character._api_gal_asset,
-            "/api/gal/character/files": gal_character._api_gal_character_files,
-            "/api/gal/character/upload": gal_character._api_gal_character_upload,
-            "/api/gal/character/export": gal_character._api_gal_character_export,
-            "/api/gal/character/import": gal_character._api_gal_character_import,
-            "/api/gal/character/import_dir": gal_character._api_gal_character_import_dir,
-            "/api/gal/packs": gal_character._api_gal_packs,
             "/api/window/theme": misc._api_window_theme,
-            "/api/gal/character/draft": gal_character._api_gal_character_draft,
-            "/api/gal/script": gal_script._api_gal_script,
-            "/api/gal/story/get": gal_script._api_gal_story_get,
-            "/api/gal/story/save": gal_script._api_gal_story_save,
-            "/api/gal/media": gal_script._api_gal_media,
-            "/api/gal/backgrounds": gal_media._api_gal_backgrounds,
-            "/api/gal/background/save": gal_media._api_gal_background_save,
-            "/api/gal/background/upload": gal_media._api_gal_background_upload,
-            "/api/gal/background/delete": gal_media._api_gal_background_delete,
-            "/api/gal/bgms": gal_media._api_gal_bgms,
-            "/api/gal/bgm/save": gal_media._api_gal_bgm_save,
-            "/api/gal/bgm/upload": gal_media._api_gal_bgm_upload,
-            "/api/gal/bgm/delete": gal_media._api_gal_bgm_delete,
-            "/api/gal/stats/reset": gal_tts._api_gal_stats_reset,
-            "/api/gal/effects": gal_script._api_gal_effects,
-            "/api/gal/journal": gal_script._api_gal_journal,
-            "/api/gal/effect/audio": gal_script._api_gal_effect_audio,
-            "/api/gal/tts": gal_tts._api_gal_tts,
-            "/api/gal/tts/active": gal_tts._api_gal_tts_active,
-            "/api/gal/tts/voices": gal_tts._api_gal_tts_voices,
-            "/api/gal/session": gal_tts._api_gal_session,
             "/api/vscode/import": sandbox._api_vscode_import,
             "/api/balance": misc._api_balance,
             "/api/notes/tree": notes._api_notes_tree,
@@ -590,6 +569,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/notes/new": notes._api_notes_new,
             "/api/notes/delete": notes._api_notes_delete,
             "/api/notes/rename": notes._api_notes_rename,
+            "/api/notes/move": notes._api_notes_move,
             "/api/notes/folder/new": notes._api_notes_folder_new,
             "/api/notes/folder/delete": notes._api_notes_folder_delete,
             "/api/notes/graph": notes._api_notes_graph,
@@ -662,11 +642,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             fn(self)
         except Exception as e:
-            print(f"[服务] {path} 出错：{e}")
-            # 只打一行 message 定位不到代码（历史上 43 次
-            # "dictionary update sequence element #0 has length 1" 都只能靠猜）。
-            # 完整堆栈走 sys.stderr → data/app.log（main.py 的 _pipe_output 接管）。
-            traceback.print_exc()
+            # 客户端断连不是服务端错误：不打日志，但下面的流租约收尾照旧执行
+            _quiet = isinstance(e, (ConnectionResetError, ConnectionAbortedError,
+                                    BrokenPipeError))
+            if not _quiet:
+                print(f"[服务] {path} 出错：{e}")
+                # 只打一行 message 定位不到代码（历史上 43 次
+                # "dictionary update sequence element #0 has length 1" 都只能靠猜）。
+                # 完整堆栈走 sys.stderr → data/app.log（main.py 的 _pipe_output 接管）。
+                traceback.print_exc()
             # 聊天流已经切到 SSE：不能再写 HTTP 状态行 / JSON（会污染流，前端解析失败后
             # 一直停在「模型输出中」）。补一条 done 收尾，并释放流租约。
             sid = str(getattr(self, "_chat_sid", "") or "")
@@ -757,9 +741,6 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- 会话存档 / 倒带 ----------
 
 
-    # ---------- GAL 演出模式（见 docs/GAL_MODE_DESIGN.md） ----------
-
-
     # ---------- 知识库 / 记忆 ----------
 
 
@@ -784,7 +765,22 @@ class Handler(BaseHTTPRequestHandler):
         return s, sb, None
 
 
+class _QuietHTTPServer(ThreadingHTTPServer):
+    """客户端断开（连接重置 / 管道破裂）是常态，不要每次打完整栈刷日志。"""
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        et = sys.exc_info()[0]
+        if et and issubclass(et, (ConnectionResetError, ConnectionAbortedError,
+                                  BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def create_server(host="127.0.0.1", port=0):
+    # 兜底：服务进程派生的控制台子进程默认不弹窗（重复调用无副作用）
+    winproc.install_default()
     # 新域数据库：任务 / 日程 / 产物。建表幂等；旧数据（sessions.json）不动。
     try:
         db.init_db()
@@ -803,11 +799,6 @@ def create_server(host="127.0.0.1", port=0):
         migrate_profile_to_kb()
     except Exception as e:
         print(f"[知识库] 迁移失败：{e}")
-    # 启动时清理孤儿附件（已删除会话的目录 / 不再被引用的文件）
-    try:
-        sweep_uploads()
-    except Exception as e:
-        print(f"[附件清理] 失败：{e}")
     # 启动时把随项目发布的示例素材（resources/presets/）播种到 data/（缺失才复制，不覆盖用户数据）
     try:
         from app import presets
@@ -816,6 +807,12 @@ def create_server(host="127.0.0.1", port=0):
             print(f"[示例素材] 已播种 {n} 个文件到 data/")
     except Exception as e:
         print(f"[示例素材] 播种失败：{e}")
+    # 设置中心：旧配置迁移（先备份 config.json，再补版本号），幂等
+    try:
+        from app import settings_center as settings_lib
+        settings_lib.ensure_migrated()
+    except Exception as e:
+        print(f"[设置] 配置迁移失败：{e}")
     # 预设 Skill：每次启动补齐「新增且没被删除」的预设，用户改过 / 删过的都不动
     try:
         from app import skills as skills_lib
@@ -824,8 +821,51 @@ def create_server(host="127.0.0.1", port=0):
             print(f"[Skill] 已播种 {n} 个预设")
     except Exception as e:
         print(f"[Skill] 预设播种失败：{e}")
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    # 会话断点恢复：只在进程启动时做一次（此时还没有任何活跃流）。
+    # 以前挂在 load_sessions() 里，生成过程中任意一次重试都可能把正在写的
+    # _progress 快照误标成「上次运行中途退出」，导致同一轮输出被拆成多条。
+    try:
+        from app import sessions as sessions_lib
+        sessions_lib.startup_recover()
+    except Exception as e:                    # noqa: BLE001
+        print(f"[会话] 断点恢复失败：{e}")
+    httpd = _QuietHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
+    # 手机访问：只有用户开启过才启动局域网网关（主服务始终只监听回环）。
+    # 放后台线程：网关要生成 / 加载证书，别挡首屏。
+    try:
+        from app.config import load_config as _load_cfg
+        if _load_cfg().get("mobile_enabled"):
+            def _start_mobile():
+                try:
+                    from app.mobile import gateway as _gw
+                    from app.mobile import DEFAULT_PORT as _dp
+                    cfg = _load_cfg()
+                    raw_port = cfg.get("mobile_port")
+                    _gw.start(int(raw_port) if raw_port is not None else _dp,
+                              httpd.server_address[1], TOKEN)
+                except Exception as e:              # noqa: BLE001
+                    print(f"[手机访问] 网关启动失败：{e}")
+            threading.Thread(target=_start_mobile, daemon=True,
+                             name="mobile-gateway-boot").start()
+    except Exception as e:                          # noqa: BLE001
+        print(f"[手机访问] 初始化失败：{e}")
+    # 启动后的重活放到后台：记忆索引与孤儿附件清理都会完整加载一遍会话
+    # （实测各约 0.6s），挡在窗口前面就是白白多等一秒多。
+    # 延迟 2s 再跑：避开「刚启动就上传附件」的时间窗，也别和服务首屏请求抢 IO。
+    def _startup_maintenance():
+        time.sleep(2)
+        try:
+            memory.reindex()
+        except Exception as e:          # noqa: BLE001
+            print(f"[记忆] 索引重建失败：{e}")
+        try:
+            sweep_uploads(min_age=SWEEP_MIN_AGE)
+        except Exception as e:          # noqa: BLE001
+            print(f"[附件清理] 失败：{e}")
+
+    threading.Thread(target=_startup_maintenance, daemon=True,
+                     name="startup-maintenance").start()
     # 后台预热语音识别模型：首次点「语音输入」即可直接用，不必干等几秒
     threading.Thread(target=speech.warmup, daemon=True).start()
     # 资源管理器右键菜单：把待打开目录推给已连接的界面（无人连接时留在文件里等下次）
@@ -839,9 +879,4 @@ def create_server(host="127.0.0.1", port=0):
         scheduler.start()
     except Exception as e:
         print(f"[调度] 启动失败：{e}")
-    # 记忆索引放在「画像迁移 / 示例素材播种」之后：首次启动也能索引到画像库
-    try:
-        memory.reindex()
-    except Exception as e:
-        print(f"[记忆] 索引重建失败：{e}")
     return httpd, httpd.server_address[1]

@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""插件管理器：目录包扫描 / 安装 / 卸载 / 启停 / 内置源 / zip 安全 / MCP 摘要。"""
+"""插件管理器：目录包扫描 / 安装 / 卸载 / 启停 / 内置源 / zip 安全 / 市场下载 / MCP 摘要。"""
+import hashlib
+import io
 import json
 import os
 import zipfile
@@ -100,6 +102,54 @@ def test_install_zip_and_slip(env):
     with zipfile.ZipFile(bad, "w") as zf:
         zf.writestr("../evil.txt", "x")
     assert pm.install_zip(str(bad))[1] != ""
+
+
+class _Download:
+    """模拟 requests 的流式响应（install_url 用 with + iter_content）。"""
+
+    def __init__(self, data, url="https://x/alpha.zip"):
+        self.data = data
+        self.url = url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, size=65536):
+        for i in range(0, len(self.data), size):
+            yield self.data[i:i + size]
+
+
+def _zip_bytes(src, pid="alpha"):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in ("plugin.json", "plugin.py"):
+            zf.write(src / name, pid + "/" + name)
+    return buf.getvalue()
+
+
+def test_install_url_checks(env, monkeypatch):
+    src = _pkg(env.tmp / "src", "alpha")
+    data = _zip_bytes(src)
+    sha = hashlib.sha256(data).hexdigest()
+    monkeypatch.setattr(pm.requests, "get", lambda *a, **k: _Download(data))
+
+    assert pm.install_url("http://x/alpha.zip")[1] != ""            # 拒绝 http
+    assert pm.install_url("https://x/alpha.zip", "0" * 64)[1] != ""  # sha 不符
+    assert pm.install_url("https://x/alpha.zip", sha, len(data) + 1)[1] != ""  # 大小不符
+    monkeypatch.setattr(pm, "MAX_BYTES", 32)                        # 超过上限
+    assert pm.install_url("https://x/alpha.zip")[1] != ""
+    assert not (env.plugins / "alpha").exists()
+
+    monkeypatch.setattr(pm, "MAX_BYTES", 20 * 1024 * 1024)
+    pid, err = pm.install_url("https://x/alpha.zip", sha, len(data))
+    assert err == "" and pid == "alpha"
+    assert (env.plugins / "alpha" / "plugin.py").is_file()
 
 
 def test_catalog_and_builtin_install(env):

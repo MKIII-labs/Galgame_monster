@@ -4,16 +4,25 @@
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows&logoColor=white)
 ![Stack](https://img.shields.io/badge/Stack-Vanilla%20JS%20%2B%20Python-000000)
 ![LLM](https://img.shields.io/badge/LLM-OpenAI%20Compatible-412991)
-![Version](https://img.shields.io/badge/Version-3.4-2ea44f)
+![Version](https://img.shields.io/badge/Version-3.5-2ea44f)
 
-> **本机运行的 AI 工作台**：对话、文件 Agent、VS Code 风格 IDE、文档阅读与翻译、长期记忆、日程任务与功能大厅集中在同一个界面。程序在本地运行，模型走你自己的 API，数据全部留在 `data/`。
+> **本机运行的 AI 工作台**：对话、文件 Agent、VS Code 风格 IDE、文档阅读与翻译、长期记忆、日程任务、手机访问与功能大厅集中在同一个界面。程序在本地运行，模型走你自己的 API，数据全部留在 `data/`。
+
+**v3.5 更新说明**
+
+- 界面重构收尾：固定导航 / 顶栏 / 检查器 / 命令面板 / 全屏设置，新会话首屏与页面过渡，移动端适配。
+- 设置中心重做：6 个一级页面、页内分区与高级项、右侧目录、设置搜索直达并高亮；页面按需挂载。
+- Agent 增强：实时开关、验收子代理开关、清空沙箱后用绝对路径只读、完成声明（摘要 + 可折叠操作明细）。
+- 会话能力：用「从这条回复分支」取代存档点；新增会话存储压缩与会话事件清理。
+- 手机访问：同一 Wi-Fi 下 HTTPS 网关 + 扫码配对 + 端到端加密；新增 `gm` 终端客户端。
+- GAL 演出模式下线，功能大厅保留其余 6 个模块。
 
 **3 秒速览**
 
 | 你关心的 | 结论 |
 | --- | --- |
 | 是什么 | Windows 桌面端 AI 工作台：本地 Python 服务 + 原生 Web 界面，无账号、无云端同步 |
-| 能做什么 | 在同一个窗口完成「对话 → 读写文件 → 跑命令 → 读论文 / 翻译 → 记入知识库 / 笔记 → 排进日程」 |
+| 能做什么 | 在同一个窗口完成「对话 → 读写文件 → 跑命令 → 读论文 / 翻译 → 记入知识库 / 笔记 → 排进日程」，手机可在同一 Wi-Fi 下接入 |
 | 数据在哪 | 全部在项目内 `data/`；`config.json` 以明文保存 API 密钥 |
 | 需要什么 | Windows + Python 3.11+ + 一个 OpenAI 兼容（或 Anthropic）模型接口 |
 | 怎么启动 | `python -m venv .venv` → `pip install -r requirements.txt` → `python main.py` |
@@ -68,15 +77,16 @@ Galgame_monster 是一个**纯本地**的个人 AI 工作台：界面用原生 W
 
 | 模块 | 能力 | 关键点 |
 | --- | --- | --- |
-| Solo 对话 | 多会话、流式输出、停止 / 继续、上下文压缩、token 用量核算、轨迹回放 | 支持 Markdown / KaTeX、附件、联网搜索、语音输入与旁注提问 |
-| 文件 Agent | 沙箱内读写与执行、计划驱动多轮、子代理、变更审阅与撤回 | 写操作按审批档位执行；读取可用绝对路径访问沙箱外 |
+| Solo 对话 | 多会话、流式输出、停止 / 继续、上下文压缩、token 用量核算、分支、轨迹回放 | 支持 Markdown / KaTeX、附件、联网搜索、语音输入、旁注提问与自动跟随 |
+| 文件 Agent | 沙箱内读写与执行、计划驱动多轮、子代理、验收与完成声明 | 对话中可实时开关；写操作按审批档位执行；清空沙箱后仍可用绝对路径只读 |
 | IDE 工作区 | Monaco 编辑器、文件树、多标签、终端、Git、Python 调试、语义索引、AI Tab 补全 | 内置 Monaco，离线可用；编码按原文件自动识别 |
 | 文档阅读与翻译 | PDF / Word / PPT 沉浸式阅读、按章节翻译、术语表、公式与图表裁图、译文导出 | 左栏原页 + 右栏重排阅读流；导出仅译文 / 双语 PDF / Markdown |
 | 记忆与知识 | 用户画像、知识图谱、会话记忆、笔记库、统一记忆索引 | 知识图谱可视化编辑；笔记为普通 Markdown 文件 |
 | 检索与多模态 | 联网搜索、B 站视频 / 评论 / 字幕、网页抓取、图像识别、文档解析、语音输入与朗读 | 搜索默认关闭，可在设置中启用免注册引擎链或指定服务商 |
+| 手机访问 | 同一 Wi-Fi 下用手机继续对话；HTTPS 网关、扫码配对、设备吊销 | 主服务仍只监听 `127.0.0.1`；传输叠加应用层端到端加密 |
+| 终端客户端 | `gm` 连上正在运行的应用，复用同一会话与沙箱 | 交互式多轮或单次问答；`gm --start` 可顺带拉起应用 |
 | 图片生成 | 通过本机 ComfyUI + FLUX 工作流出图，结果登记为工作台产物 | 默认关闭，不影响其它功能 |
-| GAL 剧场 | 角色 / 立绘 / 剧本 / 配音 / 舞台状态，独立会话 | 逐段对白、打字机、选项、掷骰、关键词特效 |
-| 功能大厅 | 图寻、数学竞技场、模拟股市、模拟面试、研究道场、学习观测、GAL 剧场 | 各模块自行注册；数据独立存储 |
+| 功能大厅 | 图寻、数学竞技场、模拟股市、模拟面试、研究道场、学习观测 | 各模块自行注册；数据独立存储 |
 | 工作台 | 日程、任务拆解与执行、产物归档、工作流、专注计时 | 任务与步骤实时落盘，重启可恢复 |
 | 插件与 MCP | Python 工具插件、MCP 服务器、内置安装源与 DSH 索引 | 默认关闭；安装 / 启用需确认，重启后加载 |
 | 可观测 | 轨迹面板记录系统提示 / 上下文 / 思考 / 工具 / 耗时；旁注提问不打断主对话 | 只读旁路，不进入模型上下文 |
@@ -107,7 +117,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe main.py
 ```
 
-也可直接双击 `Galgame_monster.bat`（无控制台窗口）。首次启动后进入「设置 → 模型接入」填写 API 密钥。
+也可直接双击 `Galgame_monster.bat`（无控制台窗口）。首次启动后进入「设置 → 模型与对话」填写 API 密钥。
 
 - 退出：关闭应用窗口，或在控制台按 `Ctrl+C`。
 - 单实例：已有实例在运行时再次启动只会打开已有窗口；检测到代码已更新时会提示先关闭旧实例。
@@ -162,8 +172,9 @@ python scripts/fetch_embed_model.py
 | --- | --- |
 | 流式输出 | 回复逐字显示，可随时「停止」（联网搜索阶段也能立即停）；被中断的回复可「继续输出」，写回同一条消息 |
 | Markdown / 公式 | 标题、粗体、列表、引用、表格、代码高亮、KaTeX 公式；渲染失败退回原文，不显示红色报错 |
-| 多会话 | 新建 / 切换 / 双击重命名 / 删除（二次确认）；会话列表支持置顶、分组与搜索 |
-| 分支存档 | 每轮结束自动留档，也可手动打点命名；可从存档点「回退」或「分支」。每会话最多 60 个存档点 |
+| 多会话 | 新建 / 切换 / 双击重命名 / 删除（二次确认）；会话列表支持置顶、分组与搜索；新会话首屏带问候、最近会话与快捷入口 |
+| 分支 | 在任意一条 AI 回复处「从这条回复分支」：按消息切片复制出新会话，原会话原样保留；不再生成磁盘存档副本 |
+| 自动跟随 | 长回复与工具过程自动贴底；向上翻时暂停，回到底部自动恢复；过程折叠块内部独立跟随 |
 | 消息操作 | 用户消息可「撤回」「修改」后重发；AI 回复可「重新发言」、切换源码视图；支持复制 / 删除 |
 | 提问标记 | 给关键提问起名，Solo 模式右侧出现悬浮按钮，一键跳回；右键改名 / 删除 |
 | 旁注提问 | 流式输出时划选一段文字就地提问，走独立接口，不写会话、不打断主对话 |
@@ -181,17 +192,18 @@ python scripts/fetch_embed_model.py
 
 | 项目 | 说明 |
 | --- | --- |
-| 开启与沙箱 | 点输入区上方「Agent」，选择沙箱目录；设置按会话保存 |
+| 开启与沙箱 | 点输入区上方「Agent」，选择沙箱目录；设置按会话保存，对话进行中切换也会在下一轮生效 |
+| 清空沙箱（只读） | 「清空目录」回到未指定沙箱的状态：仍可用绝对路径读取 / 列目录 / 看图，写入与命令需要先选目录 |
 | 工具分组 | **读取** list / file / files / search / semantic / map；**编辑** write / patch / mkdir / move / copy / delete；**执行** exec / terminal；**代码** diagnostics / definition / references / hover / symbols / implementation / calls / rename / check / find / impact / context；**Git** status / diff / log / commit / split；**计划** update / patch；**子代理** delegate / explore / followup / status / result / cancel；**联网** search / fetch / note；**历史** list / undo / redo / recover；**视觉** render / qa / views / geometry / scene；**图片** see / compare / analyze；**素材** scan / convert / atlas / inline / validate / mesh；**音频** probe / compare；**工作流** run / script / status / resume / cancel；**其他** sleep / reminder，以及 `calendar.*` / `task.*` / `memory.*` / `note.*` / `bili.*` / `stock.*` |
 | 安全边界 | 写入只接受沙箱内路径，读取可用绝对路径访问沙箱外；`.git` / `.venv` / `node_modules` / `__pycache__` 与本项目 `data/` 永久禁止访问；秘密文件默认拒读 |
 | 审批档位 | `ask` 手动审批 / `ai` 智能审批（默认；只读与普通命令放行，安装、联网、改历史类才问）/ `full` 完全自动 / `custom` 自定义规则（沙箱内 `.gm/agent-rules.json`） |
 | Shell 自由度 | `standard`（默认，允许 `\|` 与沙箱内重定向，每段仍过白名单）/ `strict`（禁用管道与重定向）/ `trusted`（额外允许 `;` `&&` `\|\|`） |
 | 变更审阅 | 变更卡显示文件名、完整路径、增删行数；支持单栏 inline diff、全部撤销 / 全部保留；`Ctrl+Backspace` / `Ctrl+Enter` |
 | 撤回 | 每次写操作生成工具卡片，点「撤回」恢复快照；默认保留最近 60 条往期写入（`agent_max_undo`，0 = 不限），仅存内存，重启失效 |
-| 中途提问 | 需要决策时弹提问卡：可多问、可翻页、可留空；选项支持说明与「推荐」标记，题面支持 Markdown；可点「让 AI 自己决定」或停止来推进，历史卡可「重新提问」 |
-| 收尾判定 | 模型调用 `finish` 声明完成，或本轮不再调用工具；计划仍有未完成步骤时自动续跑 |
+| 中途提问 | 需要决策时弹提问卡：可多问、可翻页、可留空；输入框与主聊天一致（附件 / 粘贴 / 语音）；选项支持说明与「推荐」标记，题面支持 Markdown |
+| 完成声明 | 模型调用 `finish` 声明完成：面向用户的摘要 + 可选的内部操作明细；完成卡显示耗时与工具次数，明细默认折叠 |
 | 规划模式（`/plan`） | 本轮只读：只下发读取 / 搜索 / 提问与计划工具，产出「目标 + 完成判据 + 里程碑 + 首步拆解」，确认后再执行 |
-| 验收 | finish 前由独立验收子代理按实际产物核对打分（默认阈值 70），没有证据的「通过」不算通过 |
+| 验收 | finish 前由独立验收子代理按实际产物核对打分（默认阈值 70）；可在设置里关闭，关闭后与普通聊天一样不跑验收 |
 
 ### 4.3 IDE 工作区
 
@@ -252,30 +264,12 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 台词朗读 | Edge TTS（免费）/ OpenAI 兼容 `/v1/audio/speech` / 本地 GPT-SoVITS（支持音色克隆） |
 | 图片生成 | 通过本机 ComfyUI 的 HTTP API 出图，使用从官方 FLUX 3 Klein 模板导出的 API 工作流 |
 
-### 4.7 GAL 剧场
+### 4.7 功能大厅
 
-入口：大厅 → GAL 剧场。使用独立会话（`gal_scope=gal`），默认不读 Solo / IDE 的历史、画像、知识库与全局规则；进入前可逐项打开（只读），写入只进本场记忆。
-
-| 功能 | 说明 |
-| --- | --- |
-| 舞台演出 | 背景 + 立绘 + 对白框 + 选项；立绘自动靠边分栏，不说话的变暗；对话与选项统一磨砂 |
-| 逐段对白 | 一轮话拆成若干短段边生成边显示（打字机 + 逐段朗读）；速度 8–120 字/秒；可切「逐段追加 / 单行推进」 |
-| 推进与快捷键 | 空格 / 回车 / 点击推进；按住 `Ctrl` 快进；`A` 自动播放；`↑` 回顾；`Esc` 逐层关闭；`?` 快捷键清单 |
-| 选项 | 每轮 2–4 个，最后一段对白显示完后浮出；选定后淡出并发送 |
-| 角色与素材 | 角色即目录（`data/gal/characters/<id>/`）：人设、立绘、主题色、剧本、配音预设；支持 `.char` 导入导出与 Shinsekai 角色包 |
-| 台词朗读 / 音色克隆 | Edge TTS / OpenAI 兼容 / 本地 GPT-SoVITS；`⋯ → 快速克隆` 用 5–10 秒参考音频克隆音色 |
-| AI 自动写剧本 | 依据角色设定 + 世界观 + 用户画像生成分幕大纲，再逐幕展开 |
-| 舞台状态与档案 | AI 自建状态参数（好感度 / 危险度 / 时间 / 地点…），撤回时回滚；剧情档案支持列表与关系图、俯视方位图 |
-| 随机判定 | 结果不确定时 AI 可声明掷骰（`d20+调整值 vs DC` 或自由骰），由系统掷出并回灌 |
-| 关键词特效 | 台词里写 `*闪光*` / `*震动*` / `*黑屏*` / `*淡入*` 触发动画与音效 |
-
-### 4.8 功能大厅
-
-卡片式入口，由各模块自行注册，当前 7 个：
+卡片式入口，由各模块自行注册，当前 6 个：
 
 | 功能 | 说明 |
 | --- | --- |
-| GAL 剧场 | 见 4.7，作为大厅入口进入独立演出会话 |
 | 图寻游戏 | 你与 AI 对手在地图上标拍摄位置，距离近者赢；题库来自 Panoramax 开放街景 |
 | 数学竞技场 | 题库（数学分析 / 高等代数等）与竞技 / 复习记录 |
 | 模拟股市 | 独立 SQLite 行情与学生交易模拟：K 线、市价 / 限价单、部分成交、公司行为、绩效指标与 Markdown / CSV 报告导出 |
@@ -285,7 +279,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 
 > 图寻底图使用 OpenStreetMap 瓦片（WGS-84）。不能换成高德 / 腾讯瓦片：GCJ-02 偏移会让距离系统性偏出几百米。
 
-### 4.9 工作台
+### 4.8 工作台
 
 顶部可在 **今天 / 周 / 月 / 看板 / 统计** 五种视图之间切换；「今天」仍是日程、任务、产物三栏。
 
@@ -310,7 +304,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 图片生成 | 调用本机 ComfyUI 生成图片并登记为产物 |
 | 场景包 | 通用 / 办公 / 学习 / 生活四种场景，影响系统提示的场景纪律与能力展示顺序 |
 
-### 4.10 插件与 MCP
+### 4.9 插件与 MCP
 
 侧栏插件按钮打开整屏「插件」页：
 
@@ -320,20 +314,51 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 
 > 插件是任意 Python 代码：安装与启用都要二次确认，且**重启应用后才加载**；总开关关闭时任何工具插件都不会加载。MCP 默认关闭。
 
+### 4.10 手机访问与终端客户端
+
+**手机访问**（设置 → 数据与用户 → 移动访问）
+
+主服务始终只监听 `127.0.0.1`；开关打开后另起一个 HTTPS 端口，供同一 Wi-Fi 下的手机访问，关闭即停止监听。
+
+| 项目 | 说明 |
+| --- | --- |
+| 传输 | HTTPS + 应用层端到端加密（ECDH + AES-256-GCM）；防火墙规则只放行本子网 |
+| 配对 | 手机先安装根证书（`https://IP:端口/ca.crt`），再扫「生成二维码」；电脑与手机显示同一 6 位校验码后允许 |
+| 设备 | 已配对设备可单独 / 全部吊销，授权有效期可配置；可查看最近审计日志 |
+| 排障 | Windows 默认拦 ping，不能用 ping 判断连通性；直接用手机浏览器打开给出的 https 地址 |
+
+**终端客户端 `gm`**
+
+`gm` 不是另一个后端：它连上正在运行的应用，使用同一份 `data/`、会话与沙箱，GUI 里聊到一半切到终端可以继续。
+
+```powershell
+.\.venv\Scripts\python.exe gm.py          # 交互式，接着最近会话
+.\.venv\Scripts\python.exe gm.py -p "帮我跑一下测试"
+.\.venv\Scripts\python.exe gm.py -n       # 新建会话
+.\.venv\Scripts\python.exe gm.py -l       # 列出会话
+.\.venv\Scripts\python.exe gm.py -s 3     # 指定第 3 个会话
+.\.venv\Scripts\python.exe gm.py --start  # 应用没在跑时先拉起
+```
+
+交互命令：`/list` `/use N` `/new` `/stop` `/verbose` `/help` `/quit`。
+
 ### 4.11 设置与快捷键
 
-设置面板左侧为 **4 组 15 分类**：
+设置面板左侧为 **6 个一级页面**：
 
-| 分组 | 分类 |
+| 页面 | 内容 |
 | --- | --- |
-| 常用 | 模型接入、联网与数据源、上下文与压缩、主动与提醒 |
-| Agent 与能力 | Agent 执行、子代理、Skill、图片生成 |
-| 用户与外观 | 用户画像与学习、主题与外观、GAL 演出、语音与朗读 |
-| 系统 | 快捷键、数据与高级、功能说明 |
+| 模型与对话 | 聊天 / 视觉接口、推理参数、上下文预算与压缩 |
+| 联网与检索 | 搜索服务商、抓取策略与 B 站读取 |
+| 能力与工具 | 执行策略、子代理与流程、技能与外部工具、图像（4 个二级分段） |
+| 界面与提醒 | 主题外观、快捷键、语音与朗读、提醒 |
+| 数据与用户 | 用户规则、移动访问、存储维护与重置 |
+| 帮助 | 各项功能的实际作用与差异 |
 
-- 顶部搜索框可直达设置项并高亮；`Esc` 关闭、`Ctrl+S` 保存、`←`/`→` 切换分类。
-- 快捷键可逐项改键：同组撞键拒绝，跨组撞键允许并提示，用户自定义优先。
-- 分组为 GAL 演出 / IDE 工作区 / 编辑器（VS Code）/ 输入框 / 全局。
+- 顶部搜索框可直达设置项：跨页切换、展开高级项 / 折叠分区，并滚动到目标高亮；`Ctrl+K` 聚焦搜索。
+- 页内按任务分区，可单独展开高级项；右侧为本页目录；每页可「恢复本页默认」。
+- `Esc` 关闭、`Ctrl+S` 保存、`←`/`→` 切换分类。
+- 快捷键可逐项改键：同组撞键拒绝，跨组撞键允许并提示，用户自定义优先；分组为 IDE 工作区 / 编辑器（VS Code）/ 输入框 / 全局。
 
 ---
 
@@ -344,6 +369,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 界面 | HTML / CSS / JavaScript（无框架、无构建） |
 | 窗口 | Electron 窗口壳（可选）/ Edge、Chrome 应用模式（`--app`） |
 | 后端 | Python 标准库 `http.server`（多线程）+ `requests`；SSE 流式响应 |
+| 手机网关 | aiohttp（独立 HTTPS 端口）+ cryptography（ECDH / AES-256-GCM）+ qrcode（配对二维码） |
 | 前端第三方库 | KaTeX、Monaco、pdf.js、vis-network、xterm、Seti 图标（本地内置）；highlight.js、ECharts、Mermaid（CDN，带备用源） |
 | 编辑器 | Monaco（本地内置，离线可用） |
 | PDF 阅读 | pdf.js（本地渲染）· pypdfium2（裁图 / 扫描页）· pypdf（文本层） |
@@ -381,7 +407,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 
 只填 base URL（如 `https://api.deepseek.com`）时会自动补全为 `/v1/chat/completions`。地址 + 模型 + 密钥可以打包成「API 预设」，随时切换服务商；也可用 `chat_fallback` 配置故障转移链（主服务商失败且未输出任何内容时按序尝试）。
 
-主要参数（设置 → 模型接入）：
+主要参数（设置 → 模型与对话）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -399,7 +425,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 
 ### 6.3 轻量模型与视觉模型
 
-`light_model` 用于摘要、记忆挑选、GAL 判定、IDE Tab 补全等短请求；可另填 `light_url` / `light_api_key`。留空时除 IDE 补全外的轻量任务沿用主模型。阅读器的翻译与术语表固定用主聊天模型（避免小模型术语漂移）。
+`light_model` 用于摘要、记忆挑选、语音矫正、IDE Tab 补全等短请求；可另填 `light_url` / `light_api_key`。留空时除 IDE 补全外的轻量任务沿用主模型。阅读器的翻译与术语表固定用主聊天模型（避免小模型术语漂移）。
 
 视觉模型支持两种协议：
 
@@ -498,11 +524,11 @@ python api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
 | 类型 | 内容 |
 | --- | --- |
 | JSON | `config.json`（密钥与预设，明文）、`sessions.json`（会话快照）、`user_profile.json`（画像）、`tasks.json`（提醒 / 任务） |
-| JSON 目录 | `session_store/`（单会话热落库快照，回合收尾后自动清理）、`saves/`（存档点快照） |
+| JSON 目录 | `session_store/`（单会话热落库快照，回合收尾后自动清理） |
 | Markdown | `notes/`（笔记库）、`knowledge/`（知识库）、`agents/`（子代理定义）、`skills/`（Skill） |
 | SQLite | `assistant.db`（工作台任务 / 日程 / 产物）、`stock.db`（模拟股市） |
 | JSONL | `token_usage.jsonl`（逐次调用用量）、`sessions/<id>/events.jsonl`（会话事件流） |
-| 目录 | `gal/`（角色与素材）、`uploads/`（聊天附件）、`reader/`（版面 / 译文 / 裁图缓存）、`plugins/`（工具插件）、`models/`（语音 / embedding 模型）、`trajectory/`（轨迹）、`tool_trace/`（工具结果原文）、`subagents/`（子代理批次）、`worktrees/`（Git 隔离） |
+| 目录 | `uploads/`（聊天附件）、`reader/`（版面 / 译文 / 裁图缓存）、`plugins/`（工具插件）、`models/`（语音 / embedding 模型）、`mobile/`（手机身份 / 设备 / 证书 / 审计）、`trajectory/`（轨迹）、`tool_trace/`（工具结果原文）、`subagents/`（子代理批次）、`worktrees/`（Git 隔离） |
 
 `resources/presets/` 在启动时按「缺失才补、不覆盖已有」播种到 `data/`。
 
@@ -602,22 +628,25 @@ robocopy "data" "..\_backup_data" /E /XD ".browser_profile"
 ```
 Galgame_monster/
 ├── main.py               # 启动器：起本地服务 + 打开应用窗口
+├── gm.py · gm.cmd        # 终端客户端：连上运行中的应用，复用同一会话
 ├── server.py             # 兼容入口（转发到 app/httpd.py）
 ├── app/                  # 后端实现（按功能拆分）
 │   ├── store.py          # 路径常量、共享锁、带 mtime 缓存的 JSON 读写、APP_VERSION
 │   ├── httpd.py          # HTTP 入口：路由表 + 静态资源 + SSE（含常驻 /api/events）
 │   ├── api/              # HTTP 接口实现，按域拆分
 │   │   ├── chat.py       # 对话主循环：装配 / 流式 / 工具 / 收尾
-│   │   ├── sessions.py   # 会话、消息、提问标记；savepoints.py 存档点
+│   │   ├── chat_attach.py · chat_accept.py · chat_nudge.py
+│   │   ├── sessions.py   # 会话、消息、提问标记；branch.py 按消息分叉
 │   │   ├── sandbox.py    # 沙箱文件读写、变更审阅、IDE 补全接口
 │   │   ├── reader.py     # 文档阅读：解析 / 裁图 / 翻译 / 术语表 / 导出
 │   │   ├── plugins.py · market.py   # 工具插件与 DSH 索引
 │   │   ├── trajectory.py · debugger.py · codeindex.py
-│   │   ├── gal_*.py      # GAL：角色 / 剧本 / 媒体 / 配音
+│   │   ├── mobile.py · settings_center.py · storage.py
 │   │   ├── hall*.py      # 大厅：图寻 / 数学 / 股市 / 面试 / 道场
 │   │   ├── tasks.py · work.py · workflow.py · calendar.py
 │   │   └── memory.py · skills.py · mcp.py · terminal.py · git.py · anno.py · aside.py
 │   ├── agent/            # 文件 Agent：工具实现 / 沙箱安全闸 / 审批 / 提问 / 撤销 / 子代理
+│   ├── mobile/           # 手机网关：HTTPS / 配对 / 设备 / 证书 / 审计
 │   ├── reader.py         # 文档版面重建、公式识别、翻译内核
 │   ├── reader_export.py  # 译文导出：仅译文 / 双语 PDF、Markdown（reportlab）
 │   ├── docparse.py       # PDF / Office 文本提取与扫描件识别
@@ -625,33 +654,38 @@ Galgame_monster/
 │   ├── search*.py · bilibili.py
 │   ├── knowledge.py · notes.py · profile.py · mem_tool.py · memory.py
 │   ├── image_gen.py · imaging.py · speech.py · tts.py
-│   ├── gal.py · hall.py · interview.py · stock.py · math_arena.py · dojo/
+│   ├── hall.py · interview.py · stock.py · math_arena.py · dojo/
+│   ├── branch.py · session_compact.py · session_event_prune.py
 │   ├── task_engine.py · workflow.py · scenes.py · scheduler.py · notify.py
 │   ├── plugin_manager.py · mcp.py · skills.py · market.py
 │   ├── codeindex.py · debugger.py · trajectory.py · aside.py · anno.py · library.py
 │   └── …                 # 其余按功能拆分，详见目录
 ├── web/                  # 前端界面（无框架、无构建）
 │   ├── index.html        # 页面结构 + SVG 图标库（sprite）
-│   ├── css/              # base / ide / reader / aside / notes / gal / hall / work …
+│   ├── css/              # base / tokens / shell / ui / polish / settings-center / ide / reader / notes / hall / work …
 │   ├── core.js           # 全局状态、HTTP 封装、Toast、SVG helper
-│   ├── chat.js · stream.js · composer.js · markdown.js · rich-media.js
+│   ├── chat.js · composer.js · markdown.js · rich-media.js · follow.js · branch.js
+│   ├── stream/           # 发送 / 队列 / 停止 / 续写 / 附件 / 消息操作
+│   ├── settings/         # 设置中心：壳层 / 搜索 / 各页 pane / 移动访问 / 帮助
 │   ├── reader.js · aside.js · agents.js · trajectory.js · turndots.js
-│   ├── settings.js · knowledge.js · saves.js · auto.js · init.js · hotkeys.js · hk-core.js
+│   ├── new-home.js · page-transition.js · knowledge.js · auto.js · init.js · hotkeys.js · hk-core.js
 │   ├── work/             # 工作台：core / events / tasks / artifacts / workflows / backup / views / stats / focus / templates / misc
-│   ├── git.js · ide-term.js · observe.js · mdlint.js
+│   ├── git.js · ide-core.js · ide-term.js · observe.js · mdlint.js · notes.js · notes-blocks.js
 │   ├── hall.js · hall-geo.js · hall-math*.js · hall-stock.js · hall-interview.js
-│   ├── hall-dojo.js · hall-observe.js · hall-gal.js · hall-plugins.js
-│   ├── gal/              # GAL 演出（core / assets / stats / script / theme / stage / session / media / voice / editor / ide）
+│   ├── hall-dojo.js · hall-observe.js · hall-plugins.js
+│   ├── m/                # 手机端页面
 │   └── vendor/           # 本地内置 katex / monaco / pdfjs / seti / vis-network / xterm
 ├── desktop/              # 可选 Electron 窗口壳（main.js / preload.js / package.json）
 ├── scripts/              # 开发与运维脚本
 │   ├── dev_check.py · http_smoke.py · chat_smoke.py
 │   ├── fetch_speech_model.py · fetch_embed_model.py
 │   ├── prompt_snapshot.py · sync_presets.py · make_shortcut.ps1 · notify.ps1
+│   ├── compact_sessions.py · prune_session_events.py · clean_memory_leaks.py
+│   ├── ui/                # 浏览器交互回归（设置交互等）
 │   └── bench.py · eval_research.py · hotkeys_test.js · markdown_test.js · transpage_test.js
 ├── resources/
 │   ├── prompts/          # 提示词模板（*.md，带 {{占位符}}）
-│   └── presets/          # 示例角色 / 立绘 / 背景 / BGM / 特效 / 知识库
+│   └── presets/          # 示例技能 / 知识库
 ├── docs/                 # 开发笔记（本地，不入库）
 ├── data/                 # 运行时数据（整目录忽略，不提交）
 ├── tests/                # pytest 单测
@@ -665,7 +699,7 @@ Galgame_monster/
 ## 11. 常见问题
 
 **Q：提示「尚未配置聊天 API 密钥」**
-到「设置 → 模型接入」填写地址、模型名与密钥并保存。
+到「设置 → 模型与对话」填写地址、模型名与密钥并保存。
 
 **Q：公式显示成代码、代码块没有颜色**
 KaTeX 已内置在 `web/vendor/katex`；代码高亮依赖 CDN 加载 highlight.js，请确认网络可用。加载失败会降级，不影响聊天。
@@ -683,7 +717,10 @@ KaTeX 已内置在 `web/vendor/katex`；代码高亮依赖 CDN 加载 highlight.
 「总输入」是整回合累计：每个工具轮都会把完整上下文重发一次。明细表里的逐轮数字是单次调用，计费只按未命中缓存的部分计算。
 
 **Q：Agent 说无法读取 / 写入文件**
-先确认已开启 Agent 并选好沙箱目录；**写入**只能落在沙箱内，**读取**可用绝对路径访问外部（`.git` / `.venv` / `data/` 与秘密文件会被拒绝）。若仍不行，重启服务并 `Ctrl+F5` 强刷。
+**写入**只能落在沙箱内；**读取**可用绝对路径访问外部（`.git` / `.venv` / `data/` 与秘密文件会被拒绝）。没选沙箱时也能只读：点工具栏「清空目录」后，用绝对路径读取 / 列目录 / 看图，写入与命令仍需先选目录。若仍不行，重启服务并 `Ctrl+F5` 强刷。
+
+**Q：手机打不开 / 连不上**
+确认手机与电脑在同一 Wi-Fi、设置里已开启手机访问；Windows 默认拦 ping，不要用 ping 判断，直接用手机浏览器打开状态里给出的 https 地址。首次需要安装根证书并扫码配对；连不上时先点「添加防火墙规则」。
 
 **Q：AI 改了文件，去哪里看它到底改了什么**
 看助手回复下方的变更卡：文件名、完整路径、增删行数；点文件名打开 inline diff，可撤销或保留。快捷键 `Ctrl+Backspace` / `Ctrl+Enter`。重启程序后快照失效。
@@ -698,7 +735,7 @@ KaTeX 已内置在 `web/vendor/katex`；代码高亮依赖 CDN 加载 highlight.
 导出是重排文档：统一字号、书签、页码，图表与公式按阅读流顺序插回，不再与原页一一对应。需要原版式时使用左栏原页。
 
 **Q：提问标记在哪里**
-悬停任意用户提问 → 点图钉「标记提问」并命名。Solo 模式右侧会出现对应悬浮按钮，点击跳回；右键改名 / 删除。IDE、GAL、大厅、工作台模式下自动隐藏。
+悬停任意用户提问 → 点图钉「标记提问」并命名。Solo 模式右侧会出现对应悬浮按钮，点击跳回；右键改名 / 删除。IDE、大厅、工作台模式下自动隐藏。
 
 **Q：图寻游戏的照片从哪来 / AI 对手好像看不见图**
 照片与真实经纬度来自 Panoramax 开放街景库，需要联网。AI 对手要真正看图需配视觉模型；未配置时退用聊天模型，都不可用则区域内盲猜并标注。

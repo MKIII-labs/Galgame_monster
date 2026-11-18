@@ -123,20 +123,23 @@ def open_url(url, sandbox=None):
         text = snapshot.render(data, _cfg().get("computer_snapshot_chars") or 4000)
     except Exception as e:
         text = "（快照获取失败：%s）" % e
-    tail = maybe_auto_shot("browser", poor_browser_structure(data), shot)
+    tail = maybe_auto_shot("browser", poor_browser_structure(data),
+                           lambda: shot(sandbox))
     return "已打开：%s（%s）\n\n%s%s" % (title or "(无标题)", final, text, tail)
 
 
 def see(**kw):
     start = kw.get("start") or 0
     limit = kw.get("limit") or 30
+    sandbox = kw.get("sandbox")
     try:
         browser.ensure()
         data = snapshot.collect(int(start), int(limit))
     except Exception as e:
         return "❌ 获取快照失败：%s" % e
     text = snapshot.render(data, _cfg().get("computer_snapshot_chars") or 4000)
-    return text + maybe_auto_shot("browser", poor_browser_structure(data), shot)
+    return text + maybe_auto_shot("browser", poor_browser_structure(data),
+                                  lambda: shot(sandbox))
 
 
 def act(action, ref=None, value="", clear=False):
@@ -225,7 +228,7 @@ def _network_text():
     return "最近的请求（最多 25 条）：\n" + "\n".join(lines)
 
 
-def shot():
+def shot(sandbox=None):
     try:
         browser.ensure()
         res = browser.conn().send("Page.captureScreenshot", {"format": "png"}, timeout=30)
@@ -240,8 +243,15 @@ def shot():
         desc = _describe_shot(b64)
     except Exception as e:
         desc = "⚠️ 视觉描述不可用：%s（图像已截取，但无法描述）" % e
+    rel = ""
+    try:
+        from app.computer.shots import save_png
+        rel = save_png(b64, sandbox, "page")
+    except Exception:
+        rel = ""
     trace.add("computer_shot", {}, "ok", browser.current_url(), browser.current_url())
-    return "【截图（%d KB）】\n%s" % (len(b64) // 1024, desc)
+    pic = ("\n![实机截图](%s)" % rel) if rel else ""
+    return "【截图（%d KB）】%s\n%s" % (len(b64) // 1024, pic, desc)
 
 
 # ============================================================
@@ -260,7 +270,7 @@ def dispatch(name, args=None, sandbox=None):
             text = desktop.snapshot(target, args.get("start"), args.get("limit"))
             return text + maybe_auto_shot(
                 target, poor_desktop_structure(desktop.last_snapshot(target)),
-                lambda: desktop.shot(target))
+                lambda: desktop.shot(target, sandbox))
         if name == "computer_act":
             before = desktop.window_title(target)
             text = desktop.act(target, args.get("action"), args.get("ref"),
@@ -278,7 +288,7 @@ def dispatch(name, args=None, sandbox=None):
                 return trace.recent(12)
             return "❌ 桌面窗口只支持 kind=value / trace（当前：%s）" % kind
         if name == "computer_shot":
-            return desktop.shot(target)
+            return desktop.shot(target, sandbox)
         return "❌ 桌面窗口不支持这个工具：%s" % name
     if not enabled():
         return ("⚠️ Computer Use 未开启。请在「设置 → Agent → Computer Use」打开后再试。")
@@ -286,14 +296,14 @@ def dispatch(name, args=None, sandbox=None):
         if name == "computer_open":
             return open_url(str(args.get("url") or "").strip(), sandbox)
         if name == "computer_see":
-            return see(start=args.get("start"), limit=args.get("limit"))
+            return see(start=args.get("start"), limit=args.get("limit"), sandbox=sandbox)
         if name == "computer_act":
             return act(args.get("action"), args.get("ref"),
                        args.get("value", ""), bool(args.get("clear")))
         if name == "computer_read":
             return read(args.get("kind") or "console", args.get("ref"))
         if name == "computer_shot":
-            return shot()
+            return shot(sandbox)
     except Exception as e:
         return "❌ Computer Use 出错：%s" % e
     return "❌ 未知的 Computer 工具：%s" % name

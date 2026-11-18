@@ -20,8 +20,7 @@ def test_default_config_covers_settings_pages():
     for key in ("chat_url", "chat_model", "chat_context_limit", "chat_think_mode",
                 "chat_round_retries", "chat_stream_stall_timeout",
                 "chat_persist_reasoning", "chat_reasoning_keep_chars",
-                "gal_cps", "gal_theme", "speech_polish",
-                "tts_provider", "agent_max_undo"):
+                "speech_polish", "agent_max_undo"):
         assert key in cfg
 
 
@@ -38,6 +37,19 @@ def test_settings_routes_registered():
     routes = snapshot()
     for path in ("/api/settings/defaults", "/api/app/info", "/api/app/open-data-dir"):
         assert ("POST", path) in routes
+
+
+def test_acceptance_toggle_wired_in_settings():
+    """验收开关：设置页必须有控件、默认勾选，并参与收集 / 本页重置。"""
+    import os
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "web", "settings", "panes-agent.js")
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    assert "agent-acceptance-review" in src
+    assert "agent_acceptance_review !== false" in src
+    assert "agent_acceptance_review: !!" in src
+    assert "'agent_acceptance_review'" in src
 
 
 def test_obsolete_keys_are_dropped_on_save(monkeypatch):

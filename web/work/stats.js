@@ -40,6 +40,18 @@ function workRenderStats() {
   };
   mk(7, '近 7 天');
   mk(30, '近 30 天');
+  const ai = workElNew('button', 'work-btn small primary wv-ai-review', '让 AI 写复盘');
+  ai.title = '回到今日驾驶舱，在 AI 助手里生成这份复盘';
+  ai.onclick = () => {
+    const panel = workEl('work-ai-panel');
+    if (panel) panel.classList.remove('hidden');
+    const toggle = workEl('work-ai-toggle');
+    if (toggle) toggle.classList.add('on');
+    if (typeof workSetView === 'function') workSetView('today');
+    if (typeof workAiSetTab === 'function') workAiSetTab('review');
+    if (typeof workAiLoadReview === 'function') workAiLoadReview(WORK.statsDays || 7);
+  };
+  tabs.appendChild(ai);
   box.appendChild(tabs);
 
   const st = WORK.stats;

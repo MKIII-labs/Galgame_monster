@@ -56,6 +56,10 @@ def _api_plugins(h):
                 pid, err = pm.install_dir(path)
         elif source == "zip":
             pid, err = pm.install_zip(body.get("path") or "")
+        elif source == "url":
+            pid, err = pm.install_url(body.get("url") or "",
+                                      body.get("sha256") or "",
+                                      body.get("size") or 0)
         elif source == "git":
             pid, err = pm.install_git(body.get("url") or "")
         else:

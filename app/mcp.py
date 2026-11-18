@@ -72,7 +72,12 @@ def exposed_name(server, tool):
     OpenAI / Anthropic 的 function name 只允许 [A-Za-z0-9_-] 且不超 64 字符，
     所以 server 截 32、tool 截 25，超长部分舍弃（真名仍由索引表记住）。
     """
-    return "mcp__%s__%s" % (_safe(server, 32), _safe(tool, 25))
+    return server_prefix(server) + _safe(tool, 25)
+
+
+def server_prefix(server):
+    """某个 server 的工具名前缀：`mcp__<server>__`。"""
+    return "mcp__%s__" % _safe(server, 32)
 
 
 def servers():

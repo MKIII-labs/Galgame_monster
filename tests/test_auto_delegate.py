@@ -8,6 +8,7 @@ from app import agent_defs, auto_delegate, explore
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_defs, "AGENTS_DIR", str(tmp_path / "agents"))
+    monkeypatch.setattr(agent_defs, "USER_AGENTS_DIR", str(tmp_path / "user_agents"))
     monkeypatch.setattr(explore, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(explore, "VERIFY_EVIDENCE", False)
 
@@ -41,7 +42,7 @@ def test_routing_block_lists_agents():
 
 
 def test_routing_block_empty_when_no_agent(monkeypatch):
-    monkeypatch.setattr(auto_delegate, "enabled_agents", lambda: [])
+    monkeypatch.setattr(auto_delegate, "enabled_agents", lambda sandbox="": [])
     assert auto_delegate.routing_block() == ""
 
 

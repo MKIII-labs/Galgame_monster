@@ -11,6 +11,9 @@
   --ide-tab-bg: var(--bg-side);           /* 未激活标签页底色 */
   --ide-status-bg: var(--bg-side);        /* 状态栏底色（跟随侧栏，不再用强调色铺满一条） */
   --ide-status-fg: var(--text);           /* 状态栏文字 */
+  /* 编辑器实际底色：Monaco 的 vs / vs-dark 分别写死 #FFFFFF / #1E1E1E，
+     面包屑要贴着编辑器，不能用界面主题的 --bg（雾光下会偏紫）。 */
+  --ide-editor-bg: #FFFFFF;
   /* 文件 / 列表项配色（对齐 VS Code 的 sideBar / list / tab 语义）
      —— VS Code 的资源管理器文件名用 sideBar.foreground，选中项用自己的前后景，
         都不是"强调色"；以前我们把选中与改动都涂成 --accent，是本次要修的偏差。 */
@@ -63,6 +66,7 @@
   --t-press: var(--t-press); --t-fast: .1s; --t: .1s; --t-slow: .1s;
 }
 #ide-panel.hidden { display: none; }
+html[data-theme-mode="dark"] #ide-panel { --ide-editor-bg: #1E1E1E; }
 
 /* 滚动条：VS Code 是自绘 overlay（不占布局宽度，悬停才显现）。浏览器原生滚动条无法做到，
    折中收窄到 10px，减少它对侧栏内容的挤占；滑块仍按 VS Code 的 4px 圆角。 */
@@ -72,23 +76,6 @@
   border-radius: 4px; background-clip: content-box;
 }
 #ide-panel ::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover); background-clip: content-box; }
-/* 顶部提示条（可关闭） */
-.ide-notice {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  /* 窄窗口里提示条会折成很高的一列；不给它上限会把下面的编辑器挤成 0 高，
-     变更审阅 / diff 就完全看不见。让它最多占 30%，超出自己滚动。 */
-  flex: 0 1 auto; max-height: 30%; overflow-y: auto;
-  padding: 7px 12px;
-  background: var(--accent-soft); border-bottom: 1px solid var(--border);
-  color: var(--text); font-size: 12.5px; line-height: 1.5;
-}
-.ide-notice.hidden { display: none; }
-.ide-notice-text { min-width: 0; }
-.ide-notice-x {
-  flex: none; width: 20px; height: 20px; display: grid; place-items: center;
-  border-radius: var(--radius-sm); color: var(--text-dim); font-size: 12px;
-}
-.ide-notice-x:hover { background: var(--bg-hover); color: var(--text); }
 /* 键盘焦点：VS Code 全站是 1px focusBorder + outline-offset:-1（style.css）。
    全站默认的 2px 强调色外扩环在密集的 IDE 里过重，这里按 VS Code 的规格收回。 */
 #ide-panel button:focus-visible,
@@ -101,24 +88,28 @@
 /* 主体：活动栏 / 侧边栏 / 编辑区 */
 .ide-body { display: flex; flex: 1; min-height: 0; position: relative; }
 
-/* 活动栏（Trae 风：窄条 + 圆角图标按钮）
-   尺寸 44px、按钮 36×36 圆角 8px；选中用淡色圆角块，而不是 VS Code 的左侧竖条。 */
+/* 活动栏（对齐 VS Code：48px 宽、48×48 命中区、24px 图标、直角）
+   选中态不是整块底色，而是左侧 2px 竖条 + 图标高亮（activityBar.activeBorder）。 */
 .ide-activity {
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  width: 44px; flex: 0 0 44px; padding: 6px 0;
+  display: flex; flex-direction: column; align-items: center; gap: 0;
+  width: 48px; flex: 0 0 48px; padding: 0;
   background: var(--ide-activity-bg);
 }
 .act-spacer { flex: 1; }
 .act-btn {
   position: relative;                 /* 给右上角改动数角标定位 */
-  width: 36px; height: 36px; display: grid; place-items: center;
-  border: 0; cursor: pointer; border-radius: 8px;
+  width: 48px; height: 48px; display: grid; place-items: center;
+  border: 0; cursor: pointer; border-radius: 0;
   background: transparent; color: var(--ide-activity-fg-dim);
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
-#ide-panel .act-btn .ic { width: 20px; height: 20px; }
-.act-btn:hover { color: var(--ide-activity-fg); background: var(--bg-hover); }
-.act-btn.active { color: var(--ide-activity-fg); background: var(--bg-hover); }
+#ide-panel .act-btn .ic { width: 24px; height: 24px; }
+.act-btn:hover { color: var(--ide-activity-fg); }
+.act-btn.active { color: var(--ide-activity-fg); }
+.act-btn.active::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0;
+  width: 2px; background: var(--accent);
+}
 
 /* 侧边栏容器：收起 / 展开只动这一层的宽度与透明度。
    各视图（资源管理器 / 搜索 / Git …）仍用 .hidden 瞬间切换，不参与宽度动画；
@@ -148,13 +139,15 @@
 }
 .ide-side-resizer:hover, .ide-side-resizer.dragging { background: var(--accent); }
 .ide-side-resizer.hidden { display: none; }
+/* 侧栏标题：VS Code 的 .part>.title 高 38px，标题文字取
+   `.part>.title>.title-label h2 { font-size:11px; font-weight:400 }`。 */
 .ide-side-head {
   display: flex; align-items: center; justify-content: space-between; gap: 6px;
-  height: 38px; padding: 0 6px 0 12px; flex: 0 0 auto;
-  font-size: 12.5px; color: var(--text);
+  height: 38px; padding: 0 8px 0 12px; flex: 0 0 auto;
+  font-size: 11px; color: var(--text);
 }
 .ide-side-title {
-  min-width: 0; font-weight: 600;
+  min-width: 0; font-weight: 400;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* 操作按钮平时收着，鼠标进侧栏才浮现（Trae 的头部就是这么干净的） */
@@ -171,31 +164,44 @@
 }
 .ico-btn:hover { background: var(--bg-hover); color: var(--text); }
 .ico-btn.busy { opacity: .55; }
-/* 工作区行：沙箱名 + 路径，点击折叠 / 展开整棵树 */
+/* 工作区根行：对齐 VS Code 的根目录行（22px 单行、11px / 700、满宽、直角）。
+   沙箱路径仍放在同一行（我们用 "工作区" 作名字，路径本身就是有效信息），窄了就省略。 */
 .ide-workspace {
-  display: flex; align-items: flex-start; gap: 5px;
-  margin: 0 6px 4px; padding: 5px 8px;
-  border-radius: 6px; cursor: pointer; user-select: none;
+  display: flex; align-items: center; gap: 4px;
+  height: 22px; margin: 0; padding: 0 8px;
+  border-radius: 0; cursor: pointer; user-select: none;
   color: var(--ide-side-fg);
 }
 .ide-workspace:hover { background: var(--bg-hover); }
 .ide-workspace:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.ide-ws-caret { flex: none; display: inline-flex; align-items: center; height: 17px; color: var(--text-dim); }
+.ide-ws-caret { flex: none; display: inline-flex; align-items: center; height: 22px; color: var(--text-dim); }
 .ide-ws-caret .ic { width: 14px; height: 14px; transition: transform var(--t-fast) var(--ease); }
 .ide-workspace.collapsed .ide-ws-caret .ic { transform: rotate(-90deg); }
 /* 折叠态由工作区行的类控制；动画期间 JS 会用内联 display 抵消它 */
 .ide-workspace.collapsed + .ide-tree { display: none; }
-.ide-ws-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.ide-ws-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.ide-ws-main {
+  min-width: 0; flex: 1 1 auto; display: flex; flex-direction: row;
+  align-items: baseline; gap: 6px; overflow: hidden;
+}
+.ide-ws-name {
+  flex: none; font-size: 11px; font-weight: 700; color: var(--text);
+  white-space: nowrap;
+}
 .ide-workspace .ide-root {
-  margin: 0; padding: 0; flex: none;
+  margin: 0; padding: 0; min-width: 0; flex: 0 1 auto;
   font-size: 11px; color: var(--text-dim); font-family: var(--mono, monospace);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ide-tree {
-  flex: 1 1 auto; overflow: auto; padding: 2px 6px 10px;
+  flex: 1 1 auto; overflow: auto; padding: 2px 0 10px;
   /* VS Code 工作台基准字号 13px（docs/IDE_VSCODE_PARITY.md §2.1） */
   font-size: 13px; color: var(--ide-side-fg);
+}
+/* 树行尺寸对齐 VS Code 的 explorer-item：22px 行高、8px 缩进、满宽、直角 */
+#ide-panel .ide-row {
+  height: 22px; line-height: 22px;
+  padding: 0 8px 0 calc(8px + var(--ide-depth, 0) * 8px);
+  border-radius: 0;
 }
 /* 正在读盘的文件：立刻给点击反馈，不用等到内容返回 */
 .ide-row.loading { opacity: .55; cursor: progress; }
@@ -311,25 +317,26 @@
 .ide-editor-wrap.md-split .ide-fallback,
 .ide-editor-wrap.md-split .ide-diff,
 .ide-editor-wrap.md-split .ide-image { right: 50%; }
+/* 标签栏：VS Code 的 editor-group 标签高 35px、直角、标签之间没有间隙 */
 .ide-tabsbar {
   display: flex; align-items: center; flex: 0 0 auto;
-  height: 36px; padding: 0 8px;
+  height: 35px; padding: 0 6px 0 0;
   background: var(--bg-side); border-bottom: 1px solid var(--border);
 }
 .ide-tabs {
-  display: flex; align-items: flex-end; gap: 2px;
-  overflow-x: auto; flex: 1; min-width: 0; height: 36px; padding-top: 4px;
-  /* 溢出用滚轮/中键横向滚动，不显示滚动条：36px 高的条里塞一条原生滚动条会吃掉近三成高度 */
+  display: flex; align-items: flex-end; gap: 0;
+  overflow-x: auto; flex: 1; min-width: 0; height: 35px;
+  /* 溢出用滚轮/中键横向滚动，不显示滚动条：35px 高的条里塞一条原生滚动条会吃掉近三成高度 */
   scrollbar-width: none;
 }
 .ide-tabs::-webkit-scrollbar { display: none; }
 .ide-tab {
   display: flex; align-items: center; gap: 6px;
-  height: 30px; max-width: 260px;
-  padding: 0 4px 0 10px;
-  border: 0; border-radius: 6px 6px 0 0;
+  height: 35px; max-width: 260px;
+  padding: 0 4px 0 12px;
+  border: 0; border-radius: 0;
   background: transparent;
-  font-size: 12.5px; color: var(--ide-tab-fg-dim); cursor: pointer; white-space: nowrap;
+  font-size: 13px; color: var(--ide-tab-fg-dim); cursor: pointer; white-space: nowrap;
 }
 .ide-tab-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 待审查的增删行数：只在该文件还有未处理改动时出现 */
@@ -362,6 +369,31 @@
 /* 拖拽排序：拖动中的标签变淡，目标位置用左侧竖线标出 */
 .ide-tab.dragging { opacity: .45; }
 .ide-tab.drop-target { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* 面包屑：VS Code 的 breadcrumbs-below-tabs 是 22px 高、12px 文字，
+   与编辑器同底色、不额外画分隔线（标签栏那条下边框已经分开了）。 */
+.ide-crumbs {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 1px;
+  height: 22px; padding: 0 8px; overflow-x: auto; overflow-y: hidden;
+  background: var(--ide-editor-bg); color: var(--text-dim); font-size: 12px;
+  scrollbar-width: none;
+}
+.ide-crumbs::-webkit-scrollbar { display: none; }
+.ide-crumbs.hidden { display: none; }
+.ide-crumb {
+  display: inline-flex; align-items: center; gap: 4px; height: 18px;
+  min-width: 0; max-width: 220px; padding: 0 3px;
+  border: 0; border-radius: 2px; background: transparent;
+  color: inherit; font: inherit; cursor: pointer;
+}
+.ide-crumb:hover { background: var(--bg-hover); color: var(--text); }
+.ide-crumb.file { flex: none; color: var(--text); }
+.ide-crumb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ide-crumb .ide-ico { width: 14px; height: 14px; }
+.ide-crumb .ide-ico svg { width: 14px; height: 14px; }
+.ide-crumb .ide-ico.seti { font-size: 14px; line-height: 14px; }
+.ide-crumb-sep { flex: none; font-size: 11px; opacity: .7; }
+
 .ide-editor-wrap { flex: 1; min-height: 0; position: relative; }
 .ide-editor-area { position: absolute; inset: 0; }
 .ide-editor-area.hidden { display: none; }
@@ -386,7 +418,7 @@
 }
 .ide-text {
   width: 100%; height: 100%; box-sizing: border-box; border: 0; resize: none;
-  background: var(--bg); color: var(--text); padding: 10px 12px;
+  background: var(--ide-editor-bg); color: var(--text); padding: 10px 12px;
   font-family: var(--mono); font-size: 13px; line-height: 1.6; outline: none;
 }
 
@@ -394,15 +426,19 @@
 .ide-welcome {
   position: absolute; inset: 0; z-index: 3;
   display: grid; place-items: center;
-  background: var(--bg); padding: 24px;
+  background: var(--ide-editor-bg); padding: 24px;
 }
 .ide-welcome.hidden { display: none; }
 .ide-welcome-inner { width: min(520px, 100%); }
-.ide-welcome-title { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
-.ide-welcome-sub { color: var(--text-dim); margin-bottom: 22px; }
-.ide-welcome-keys { display: flex; flex-direction: column; gap: 6px; margin-bottom: 22px; }
-.ide-welcome-key { display: flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--text-dim); }
+/* 欢迎页排版对齐 VS Code watermark：标题 24px / 400，正文与快捷键 13px */
+.ide-welcome-title { font-size: 24px; font-weight: 400; margin-bottom: 6px; }
+.ide-welcome-sub { font-size: 13px; color: var(--text-dim); margin-bottom: 24px; }
+.ide-welcome-keys { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.ide-welcome-key { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text-dim); }
 .ide-welcome-key > span:first-child { flex: 1; }
+.ide-welcome-hint {
+  margin: 0 0 20px; font-size: 12px; line-height: 1.6; color: var(--text-dim);
+}
 .ide-welcome-key kbd {
   min-width: 20px; padding: 1px 5px; border: 1px solid var(--border);
   border-bottom-width: 2px; border-radius: 3px;
@@ -629,18 +665,29 @@
 /* 状态栏（VS Code 是 22px / 12px；底色在 Dark Modern 与侧栏同色，靠 1px 上边框分隔） */
 .ide-status {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  flex: 0 0 auto; height: 22px; padding: 0 10px; font-size: 12px;
+  flex: 0 0 auto; height: 22px; padding: 0; font-size: 12px;
   background: var(--ide-status-bg); color: var(--ide-status-fg);
   border-top: 1px solid var(--border);
 }
-.ide-status-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ide-status-right { display: flex; gap: 12px; flex: 0 0 auto; align-items: center; }
+/* 状态栏 item：满高、左右 8px 内边距，悬停给一块底色（statusBarItem.hoverBackground） */
+.ide-status-path {
+  display: flex; align-items: center; height: 100%; padding: 0 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ide-status-right { display: flex; gap: 0; flex: 0 0 auto; align-items: center; height: 100%; }
+.ide-status-right > span {
+  display: flex; align-items: center; height: 100%; padding: 0 8px;
+  white-space: nowrap;
+}
+.ide-status-path:hover,
+.ide-status-right > span:hover,
+.ide-status-chip:hover { background: var(--bg-hover); }
 .ide-status-flash { color: var(--ok); }   /* 保存成功的短暂提示（替代底部 toast） */
 /* 状态栏「问题」角标：有错误时变红；点击展开问题面板 */
 .ide-status-chip {
   border: 0; background: transparent; color: var(--ide-status-fg, var(--text-dim));
-  font-family: var(--font); font-size: 11.5px; cursor: pointer; padding: 0 4px;
-  opacity: .85;
+  font-family: var(--font); font-size: 11.5px; cursor: pointer; padding: 0 8px;
+  height: 100%; opacity: .85;
 }
 .ide-status-chip:hover { opacity: 1; }
 .ide-status-chip.has-err { color: var(--danger); opacity: 1; }
@@ -711,9 +758,10 @@
   border: 0; border-bottom: 1px solid var(--border); outline: none;
 }
 .ide-cmd-list { max-height: 320px; overflow: auto; }
+/* VS Code 的 quick input 列表行高 22px（不是 30px 的网页列表） */
 .ide-cmd-item {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 7px 12px; font-size: 13px; color: var(--text); cursor: pointer;
+  height: 22px; padding: 0 12px; font-size: 13px; color: var(--text); cursor: pointer;
 }
 .ide-cmd-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ide-cmd-key { flex: none; color: var(--text-dim); font-size: 11px; font-family: var(--mono); }
@@ -765,7 +813,7 @@
 .ide-term {
   display: flex; flex-direction: column; flex: 0 0 auto;
   height: 240px; min-height: 90px;
-  background: var(--bg); border-top: 1px solid var(--border);
+  background: var(--ide-editor-bg); border-top: 1px solid var(--border);
 }
 .ide-term.hidden { display: none; }
 .ide-term-resizer {
@@ -774,23 +822,51 @@
 }
 .ide-term-resizer.hidden { display: none; }
 .ide-term-resizer:hover { background: color-mix(in srgb, var(--accent) 40%, transparent); }
-.ide-term-head {
-  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
-  height: 30px; padding: 0 8px;
+/* 终端页签栏：26px、方角、激活态左侧 1px 竖条（VS Code terminal-tab-activeBorder） */
+.ide-term-tabsbar {
+  flex: 0 0 auto; display: flex; align-items: center;
+  height: 26px;
   background: var(--ide-tab-bg);
   border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  font-size: 12px;
 }
-.ide-term-title { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
-.ide-term-title .ic { width: 14px; height: 14px; }
-.ide-term-cwd {
-  flex: 1; min-width: 0; color: var(--text-dim);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px;
+.ide-term-tabs {
+  flex: 1; min-width: 0; display: flex; height: 26px;
+  overflow-x: auto; scrollbar-width: none;
 }
-.ide-term-actions { display: flex; gap: 2px; flex: 0 0 auto; }
-.ide-term-actions .ico-btn { width: 22px; height: 22px; font-size: 11px; line-height: 1; }
-.ide-term-host { flex: 1; min-height: 0; overflow: hidden; padding: 4px 0 4px 8px; }
+.ide-term-tabs::-webkit-scrollbar { display: none; }
+.ide-term-tab {
+  position: relative; flex: none; display: inline-flex; align-items: center; gap: 5px;
+  height: 26px; max-width: 220px; padding: 0 8px 0 10px;
+  color: var(--text-dim); font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.ide-term-tab:hover { background: var(--bg-hover); color: var(--text); }
+.ide-term-tab.active { color: var(--text); background: var(--bg); }
+.ide-term-tab.active::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0;
+  width: 1px; background: var(--accent);
+}
+.ide-term-tab-ic { flex: none; display: inline-flex; }
+.ide-term-tab-ic .ic { width: 14px; height: 14px; }
+.ide-term-tab-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ide-term-tab-x {
+  flex: none; width: 14px; height: 14px; display: grid; place-items: center;
+  border-radius: 2px; font-size: 10px; opacity: 0;
+}
+.ide-term-tab:hover .ide-term-tab-x,
+.ide-term-tab.active .ide-term-tab-x { opacity: .7; }
+.ide-term-tab-x:hover { opacity: 1; background: var(--bg-hover); }
+.ide-term-tab-input {
+  width: 110px; height: 18px; padding: 0 3px; box-sizing: border-box;
+  background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 2px;
+  font: inherit; font-size: 12px; outline: none;
+}
+.ide-term-actions { flex: none; display: flex; gap: 2px; padding: 0 6px; }
+.ide-term-actions .ico-btn { width: 20px; height: 20px; font-size: 12px; line-height: 1; }
+.ide-term-actions .ico-btn:disabled { opacity: .35; cursor: default; }
+.ide-term-host { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+.ide-term-pane { position: absolute; inset: 4px 0 4px 8px; }
+.ide-term-pane.hidden { display: none; }
 .ide-term-host .xterm { height: 100%; }
 .ide-term-host .xterm-viewport { background: transparent !important; }
 .ide-term-hint {
@@ -798,8 +874,8 @@
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 .ide-term-hint.hidden { display: none; }
-/* 活动栏里的终端按钮：面板打开时保持高亮 */
-#ide-term-act.active { color: var(--ide-activity-fg); background: var(--bg-hover); }
+/* 活动栏里的终端按钮：面板打开时保持高亮（复用 .act-btn.active 的左侧竖条，不铺底色） */
+#ide-term-act.active { color: var(--ide-activity-fg); }
 
 /* ============================================================
    源代码管理（Git 侧栏 + 只读 diff）
@@ -1095,12 +1171,14 @@
 }
 .ide-bottom.hidden { display: none; }
 
+/* 面板页签：VS Code 的 composite bar 是 35px 方角、11px 标签，
+   激活态只加一条 1px 下边框（panelTitle.activeBorder），不用胶囊底色。 */
 .ide-bottom-head {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 2px;
-  height: 32px;
+  gap: 0;
+  height: 35px;
   padding: 0 8px;
   background: var(--ide-tab-bg);
   border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -1109,20 +1187,23 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 24px;
-  padding: 0 8px;
+  height: 35px;
+  padding: 0 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 0;
   background: transparent;
   color: var(--text-dim);
   font-family: var(--font);
-  font-size: 12px;
+  font-size: 11px;
   cursor: pointer;
 }
 .ide-bottom-tab:hover { color: var(--text); background: var(--bg-hover); }
-.ide-bottom-tab.active { color: var(--text); background: var(--bg-hover); }
+.ide-bottom-tab.active {
+  color: var(--text); background: transparent;
+  box-shadow: inset 0 -1px 0 var(--accent);
+}
 .ide-bottom-tab.hidden { display: none; }
-.ide-bottom-tab .ic { width: 14px; height: 14px; }
+.ide-bottom-tab .ic { width: 16px; height: 16px; }
 .ide-bottom-count { opacity: .65; }
 .ide-bottom-spacer { flex: 1; }
 
@@ -1130,5 +1211,4 @@
 /* 页签栏已经说明是哪个面板，内部标题不再重复 */
 #ide-bottom .ide-term { border-top: 0; }
 #ide-bottom .ide-intel { border-top: 0; }
-#ide-bottom .ide-term-title { display: none; }
 #ide-bottom .ide-intel-head { display: none; }

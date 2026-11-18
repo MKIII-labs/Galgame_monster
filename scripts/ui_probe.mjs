@@ -30,8 +30,8 @@ const URL_ = arg('url', 'http://127.0.0.1:8791/').replace(/\/$/, '') + '/';
 const OUT = path.resolve(arg('out', 'data/ui-baseline'));
 const MODES = arg('modes', 'solo,ide,hall,work,settings').split(',').map((s) => s.trim()).filter(Boolean);
 const MOBILE = process.argv.includes('--mobile');
-const WIDTH = MOBILE ? 390 : 1440;
-const HEIGHT = MOBILE ? 844 : 900;
+const WIDTH = Number(arg('width', MOBILE ? 390 : 1440));
+const HEIGHT = Number(arg('height', MOBILE ? 844 : 900));
 const PORT = 9371;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

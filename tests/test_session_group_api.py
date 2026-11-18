@@ -64,7 +64,7 @@ def test_delete_group_removes_sessions_and_meta(monkeypatch):
     monkeypatch.setattr(api, "load_sessions", lambda: data)
     monkeypatch.setattr(api, "save_sessions", lambda d: None)
     monkeypatch.setattr(api, "delete_session_uploads", lambda sid: None)
-    monkeypatch.setattr(api.saves, "drop_saves", lambda sid: None)
+    monkeypatch.setattr(api.branch_lib, "drop_legacy_saves", lambda sid: None)
 
     h = _H({"op": "delete", "key": key, "ids": ["s1", "s2"]})
     api._api_session_group(h)

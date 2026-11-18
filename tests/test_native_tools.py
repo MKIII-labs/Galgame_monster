@@ -77,6 +77,34 @@ def test_task_state_text_and_plan():
     assert "canvas 黑屏" in text
 
 
+def test_finish_schema_separates_summary_and_details():
+    """完成声明：summary 面向用户，details 只放内部操作留痕。"""
+    from app.agent.prompt import _FINISH_PROMPT
+    from app.agent.schemas import native_tool_schemas
+
+    schemas = native_tool_schemas(agent_on=True)
+    finish = next(t for t in schemas if t["function"]["name"] == "finish")
+    props = finish["function"]["parameters"]["properties"]
+    assert "summary" in props and "details" in props
+    assert "内部细节" in props["summary"]["description"]
+    assert "操作明细" in props["details"]["description"]
+    assert "details" in _FINISH_PROMPT and "沙箱路径" in _FINISH_PROMPT
+
+
+def test_memory_apply_native_schema_is_structured():
+    """记忆写入走原生工具时，模板由程序侧定死（ops 数组 + 枚举 + 必填）。"""
+    from app import capabilities, memory  # noqa: F401  注册 memory.* 能力
+    from app import agent
+    schemas = agent.native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None)
+    fn = next(t["function"] for t in schemas if t["function"]["name"] == "memory_apply")
+    params = fn["parameters"]
+    assert params["required"] == ["ops"]
+    ops = params["properties"]["ops"]
+    assert ops["type"] == "array"
+    assert "add" in ops["items"]["properties"]["op"]["enum"]
+    assert capabilities.get("memory.apply").permission == "write"
+
+
 def test_model_context_limit_has_no_model_table():
     from app.config import model_context_limit
     # 不看模型名：没填就是 0（不限）
@@ -85,6 +113,36 @@ def test_model_context_limit_has_no_model_table():
     # 显式填写才生效，且原样使用
     assert model_context_limit("claude-sonnet-4-6",
                                {"chat_context_limit": 500000}) == 500000
+
+
+def test_subagent_tool_filter_respects_disallowed_and_mcp_servers(monkeypatch):
+    """子代理 frontmatter：disallowedTools 优先，mcpServers 只放行声明的 server。"""
+    from app import mcp
+    from app.agent import schemas
+
+    def _tool(name):
+        return {"type": "function", "function": {
+            "name": name, "description": "", "parameters": {"type": "object",
+                                                             "properties": {}}}}
+
+    monkeypatch.setattr(mcp, "tool_schemas", lambda: [
+        _tool("mcp__GitHub__get_issue"),
+        _tool("mcp__Other__read"),
+    ])
+    monkeypatch.setattr(mcp, "activate", lambda name: True)
+    names = [t["function"]["name"] for t in schemas.native_tool_schemas(
+        agent_on=True, allowed_tools={"read_file", "search_code"},
+        disallowed_tools={"search_code"}, allowed_mcp_servers=["GitHub"])]
+    assert "read" in names
+    assert "search_code" not in names
+    assert "mcp__GitHub__get_issue" in names
+    assert "mcp__Other__read" not in names
+    read_tool = next(t for t in schemas.native_tool_schemas(
+        agent_on=True, allowed_tools={"read_file", "search_code"},
+        disallowed_tools={"search_code"}, allowed_mcp_servers=["GitHub"])
+        if t["function"]["name"] == "read")
+    acts = read_tool["function"]["parameters"]["properties"]["action"]["enum"]
+    assert "search" not in acts
 
 
 def test_compress_pins_task_ledger(tmp_path, monkeypatch):

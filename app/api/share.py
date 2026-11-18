@@ -4,6 +4,8 @@
 旧接口 `/api/share/save` 保留（本机预览页），新前端不再使用它。
 """
 import base64
+import os
+import subprocess
 
 from app import share
 from app.registry import route
@@ -38,8 +40,17 @@ def _api_share_export(h):
     fmt = str(body.get("format") or "html").lower()
     if fmt not in ("html", "png", "package"):
         return h._json({"ok": False, "error": "不支持的格式"}, 400)
+    save_path = ""
+    if body.get("save_as"):
+        picked = share.ask_save_path(share.default_name(fmt), fmt)
+        if picked is None:
+            save_path = ""                  # 没有可用对话框：退回默认导出目录
+        elif not picked:
+            return h._json({"ok": False, "canceled": True, "error": "已取消保存"})
+        else:
+            save_path = picked
     try:
-        out = share.export(body, fmt)
+        out = share.export(body, fmt, save_path=save_path)
     except Exception as e:                # noqa: BLE001
         return h._json({"ok": False, "error": "导出失败：%s" % e}, 500)
     return h._json(out)
@@ -47,7 +58,31 @@ def _api_share_export(h):
 
 @route("/api/share/list")
 def _api_share_list(h):
-    return h._json({"ok": True, "items": share.list_exports()})
+    return h._json({"ok": True, "items": share.list_exports(), "dir": share.EXPORT_DIR})
+
+
+@route("/api/share/reveal")
+def _api_share_reveal(h):
+    """在资源管理器里定位导出文件（默认目录或用户「另存为」选择的位置）。"""
+    body = h._body()
+    raw = str(body.get("path") or "").strip()
+    if raw:
+        path = os.path.abspath(raw)
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".html", ".png", ".gmshare") or not os.path.isfile(path):
+            return h._json({"ok": False, "error": "文件不存在或类型不支持"}, 400)
+    else:
+        path = share.export_path(body.get("name"))
+        if not path:
+            return h._json({"ok": False, "error": "文件不存在或名称非法"}, 404)
+    if os.name != "nt":
+        return h._json({"ok": False, "error": "仅 Windows 支持在资源管理器中定位"}, 501)
+    try:
+        subprocess.Popen('explorer /select,"%s"' % path,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:                # noqa: BLE001
+        return h._json({"ok": False, "error": "打开资源管理器失败：%s" % e}, 500)
+    return h._json({"ok": True, "path": path, "dir": os.path.dirname(path)})
 
 
 @route("/api/share/delete")

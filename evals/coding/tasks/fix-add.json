@@ -1,0 +1,15 @@
+{
+  "name": "fix-add",
+  "fixture": "fixtures/calc",
+  "prompt": "这个仓库的测试失败了。请运行测试，修复实现里的 bug；不要修改测试文件。修好后再次运行测试确认通过，并简要说明改了什么。",
+  "test": ["python", "test_calc.py"],
+  "solution_files": {
+    "calc.py": "def add(a, b):\n    return a + b\n"
+  },
+  "expect": {
+    "tests_pass": true,
+    "pre_test_fails": true,
+    "changed_files": ["calc.py"],
+    "forbid_changed": ["test_"]
+  }
+}

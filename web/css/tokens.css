@@ -215,6 +215,46 @@ html[data-theme="light"] {
   --scroll-hover: #b7bcc4;
 }
 
+/* 雾光：新会话首屏的视觉语言提炼成主题（浅底 + 冷紫强调 + 更柔的圆角/阴影） */
+html[data-theme="aurora"] {
+  color-scheme: light;
+  --accent: #5b6cff; --accent-hover: #4a5bf0; --accent-soft: rgba(91, 108, 255, .14);
+  --bg: #f4f6ff;
+  --bg-side: #eef1fc;
+  --bg-hover: #e7ecfb;
+  --bg-active: #dde4f8;
+  --bg-input: #f8f9ff;
+  --bg-elevated: #ffffff;
+  --overlay: rgba(24, 30, 60, .28);
+  --text: #1b1f2e;
+  --text-dim: #5a6078;
+  --text-mute: #8a90a5;
+  --border-subtle: #edf0fb;
+  --border: #dfe4f2;
+  --border-strong: #c6cde3;
+  --bubble-user: #5b6cff;
+  --bubble-user-text: #ffffff;
+  --code-bg: #f7f8ff;
+  --code-head: #eef1fb;
+  --inline-bg: #eef1fb;
+  --quote-bar: #c6cde3;
+  --scroll: #d3d9ec;
+  --scroll-hover: #b9c1da;
+  --accent-line: rgba(91, 108, 255, .38);
+  --accent-faint: rgba(91, 108, 255, .07);
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --shadow-md: 0 4px 18px rgba(60, 80, 180, .10);
+  --shadow-lg: 0 18px 48px rgba(40, 60, 160, .18);
+  --kb-graph-bg: #f0f3ff;
+  --kb-graph-dot: #d9dff2;
+  --kb-node-bg: #dfe6f7;
+  --kb-node-border: #8d97b5;
+  --kb-node-shadow: rgba(40, 60, 140, .16);
+  --kb-edge: #8d93a8;
+  --kb-label-bg: #f0f3ff;
+}
+
 /* 深色：VS Code Dark+ 镜像（提高文字与边框对比度） */
 html[data-theme="dark"] {
   color-scheme: dark;         /* 原生控件 / 滚动条跟随深色 */

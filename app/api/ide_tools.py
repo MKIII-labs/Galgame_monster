@@ -102,6 +102,7 @@ def _api_ide_format(h):
             return h._json({"ok": False, "unsupported": True, "error": note})
         if not ok:
             return h._json({"ok": False, "error": note}, 500)
-        token = agent.register_undo((s or {}).get("id") or "", [snapshot], "格式化：" + rel)
+        token = agent.register_undo((s or {}).get("id") or "", [snapshot],
+                                    "格式化：" + rel, root=sb)
     agent.invalidate_tree(sb)
     return h._json({"ok": True, "token": token, "note": note})

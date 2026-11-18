@@ -28,6 +28,8 @@ _ROOT = ""
 _MODE = "static"          # static | dev
 _DEV_TARGET = ""          # dev server 的 origin，如 http://127.0.0.1:5173
 _DEV_TOKEN = ""
+_DEV_PREFIX = ""          # dev server 的挂载前缀（/app 这类子路径；根为 ""）
+_DEV_OPEN = "/"           # 打开代理时停在哪一页（通常是 / 或 /index.html）
 
 # 静态预览和本机 dev server 反向代理都在 HTML 里注入桥接脚本：
 # 元素选择（把 DOM 节点发回对话）与控制台错误采集都靠它。
@@ -308,10 +310,32 @@ def _handler(root):
 
 
 
+def _split_target_path(path):
+    """把 dev server URL 的路径拆成 (挂载前缀, 要打开的页面)。
+
+    - 目录形式（以 / 结尾，或最后一段没有扩展名）→ 前缀=目录，打开 /
+    - 文件形式（/app/index.html）→ 前缀=所在目录，打开 /index.html
+
+    以前整段路径都被当成前缀，`http://host:8000/index.html` 会变成
+    「前缀 /index.html + 请求路径」→ 上游收到 /index.html/ 直接 404；
+    同时返回给前端的地址又丢掉了 /index.html，预览只能停在站点根目录。
+    """
+    p = urllib.parse.unquote(str(path or ""))
+    if not p or p == "/":
+        return "", "/"
+    if p.endswith("/"):                  # 显式目录（含 /v1.2/ 这类带点的目录名）
+        return p.rstrip("/"), "/"
+    name = p.rsplit("/", 1)[-1]
+    if "." not in name:                  # 目录（/app）
+        return p, "/"
+    d = p.rsplit("/", 1)[0]
+    return d.rstrip("/"), "/" + name
+
+
 def _parse_local_target(raw):
     """校验 dev server 地址：只允许本机 http(s)、端口 >= 1024。
 
-    返回 (scheme, host, port, base_path, origin)。拒绝公网 / 内网地址，
+    返回 (scheme, host, port, proxy_prefix, open_path, origin)。拒绝公网 / 内网地址，
     避免预览代理变成 SSRF 入口；1024 以下端口按 Trae 的 preview-proxy 策略拒绝。
     """
     s = str(raw or "").strip()
@@ -320,8 +344,11 @@ def _parse_local_target(raw):
     if "://" not in s:
         s = "http://" + s
     u = urllib.parse.urlparse(s)
+    if u.scheme == "file":
+        raise ValueError("url 只接受 http / https；沙箱内的本地文件请改用 path 参数"
+                         "（例如 path=\"index.html\"）")
     if u.scheme not in ("http", "https"):
-        raise ValueError("只支持 http / https")
+        raise ValueError("url 只接受 http / https")
     if u.username or u.password:
         raise ValueError("dev server 地址不能带用户名 / 密码")
     host = (u.hostname or "").lower()
@@ -333,10 +360,10 @@ def _parse_local_target(raw):
         raise ValueError("端口不合法")
     if port < 1024:
         raise ValueError("拒绝 1024 以下的端口（当前 %d）" % port)
-    base_path = u.path.rstrip("/") if u.path not in ("", "/") else ""
+    prefix, open_path = _split_target_path(u.path)
     host_url = ("[%s]" % host) if ":" in host else host
     origin = "%s://%s:%d" % (u.scheme, host_url, port)
-    return u.scheme, host, port, base_path, origin
+    return u.scheme, host, port, prefix, open_path, origin
 
 
 def _rewrite_location(value, target_origin, proxy_base):
@@ -349,7 +376,7 @@ def _rewrite_location(value, target_origin, proxy_base):
 
 
 def _proxy_handler(target, token):
-    scheme, host, port, base_path, target_origin = target
+    scheme, host, port, base_path, _open_path, target_origin = target
 
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -549,10 +576,15 @@ def _proxy_handler(target, token):
 
 
 def start_dev(raw):
-    """启动（或复用）本机 dev server 反向代理，返回带 token 的 base URL。"""
+    """启动（或复用）本机 dev server 反向代理，返回带 token 的 base URL。
+
+    返回的地址已带上 URL 里的页面路径（`/index.html`），不是只有站点根；
+    这样 `open_preview(url=...)` 打开的就是用户指定的那一页。
+    """
     global _SERVER, _THREAD, _ROOT, _MODE, _DEV_TARGET, _DEV_TOKEN
+    global _DEV_PREFIX, _DEV_OPEN
     target = _parse_local_target(raw)
-    origin = target[4]
+    origin, prefix, open_path = target[5], target[3], target[4]
     # 先探一下端口：dev server 没起时直接给明确错误，而不是让 iframe 停在 502
     try:
         probe = socket.create_connection((target[1], target[2]), timeout=1.0)
@@ -563,7 +595,10 @@ def start_dev(raw):
     with _LOCK:
         if (_MODE == "dev" and _DEV_TARGET == origin and _SERVER
                 and _THREAD and _THREAD.is_alive()):
-            return "http://127.0.0.1:%d/%s/" % (_SERVER.server_address[1], _DEV_TOKEN)
+            _DEV_PREFIX, _DEV_OPEN = prefix, open_path
+            return ("http://127.0.0.1:%d/%s%s"
+                    % (_SERVER.server_address[1], _DEV_TOKEN,
+                       urllib.parse.quote(open_path, safe="/")))
         _stop_locked()
         token = secrets.token_urlsafe(12)
         srv = ThreadingHTTPServer(("127.0.0.1", 0), _proxy_handler(target, token))
@@ -571,7 +606,10 @@ def start_dev(raw):
         th.start()
         _SERVER, _THREAD, _ROOT = srv, th, ""
         _MODE, _DEV_TARGET, _DEV_TOKEN = "dev", origin, token
-        return "http://127.0.0.1:%d/%s/" % (srv.server_address[1], token)
+        _DEV_PREFIX, _DEV_OPEN = prefix, open_path
+        return ("http://127.0.0.1:%d/%s%s"
+                % (srv.server_address[1], token,
+                   urllib.parse.quote(open_path, safe="/")))
 
 
 def start(root):
@@ -593,6 +631,7 @@ def start(root):
 
 def _stop_locked():
     global _SERVER, _THREAD, _ROOT, _MODE, _DEV_TARGET, _DEV_TOKEN
+    global _DEV_PREFIX, _DEV_OPEN
     if _SERVER:
         try:
             _SERVER.shutdown()
@@ -604,6 +643,7 @@ def _stop_locked():
             pass
     _SERVER, _THREAD, _ROOT = None, None, ""
     _MODE, _DEV_TARGET, _DEV_TOKEN = "static", "", ""
+    _DEV_PREFIX, _DEV_OPEN = "", "/"
 
 
 def stop():

@@ -3,7 +3,7 @@
    ------------------------------------------------------------
    只做展示与入口整合：
    - 上下文 / 工具 / 用量 / 轨迹四个查看器收进右侧检查器；
-   - 原有 openCtxDetail / openUsage / #btn-trajectory 仍可复用；
+   - 原有 openCtxDetail / openUsage / openTrajectory 仍可复用；
    - 不改任何业务数据与接口。
    ============================================================ */
 'use strict';
@@ -18,13 +18,12 @@
     hall: ['功能大厅', '大厅'],
     work: ['工作台', '看板'],
     plugins: ['插件', '市场'],
-    gal: ['演出', 'GAL'],
   };
 
   function currentMode() {
     const main = $('#main');
     if (!main) return 'solo';
-    for (const key of ['ide', 'hall', 'work', 'plugins', 'gal']) {
+    for (const key of ['ide', 'hall', 'work', 'plugins']) {
       if (main.classList.contains(key + '-mode')) return key;
     }
     return 'solo';
@@ -92,6 +91,13 @@
     $$('.insp-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.ipane !== name));
     if (name === 'usage') loadUsage();
     if (name === 'tools') syncTools();
+    if (name === 'plan') {
+      // 切到计划页：清掉「计划有更新」的红点，并按当前会话最新计划重画
+      $$('.insp-tab').forEach((b) => b.classList.remove('has-dot'));
+      const ib = $('#btn-inspector');
+      if (ib) ib.classList.remove('has-dot');
+      if (typeof window.uiInspectorSyncPlan === 'function') window.uiInspectorSyncPlan();
+    }
   }
 
   function setContext(ctx) {
@@ -225,8 +231,7 @@
   const trajMore = $('#insp-traj-more');
   if (trajMore) {
     trajMore.onclick = () => {
-      const btn = $('#btn-trajectory');
-      if (btn) btn.click();
+      if (typeof openTrajectory === 'function') openTrajectory();
     };
   }
   const toolsMore = $('#insp-tools-more');
@@ -289,13 +294,11 @@
     ['#modal', '设置'],
     ['#review-modal', '变更审阅'],
     ['#usage-modal', '用量统计'],
-    ['#saves-modal', '存档与倒带'],
     ['#ctx-modal', '上下文与压缩'],
     ['#kb-modal', '知识库'],
     ['#notes-modal', '笔记'],
     ['#input-modal', '输入'],
     ['#rollback-modal', '回滚确认'],
-    ['#gal-modal', 'GAL 编辑'],
     ['#hk-panel', '快捷键'],
     ['#work-modal', '工作台弹窗'],
     ['#trajectory-modal', '轨迹'],

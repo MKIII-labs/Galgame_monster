@@ -13,10 +13,19 @@ PDF 三个坑（都已在实现里处理）：
 3. **超长扫描件烧额度** —— 逐页识别有页数上限（PDF_MAX_OCR_PAGES）。
 """
 import csv
+import hashlib
 import io
+import json
 import os
 import re
 import zipfile
+
+from app.store import DATA_DIR
+
+# 抽取结果缓存：同一份文件（内容哈希相同）反复当附件发送时，不再重跑解析。
+# 只缓存「文本层」结果；走过视觉 OCR 的不缓存（识别结果依赖模型，重解析应能覆盖）。
+DOC_CACHE_DIR = os.path.join(DATA_DIR, "doc_cache")
+DOC_CACHE_MAX = 120          # 最多保留多少份，按最后一次使用时间淘汰
 
 MAX_CHARS = 0              # 0 = 不截断（已放开抽取上限；超长文档可能触发模型上下文报错）
 
@@ -35,6 +44,18 @@ PDF_PAGE_OCR_PROMPT = (
     "保持原有顺序与分段；表格用 Markdown 表格、公式用 LaTeX。"
     "不要总结、不要补充、不要遗漏。")
 PDF_JPEG_QUALITY = 80
+
+# 音频 / 视频不当作文档解析：二进制解码只会得到乱码，还会把请求体撑到几十 MB。
+# 视频以前漏在这张表外，MP4 被当文本解出十几 MB 乱码写进会话（sessions.json 93MB 的根因）。
+AUDIO_EXT = {
+    ".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".wma",
+    ".amr", ".opus", ".aiff", ".aif", ".ape",
+}
+VIDEO_EXT = {
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".flv", ".wmv",
+    ".mpeg", ".mpg", ".3gp", ".ogv", ".rmvb", ".rm",
+}
+MEDIA_EXT = AUDIO_EXT | VIDEO_EXT
 
 # 明确按纯文本处理的扩展名
 TEXT_EXT = {
@@ -355,6 +376,9 @@ def extract(name, raw, ocr=None, progress=None):
         return None, "文件是空的"
     ext = os.path.splitext(str(name or ""))[1].lower()
     warn = ""
+    if ext in MEDIA_EXT:
+        return None, ("音频 / 视频文件不能直接当作文档解析（%s）。"
+                      "请先用语音输入转成文字，或上传文字稿 / 截图。" % ext)
     if ext == ".docx":
         try:
             text = _unescape(_docx_text(raw))
@@ -394,9 +418,16 @@ def extract(name, raw, ocr=None, progress=None):
     elif ext in (".doc", ".xls", ".ppt"):
         return None, "不支持旧版 Office 格式（%s），请先另存为 .docx / .xlsx / .pdf" % ext
     else:
+        if ext not in TEXT_EXT:
+            # 扩展名不认识：先看原始字节。含 NUL 或大量控制字符的一律按二进制拒绝，
+            # 否则 MP4 / 压缩包之类会被 _decode 解成十几 MB 乱码写进会话。
+            head = raw[:8192]
+            bad = sum(1 for b in head if b < 9 or (13 < b < 32))
+            if b"\x00" in head or bad > max(8, len(head) * 0.02):
+                return None, "无法识别的二进制文件类型：%s" % (ext or "无扩展名")
         text = _decode(raw)
         if ext not in TEXT_EXT:
-            # 扩展名不认识：看一眼二进制控制字符占比，太多就判定为不支持的类型
+            # 扩展名不认识：再看解码后的控制字符占比，兜住「没有 NUL 但不是文本」的文件
             head = text[:2000]
             bad = sum(1 for ch in head if ord(ch) < 9 or (13 < ord(ch) < 32))
             if bad > 40:
@@ -412,34 +443,102 @@ def extract(name, raw, ocr=None, progress=None):
     return text, warn
 
 
-def extract_pages(name, raw, ocr=None, progress=None):
+def _cache_key(name, raw):
+    """内容哈希 + 扩展名 + 抽取参数：文件内容/解析策略一变就自动换 key。"""
+    ext = os.path.splitext(str(name or ""))[1].lower().replace(".", "_")
+    return "%s%s_v1_%d" % (hashlib.sha1(raw).hexdigest(), ext, MAX_CHARS)
+
+
+def _cache_load(key):
+    p = os.path.join(DOC_CACHE_DIR, key + ".json")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        if not isinstance(obj, dict):
+            return None
+        os.utime(p, None)                 # 命中即更新访问时间（LRU 淘汰依据）
+        return obj
+    except (OSError, ValueError):
+        return None
+
+
+def _cache_store(key, text, warn, pages, ocr=False):
+    try:
+        os.makedirs(DOC_CACHE_DIR, exist_ok=True)
+        p = os.path.join(DOC_CACHE_DIR, key + ".json")
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"text": text, "warn": warn or "", "pages": pages or [],
+                       "ocr": bool(ocr)}, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    except OSError:
+        return
+    _cache_evict()
+
+
+def _cache_evict():
+    try:
+        paths = [os.path.join(DOC_CACHE_DIR, n) for n in os.listdir(DOC_CACHE_DIR)
+                 if n.endswith(".json")]
+        if len(paths) <= DOC_CACHE_MAX:
+            return
+        paths.sort(key=lambda x: os.path.getmtime(x))
+        for p in paths[:len(paths) - DOC_CACHE_MAX]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def extract_pages(name, raw, ocr=None, progress=None, use_cache=True):
     """与 extract 相同，但额外返回 PDF 的逐页文本（list[str]，1-based 对应页码）。
 
     非 PDF 返回空列表；扫描件 OCR 只返回实际处理过的页。其它格式仍按整篇读，
     这样 attachment_read 可以按页定位，而不用从头按字符 offset 翻。
+
+    use_cache：命中同内容文件时直接复用上次抽取结果（文本层与视觉 OCR 都缓存；
+    手动「重新解析」传 False 强制重跑）。
     """
+    if not raw:
+        return None, "文件是空的", []
+    key = _cache_key(name, raw) if use_cache else ""
+    if key:
+        hit = _cache_load(key)
+        if hit:
+            return hit.get("text"), hit.get("warn") or "", hit.get("pages") or []
+    text, warn, pages, used_ocr = _extract_pages_impl(
+        name, raw, ocr=ocr, progress=progress)
+    if key and text:
+        _cache_store(key, text, warn, pages, ocr=used_ocr)
+    return text, warn, pages
+
+
+def _extract_pages_impl(name, raw, ocr=None, progress=None):
+    """真正做抽取；返回 (text, warn, pages, used_ocr)。"""
     ext = os.path.splitext(str(name or ""))[1].lower()
     if ext != ".pdf":
         text, warn = extract(name, raw, ocr=ocr, progress=progress)
-        return text, warn, []
+        return text, warn, [], False
     text, warn, needs_ocr, pages = _pdf_text(raw, progress=progress)
     if needs_ocr:
         if ocr is not None:
             otext, owarn, okn, opages = _pdf_ocr(raw, ocr, progress=progress)
             if okn:
-                return otext, owarn, [p.strip() for p in opages]
+                return otext, owarn, [p.strip() for p in opages], True
             warn = owarn or warn
         if not text:
             return None, ("%s；" % warn if warn else "") + \
                 "该 PDF 没有可提取的文本层（可能是扫描件）。" \
-                "在「设置 → 视觉模型」或「聊天模型」里配好密钥后重试，即可自动逐页识图。", []
+                "在「设置 → 视觉模型」或「聊天模型」里配好密钥后重试，即可自动逐页识图。", [], False
     if text is None:
-        return None, warn, []
+        return None, warn, [], False
     text = (text or "").strip()
     if not text:
-        return None, "没有提取到文本（可能是扫描件 / 空文件 / 纯图片文档）", []
+        return None, "没有提取到文本（可能是扫描件 / 空文件 / 纯图片文档）", [], False
     pages = [str(p or "").strip() for p in (pages or [])]
     if MAX_CHARS and len(text) > MAX_CHARS:
         return text[:MAX_CHARS], (warn + "；" if warn else "") + \
-            "文档较长，只取了前 %d 字" % MAX_CHARS, pages
-    return text, warn, pages
+            "文档较长，只取了前 %d 字" % MAX_CHARS, pages, False
+    return text, warn, pages, False

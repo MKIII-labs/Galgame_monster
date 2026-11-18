@@ -69,46 +69,8 @@ def check_imports():
 
 def check_invariants():
     step("3. 关键不变量")
-    from app import gal, knowledge
-    from app.saves import RESTORE_FIELDS
-
-    # 3.1 提示词里不得写死具体世界观名词（本会话踩过的耦合）
-    neutral = {"name": "测试角色", "profile": "普通设定。"}
-    node = {"id": "a1", "type": "limited_turn", "maxRounds": 4, "prompt": "x"}
-
-    def _template_only(t, marks=("### 可用背景", "### 可用 BGM", "### 当前舞台现状")):
-        """剥离按用户数据拼进来的段落（背景/BGM 清单等），只查代码模板本身"""
-        cut = len(t)
-        for m in marks:
-            i = t.find(m)
-            if i >= 0:
-                cut = min(cut, i)
-        return t[:cut]
-
-    texts = {
-        "build_prompt": _template_only(gal.build_prompt(neutral)),
-        "build_script_prompt": gal.build_script_prompt(neutral, world="占位"),
-        "build_next_act_prompt": gal.build_next_act_prompt(neutral, world="占位"),
-        "build_node_prompt": gal.build_node_prompt(node, 1),
-        "build_recap_prompt": gal.build_recap_prompt("a", "b"),
-    }
-    banned = ("选择光幕", "光幕", "非凡者", "序列九", "解析系统")
-    hits = [(n, b) for n, t in texts.items() for b in banned if b in t]
-    if hits:
-        bad("提示词写死了世界观名词：%s" % hits)
-    else:
-        ok("提示词未写死任何具体世界观名词")
-
-    # 3.2 演出契约必须还在
-    p = gal.build_prompt(neutral)
-    need = ("## GAL 演出模式", "dialog", "options", "cast", "map", "stats")
-    miss = [k for k in need if k not in p]
-    (bad if miss else ok)("演出契约字段缺失：%s" % miss if miss else "演出契约字段齐全")
-
-    # 3.3 分幕大纲五要素
-    sp = gal.build_script_prompt(neutral)
-    miss2 = [k for k in ("情境", "目标", "阻碍", "转折", "代价与钩子") if k not in sp]
-    (bad if miss2 else ok)("分幕大纲要素缺失：%s" % miss2 if miss2 else "分幕大纲五要素齐全")
+    from app import knowledge
+    from app.branch import RESTORE_FIELDS
 
     # 3.4 规则常驻 / 检索排除 两态：不能「排除后无替代」
     kb = {"id": "kb_t", "name": "T", "nodes": [
@@ -127,19 +89,19 @@ def check_invariants():
         blk_off, _ = knowledge.retrieve_memory(fake, "光幕", exclude_pinned=False)
         blk_on, _ = knowledge.retrieve_memory(fake, "光幕", exclude_pinned=True)
         if "光幕规则" not in blk_off:
-            bad("非 GAL 检索丢了规则节点（回归！）")
+            bad("普通检索丢了规则节点（回归！）")
         elif "光幕规则" in blk_on:
-            bad("GAL 检索未排除规则节点（会与常驻重复）")
+            bad("排除常驻规则后仍命中（会与常驻注入重复）")
         else:
-            ok("检索两态正确（非 GAL 保留 / GAL 排除）")
+            ok("检索两态正确（默认保留 / 排除常驻排除）")
     finally:
         knowledge.load_kb, knowledge.get_profile_kb = old_load, old_prof
 
-    # 3.5 存档可恢复字段必须含背景与前情提要
-    for k in ("gal_bg", "gal_recap", "gal_auto_story"):
+    # 3.5 分支可恢复字段必须含标题与消息（存档已删除，字段表在 app.branch）
+    for k in ("title", "messages", "summary"):
         if k not in RESTORE_FIELDS:
-            bad("RESTORE_FIELDS 缺少 %s（回退/分支会丢状态）" % k)
-    ok("RESTORE_FIELDS 含 gal_bg / gal_recap / gal_auto_story")
+            bad("RESTORE_FIELDS 缺少 %s（分支会丢内容）" % k)
+    ok("RESTORE_FIELDS 含 title / messages / summary")
 
 
 def check_server_smoke():

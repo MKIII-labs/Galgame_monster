@@ -9,6 +9,7 @@ import atexit
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import uuid
@@ -20,7 +21,7 @@ except Exception:                       # 没装 pywinpty：面板提示安装�
 
 BUFFER_CHARS = 200_000      # 每个终端保留的输出上限（字符）
 IDLE_SECONDS = 2 * 3600     # 空闲多久自动回收
-MAX_TERMS = 4               # 同时最多几个终端
+MAX_TERMS = 8               # 同时最多几个终端（IDE 多页签 + Agent 共用）
 READ_SIZE = 8192
 SHELL = "powershell.exe -NoLogo"     # Windows PowerShell 5.1，必定存在
 # Agent 的 shell 工具用无配置启动：不加载 conda / 自定义 profile，
@@ -204,9 +205,12 @@ def _use_os_sandbox():
         return False
 
 
-def start(sid, sandbox, cols=120, rows=30, force=False, env=None, shell=None):
+def start(sid, sandbox, cols=120, rows=30, force=False, env=None, shell=None,
+          fresh=False):
     """取（或创建）该会话的终端。force=True 时先杀掉旧进程。
 
+    fresh=True：再开一个终端（IDE 多页签），不动已有的那个；
+                只有该会话还没有主终端时才把它记成 _BY_SID。
     env：给子进程的环境变量；None = 继承当前进程（IDE 面板用）。
     shell：启动命令，None = 默认 SHELL。
     Agent 的 shell 工具会传清洗过的 env + SHELL_AGENT，避免把密钥带进终端、也不加载用户 profile。
@@ -216,21 +220,36 @@ def start(sid, sandbox, cols=120, rows=30, force=False, env=None, shell=None):
         from app import sandbox_win
         if not sid or not sandbox or not os.path.isdir(sandbox):
             raise TerminalError("沙箱目录不可用，请先选择目录")
+        # 先确认 ACL 已就绪：没有授权就直接退回 ConPTY，而不是让 AppContainer
+        # 里的命令全部 Access Denied。默认不提权，避免弹 UAC 安全提示。
+        _sb_ok, _sb_why = sandbox_win.ensure_acls(sandbox)
+        if not _sb_ok:
+            try:
+                if sys.stderr:         # pythonw 下为 None
+                    sys.stderr.write("[sandbox] shell 未启用 OS 沙箱（%s），退回普通终端\n"
+                                     % _sb_why)
+            except Exception:          # noqa: BLE001
+                pass
+    else:
+        _sb_ok = False
+    if shell is not None and list(shell) == list(SHELL_AGENT) and _sb_ok:
         _ensure_cleaner()
         with _LOCK:
             old_tid = _BY_SID.get(sid)
             old = _TERMS.get(old_tid) if old_tid else None
-            if old and old.alive and not force:
-                old.resize(cols, rows)
-                old.last_active = time.time()
-                return old
-            if old:
-                _drop(old)
+            if not fresh:
+                if old and old.alive and not force:
+                    old.resize(cols, rows)
+                    old.last_active = time.time()
+                    return old
+                if old:
+                    _drop(old)
             if len(_TERMS) >= MAX_TERMS:
                 raise TerminalError("同时最多打开 %d 个终端，请先关闭一个" % MAX_TERMS)
             t = sandbox_win.ShellSession(sid, sandbox, env=env, cols=cols, rows=rows)
             _TERMS[t.tid] = t
-            _BY_SID[sid] = t.tid
+            if old_tid is None or force:
+                _BY_SID[sid] = t.tid
             return t
     if not available():
         raise TerminalError("缺少 pywinpty，请先执行：pip install pywinpty")
@@ -240,17 +259,19 @@ def start(sid, sandbox, cols=120, rows=30, force=False, env=None, shell=None):
     with _LOCK:
         old_tid = _BY_SID.get(sid)
         old = _TERMS.get(old_tid) if old_tid else None
-        if old and old.alive and not force:
-            old.resize(cols, rows)
-            old.last_active = time.time()
-            return old
-        if old:
-            _drop(old)
+        if not fresh:
+            if old and old.alive and not force:
+                old.resize(cols, rows)
+                old.last_active = time.time()
+                return old
+            if old:
+                _drop(old)
         if len(_TERMS) >= MAX_TERMS:
             raise TerminalError("同时最多打开 %d 个终端，请先关闭一个" % MAX_TERMS)
         t = Terminal(sid, sandbox, cols, rows, env=env, shell=shell)
         _TERMS[t.tid] = t
-        _BY_SID[sid] = t.tid
+        if old_tid is None or force:
+            _BY_SID[sid] = t.tid
         return t
 
 

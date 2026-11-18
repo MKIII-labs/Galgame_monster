@@ -185,3 +185,21 @@ def test_plan_brief_points_to_current_step():
     done = {"steps": [{"text": "a", "status": "done"}]}
     assert "已全部完成" in agent.plan_brief(done)
     assert agent.plan_brief({}) == ""
+
+
+def test_plan_done_when_revision_logs_and_keeps_locked():
+    """完成判据中途变更要留痕（旧值 / 新值 / 原因）；用户确认过的项不可删。"""
+    plan, _ = agent.normalize_plan({"steps": ["a"], "done_when": ["首页能打开"]})
+    plan["done_when_locked"] = ["首页能打开"]
+
+    bad, err, _ = agent.apply_plan_patch(
+        plan, {"done_when": ["接口返回 200"], "reason": "改判据"})
+    assert bad is None and "不能删除" in err
+
+    good, gerr, summary = agent.apply_plan_patch(
+        plan, {"done_when": ["首页能打开", "接口返回 200"], "reason": "补一条"})
+    assert gerr == "" and "完成判据已修订" in summary
+    assert good["done_when_rev"][-1]["old"] == ["首页能打开"]
+    assert good["done_when_rev"][-1]["new"] == ["首页能打开", "接口返回 200"]
+    assert good["done_when_rev"][-1]["reason"] == "补一条"
+    assert good["done_when_locked"] == ["首页能打开"]

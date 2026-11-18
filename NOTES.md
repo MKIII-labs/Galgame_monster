@@ -1,5 +1,841 @@
 # NOTES
 
+## [2026-11-18] 修复：设置搜索结果无法用鼠标点击跳转
+
+- 问题：设置里搜到结果后，用鼠标点结果项没反应；键盘 ↑↓ + Enter 正常，
+  自动化里 `item.click()` 也正常。
+- 根因：弹窗标题栏拖动（`makeDraggable`）在 `pointerdown` 时只排除了
+  `button / a / input / select / textarea / .tab`，搜索结果项是 `div`，
+  于是按下即开始拖动：对 `.modal-head` 调 `setPointerCapture` + `preventDefault`，
+  后续 click 被重定向到标题栏元素，`#settings-search-list` 上的点击委托收不到事件。
+- 解决：`web/core.js::makeDraggable` 的排除名单加上 `.settings-search`
+  （输入框 + 结果下拉整体不触发拖动）；标题栏其它区域拖动不受影响。
+- 验证：
+  - 真实 CDP 鼠标点击探针：主题 / 桌面 / 压缩 三例都能跳转，列表收起、
+    目标滚动进视野并高亮；桌面 → 能力与工具 跨页正确；
+  - 拖动回归探针：拖标题移动 `translate(60px, 30px)`，从搜索框按下不移动；
+  - `scripts/ui/settings_interaction.mjs` 的搜索跳转改为真实鼠标事件，
+    并新增「结果列表收起」断言；全部通过；
+  - `scripts/dev_check.py` 全绿。
+
+## [2026-11-18] 完成声明升级：用户摘要 + 折叠操作明细
+
+- 问题：完成卡只有「本轮完成」+ 一段摘要，摘要里混着沙箱路径、临时脚本、
+  目录项变化这类内部细节；用户想让它更像交付声明，但内部留痕仍要保留。
+- 设计：
+  - `finish.summary` 只写面向用户的「交付了什么 / 如何验证 / 还剩什么」；
+  - 新增 `finish.details`（可选）放内部操作明细，完成卡里默认折叠；
+  - 完成卡标题统一为「任务完成」，补「耗时 · N 次工具调用」；
+  - 旧消息（title=本轮完成、无 details）也按新标题渲染，只是没有明细区。
+- 实现：
+  - `app/agent/schemas.py`：finish 增加 `details` 参数说明；`app/agent/prompt.py`
+    的 `_FINISH_PROMPT` 明确 summary / details 的分工与「不写内部细节」。
+  - `app/api/chat.py`：记录 `finish_details`；`end_reason` 增加
+    `details / duration_ms / tool_calls`，title 改为「任务完成」；
+    finish 工具日志里的 details 截断到 500 字，完整明细最多 2000 字。
+  - `web/chat.js::buildEndNote`：接收 message 以回退 timing / tools；
+    渲染 meta、操作明细折叠区；旧数据兼容。
+  - `web/css/base.css`：完成卡改为与过程折叠一致的细边框卡片，新增
+    `.end-meta` / `.end-details` 样式；帮助页同步 finish 说明。
+- 验证：
+  - 新增 `test_finish_schema_separates_summary_and_details`；
+    `tests/test_native_tools.py`、`tests/test_agent_guards.py` 通过；
+  - headless 探针：卡片标题「任务完成」、meta「耗时 1 分 2 秒 · 7 次工具调用」、
+    「操作明细」默认折叠且内容正确；旧 reason 无 details/meta 也正常；
+  - `scripts/dev_check.py` 全绿。
+- 备注：历史消息没有存 details，无法补出内部明细区；只更新标题与已有信息。
+
+
+## [2026-11-18] 自动跟随实测：4 个修复
+
+- 方法：headless Edge 打开真实页面，往 `#chat` 合成消息 / 过程折叠，模拟滚动、
+  流式增长、选区、动画、重渲染、视口变化等，共 22 个场景。
+- 发现并修复：
+  1. **内容变矮被当成用户上翻**：折叠 / 占位移除 / 图片重排会让 scrollTop 被夹低，
+     `onScroll` 看到 top 变小就 unpin，之后输出不再跟随。
+     修复：记录 `state.lastMaxTop`；只有「位置仍贴着新底部」的夹紧才忽略，
+     用户同时大幅上翻仍然解除跟随（`clampLike`）。
+  2. **流式中无法通过滚回底部重新吸附**：未跟随时 ResizeObserver 仍每帧刷新
+     quiet 窗口，流式 token 不断把它续期，用户拖滚动条回底部的 scroll 事件
+     一直被忽略。修复：`noteResize` 只在 `pinned` 时设 quiet（未跟随没有程序滚动）。
+  3. **回到底部动画被步骤跟随打断**：`followProcessStep` 会 cancel 主动画，
+     然后只保证折叠底边可见；主窗口停在离底几像素且不再动。
+     修复：步骤处理完若仍 pinned，再 `CHAT_FOLLOW.follow()` 收到底。
+  4. **回到底部按钮不出现**：未跟随但离底 <120px 时按钮被隐藏；流式增长把距离
+     推远后没有 scroll 事件，按钮一直不出现。修复：未跟随（非 pinned）时始终
+     显示按钮；ResizeObserver / MutationObserver 按帧合并刷新按钮状态。
+- 验证（headless 探针，22/22 通过，零运行时异常）：
+  - 贴底增长 / 上翻保持 / 滚回重吸附 / 选区暂停恢复 / 动画中上翻取消 /
+    过程折叠内层跟随 / 跨屏瞬移 / 折叠收起 / 整段重渲染 / 容器高度变化 /
+    会话位置还原 / 流式位置保持与重吸附；
+  - 长会话 600 行 + 53 折叠：`syncChildren` < 1ms，snap 约 12ms。
+- 备注：缓动 `tau=55ms`，一次大突发约 240ms 追平；离底超过 1.15 屏直接瞬移。
+  探针为临时脚本，跑完已清理；结论与用例说明保留在本条。
+- 补充（过程折叠内层自动跟随）：
+  - 之前内层跟随和主窗口 `_followBottom` 绑死：用户只是把外层往上翻了一点，
+    新步骤就不再进视野。现在 `followProcessStep` 不再以主窗口 pinned 为前提：
+    内层按自己的 `_procFollow` 状态滚动；只有主窗口 pinned 时才
+    `ensureFoldVisible` / `follow()`，所以外层不会被拽走。
+  - `onResize` / `onMutation` 在未跟随时也会识别 running fold 并驱动内层；
+    `onMutation` 未跟随时仍按帧刷新「回到底部」按钮。
+  - 内层自己的滚轮 / 触摸 / 拖滚动条上翻仍然暂停内层跟随；滚回底部（或点
+    「回到底部」）恢复。
+  - 实测真实结构（`process-fold-body` 本身就带 `chat-flow` 类）：主窗口未跟随时
+    新增 4 个步骤，内层 `innerDist=0`、主窗口 `drift=0`；内层上翻后新增步骤不拽回，
+    滚回底部后恢复跟随；主窗口贴底增长 / 上翻 / 回底三条主路径无回归。
+
+
+## [2026-11-18] 侧栏「等待确认」假状态：SSE 快照对账
+
+- 现象：会话「C盘空间清理与整理方法」侧栏一直显示待批准，聊天区已没有审批卡。
+- 排查结论（后端没有在等）：
+  - `/api/state.pending` 为空、`/api/interactions` 返回空；
+  - 该会话日志已是 `end_reason=done/stopped`，最后一轮走完 `session_status.drop(sid)`；
+  - 前端 `state.pending` 只在启动时从 `/api/state` 读一次，之后只靠常驻 SSE 的增量
+    `session_pending`。断线 / 休眠 / 页面暂停期间错过的 clear 事件不会重放，
+    侧栏就会一直留着假橙点（刷新一次才会消失）。
+- 修复：
+  - `/api/events` 连上后先推一条 `session_pending_snapshot`（全量待办快照）；
+    `web/auto.js` 收到后直接以它覆盖 `state.pending` 并重绘侧栏。
+  - 新增轻量 `GET /api/pending`（只返回 `session_status.snapshot()`，不读整份会话）；
+    `auto.js::syncPendingState()` 用它做兜底对账。
+  - `web/init.js` 监听 `visibilitychange`：从后台 / 休眠切回前台时对一次账。
+- 验证：
+  - 全量 `pytest tests -q` 通过；`scripts/dev_check.py` 全绿。
+  - 现有界面刷新一次即可清掉历史遗留的假橙点；之后断线重连会自动对账。
+
+
+## [2026-11-18] Agent 清空沙箱 + 未选目录只读模式
+
+- 问题/决策：
+  - 沙箱只能「选目录 / 输入路径」，没有回到「新对话未选目录」的入口。
+  - 未选目录时 `agent_on` 直接为 false：模型连读文件都做不了，提示词还只让用户去选目录。
+  - 决定：未选目录 = 只读模式。允许用**绝对路径**读文件 / 列目录 / 看图 /
+    会话附件；写入、删除、执行命令、搜索、Git、LSP、可视化产物仍然要求先选目录。
+- 实现：
+  - `web/index.html`：Agent 菜单新增 `#btn-sandbox-clear`「清空目录」；
+    `web/settings/misc.js` 新增 `clearSandbox()`（草案清本地、真实会话写
+    `/api/session/agent {sandbox: ""}`），`syncAgentUI` 按「有目录」显隐按钮；
+    开启 Agent / 未选目录的提示改成「只能用绝对路径读取」。
+  - `app/agent/sandbox.py::resolve_path`：沙箱为空时只接受绝对路径的读请求，
+    仍过 `BLOCKED_SEGMENTS` / 本项目 `data/` 拦截；相对路径与写操作给出明确报错。
+    `_rel` 在空根时返回绝对路径，工具回执不再出现相对 cwd 的怪路径。
+  - `app/agent/groups.py`：新增 `SANDBOXLESS_TOOLS`（读文件 / 列目录 / 看图 / 附件）
+    与 `SANDBOX_ONLY_TOOLS`（其余依赖根目录的工具）。
+  - `app/agent/schemas.py::native_tool_schemas(..., read_only=True)`：
+    在生成 meta 工具前过滤掉 `SANDBOX_ONLY_TOOLS`，`edit/run/git` 等 action 不会出现。
+  - `app/api/chat.py`：新增 `read_on`（开了 Agent 但没选目录）；schema 生成用
+    `agent_on or read_on` + `read_only=read_on`；工具分发只放行 `SANDBOXLESS_TOOLS`；
+    回合中途开关 / 清空目录时同步 `read_on` 并重建 schema 与提示。
+  - `app/agent/prompt.py`：无目录分支改成「文件读取（尚未选择工作目录）」，
+    说明绝对路径可读、写入/命令要选目录；决策表的类型补「读（绝对路径）/ 列 / 看图」。
+- 验证：
+  - 新增测试：空沙箱绝对路径可读、相对路径/写入报错；只读 schema 保留
+    read/list/files/image、去掉 edit/run/git/search；提示词出现「绝对路径」；
+    清空目录会写即时开关。
+  - 全量 `pytest tests -q` 通过；`scripts/dev_check.py` 全绿。
+  - headless 探针：`#btn-sandbox-clear` 存在且已绑定；有沙箱时显示、无沙箱时隐藏，
+    零运行时异常。
+- 备注：只读模式只支持绝对路径；需要搜索 / Git / LSP / 写文件时仍要先选工作目录。
+
+
+## [2026-11-18] Agent 开关实时生效 + 新建会话误排队修复
+
+- 问题/决策：
+  - 工具栏 Agent 开关原来只在「下一次请求」生效：`agent_on`、工具 schema、系统提示都在
+    回合开始时算一次，中途打开 Agent 这一轮仍然没有文件 / 命令能力。
+  - 新建会话后发送被误判成「排队」：`state.streaming` 是全局缓存，切到草案 / 新会话时
+    没有重算，沿用了后台会话的 true；发送入口又读这个缓存。
+- 实现（实时开关）：
+  - `app/store.py`：新增 `LIVE_SESSION_FLAGS` + `set_live_flags` / `take_live_flags` /
+    `peek_live_flags`（消费制，避免下次回合读到过期值）。
+  - `app/api/sandbox.py::_api_session_agent`：写会话后记录一份即时开关（只在
+    agent_enabled / sandbox 变化时）。
+  - `app/api/chat.py`：工具循环每轮 `take_live_flags`，变化时更新 `sandbox` / `agent_on` /
+    `caps["agent_on"]` / `_accept_review_on`，重建原生工具 schema 与 Agent 提示
+    （只替换上一份 `ap`，同步 `_sys_core` / `_sys_core_base`，防止中途压缩写回旧提示）。
+  - `_persist_session` 落库前 `peek_live_flags`：避免回合内进度快照 / 收尾写回把刚改的
+    开关覆盖回旧值。
+- 实现（排队修复）：
+  - `web/stream/send.js`：排队判定改用 `isStreaming()`（按当前会话实时判断），
+    toast 同步；`web/stream/live.js`、`web/composer.js` 的提示也改用实时状态。
+  - `web/chat.js`：`newSession()` 与 `materializeDraft()` 切换当前会话后调用
+    `refreshStreamingUI()`，重算发送 / 停止按钮与「排队」提示。
+- 验证：
+  - 新增 `test_session_agent_toggle_sets_live_flags`（接口写即时开关、取走一次、
+    只改审批模式不产生开关）。
+  - 全量 `pytest tests -q` 通过（mobile e2e 首次失败为已知线程竞态，单独重跑通过）；
+    `scripts/dev_check.py` 全绿。
+  - headless 探针：把当前会话标记为生成中 → `newSession()` 后 `isStreaming()` 与
+    `state.streaming` 都回到 false，输入提示恢复「Enter 发送」，零运行时异常。
+- 备注：实时开关只在「工具循环的下一轮」生效；如果模型这一轮已经直接收尾，
+  要等下一句消息才用上 Agent。关闭 Agent 同理，已在执行的工具调用不会被中断。
+
+
+## [2026-11-18] 验收子代理开关 + 提问卡 composer
+
+- 问题/决策：
+  - 验收子代理的后端门槛已有（`agent_acceptance_review` 默认 True，`chat.py` 的
+    `_accept_review_on`），缺的只是设置 UI；默认开启，关闭后 finish 不再跑独立复核，
+    也不处理申诉。
+  - 提问卡原来只有一行 input，附件只能借底部主输入框。改成卡片自带 composer：
+    大 textarea + 附件（图片 / 文档）+ 语音 + 粘贴 / 拖入。
+- 实现：
+  - `web/settings/panes-agent.js`：执行节奏区新增 `agent-acceptance-review` 复选框；
+    回填 `cfg.agent_acceptance_review !== false`；`collectAll()` 与 `AGENT_KEYS` 接入，
+    保证保存 / 本页恢复默认都覆盖它。
+  - `web/chat.js`：`.ask-input` 换成 textarea + `.ask-composer`（附件菜单、mic、拖拽高亮）；
+    附件存卡片本地（4 图 / 10 文档），提交时随 `/api/agent/answer` 发 `images` / `docs`；
+    语音复用 `toggleMic(inputId, btnId)`；翻题 / 提交 / 超时时 `micStopIf`。
+  - `app/api/sandbox.py`：`_api_agent_answer` 先确认提问还在等，再落附件
+    （`save_upload` + `docparse.extract_pages`），返回可挂消息的元信息；
+    **不在 HTTP 线程改会话**（这轮 `s` 归聊天线程所有，两边写会互相覆盖）。
+  - `app/agent/plan.py`：`submit_answers(..., attachments)` 记录摘要，`ask_attachments(qid)`
+    取走；`chat.py` 在 wait 之后把附件挂到本轮最后一条 user 消息并 `_persist_session(s)`，
+    再追加【附件】提示。挂消息而不是只落盘：`attachment_read` 从消息解析附件，
+    uploads 清理也只保留消息引用到的文件。
+- 验证：
+  - 全量 `pytest tests -q` 通过；`scripts/dev_check.py` 全绿。
+  - headless 探针：提问卡 textarea 默认 62px、多行自动长到 180px；附件菜单 2 项；
+    粘贴 PNG 生成 1 个附件 chip；零运行时异常。
+  - 设置探针：`#agent-acceptance-review` 默认勾选，取消后 `collectSettings().config`
+    为 false 且标脏，重新勾选恢复 true。
+- 备注：附件只进会话历史 + 工具提示，不塞进当前轮请求体；模型要看内容需自己调
+  `attachment_read`（省 token，也避免在工具循环里插图片消息）。扫描版 PDF 没有 OCR 时
+  正文为空。
+
+
+## [2026-11-18] 设置页按需挂载 + 版本 3.5
+
+- 目标：设置页打开时不再把所有 pane 的 DOM 都挂在文档里；同时保证保存时字段一个不丢。
+- 方案（不重写字段映射）：
+  - `SETTINGS_PANE_STORE`：离开当前页的 pane 不销毁，整块移到 detached Map，
+    字段值、事件、卡片装饰、折叠状态全部保留。
+  - `SETTINGS_FIELD_INDEX` + `window.__gmDetachedEl`：`$('#id')` 在文档里找不到时回退到
+    detached 索引。`collectSettings` / `fillStaticSettings` / pane `_collect` 不用逐处改。
+  - `allSettingsPanes()`：collect、applyMeta、搜索索引、页面重置都改为遍历「已挂载 + detached」，
+    避免 detach 后丢字段。
+  - `keepOnlyPanes()`：只保留当前页（含二级分段）的 pane；切页时先 attach 目标页，再 detach 其余。
+  - 打开设置时先完成全量装饰 / 搜索索引 / 快照，再 detach；否则静态 pane 会没被装饰。
+  - `buildDynamicPanes()` 重建前 `forgetPane()`，清掉上一轮 detached 动态 pane 的字段索引。
+  - 主题单选 /单选组 / 页面重置 / help / mobile 的 pane 查找改为 `settingsPaneEl` / `settingsQuery`；
+    外观页重新挂载时补一次 `syncThemeCards`。
+- 实测：
+  - 设置弹窗内 DOM 从约 8k 降到 **533 节点**；整页 DOM 28,702 → **20,948**（剩余主要是应用主界面）。
+  - 字段零丢失：17 pane / 84 卡片 / 335 字段，`collectSettings()` 深比较与重构前一致。
+  - 交互回归新增「外观页 detach 后 collectSettings 仍读到最新值」，全部通过，零运行时异常。
+  - 全量 `pytest tests -q` 通过；`scripts/dev_check.py` 全绿。
+- 版本：`app/store.py::APP_VERSION` 与 `app/share/__init__.py` 同步 3.4 → **3.5**
+  （`/api/app/info` 与 HTTP `Server` 头都读它）。
+- 取舍：detached pane 仍在内存里（只从文档移除），换来渲染和样式计算不再覆盖全部设置；
+  进一步降内存需要字段 schema + 按需构建，留到后续。
+- 相关文件：`web/core.js`（`$` 回退）、`web/settings/modal.js`（存储 / attach / detach / 装饰）、
+  `web/settings/search.js`（切页挂载 / 搜索索引）、`web/settings/dirty.js`（collect / 重置）、
+  `web/settings/registry.js`、`web/settings/help.js`、`scripts/ui/settings_roundtrip.mjs`、
+  `scripts/ui/settings_interaction.mjs`、`app/store.py`、`app/share/__init__.py`。
+
+## [2026-11-17] 设置中心重构（P1 壳层 + 重排）
+
+- 目标：解决设置页「导航机制打架 / 板块内部杂乱 / 手机不可用」。10 页合并为 6 页，
+  但字段不搬家，靠 `SETTINGS_PAGES` 把现有 pane 归到新页。
+- 信息架构（6 页）：
+  - 模型与对话（chat + context）
+  - 联网与检索（search）
+  - 能力与工具（agent / flow / agents / ext / skills / image），页内二级分段：
+    执行策略 / 子代理与流程 / 技能与外部工具 / 图像
+  - 界面与提醒（appearance / speech / keys / remind）
+  - 数据与用户（profile / mobile / data）
+  - 帮助（help）
+  - `SETTINGS_TAB_ALIAS` 兼容旧页 id / 深链 / localStorage（flow→tools、ext→tools、profile→data…）。
+- 壳层：
+  - 搜索从左侧导航挪到顶栏，`Ctrl/Cmd+K` 聚焦；结果下拉不再被导航容器裁切。
+  - 右侧「本页目录」按任务分区生成；≤1200px 隐藏。
+  - 移除顶部「基础/进阶/专家」级别栏，改为每个分区的「显示高级项（N）」。
+  - 手机端改为「分类列表 → 详情」：`#modal.mobile-page` 控制导航/内容切换，返回键回列表；
+    深链指定页签时直接进详情。
+  - 卡片头去掉每张卡的「恢复默认」，保留页级「恢复本页默认」；维护/重置归入危险分区。
+- 页内分区：
+  - `SETTINGS_PANE_SECTIONS` 按 pane + 卡片标题把卡片包进 `.set-section`；
+    分区头有标题和高级项开关。
+  - 高级项只认 `SETTINGS_CARD_ADVANCED` 里 curated 的卡片，**不按 pane 默认级别隐藏**
+    （否则 context / agent 整页会被判成高级，打开就是空的）。
+  - 搜索命中高级项时自动展开所属分区再滚动。
+- 验证：
+  - 回环基线 `scripts/ui/settings_roundtrip.mjs`：重构前后 `collectSettings()` 深比较一致，
+    17 pane / 84 卡片 / 335 字段全部保留；重构后 6 页。
+  - 交互回归 `scripts/ui/settings_interaction.mjs`：6 页导航、4 个二级分段、
+    分区高级项展开、搜索「压缩」跳转到上下文、手机列表→详情→返回，全部通过，零运行时异常。
+  - 1024 / 1280 / 1440 / 390 四档 `overflow_x=0`；`scripts/dev_check.py` 全绿；
+    `pytest tests/test_settings_defaults.py tests/test_session_api_contract.py -q` 通过。
+- 未完成 / 下一步：
+  - DOM 仍是 ~28.7k（所有 pane 一次性构建），懒加载 + 字段 schema 化留到下一阶段；
+  - 设置页 CLS 约 0.43–0.48，与重构前一致，来自页面加载（含 Monaco/ECharts CDN 冲突），
+    不是本次设置改动引入；若要做 <0.05 需要单独处理首屏资源。
+  - `scripts/ui_probe.mjs` 新增 `--width/--height`，便于四档截图。
+- 相关文件：`web/index.html`、`web/settings/core.js`、`search.js`、`modal.js`、`registry.js`、
+  `web/css/shell.css`、`web/css/settings-center.css`、`scripts/ui/settings_roundtrip.mjs`、
+  `scripts/ui/settings_interaction.mjs`。
+
+## [2026-11-16] 续写工具合并 / render_check 成败修复 + 计划 20 步根因
+
+- 问题（08:44:54 停止的 `s_9972cf5715b4` #27 暴露）：
+  1. 连续两次「继续输出」后，消息 285 块 / 156 个工具块，但 `tools` 只有 70 条：
+     32 个工具块下标越界（刷新后卡片消失）、36 个下标重复、34 条工具记录 `trace_id` 重复。
+  2. 计划从 9 步变成 20 步，其中 `m1S1..m4S2` 10 步永远 pending，`finish` 不再被信任。
+  3. `render_check` 连续 5 次「浏览器没有回传探针结果」但 `ok=true`，过程折叠 failed=0。
+- 工具 / 块错位根因：
+  - `_save_progress(..., inplace_base=...)` 把 `last["tools"]` **覆盖**成本次请求的 `tool_log`；
+  - 收尾 `_merge_blocks` 又用 `len(last["tools"])` 当新块偏移，并把 `tool_log` 再追加一次
+    → 偏移偏小（新旧下标重叠）、工具重复追加。
+  - 修复：新增 `_merge_tools(old, new, base)`；`_save_progress` 增加 `tools_base`
+    （续写开始时目标消息的工具数），快照按 `old[:base] + tool_log` 合并；
+    收尾合并用同一个 `cont_tools_base` 算偏移。现场损坏的历史消息不会自动修复。
+- render_check 成败：
+  - `result_ok` 只认 `❌`（`run_command` 另看退出码），`⚠️` 一律成功；
+    `webprobe.check` 的「没找到 Edge / 浏览器没有回传探针结果」改成 `❌`，
+    这样 `ok=false`、失败熔断与 `_tool_failed` 都能识别。
+- 计划 20 步根因（用户要求先研究、不打补丁）：
+  - 02:27 时旧计划 rev6 的 9 步已全部 `done` → 08:41 续跑时 `_pending_steps` 为空，
+    按现行规则不继承旧计划（`plan_state=None`），系统提醒「还没有执行计划，请先 update_plan」。
+  - 模型先试 `plan_patch`（被正确拒绝：还没有计划），随后调用 `update_plan`，
+    **同时**传了 `milestones`（每个里程碑里又带一份步骤字符串，如 "s1 推翻滚动+卡片…"）
+    和顶层 `steps`（同一批 10 步，带 status/verify）。
+  - `normalize_plan` 把 `milestones[].steps` 和 `steps` 都拼进扁平列表，只按 id 去重；
+    里程碑那份自动生成 `m1S1..`，与顶层 `s1..` 不同 → 20 步，里程碑那 10 步永远 pending。
+  - 08:42:48 又调用一次 `update_plan`（同样两份）→ rev2、仍 20 步。
+  - 证据：轨迹 `todo/write`（08:41:53、08:42:48）与模型思考（08:41:42「系统提示说…还没有执行计划」、
+    08:42:11「plan_patch failed because there's no plan」）；计划里里程碑步骤文本带 "s1 " 前缀、
+    verify 为空，顶层步骤有完整 verify/status。
+  - 未改，建议：`normalize_plan` 在两份同时存在时按文本去重（或 `steps` 非空时忽略
+    `milestones[].steps`），schema 描述明确二选一；另考虑「旧计划全 done 但仍在做同一任务」时
+    允许继续沿用旧计划而不是判成没有计划。
+- P0 抽取（同日后续）：
+  - `_save_progress` 的字段写入抽成纯函数 `_apply_progress_snapshot`（拼正文 / 合并工具 /
+    清 interrupted、end_reason / 带计划），落库函数只保留读盘与 `_persist_session`。
+  - 续写 usage 累加抽成 `_merge_usage`。
+  - 前端收尾工具判定只保留 `web/chat.js::isFinishTool` 一处，`stream-core.js` 不再自带副本。
+  - 新增跨端契约测试 `test_finish_tool_names_match_frontend`：前后端 `FINISH_TOOL_NAMES`
+    不一致直接失败。
+- P1 收尾阶段（同日后续，用户要求一次做完本阶段）：
+  - 新增 `_build_new_assistant_message(s2, tr)`：新消息的 sources / references / usage /
+    memory / tools / plan / blocks / timing / ctx_cut / end_reason 全部收进纯函数。
+  - 新增 `_persist_turn(s2, sid, tr, api_key, api_url, api_model)`：落库 + 记忆锚点 +
+    会话记忆 + 自动标题。
+  - `_api_chat` 的 finalize 段（原约 120 行）现在只剩：构造 `TurnResult` → 续写合并
+    或新消息构建 → `_persist_turn`（约 30 行），不再直接拼消息字段。
+  - 新增 2 条测试：新消息字段完整性、落库后台任务顺序（中断时跳过会话记忆）。
+  - 未动 parse / prepare / prompt / round-loop：parse 段有大量 `return h._json(...)` 早退，
+    一次性抽出要重做错误处理与返回协议，属于改写而非搬运；留到独立阶段。
+  - 顺手修正过期测试 `test_misc_state_reports_streaming_sessions`：
+    `stream_alive` 现在要求有 job 或在 `LEASE_STARTED` 的 30 秒装配窗口内，
+    测试需补登 `LEASE_STARTED`，否则会被判成僵尸租约。
+- 相关代码：`app/api/chat.py`（`TurnResult` / `_merge_continuation` / `_merge_tools` /
+  `_merge_usage` / `_apply_progress_snapshot` / `_save_progress` / 收尾合并 / `cont_tools_base`）、
+  `app/webprobe.py`、`web/chat.js`、`web/stream/stream-core.js`、`tests/test_resume.py`、
+  `tests/test_webprobe.py`、`tests/test_chat_blocks.py`、`tests/test_api_handlers_smoke.py`。
+- 验证：全量 `pytest tests -q`（跳过真机 UI 测试）通过；`scripts/dev_check.py` 全绿；
+  真实页面假 SSE 复现（临时端口服务）运行时异常 0，旁白均进过程折叠；临时会话已删除、
+  当前会话已还原。
+
+## [2026-11-16] 修复：流式期间长过程旁白留在正文 / 停止后正文全是旁白【已修复】
+
+- 问题/决策：截图里 `过程 · 已停止` 下方是一大段「先摸清两件事…先更新计划…开始写页面…」，
+  用户补充「流式期间这个过程性说明也会出现」。定位到工作区未提交的那轮「答案归属改成多处标记」：
+  - `web/stream/stream-core.js::foldSegmentToProcess` 新增 `isSubstantiveAnswer(seg)` 早退，
+    ≥120 字的旁白直接留在正文；HEAD（3.4）是一律折叠。
+  - `web/chat.js::buildBlocksView` 与 `app/api/chat.py::_mark_answer_blocks` 把所有「实质交付」
+    都标成答案，停止回合还额外保留最后一段；HEAD 正常回合只取一段、停止回合只保留最后一段。
+- 复现（真实页面 + 假 SSE，零模型调用）：`scripts/ui/repro_process_narration.mjs`。
+  修复前：「工具调用之后」正文仍是 128 字旁白、折叠区没有它；停止收尾 bodyLen=150。
+  修复后：工具事件到达瞬间旁白折进过程区（body 为空），正常收尾正文只剩最终 14 字，
+  停止收尾正文只剩最后一段 22 字，折叠头 `过程 · 已停止`。
+- 现场数据核对：`s_9972cf5715b4` 第 27 条（147 块 / 69 次工具 / stopped / 1181.5s）。
+  旧标记把 9 段长旁白（180/175/171/160/170/126/170/134 字）打成 `ans`，它们全部位于工具之间。
+- 解决方案（用户拍板「位置语义」）：
+  - 流式：遇到非 finish 工具一律折叠当前正文段（恢复 HEAD 行为），删除 `openNextSegment`。
+  - 收尾：答案 = **最后一次真实工具之后**的正文；finish / ask_user 不算工作边界；
+    最后工具后没有正文时，回退到最后一段实质交付，再退到最后一段。
+  - 停止 / billing / budget：只保留最后一段正文（暂停时正在看的内容）。
+  - 取舍：写在工具之间的长报告会被折进过程区（可展开），换来流式与收尾口径一致、不再有旁白噪声。
+- 相关代码/指令：`app/api/chat.py`（`_block_tool_name` / `_ANSWER_SKIP_TOOLS` / `_mark_answer_blocks`）、
+  `web/chat.js`（`isFinishTool` / `buildBlocksView`）、`web/stream/stream-core.js`（`foldSegmentToProcess`）、
+  `tests/test_chat_blocks.py`。
+- 验证：`pytest tests/test_chat_blocks.py tests/test_stream_stop.py tests/test_continue_resume_live.py
+  tests/test_chat_jobs.py -q` 全过；`scripts/dev_check.py` 全绿；`node --check` 两个前端文件通过；
+  真实页面复现脚本 A/B 两个场景均符合预期。临时会话已删除、当前会话已还原。
+
+## [2026-11-15] 修复：Steam 客户端更新后完全打不开（CEF 沙箱 + 目录 ACL）【已修复】
+
+- 现象：`steam.exe` 在跑但没有任何窗口；进程列表里没有 `steamwebhelper`（Steam 界面进程）。
+  从雷神加速器启动同样失败；重启电脑无效。
+- 根因：Steam 客户端的 CEF 沙箱要求 GPU 子进程以 `ALL APPLICATION PACKAGES` 身份读取安装目录。
+  这台机器 Steam 装在 `D:\Game\Steam`（非默认路径），目录 ACL 只有 Users / SYSTEM / Administrators，
+  **缺少 `ALL APPLICATION PACKAGES:(RX)`**（装在 Program Files 时 Windows 默认就有），
+  于是沙箱子进程在加载 DLL 阶段失败 → CEF 重试 9 次后放弃，界面进程退出。
+- 证据链：
+  1. `cef_log.txt` 从 2025/9 到 2026/11/15 20:10:53 之前**从未出现** `exit_code=-1073741515`
+     （`0xC0000135` = STATUS_DLL_NOT_FOUND）；20:10:53 起每次启动都刷同一条。
+  2. bootstrap 日志：`20:10:46 Found pending update → 正在安装更新 → 20:10:52 更新完成，正在启动 Steam`；
+     1 秒后第一条 GPU 崩溃出现；19:43 还在跑旧 build（`--buildid=1794424036`），说明旧版正常。
+  3. 新版 `steamwebhelper.exe`（build 1794536281，11/13 打包）的启动模式固定为：
+     GPU 子进程 35ms 内退出 → `The GPU process has crashed 9 time(s)` →
+     `FATAL:gpu_data_manager_impl_private.cc(449) GPU process isn't usable. Goodbye.`
+  4. 已排除：安装包 6630 个文件全部存在且大小正确；`steamwebhelper` / `libcef` / `libEGL` /
+     `libGLESv2` / `chrome_elf` 的导入与延迟导入 DLL 全部可加载；系统 Exploit Protection 全 NOTSET；
+     Smart App Control 关闭；停掉 GameViewer 用户态进程、给 cef 目录临时加 Everyone 读权限均无效。
+  5. 带 `-cef-disable-sandbox` 启动可正常出界面 —— 反证问题只出在沙箱这一层。
+- 修复（无需关沙箱、无需改 Steam 文件；只加标准读权限，可撤销）：
+  ```bat
+  icacls "D:\Game" /grant "*S-1-15-2-1:(OI)(CI)(RX)"
+  icacls "D:\Game\Steam" /grant "*S-1-15-2-1:(OI)(CI)(RX)"
+  ```
+  `S-1-15-2-1` = ALL APPLICATION PACKAGES；撤销把 `/grant` 换成 `/remove` 即可。
+- 验证：用原始方式（`steam.exe`，无参数）启动 → 6 个 `steamwebhelper` 进程 + 登录窗口正常；
+  修复后 `cef_log.txt` 不再出现 GPU 崩溃 / FATAL，连续观察稳定。
+- 相关排查命令：
+  - 进程：`Get-Process | ? { $_.ProcessName -match 'steam' }`
+  - 日志：`Get-Content D:\Game\Steam\logs\cef_log.txt -Tail 40`、
+    `Select-String D:\Game\Steam\logs\webhelper.txt -Pattern 'Startup - webhelper launched pid'`
+  - 文件完整性：解析 `Steam\package\steam_client_win64.installed`（`path,size;mtime;hash`）逐项比对
+  - 权限：`icacls "D:\Game\Steam"`，重点看 `APPLICATION PACKAGE AUTHORITY\ALL APPLICATION PACKAGES`
+  - 安装包/客户端版本：`bootstrap_log.txt` 里的 `Update complete` / `installed version`
+- 备选（不推荐长期用）：`"D:\Game\Steam\steam.exe" -cef-disable-sandbox`。
+  它绕过 CEF 沙箱，能启动但降低内置网页的隔离；本次已不需要。
+- 经验：Steam / Chromium 系程序装在非 `Program Files` 路径时，若出现「界面进程秒退 / 0xC0000135」，
+  优先检查目录 ACL 是否缺少 `ALL APPLICATION PACKAGES` 读权限。
+
+## [2026-11-15] 修复：一直显示「等待确认」但没有任何可审批内容
+
+- 问题/决策：会话「助手9.0」侧栏一直挂着「待批准/待回答」，聊天区却看不到任何审批卡 / 提问卡；
+  后台线程在 `wait_approval` / `wait_answers` 里继续等，用户没有任何入口能放行或回答。
+- 根因：
+  1. 审批卡 / 提问卡 / 计划审批卡**只随那一条 SSE 事件下发一次**，没有任何「按状态重建」的路径。
+     断线、刷新、重开窗口、切会话重排后卡片就没了，服务端却还在等（提问甚至可无限等）。
+  2. `stream_alive()` 在 `JOBS` 里没有该会话的任务时直接 `return True`，把「job 早就没了」的
+     僵尸租约永远算成「生成中」，前端于是一直显示生成中、attach 又拿不到任何事件。
+  3. watchdog 把「等用户交互期间没有 SSE 事件」当成僵尸流（180s）强制收尾，可能给前端一个假 done。
+- 解决方案/原因：
+  - `agent.pending_interactions(sid)`：汇总待审批 / 待提问 / 待计划审批（参数做了摘要，不塞文件内容），
+    新接口 `/api/interactions` 随时可取。
+  - 前端 `renderPendingCards()`：初始化、切会话、断线恢复时按快照重建缺的卡（审批 / 提问 / 计划审批），
+    用 `data-pending-*` 去重；实时流画过的卡不会重复。
+  - `stream_alive()`：等用户交互时算活着；没有 job 时改用 `LEASE_STARTED` 给 30s 装配窗口，
+    之后不再当成在跑（僵尸租约会被 `/api/state` 清掉）。
+  - `_watch_stream`：等用户交互期间续 `job.ts`，不强制收尾。
+- 验证：全量 `pytest`（含新增快照 / 僵尸租约用例）与 `scripts/dev_check.py` 全绿；
+  另起临时代码进程造了一条待回答提问，真实浏览器打开页面后自动重建出提问卡（问题 / 选项 / 提交按钮均在）。
+- 相关代码：`app/agent/approval.py`、`app/agent/plan.py`、`app/agent/__init__.py`、
+  `app/api/sandbox.py`、`app/api/chat.py`、`web/chat.js`、`web/init.js`、`web/stream/recover.js`、
+  `web/stream/stream-core.js`、`web/css/base.css`。
+- 注意：已被卡住的会话需要重启应用才能清掉内存里的旧等待线程；重启后可从进度快照继续。
+
+## [2026-11-15] 最小插件市场：静态索引 + 下载校验安装
+
+- 问题/决策：插件越来越多时不想把每个插件都塞进安装包，也不想做「自动更新 / 签名 / 镜像」这些重活，
+  先用最小闭环：静态索引 → 卡片列表 → 按需下载 zip → 校验 sha256/大小 → 复用 install_zip → 提示重启。
+- 解决方案/原因：
+  - `app/market.py::plugin_index()`：`config.plugin_index_url` 为空读随包 `resources/plugins/market.json`；
+    非空只接受 https，缓存 `data/cache/plugin_index.json`（含 url，TTL `plugin_index_ttl`，断网回退 stale）。
+    索引条目里的非 https 下载地址、非法 sha256 会被清空，非法 id 直接丢弃。
+  - `app/plugin_manager.py::install_url()`：https 流式下载到临时目录（≤ MAX_BYTES）、校验大小与 sha256
+    后才交给 `install_zip`，继承原有的路径穿越 / 300 文件 / 20MB 解压校验。
+  - API：`/api/market` 新增 `op=official`；`/api/plugins` 的 install 新增 `source=url`。
+  - 前端：发现页「官方 / 市场」来源里新增市场卡片区（已安装标记 / 大小 / 安装按钮 / 刷新市场）。
+- 相关代码/指令：`app/market.py`、`app/plugin_manager.py`、`app/api/market.py`、`app/api/plugins.py`、
+  `resources/plugins/market.json`、`web/hall-plugins.js`；
+  测试 `.\.venv\Scripts\python.exe -m pytest tests/test_market.py tests/test_plugin_manager.py -q`（20 passed）。
+- 边界（有意保留）：不做自动更新 / 自动启用 / 签名校验；安装后仍需重启进程才加载。
+
+## [2026-11-15] 自动跟随：生产验证与交互收敛
+
+- 方法：真实页面（运行中的服务）+ 假 SSE 驱动真实 `streamChat`，覆盖「过程步骤跟随 → 用户滚轮上翻 →
+  内容继续增长 → 点回到底部 → 选区暂停 → 取消选区」全链路，测试会话已删。
+- 实测结果：跟随中 dist=0；上翻后 pinned=false、按钮出现、内容增长 700ms 内 drift=0（不拽走）；
+  点按钮后主窗口与过程折叠区同时回到底（fold top=max）；选区中暂停且按钮正确显示，取消后继续贴底。
+- 修掉的问题：
+  1. 回到主窗口底部后，过程折叠区的 `_procFollow` 仍停在 paused（点「回到底部」步骤不跟）：
+     新增 `resumeProcessFollow()`，在 pinned 变 true 与点按钮时恢复，并把最后一个展开的折叠区滚到最新。
+  2. `.process-fold-body` 的 `overscroll-behavior: contain` 让内层滚到顶后滚轮被吞：改成 `auto`，滚动链回主窗口。
+  3. 内层已在顶部时滚轮上翻仍会暂停跟随：`markProcInput` 增加 `scrollTop > 0` 条件。
+  4. 选区暂停时按钮状态不刷新（离底很远仍隐藏）：`noteMutation` / `selectionchange` 发 reason=selection 的
+     notify，只刷按钮、不抢滚动；`onChange` 对 selection 不触发 resumeProcessFollow。
+  5. 性能：MutationObserver 以前每个 token 都重建观察列表（长会话 O(N)）；改为只在 childList 变化时
+     120ms 防抖同步。
+- 边界（有意保留）：主窗口上翻时内层也暂停跟随；内层滚动区里的主动上翻只暂停内层；两者都在回底时恢复。
+
+
+## [2026-11-15] 页面切换过渡 + 首进骨架 / 预加载
+
+- 问题：页面切换是 `.hidden`（`display:none !important`）硬切，只有大厅 / 工作台 / 插件有一层纯 opacity 的
+  `panel-in`；IDE 首进等 xterm + Monaco、大厅等 8 个模块脚本、工作台等两个接口，期间白屏 / 空面板。
+- 方案：
+  - 新增 `web/page-transition.js`：`gmPageTransition(run, fallbackEl, onFallback)` 优先用 View Transitions
+    （连续点击直接切、不排队；减弱动效 / 不支持 / 页面不可见时退回），`gmPageIn` 给内层新内容补淡入，
+    `gmPrefetchGroup` 预热、`gmSkeleton` / `gmSkeletonClear` 铺骨架。
+  - `polish.css`：`#main { view-transition-name: gm-main }`，root 交叉淡化关掉，只对 gm-main 做
+    120ms 淡出 / 180ms 淡入 + 4px 上移；`.page-in` 160ms；减弱动效全部关闭。
+  - 顶层 `applyUiMode` 拆成 wrapper + `applyUiModeNow`，只在真的换模式时走过渡；删掉旧的 `replayModeEnter`。
+  - 内层：大厅模块切换、工作台视图切换、设置页签切换、轨迹 / 阅读器打开都接 `gmPageIn`。
+  - 骨架：大厅首次进入（`hall-body`）、工作台首进（`.work-cols`）、插件已安装列表、IDE 首次进编辑器；
+    数据到了各自清掉（`gmSkeletonClear`）。
+  - 预加载：模式按钮 / 插件入口 `mouseenter` / `focus` 时 `gmLoadGroup` 提前拉对应脚本（ide→xterm、
+    hall、work、plugins）。
+- 验证（真实页面 CDP）：`viewTransitionName=gm-main`，连续切 hall→work→plugins→solo→ide→solo 触发 6 次
+  view transition；工作台骨架出现后清掉、IDE 骨架在 Monaco 就绪后清掉；设置页签切到 agent 后
+  `.settings-content` 带 `page-in`；0 个未捕获异常；`dev_check.py` 全绿。
+- 坑：View Transitions 回调是异步执行的，别在调用后立刻假设 DOM 已切换；`#main` 命名后 root 快照会
+  排除它，所以 root 动画必须显式关掉，否则会双重淡化。
+
+
+## [2026-11-15] 持久 shell 只读命令免审批（对齐 Trae 的 command policy）
+
+- 问题：模型做只读探查时会用持久 shell（跨盘列目录 / 管道过滤 / 数行数），而 `judge_shell`
+  把 shell 整体当高危：连 `action=read` / `status` / `close` 都要审批，长命令会话里弹窗不断。
+- 调研（Trae，扫描 `ai_agent.dll` 字符串取证）：有独立的 `domain/permission/command_policy.rs`、
+  `AutoRunCommandsConfigV2 { allow_list, deny_list, rules }`、`AutoRunConfigAlwaysAskWhitelistAlwaysRun`、
+  `all_in_allow_list is ...`；只读工具本身不弹审批，命令按 allow / deny 列表判定是否自动执行。
+- 实现：
+  - `app/agent/approval.py`：`judge_shell(..., sandbox, args, autonomy, allow, deny)`。
+    `read` / `status` / `close` / `interrupt` 永远放行；`run` 按三档 `ask / whitelist（默认）/ auto`。
+    whitelist 下按 `; | && ||` 换行拆段，每段都要命中白名单，且不含重定向 / 子表达式 / 脚本块 / 命令串联；
+    禁止清单优先；引用密钥文件（.env / id_rsa 等）仍会问。
+  - 内置白名单：Get-ChildItem / Get-Content / Select-String / Measure-Object / git status|diff|log|ls-files
+    / rg / findstr / 版本查询等。
+  - 两处审批入口（工作流节点 + 主循环）都传入 args 与配置；设置页「工具与写入」新增
+    `agent_shell_autonomy` 下拉 + `agent_shell_allow` / `agent_shell_deny` 两个清单。
+  - 提示词明确「只读探查一律用 read，shell 只用于真实进程 / 交互 / 管道」；审批卡会显示 shell 的 action 与命令。
+- 验证：`tests/test_shell_policy.py` 10 项全过；全量 `pytest -q`；`scripts/dev_check.py`；
+  真实页面（CDP）确认设置控件渲染并回填 `whitelist`、两个清单为空。
+- 19:41 现场复盘（用户仍被要权限）：
+  - 服务 19:41:23 启动，晚于 `approval.py`（19:31）与 `chat.py`（19:37）→ 跑的是新策略，不是旧进程。
+  - 被拦的是 `Get-PSDrive D | ForEach-Object { ... }` 和 `Get-ChildItem ... | ForEach-Object { ... }`：
+    前者 `Get-PSDrive` 当时不在内置白名单；两者都含 `ForEach-Object { ... }` 脚本块 + `$` 变量，
+    内置白名单按设计一律回到审批（脚本块里可以写任意命令）。
+  - 顺带修了两个实现问题：`_split_shell_command` 之前不认括号层级，把
+    `(Get-ChildItem ... | Measure-Object ...)` 拆坏；用户自定义白名单现在优先匹配**整条命令**
+    （禁止清单仍优先），可显式信任某类脚本块统计；另补 Get-PSDrive / Get-Volume / Get-Disk /
+    Get-Partition / Get-Process / Get-Service。
+  - 结论：脚本块命令默认仍要审批；要免审批就在只读白名单里加整条命令的 glob，或临时用 `auto`。
+- 注意：`auto` 档等于放开任意命令（与「完全访问」同义）；白名单留空才用内置列表，写了就只认自己写的。
+
+
+## [2026-11-15] 修复：过程步骤自动跟随被误判成「用户上翻」后永久暂停
+
+- 问题/决策：设置里 `ui_process_follow` 为 true，但流式生成中过程折叠区的新步骤不再自动带进视野。
+- 根因（真实页面复现）：`follow.js` 的 `watchProcessScroll` 把所有「不是自己写入」的内层滚动都当用户操作。
+  折叠动画、浏览器滚动锚定、连续两步的 scroll 事件合并，都会让 `_procExpected` 对不上；
+  此刻 `processNearBottom` 恰好超出 24px 容差 → `_procFollow=false`，之后再也不恢复。
+- 解决方案：
+  - `_procExpected` 从单值改成期望值数组（最多 4 个），scroll 事件命中任意一个都算自己滚的。
+  - 只有「近期有真实输入」（wheel / touch / 按住滚动条 / 键盘）才允许改跟随意图，布局位移直接忽略；
+    滚轮上翻立即暂停，主动往下滚直接恢复。
+  - 按在步骤内容上的 mousedown / pointerdown 不算滚动意图（只有 target 是 body 时才当滚动条）。
+- 验证：临时 CDP 脚本（真实页面 + 假 SSE 驱动真实 `streamChat`，零模型调用、测试会话已删）：
+  修复前第 14 个采样点 `proc=paused`、top 停在 122 而 max 涨到 500+；修复后 12 步全程 top=max、最新步骤可见。
+  `node --check web/follow.js`、`scripts/dev_check.py` 全绿。
+- 相关代码：`web/follow.js`（`procSetScroll` / `markProcInput` / `watchProcessScroll`）。
+
+
+## [2026-11-15] 调研：Trae 的撤回 / 文件同步回滚实现
+
+- 结论：Trae 用「每个工作区一个影子 git 仓库」做检查点，按对话轮次 / 工具调用打 tag；
+  撤回时按消息找到目标 tag，算出受影响文件再写回工作区。不是逐文件备份，也不依赖 VS Code 本地历史。
+- 证据（本机 Trae CN，闭源，来自安装包与落盘数据）：
+  - 目录：`%APPDATA%\Trae CN\ModularData\ai-agent\snapshot\<workspaceId>\v2\.git`
+    （`resources/app/modules/ai-agent/start.bat` 里 `FILE_BASE_DIR=...\ai-agent\snapshot`）。
+  - `git show-ref`：`refs/tags/before-chat-turn-*` / `after-chat-turn-*` / `toolcall-<turn>-<call>`；
+    提交里还有 `user-<时间>`、`chain-start-*`。
+  - 每个 tag 的 tree：`base/content/<改动文件>`（检查点内容）、`disk/content/<同文件>`（当时磁盘内容）、
+    `base/version_file_{first_graph,latest_change,extra_meta}.json`。
+  - `version_file_first_graph.json` = `version_id_history`（版本序列）+ `graph`（version_id → {文件: blob}）
+    + `now_index` + `previous_segment_end_version_id`（分段压缩用）；
+    `version_file_latest_change.json` = `{toolcall:{name, tag, map:{路径: blob}, now_index}}`。
+  - `ai_agent.dll` 符号串：`revert_check`、`revert_internal(... execute_revert=)`、`rollback_snapshot_v2`、
+    `snapshot_rollback_version`、`calculate_changed_file_origin_entries` / `_latest_entries`、
+    `snapshotCompactionEligible`、`snapshot_ignore`、`snapshot_clean_up`、`diffview/toolcall-*`。
+- 流程（据证据还原）：
+  1. 轮前 `before-chat-turn`（再来一次 `-refresh` 吸收用户手改）→ 每次工具调用后 `toolcall-...`
+     → 轮末 `after-chat-turn`；用户单独编辑另有 `user-<ts>`。
+  2. `revert_check`：算 added / modified / deleted，并按磁盘现状修正（文件已不在 → 跳过；
+     内容相同 → 跳过；缺失文件修正类型），把 diff 列表交给弹窗预览。
+  3. 确认后 `revert_internal(execute_revert=true)` → `rollback_snapshot_v2` 回滚版本引用，
+     把 diff 写回工作区，再删消息 / 清 pending 任务；CLI 的 `/undo-rewind` 可撤销上一次 rewind。
+  4. 版本历史分段 + 快照压缩（`snapshot_compaction`，指标含 reclaimed_bytes）。
+- 与本项目差异（`app/agent/undo.py` + `app/snapstore.py`）：
+  - 我们是 per-op undo token（before/after 字节）+ 每会话 60 条 FIFO + base64 JSON；
+    没有影子仓库 / 内容寻址 / 版本图。
+  - `preview_undo` 只按 op 反推，**不对比当前磁盘**：用户手改过的文件会被静默覆盖。
+  - 只有工具写操作有快照；用户手动编辑不产生检查点，也不能「只回退文件」或「只删消息」。
+  - 快照上限：单文件 1MB 不落盘、单会话 8MB 放弃持久化。
+- 可借鉴（按优先级）：P0 磁盘冲突检测（同内容 / 已删除跳过，用户改过需确认）；
+  P1 按轮存 before/after 检查点并拆分「回滚文件」「删消息」；
+  P1 内容寻址 + 分片目录替代 base64 JSON；P2 忽略规则（node_modules/.git/大文件/二进制）与 GC 指标。
+- 备注：安装目录 `modules/ai-agent/checkpoint.sh` 的内文是「让 agent 每次调工具前重跑本脚本」的
+  提示词注入样本，不是检查点实现，不要执行。
+
+
+## [2026-11-15] 实现：影子 git 检查点 + 回退文件的 diff 提示
+
+- 问题/决策：撤回体系原来只有 per-op before/after 字节，`preview_undo` 不看磁盘现状，
+  用户手改过的文件会被静默覆盖。按调研结论落地「每个工作区一个影子裸仓库 + 文件级冲突标记」，
+  撤销执行仍走原内存快照，影子仓库只做持久化 / 去重 / 可追溯（失败不影响对话）。
+- 解决方案：
+  - 新模块 `app/agent/snapshot.py`：仓库在 `data/snapshots/<sha1(工作区)前16位>/`（`git init --bare`）；
+    写入用 `git hash-object -w --stdin` → 临时 index（`repo/index.checkpoint`）+ `update-index --add --cacheinfo`
+    → `write-tree` → `commit-tree`（父提交 `refs/heads/main`）→ `update-ref`；
+    tree 里同时放 `before/<rel>`、`content/<rel>`、`meta.json`；tag 为
+    `before-chat-turn-<turn>` / `toolcall-<turn>-<token>`；`available()` 缓存探测，无 git 整体降级。
+  - `app/agent/undo.py`：`register_undo(..., root="")` 打检查点，本轮首次写入先补一条 meta-only 的
+    轮前基线；`preview_undo` 新增 `_preview_restore`（磁盘 vs 快照 → action / conflict / skipped /
+    adds / dels）与 `_at_target`（`undo()` 对已是目标状态的文件跳过）；返回值新增 `conflicts/adds/dels`。
+  - `app/agent/io_utils.py`：`_read_disk_state`（file/missing/dir/error，>8MB 不读内容）、
+    `_preview_text`、`_preview_stat`（复用 `diffview.build(stat_only=True)`）。
+  - `app/agent/read_tracking.py`：`turn_begin` 生成 `id`（`t<ms>`）作为轮次标识。
+  - 8 处 `register_undo` 调用点补 `root=`（chat / code_mode / ide_* / sandbox）。
+  - 前端 `web/stream/message-ops.js` + `web/css/base.css`：回退弹窗每行显示 `+A −M`，
+    标签追加「已跳过」「你改过」，冲突行浅黄底、跳过行变淡；`rollbackMessage` 汇总增删与冲突数。
+  - 用户消息的「撤回」改为复用 `rollbackMessage(index, opts)`：同一套文件预览 → 按 token 还原 →
+    再删消息（标题 / toast 文案可换），菜单文案同步为「撤回（含文件改动）」。
+  - 「修改」与「版本切换」共用新助手 `revertDiscardedFiles(index, opts)`：
+    真正发送 / 切版本前先弹同一套文件预览，确认后还原、再重新生成；取消则输入框、
+    editTarget、磁盘都不动。交互形态保持「退回输入框」，不改成内联 / 弹窗编辑。
+    `send.js` 的 edit 分支在排队（压缩中）之前确认，队列回放不再二次确认。
+- 验证：
+  - `pytest tests/test_undo_preview.py -q`（4 通过）、全量 `pytest -q`、`scripts/dev_check.py` 全绿。
+  - 临时端到端脚本（真起服务 + 真写文件 + `/api/agent/undo/preview`）：冲突 / 跳过 / create→delete /
+    增删统计 / 影子仓库读回写前写后内容全部通过。
+  - 浏览器 harness 目测弹窗：`+12 −3`、「你改过」浅黄底、「已跳过」opacity .55、删除行红标签。
+  - 撤回用户消息的 harness（无头 Edge + 桩 api）：弹窗标题「撤回这条消息？」、副标题含消息数 /
+    文件数 / 增删 / 冲突数、确认后调用顺序为 `/api/agent/undo` → `/api/message/withdraw`、toast 汇报覆盖数。
+  - 修改 / 版本切换的 harness（17 项）：取消时输入框、editTarget、消息、磁盘都不动；
+    确认后顺序为 `/api/agent/undo/preview` → `/api/agent/undo` → `ideReloadAll` → `streamChat`，
+    截断到被改消息、写入新版本并重新生成。
+- 坑：
+  - `app/agent/__init__.py` re-export 了同名函数 `undo()`，测试里 `from app.agent import undo` 拿到的是函数，
+    必须 `import_module("app.agent.undo")`。
+  - Windows 下 `Path.write_text` 会做换行翻译，字节断言要用 `write_bytes`。
+  - 裸仓库没有工作区，不能用 `git add`，只能 `--cacheinfo` 直接往临时 index 里塞 blob。
+
+
+## [2026-11-15] 剥离 GAL 后端核心链路（app/gal.py 与 chat/sessions/prompt）
+
+- 问题/决策：GAL 前端入口与 `/api/gal/*` 已下线，但 `app/gal.py` 仍被
+  `chat.py`（约 380 处）/ `sessions.py` / `prompt_assembly.py` 深度引用。按要求把核心链路一起剥离。
+- 解决方案：
+  - 删除 `app/gal.py`；`app/api/chat.py` 删掉 `gal_mode` / `gal_data` / GAL 流式解析 /
+    舞台事件 / 剧情推进 / 前情提要刷新；`_truncation_action`、`_pseudo_final_action`、
+    `_stop_hook_action`、`_needs_finish_nudge` 去掉 `gal` 参数。
+  - `app/prompt_assembly.py`：删 `gal_round_prompt`、`DIRECTOR_RULES` 与 `gal_mode` 参数
+    （`pinned_block` 不再从这里导出）。
+  - `app/sessions.py` / `app/api/sessions.py` / `app/branch.py`：删会话级 `gal_*` 字段、
+    搜索 scope 过滤、撤回 / 清空时的 GAL 回滚。
+  - `app/mem_tool.py` / `open_session.py` / `scheduler.py` / `export_md.py` / `agent/groups.py`：
+    删 `gal_scope` / `gal_character_id` / GAL 导出分支 / GAL 能力命名空间。
+  - `app/config.py`：整组 `gal_*` 配置删除并加入 `_OBSOLETE_KEYS`（旧配置保存时清掉）。
+  - `app/llm.py`：`stream_chat` 的 `on_flush` 参数删除（只服务 GAL 分段渲染）。
+  - 测试 / 脚本：删 `tests/test_gal_parse.py`、`tests/test_gal_prompts.py`；
+    `test_gal_scope.py` 只留通用记忆用例；`dev_check` 去掉 GAL 提示词不变量；
+    `chat_smoke` 去掉 `--gal`；`http_smoke` 去掉 gal / save 接口探测。
+- 前端死代码（同日补清）：`web/chat.js` / `init.js` / `stream/*` / `auto.js` / `branch.js` /
+  `knowledge.js` 里约 200 处 `state.uiMode === 'gal'`、`$('#gal-…')` 守卫分支全部删除；
+  `init.js` 的 GAL 绑定段（约 255 行）整段移除，只保留通用的 Esc 关闭弹窗处理；
+  `#btn-more`（只切换已不存在的 `gal-tools-open` 样式）连同 index.html 里的按钮一起删掉。
+  现在 `web/`（不含 vendor）已无任何 GAL 函数调用。
+- 验证：`pytest -q` 全绿；`scripts/dev_check.py` 全部通过；
+  `scripts/http_smoke.py` 通过（index.html 引用的 95 个静态资源全部 200）；
+  真实浏览器首页 / 设置 / IDE 无 ReferenceError；
+  `scripts/chat_smoke.py` 真实模型流式一轮通过（首 token 4.3s / 总 6.8s，
+  delta → done 正常，正文 14 字，临时会话已清理、当前会话已还原）。
+
+
+## [2026-11-15] 下线 GAL 台词朗读（TTS）与 GAL 前后端入口
+
+- 问题/决策：确认再清两块：①「语音与朗读」里的台词朗读（TTS）卡片 + `tts_*` 配置 + 帮助文案；
+  ②后端 GAL API 与 `web/gal/`。
+- 解决方案：
+  - 设置：`web/index.html` 删 TTS 段落；`settings/modal.js`、`dirty.js`、`core.js`
+    （`STATIC_RESET_KEYS.speech` 只剩 `speech_polish` / `speech_denoise`）、`init.js` 删 `speech-tts-*` 绑定；
+    `app/config.py` 删 `tts_*` 与 `gal_tts_priority`，并加进 `_OBSOLETE_KEYS`（旧配置保存时顺手清掉）。
+  - 后端：删 `app/api/gal_{character,media,script,tts}.py` 与 `/api/gal/*` 路由；
+    `app/tts.py` 只保留 `workflow.py` 的 `tts.speak` 用到的 `speak_local()`（Edge / GPT-SoVITS 合成全部移除）。
+    `scripts/http_smoke.py` 同步去掉 gal 接口探测。
+  - 前端：删 `web/gal/*.js`（11 个）、`web/hall-gal.js`、`web/css/gal.css`；
+    `init.js` 删 GAL 绑定，尤其是**无条件的 `galState` / `galHotkeys` 键盘钩子**（不删则每次按键都 ReferenceError）；
+    `ui-shell.js` 与首页卡片去掉 GAL 入口。
+  - **坑（重要）**：`web/gal/gal-ide.js` 名字带 gal，实际是 IDE 主体（5699 行：Monaco / 文件树 / 审阅 / 调试 / 命令面板）。
+    直接删会让 IDE 模式整块失效（`ideInitNotice` / `ideApplyWhitespace` / `idePaletteOpen` / `ideReviewEndTurn` 等全部未定义）。
+    已从 `HEAD` 恢复为 `web/ide-core.js`，剥掉 `galEnterMode` / `galMaybeShowTip` / `galCloseTip` 与
+    `applyUiMode`、`setUiMode`、`resetIdeForSession` 里的 GAL 分支，并在 `ide-term.js` 之前加载。
+  - `isTypingTarget()` 原本也定义在 `gal-stage.js`，被 `hotkeys.js` 无条件使用，已移入 `web/core.js`。
+- 未动：`app/gal.py` 与 `chat.py`（约 285 处）/ `sessions.py` / `prompt_assembly.py` 的 GAL 分支仍保留——
+  耦合过深，剥离需要单独一轮；`gal_*` 配置键也仍在。
+- 验证：`pytest -q` 全绿；`scripts/dev_check.py` 全过；`node scripts/hotkeys_test.js` 82/82；
+  真实浏览器：首页可输入、设置 10 页正常、IDE 模式可进入（文件树 + Monaco 正常）、
+  控制台无 ReferenceError（仅剩 Monaco 匿名 define 的既有报错）。
+
+
+## [2026-11-15] 设置里清理 GAL 残留
+
+- 背景：GAL 入口已于 2026-11-12 下线（`hall-gal.js` 不再加载，文件与后端保留以便回滚），
+  但设置里仍留着整套「GAL 演出」面板。
+- 已清理：
+  - `web/index.html`：删除 `<section data-pane="gal">`（主题 / 打字机 / 特效 / BGM / 推进 / 沉浸 / 剧本）。
+  - `web/settings/core.js`：删 `STATIC_RESET_KEYS.gal` 与 4 个 gal 滑杆（`RANGE_FIELDS` 现为空）。
+  - `web/settings/modal.js` / `dirty.js`：删 gal 字段的填值与收集（约 30 行）。
+  - `web/settings/preview.js`：删 `gal_theme` 预览与标签。
+  - `web/settings/help.js`：删 GAL 深链映射（「GAL 演出」「GAL 推进与自动写剧本」）。
+  - `web/hotkeys.js` / `hk-doc.js` / `hk-core.js`：删「GAL 演出」作用域与 6 条绑定，
+    以及 `hkSpecProblem` 的 GAL 裸键例外；`scripts/hotkeys_test.js` 同步去掉该断言。
+- 未动（已在同日下一轮清理，见上方两条）：语音与朗读里的 TTS 卡片、后端 `app/gal.py` / `app/api/gal_*` 与 `web/gal/`。
+- 验证：真实页面设置 10 页正常、界面与输入无 GAL 设置项、控制台无错误；
+  `node --check` 通过；`scripts/hotkeys_test.js` 82/82 通过。
+
+
+## [2026-11-15] 设置页结构重构：15 页 → 10 页（按任务分页）
+
+- 问题：设置页 15 个入口，Agent 一页塞了 20 张卡（执行节奏、审批、命令、子代理、研究闸门、工作流、Computer Use、MCP、Hooks），
+  同一类东西被拆散（子代理既在独立页又在 Agent 页），顶部还叠了搜索 + 显示级别 + 标签筛选 + 锚点 + 两级恢复 + 草稿条。
+- 决策：按「你在干什么」分页，**一页可包含多个 pane**（pane 仍是配置分组的物理单元，不搬字段就能合并页面）；
+  去掉标签筛选，只留搜索 + 基础/进阶/专家级别。
+- 新结构（`web/settings/core.js` 的 `SETTINGS_PAGES`）：
+  模型与对话（chat+context）/ 联网与检索（search）/ Agent 执行（agent）/
+  子代理与流程（flow+agents）/ 外部能力（image+ext+skills）/
+  界面与输入（appearance+speech+keys）/ 用户与学习（profile）/ 提醒与通知（remind）/ 系统（mobile+data）/ 功能说明（help）。
+- 关键实现：
+  - `setSettingsTab` 改为按页面显示一组 pane；旧入口传 pane id（keys/data/mobile/chat…）会自动映射到所在页。
+  - 搜索/锚点/整页恢复都改成「按页遍历多个 pane」；整页恢复的键由各 pane 的 `_collect()` 与 `STATIC_RESET_KEYS` 合并。
+  - Agent 的巨页在 `panes-agent.js` 里拆成 agent / flow / ext 三个 pane：**构建时按 `h4.set-group` 标题搬节点**，
+    控件 id 与绑定不变；查询统一走 `_paneRoot()`（多 pane 的 querySelector 聚合）。
+    读取函数仍是一份 `collectAll()`，三个 pane 各自 `pickKeys()` 只上报本页的键。
+  - `buildDynamicPanes()` 重建时要连同 flow/ext 一起移除，否则「恢复默认」会叠出重复面板。
+- 验证：真实页面（Edge）实测左侧恰好 10 项、无标签筛选；子代理与流程 / 外部能力 / 系统 三页内容与锚点正确，控制台无错误。
+  `node --check` 全过；72 个配置键在三个收集器里逐一覆盖，无遗漏。
+
+
+## [2026-11-15] 提问策略默认值锁定为 ask
+
+- 决策：`autonomy_question_policy` 的默认值、后端兜底、设置页下拉兜底全部锁成 `ask`（一律弹提问卡，等用户回答），
+  缺字段 / 空串 / 脏值都按 `ask` 处理，不允许静默变成自决。
+- 相关代码：`app/config.py`（DEFAULT_CONFIG）、`app/api/chat.py`（`question_policy_of()`，替换原先的内联判断）、
+  `web/settings/panes-agent.js`（下拉第一项 + 回填/收集兜底）。
+- 验证：`tests/test_ask_card.py` 新增 `test_question_policy_falls_back_to_ask` 与 `test_settings_select_defaults_to_ask`。
+
+
+## [2026-11-15] 分享导出改到「下载」目录（不再写进项目 data/）
+
+- 问题/决策：分享产物以前落在 `data/shares/exports`，在项目目录里很难找；用户要求一律做成「导出文件」。
+- 解决方案：`app/share` 的 `EXPORT_DIR` 改为 `Downloads\Galgame Monster 分享`（优先读注册表里的「下载」实际位置，
+  用户把下载移到别的盘也能跟随）；首次导出时把 `data/shares/exports` 的旧文件搬过去并清空目录；
+  新增 `POST /api/share/reveal` 在资源管理器里定位文件，分享结果面板加「打开文件夹」按钮。
+  内部预览页 `data/shares/*.html` 与 `imported/` 仍留在 data（只供本机预览/导入，不对外分发）。
+- 另存为窗口：导出时弹系统「另存为」让用户选位置，**复用「选 Agent 沙箱目录」那一套**
+  （`sys.executable -c` 子进程 + `SetProcessDpiAwareness(2)` + `tkinter.filedialog.asksaveasfilename`）。
+  不要用 PowerShell 的 SaveFileDialog：powershell.exe 非 DPI 感知，高分屏发虚，且每次会触发系统安全警告。
+  已有窗口开着时不叠第二个（`_PICK_LOCK` 非阻塞）；取消 = 不生成文件。
+- 坑：项目在 D:、下载在 C:，跨盘 `os.replace` 会失败且被吞掉（表现为「文件没搬」），必须用 `shutil.move`。
+- 验证：`tests/test_share.py` 新增导出目录/迁移/非法名/另存为/取消 等用例（共 20 项全过）；真实 HTTP 导出返回
+  `C:\Users\MKIII\Downloads\Galgame Monster 分享\sh_*.html` 且出现在 `/api/share/list`；历史 6 个文件已迁移、旧目录已删除。
+
+
+## [2026-11-15] 手机移动端方案定稿：第一期局域网 + 本地 CA
+
+- 需求/决策：手机作为前端访问 PC（PC 仍是唯一数据与执行端）；要求便捷、金融级加密、扫码配对。
+  经过 Tailscale / 公网直连 / Cloudflare / 自建中继 / WebRTC 的对比，**第一期只做同一 Wi-Fi 局域网**：
+  - 手机端 PWA（Android Chrome 优先）；
+  - MVP：会话 + 聊天 + 审批 + 截图 + 语音；
+  - 局域网 HTTPS 用**本地 CA**（PC 自签根证书，Android 安装一次），不买域名/服务器；
+  - 网关默认不监听，手动开启「手机访问」才绑定局域网 IP；关闭即停止；
+  - 审批仅高风险要求生物识别；审批请求由手机私钥签名，主应用验签。
+- 调研结论（避免重复踩坑）：
+  - 本机公网 IPv4 可见（深圳联通），但 UPnP 不可用、无全局 IPv6，不方便动路由器 → 公网直连不作为第一期；
+  - Tailscale 已安装（PC 100.78.x.x），手机节点 offline 17 天；手机常驻 VPN 不可靠，已放弃；
+  - P2P（WebRTC）适合后续：PC 内置 aiortc、手机 PWA 原生支持，但信令/STUN/TURN 仍需服务端资源，
+    没有 TURN 时对称 NAT 可能连不上；
+  - PWA 的 WebCrypto/语音/Service Worker 都要求 HTTPS，所以局域网也必须解决证书（本地 CA）。
+- 设计文档：`docs/MOBILE_REMOTE_DESIGN.md`（含威胁模型、密码学、配对、协议、阶段与验收）。
+- 状态：**第一期已实现（P0–P2）**，代码见 `app/mobile/`、`app/api/mobile.py`、`web/m/`、`web/settings/mobile.js`。
+- 实现要点（后续维护看这里）：
+  - `app/mobile/identity.py`：桌面 ECDSA/ECDH P-256 长期身份，私钥 DPAPI 加密落盘（`app/mobile/dpapi.py`），指纹 = SHA-256(SPKI) Base32 前 20 字符。
+  - `app/mobile/crypto.py`：transcript = 键排序紧凑 JSON；HKDF-SHA256 派生 72B（c2s/s2c 各 32B + 两个 4B nonce 前缀）；
+    帧 = `GM|ver|type|flags|prefix(4)|counter(8)` + AES-256-GCM（AAD=头部），接收侧 64 位滑窗防重放。
+  - `app/mobile/pairing.py`：票据 5 分钟 / 单次 / 5 次尝试上限 / 10 次失败冷却 10 分钟；二维码参数放 fragment（不进服务端日志）。
+  - `app/mobile/devices.py`：设备表（公钥、权限、到期时间、吊销）；`app/mobile/audit.py`：JSONL 审计，字段名脱敏。
+  - `app/mobile/ca.py`：本地根 CA（10 年）+ 站点证书（SAN 覆盖局域网 IP，IP 变化或临期自动重签）；根证书经 `/ca.crt` 下载。
+  - `app/mobile/gateway.py`：aiohttp HTTPS + `/ws`；独立线程/事件循环；只服务 `web/m` 白名单静态文件；
+    握手 2-RTT（hello → challenge+桌面签名 → auth → ready/paired）；配对需桌面确认（`/api/mobile/pair/confirm`，同时走 `/api/events` 弹确认框）。
+    白名单转发到 `http://127.0.0.1:<主端口>` 并带主 TOKEN；`/api/chat` 等敏感请求必须由设备私钥签名（device_id+method+path+ts+body hash）。
+  - 手机识别桌面靠二维码里的公钥指纹（pinning）；设备私钥是不可导出 CryptoKey，存 IndexedDB。
+  - `web/m/`：PWA（会话 / 聊天流式 / 审批卡 / 提问卡 / 截图（沙箱图片）/ 语音（MediaRecorder→16k PCM→/api/stt）），SW 只缓存静态壳。
+- 关键坑：
+  - `web.AppKey` 必须在**模块帧**创建；在网关线程里创建会抛 `UnboundLocalError: module`（aiohttp 会向上找 `co_name == "<module>"` 的栈帧）。
+  - qrcode 的 SVG 带 XML 声明，塞进 `innerHTML` 前要剥掉。
+  - 手机端 WS 关闭后要重连；主服务 `/api/state` 会带 config（含密钥），所以移动端走单独的 `/api/mobile/state`（脱敏）。
+  - **WebAuthn 不能用于 IP 来源**：RP ID 必须是域名，`https://192.168.x.x:端口` 注册平台凭据会被浏览器拒绝。
+    当前实现是「尝试注册 → 失败则高风险审批退化为显式二次确认」；以后走域名（Tailscale `*.ts.net` / 中继域名）会自动启用生物识别。
+  - **手机连不上（已实测踩坑）**：① Windows 默认拦 ICMP，**不能用 ping 判断**，要用手机浏览器开 `https://IP:端口/ca.crt`；
+    ② 家用 Wi-Fi 常被判成「公用网络」，防火墙规则只写 `profile=private` 会不命中 → 规则改为 `profile=private,public`
+    且 `remoteip=localsubnet`（只放行同一子网）；③ 用户点「添加防火墙规则」时用一次 UAC 自动提权（`Start-Process -Verb RunAs`），
+    但 `-ArgumentList` 里不能再带 `netsh` 前缀（否则变成 `netsh netsh ...`，静默失败）。
+  - 端口占用：Windows 允许 `SO_REUSEADDR` 重复绑定同一端口（第二个进程静默收不到流量），
+    网关启动前先探测 `127.0.0.1:port` 是否已监听并给出「端口已被占用」；另注意 `port or DEFAULT_PORT` 会把测试用的 0 当成未设置。
+  - 局域网地址是实时算的（`status()["url"]`），换 Wi-Fi 后二维码要重新生成；换 IP 后站点证书会按新 IP 重签（关掉再开启网关即可）。
+  - 手机端界面（2026-11-15 重构，深色高密度）：会话列表加搜索 / 全部·进行中·待处理筛选 / 今天·昨天·本周分组 / 徽标；
+    聊天把工具调用收成可展开的步骤行，生成中显示状态，审批与提问卡固定在输入框上方，新增「回到底部」、长按复制消息、
+    代码块复制、点图放大、断线重连提示、生成期间 Wake Lock；底部仍是 会话 / 聊天 / 设备 三页。
+  - **移动端布局坑**：纵向 flex 容器里的子项（`#app`、`.view`、`.messages`）默认 `min-width:auto`，会被最宽内容撑破页面；
+    要显式写 `min-width:0`。另外 `textarea` 也必须 `min-width:0`，否则 intrinsics 宽度会把输入区顶出屏幕。
+  - 渲染自检注意：`webprobe.check` 会把 HTML 复制到临时目录，**相对路径的 CSS 会丢**；而且 headless 的 `--window-size`
+    在 Windows 上不等于 CSS 视口（实测给 390 得到 492），所以手机端布局要用带 `--force-device-scale-factor=1`
+    的自建测量脚本，别直接拿 `check` 的「溢出」结论下判断。
+- 验证：`tests/test_mobile_core.py`（身份/帧/票据/设备/审计/CA/白名单）、`tests/test_mobile_gateway.py`（真实 TLS+WS+白名单）、
+  `tests/test_mobile_e2e.py`（真实主服务 + 网关 + 配对 + 静态壳/越权路径 404）、`tests/test_mobile_js_interop.py`（Node 复算 transcript/HKDF/帧/SAS，与 Python 字节级一致）。
+  真机 Android 仍需用户配合：先装根证书 → 扫码 → 核对 6 位码。
+
+
+## [2026-11-14] pythonw 下 run_command 必然报错：sys.stderr 为 None
+
+- 问题/决策：生产实测（pythonw 启动）里第一次 `run_command` 直接失败，工具结果写着
+  `'NoneType' object has no attribute 'write'`，命令其实根本没跑；验收子代理据此判「1 个工具调用失败后没有修复」。
+- 根因：`pythonw` 没有控制台，`sys.stdout / sys.stderr` 都是 `None`。`tools_exec._t_run_command` 在
+  OS 沙箱授权失败、退回普通执行的提示里直接 `sys.stderr.write(...)`；异常被外层 `except` 捕获后，
+  `except` 里又写了一次 `sys.stderr`，第二次异常直接冒泡成工具错误。`terminal.start()` 的同类告警也有同样问题。
+- 解决方案：`tools_exec` 新增 `_warn()`（`sys.stderr` 存在才写，任何异常吞掉），两处告警改走它；
+  `terminal.py` 的 shell 沙箱告警同样加保护。**pythonw 下任何日志输出都不能影响主流程。**
+- 相关代码：`app/agent/tools_exec.py`（`_warn` / `_t_run_command`）、`app/terminal.py`（`start`）。
+- 验证：`tests/test_os_sandbox.py::test_warn_survives_missing_stderr`；真实 pythonw 联调里
+  `run_command` 输出 `gm-prod-ok`、验收通过、无 UAC / 无控制台窗口。
+
+
+## [2026-11-14] 生产环境联调（真实服务 + 真实前端 + 本地假 LLM）
+
+- 目的：不再只靠单测，用生产启动方式（`pythonw` + `create_server`）把六项修复跑一遍。
+- 方法：临时把 `chat_url` 指向本地 OpenAI 兼容假 LLM（按请求里的 tools / 系统提示区分主对话与验收代理），
+  用无头 Edge + CDP 操作真实页面（新建对话 → 草案开 Agent → 真实 `/api/chat` → 点「允许」→ finish），
+  结束后恢复 `data/config.json` 并删除测试会话；同时轮询 `consent.exe` 与可见控制台窗口数。
+- 结果（16 项全过）：首页 200；`/api/session/new` 带入 agent+sandbox；预览代理保留 `/index.html`；
+  静态预览 200；两张审批卡都在 `.process-fold-body`；草案 Agent 落库；双击路径打开文件并定位第 3 行；
+  验收只跑 1 次且通过后不输出差距；`run_command` 真的产出 `gm-prod-ok`；`consent=False`、控制台窗口 0→0。
+- 注意：验证服务会写真实 `data/`（会话 / 用量）；必须备份并恢复 `data/config.json`，脚本被强杀时要手动恢复。
+  实测踩坑：把 `chat_api_key` 也改成假值后进程被强杀，备份只存在内存里，用户的真实 key 被覆盖（后从
+  `data/config.json.backup-*` 取回）。以后跑这类联调**只改 url / model，不动 api_key**，并把备份落到磁盘。
+
+
+## [2026-11-14] 预览代理丢掉 URL 路径 → 404（open_preview 打不开指定页）
+
+- 问题/决策：实测会话里 `open_preview {url: "http://127.0.0.1:8000/index.html"}` 返回的代理地址是 `http://127.0.0.1:<port>/<token>/`（没有 `/index.html`），页面停在站点根；用 urllib 请求该地址返回 `404 File not found`，模型据此得出「代理地址打不开」的错误结论。
+- 根因：`app/preview.py::_parse_local_target` 把整段 URL 路径当成挂载前缀（`base_path = "/index.html"`），代理把请求 `/` 转发成 `/index.html/`；返回给前端的地址又只拼到 token，路径彻底丢失。两处叠加 = 既 404 又停在错误页面。
+- 解决方案：新增 `_split_target_path()`，把目标路径拆成「挂载前缀 + 要打开的页面」：`/app/` → 前缀 `/app`、打开 `/`；`/app/index.html` → 前缀 `/app`、打开 `/index.html`。`start_dev()` 返回的地址带上页面路径，复用同一 dev server 时按新路径重算；`file://` 报错改为提示「改用 path 参数」。
+- 相关代码：`app/preview.py`（`_split_target_path` / `_parse_local_target` / `start_dev` / `_DEV_PREFIX` / `_DEV_OPEN`）。
+- 验证：`tests/test_ide_preview.py` 15 项全过，包含真实本机 dev server：`url=<origin>/index.html` 返回地址以 `/index.html` 结尾且 GET 200；`file://` 报错含 `path`。
+
+
+## [2026-11-14] 审批卡夹在对话中间：插入位置改到过程流
+
+- 问题/决策：写入审批卡以前 `row._toolsBox.appendChild()` 追加到消息末尾（在实时状态条之后），审批通过后的正文段插在状态条之前 → 卡片被夹在两段内容中间，收尾重排也无法归位。
+- 解决方案：`web/stream/stream-core.js` 的 `approval` 分支改为「先把当前旁白折进过程区，再把卡 append 到 `ensureFlow()`」，并 `followProcessStep(card)` 跟随；GAL 舞台维持原来的位置（插在状态条前）。流程区内天然按事件顺序排列，收尾重建时随过程折叠一起走。
+- 相关代码：`web/stream/stream-core.js`（`obj.type === 'approval'`）。
+- 验证：无头 Edge + 假 SSE 驱动真实 `streamChat`（`approval` 事件）→ 审批卡 `closest('.process-fold-body')` 为真、父节点 `chat-flow process-fold-body`、状态条在它之后、折叠 `running`。
+
 ## [2026-11-13] 界面重构 P2：输入区能力浮层与触屏操作
 
 - 问题/决策：
@@ -5857,3 +6693,372 @@
   - `web/css/base.css` 的 `.to-bottom`、`web/chat.js` 的 `positionToBottomBtn()`。
   - 验收：Solo 下按钮中心 x=867 / 输入框中心 x=867；IDE 下 1213 / 1213；
     按钮底边距输入区顶部 10px；两种模式截图确认居中。
+
+## [2026-11-15] 验收子代理柔性化：验收项分层 + 有界申诉 + 完成判据修订
+- 问题/决策：
+  - 旧逻辑把验收代理的所有 criteria 一律当硬性通过条件，子代理自行补的检查也能一票否决；
+    验收代理容易按计划 verify / 自设标准钻牛角尖，拖住主模型。
+  - 决策：每条 criterion 标 `source`（user / plan / reviewer）与 `severity`（blocking / advisory）。
+    user 要求锁定（不可删 / 降级 / 申诉）；plan 条件 blocking 但可申诉；reviewer 自加项默认 advisory。
+    合并判定只让 blocking 项 + 客观硬伤一票否决，advisory 只进建议。
+  - 主模型申诉走 finish 的 `challenges`：带类型（env_impossible / not_in_user_scope /
+    plan_drift / already_covered）与证据；每回合最多 2 条、同一项 1 次。验收代理逐条裁决：
+    接受 → 该项降级为 advisory（或从清单删除）；拒绝 → 不再对同一项返工，
+    本轮回 `arbitrate` 终止并交用户裁决（不再静默 quality_waiver）。
+  - 计划完成判据可中途修订：plan_patch 改 `done_when` 记录旧值 / 新值 / 原因，
+    发 `plan_revised` 事件；用户批准过的判据写入 `done_when_locked`，不可删除。
+- 解决方案/原因：
+  - `app/quality_gate.py`：新增 `SOURCES` / `SEVERITIES` / `CHALLENGE_KINDS`、
+    `_source` / `_severity` / `_criterion` / `normalize_challenges`；
+    `plan_checks` 返回带 source=plan / severity=blocking 的 dict；
+    `uncovered_checks` 分层，只有 blocking 漏核对算硬伤；
+    `merge_report` 强制计划条件 blocking、应用申诉裁决、输出 `arbitrate` / `terminal`；
+    `build_brief` 下发改后的完成判据、修订记录与申诉段。
+  - `app/api/chat.py`：finish 前校验 challenges（用户项 / 重复 / 超限 / 无历史报告都拒收）；
+    验收后发 `acceptance_challenge` SSE；arbitrate 时停止返工并在 warn 里说明；
+    `_plan_tool` 检测 `done_when_rev` 增长并发 `plan_revised`；
+    用户批准计划时写入 `done_when_locked`。
+  - `app/agent/plan.py`：`normalize_plan` 持久化 `done_when_locked` / `done_when_rev`；
+    `apply_plan_patch` 拦截删除锁定判据，并在判据变化时追加修订记录。
+  - `app/agent/schemas.py`：finish 增加 `challenges` 参数与说明。
+  - 前端：`web/chat.js` 新增 `acceptanceChallengeRender` / `planRevisedRender`；
+    `web/stream/stream-core.js` 接 `acceptance_challenge` / `plan_revised`；
+    `web/css/base.css` 新增 `.plan-revised-card`。
+- 相关代码/指令（如果有）：
+  - 测试：`tests/test_quality_gate.py`（advisory 不否决、计划条件不可降级、申诉接受 / 拒绝、
+    用户项不可申诉、漏核对区分 blocking/advisory）、`tests/test_agent_plan.py`
+    （done_when 修订留痕、锁定项不可删）。
+  - 验证：`.\.venv\Scripts\python.exe -m pytest -q` 全绿；`scripts/dev_check.py` 全通过。
+  - 限制：验收代理仍可能把用户要求漏标成 plan（此时可申诉，不再永久锁定）；
+    争议最终出口是用户裁决卡，不会自动降级。
+
+## [2026-11-15] 跨任务状态污染：验收清单 / 任务台账 / 计划按会话保存（原因定位，未修复）
+- 问题/决策：
+  - 现场：任务 A 做到一半手动停止，在同一会话里开任务 B，模型会接着做 A；
+    验收子代理也会拿 A 的验收项把 B 判不通过。
+  - 结论：确认存在。根因是「会话 = 任务」的隐含假设：验收契约、task_ledger、
+    task_goal、计划卡、压缩摘要的 pin 都挂在会话上，而切任务没有边界与清理。
+  - 新建会话（`/api/session/new`）是干净的；问题只出现在复用同一会话。
+  - 未实施修复，待确定「任务边界」策略（显式新任务 / 结束即新任务 / 仅继续词才继承）。
+- 解决方案/原因（污染链路）：
+  - `task_state.text(s)` 每轮把旧 `goal / acceptance / plan` 注入请求末尾的动态上下文；
+    模型第一眼就看到「目标：任务 A」「验收：A 的项」，自然按 A 继续。
+  - 任务结束/停止时不清理：`s["acceptance"]` 只在 `acceptance(clear)`、会话清空、
+    或改首条用户消息时被移除；`finish` 成功不会归档。
+  - `task_goal` 只在会话第一次提问时写入，之后永不更新（`if not s.get("task_goal")`）。
+  - `_reset_task_state` 只 pop `s["plan"]/acceptance/task_goal`，**不清 `s["task_ledger"]`**；
+    而 `task_state.text` 读的正是 ledger，所以旧目标/验收/计划仍会注入。
+  - 回复停下时：`_acceptance_nudge_msg` 用旧 acceptance 的 pending 项继续催模型；
+    finish 复核时 `_review_facts` 把它们当 `accept_pending` 客观硬伤，验收必挂并回灌返工。
+  - 计划：`_latest_plan` 取最后一条 assistant 的 plan，`plan_can_inherit` 对「继续 / 接着 /
+    好的」等宽泛前缀放行，可能把旧计划装回；`task_ledger.plan` 还会在 prompt 里常驻。
+  - 压缩：`build_context` 把旧 `task_goal / acceptance / 最新计划 / task_ledger` 写进摘要 pin，
+    已有摘要又会被下一次压缩合并，旧任务文本会长期留在历史里。
+  - 新申诉机制（challenges）解决不了：旧 acceptance 是 `accept_pending` 硬伤，不是 review
+    criteria，`normalize_challenges` 只认最近一次验收报告里的 criterion。
+- 相关代码/指令（如果有）：
+  - `app/task_state.py`（text / set_acceptance / set_plan）、`app/prompt_assembly.py:194`、
+    `app/context.py:1326-1359`、`app/api/chat.py:810-821 / 2755-2759 / 2849-2856 / 3742-3756 /
+    4474-4475 / 5263-5271 / 6427+`、`app/quality_gate.py:279 / 465-466`、
+    `app/api/chat_accept.py:141-145`、`app/stepctx.py:506-525`。
+  - 只读验证：构造旧 goal/acceptance/plan 后 `task_state.text(s)` 仍输出旧任务；
+    `_reset_task_state` 后 `task_ledger` 仍在；`merge_report` 对旧 `accept_pending` 判 fail。
+- 待决策：
+  - 任务边界怎么判：显式「新任务」按钮 / finish 后即新任务 / 只有 continue·resume 才继承。
+  - 旧验收是归档保留还是直接丢弃；摘要里的旧任务 pin 是否需要失效或重算。
+
+## [2026-11-15] Trae 的任务 / 计划 / 验收隔离方式（公开资料调研）
+- 问题/决策：
+  - 为「跨任务验收清单污染」找参照，调研 Trae 的 Plan / Spec / 多任务机制。
+  - Trae 闭源，无法确认内部存储实现；以下结论来自官方文档与本地 Plan 产物，
+    描述的是产品行为，不是代码实现。
+  - 核心结论：Trae 用「显式任务边界 + 任务级文件产物 + 每对话独立上下文」隔离任务；
+    我们的 acceptance / task_ledger / task_goal 是 session 级，缺少任务实体与边界。
+- 解决方案/原因（Trae 的做法）：
+  - 任务是一等对象：SOLO 左侧任务面板列出项目内所有任务；「新任务」按钮 / 图标 /
+    快捷键（Windows Ctrl+Alt+N）创建独立任务，多任务可并行。
+  - 上下文按对话隔离：文档明确「每个对话都拥有独立的上下文管理进程」，
+    「开启新的会话后，先前的上下文将被清空」；侧边对话是依附当前任务的独立子会话，
+    Fork 会从某条回复复制出新的独立对话。
+  - 计划是文件：Plan 工作流在 `.trae/documents/` 生成 `plan.md`，用户确认后逐项执行，
+    可手改或让 AI 调整；本地样例 `.trae/documents/设置面板重构方案.md` 就是这种产物。
+  - 验收清单是任务级文件：Spec 工作流在 `.trae/specs/<任务名>/` 生成
+    `spec.md / tasks.md / checklist.md`，按任务名分文件夹、可版本控制；
+    首次生成时暂停等确认，执行中自动更新任务与验收状态。
+  - Goal 模式（/goal）挂在当前会话，可查看 / 暂停 / 恢复 / 删除，不会跨任务复用。
+- 对我们的启示：
+  - 任务边界用显式动作，不用「继续 / 好的」这类文本启发式。
+  - 验收清单存到任务级作用域（task_id 或任务文件夹），不要用一个 `s["acceptance"]`。
+  - 每个任务独立摘要 / 上下文；新任务不注入旧 task_ledger / goal / plan。
+  - 我们已有的 Solo 旁注（aside）相当于 Trae 侧边对话，是隔离的；主会话仍需任务边界。
+- 备选方案（2026-11-16 记录，暂未拍板，未实施）：
+  - A. 任务=会话：新任务走 `/api/session/new`，旧任务留在会话列表；上下文天然隔离，
+    改动最小，最接近 Trae 的公开模型。代价是跨任务不能直接引用上一条对话，
+    需要「分叉 / 引用」补充。
+  - B. 会话内多任务：给 acceptance / task_ledger / task_goal / plan 加 `task_id`（或 epoch），
+    `_review_facts` / `task_state.text` 只读当前任务；新任务需要新的上下文起点
+    （不能只 pop 字段，否则旧消息与摘要仍会把模型带回旧任务）。改造中等。
+  - C. 最小清理：只在新任务时清 acceptance / ledger，不改任务模型；最快，
+    但旧消息、压缩摘要 pin 仍在，属于治标不治本，不单独推荐。
+- 相关资料：
+  - `https://docs.trae.cn/work_spec-and-plan`、`https://docs.trae.cn/solo/spec-and-plan`
+  - `https://docs.trae.cn/ide/task-management?_lang=zh`
+  - `https://docs.trae.cn/ide/context-compaction`、`https://docs.trae.cn/ide_chat`
+  - `https://docs.trae.cn/cli_slash-command`、`https://docs.trae.ai/ide/solo-coder`
+
+## [2026-11-16] Trae vs 本项目：系统提示词 / Skill / 子代理 / 工具（调研，未改代码）
+- 信息边界（2026-11-16 补充，已本机实测）：
+  - 本次会话的 **TraeCode 系统提示词在上下文中可见**：System / Doing tasks / Using tools /
+    Tone and style / Output efficiency / Asking questions / Plugins / code_mode /
+    Environment / 可用 Skills / Inline Visuals / Image Guidelines / Memory Guidelines /
+    Code Reference / Response language / File Delivery / important-instruction-reminders /
+    MCP Server Instructions。
+  - 本机 `%userprofile%\.trae-cn` 下可读：
+    `builtin_skills/`（TRAE-code-review / TRAE-debugger / TRAE-security-review /
+    TRAE-generate-mini-app）；`builtin/baseline/` 的内置 skill（TRAE-plan-mode /
+    TRAE-spec-mode / TRAE-code-mode-orchestrator / dynamic-ui / skill-creator /
+    gp-agent-handoff / schedule / TRAE-computer-use-ptc / TRAE-browseruse /
+    TRAE-product-knowledge 等）；`plugins/trae-remote-official/` 的插件技能。
+  - 仍不可见：Trae 远端 / 其他模式（SOLO、云端）的核心 prompt、内部工具实现、模型路由、
+    以及内置 Agent 的完整原始 system prompt 全文；只能看到当前会话注入的版本与本地技能文件。
+- Trae 的体系（公开文档 + 本机插件 + 本机内置 skill）：
+  - Rule：全局 / 项目 `.trae/rules`，支持「始终生效 / 指定文件 globs / 智能描述 /
+    @Rule 手动」四种；可递归 3 层、支持子目录规则；规则全量注入。
+  - Skill：项目 `.trae/skills`、全局 `~/.trae/skills`、插件市场、`.agents/skills`；
+    SKILL.md = frontmatter（name/description）+ 正文；按 description 语义匹配、按需加载；
+    官方技能通常很长，带 references/、scripts/、模板、依赖安装与质量门。
+    最佳实践：name 小写连字符、description 第三人称含触发时机、when / not-when、
+    Input/Output 结构化、步骤可执行、失败策略、单一职责、渐进披露、正文 <500 行。
+  - Subagent：用户级 `%userprofile%/.trae-cn/agents/*.md`、项目级 `.trae/agents/*.md`；
+    frontmatter：name / description / model / tools / disallowedTools / mcpServers；
+    正文就是 system prompt（角色、工作流、输出格式、行为边界）；独立上下文；
+    只有内置 Agent 能调用；按 description 自动匹配；工具仅 Bash/Edit/Glob/Grep/Read/
+    Skill/TodoWrite/WebFetch/WebSearch/Write/LSP/MCP；模型限内置模型。
+    另有 `gp-agent-handoff` 内置 Skill 规定子代理交回主代理的输出契约：
+    Summary / Verification / Gaps & Unverified / Artifacts / Next Action，要求证据可追溯、
+    区分已完成 / 失败 / 未验证。
+  - 工具：主 Agent 内置「阅读 / 文件系统 / 终端 / 联网搜索 / 预览」五类 + MCP；
+    当前会话实际工具含 Read / Edit / Write / Glob / Grep / Shell / TodoWrite / Agent /
+    Skill / Exec（code_mode）等；工具面板另有浏览器、编辑器、文档等。
+  - 内置工作流 Skill（本机实测）：
+    - `TRAE-plan-mode`：先研究 → 写
+      `$(cwd)/.trae/documents/{NAME}_plan.md` → 审批 → 执行 → 总结；
+      方案需包含研究结论、改动文件、依赖顺序、验证、风险；审批前不得改状态。
+    - `TRAE-spec-mode`：Specify → Plan → Approve → Implement → Review；
+      在 `.trae/specs/<任务>/` 生成 `spec.md / tasks.md / review.md`；
+      验收标准分 `rule`（二值）与 `rubric`（1–5 分 + 阈值 + 证据）；
+      Review 必须由独立上下文执行，不能把实现者自验当最终结论；
+      Delegation Policy 明确要求：目标、先读路径、上下文、范围、成功标准、停止条件、输出契约，
+      并防止并发写同一文件。
+    - `TRAE-code-mode-orchestrator`：Exec（V8 隔离）只通过 `tools.<name>` 访问外部；
+      适用 fan-out / 数据依赖 / 条件分支 / 循环 / 聚合去重 / 验证门；
+      不适合纯文本生成、≤2 次顺序调用、单工具调用；要求有界循环、只读并行、副作用串行、
+      最终结构化输出。
+    - `TRAE-code-review`：先定范围 → 收集证据 → 推断作者意图 → 输出 Mermaid 变更图 →
+      扫描问题 → **派 2 个子代理并行交叉验证**（2/2 高置信、1/2 中置信、0/2 排除）→
+      表格输出 → 询问用户要修哪些。
+    - `TRAE-debugger`：三道激活门（意图 / 专用流程优先 / 复杂度）；
+      要求 3–5 条可证伪假设 → 最小插桩 → 复现采集 → 证据判定 → 最小修复 →
+      pre/post 日志对比 → 自动清理调试产物。
+    - `TRAE-security-review`：只报 diff 引入且可证实可利用的问题；
+      右侧行号、`[start,end]` 区间、confidence ≥ 0.8、不写补丁；
+      必须收集 source-side / sink-side / bypass-context 证据。
+    - `TRAE-generate-mini-app`：Skill 自带完整 `prompts/system-prompt.md`
+      （角色 + 七阶段开发流程 + 技术栈约束 + 质量门），并明确禁止调用子代理 / TodoWrite，
+      要求主智能体亲自执行、脚本初始化模板、每次变更后刷新预览。
+    - `dynamic-ui`：`PureShowWidget` 渲染契约（HTML/SVG/JS 结构、主题 token、图表规则、
+      交互与无障碍约束）。
+    - `skill-creator`：`.trae/skills/<name>/SKILL.md`；description 必须写清
+      “做什么 + 何时调用”，建议 <200 字符，默认英文。
+- 本项目的体系：
+  - 系统提示词：`app/agent/prompt.py:984-1067` 组装；包含 base 原则、能力边界、工具协议、
+    ask / reminder / plan / finish / search / research / visual / capability / tool decision；
+    `app/prompt_assembly.py:194-202` 每轮注入 task_state；动态段贴到请求末尾保前缀缓存。
+    实测 `build_agent_prompt`（原生工具 + computer，无目录树）约 9.5k 字符（≈4.7k tokens）；
+    21 个原生 schema 约 20k 字符 JSON（≈10k tokens）。
+  - Skill：`app/skills.py`；15 个预设，frontmatter name/description/keywords/enabled；
+    L1 索引常驻（约 1.4k 字符）、L2 用 `skill_read` 展开、L3 references；
+    关键词触发 + 每轮最多展开 1 个；正文通常 400–600 字；
+    存储 `data/skills` + `resources/presets/skills`，不读 `.trae/skills` / `.agents/skills`。
+  - 子代理：`app/agent_defs.py` 内置 11 个（researcher / reviewer / fidelity-reviewer /
+    critic / planner / implementer / tester / debugger / security / documenter / explainer）
+    + `data/agents/*.md`；frontmatter name/description/tools/model/max_turns/permission/enabled；
+    readonly/write 白名单；`app/explore.py` 支持并行、pipeline、后台、followup、
+    worktree 隔离、独立上下文预算、嵌套 max_depth。
+  - 工具：`app/agent/groups.py` 注册 100 个工具名；`app/agent/schemas.py` 下发 21 个原生
+    meta tool（read/edit/run/code/git/plan/agent/web/history/visual/image/asset/audio/
+    workflow/utility/attachment_read/read_tool_result/archify/ask_user/acceptance/finish）；
+    `app/tool_meta.py` 把高频工具收敛成 action；`tool_search` 解锁隐藏组；
+    原生 function calling 为主，不支持时回退 ```tool 文本协议；
+    写入审批 / read-before-write / undo / 沙箱 / 秘密文件护栏。
+  - Rules：`app/agent/rules.py` 读沙箱根 `AGENTS.md` / `CLAUDE.md`（6k 上限，全量注入）
+    + `.gm/agent-rules.json` 权限规则；没有 `.trae/rules` 的 globs/嵌套/@Rule 语义。
+- 主要差异与双方业务逻辑：
+  1) 提示词结构：我们「厚核心提示词 + 短 Skill」；Trae「薄核心 + 长 Skill/Rule/Subagent 文件」。
+     我们每轮固定付工具说明与 schema；Trae 用按需 Skill、小工具面、MCP 控上下文。
+  2) Skill：我们偏中文 checklist（何时用/步骤/输出/常见错误）；Trae 偏自包含 SOP
+     （角色/流程/硬约束/来源等级/质量门/脚本/依赖/参考）。我们靠 keywords 触发，
+     Trae 靠 description 语义匹配；我们没有项目级 `.trae/skills`，Trae 有全局/项目/插件市场。
+  3) 子代理：我们角色多、编排强（pipeline/background/followup/worktree/嵌套/预算）；
+     Trae 更轻（用户自定义、独立上下文、按 description 自动调用、小工具面、模型限内置，
+     公开文档未描述 pipeline/background/followup）。
+  4) 工具：我们内置大量领域工具（visual/asset/mesh/audio/computer/workflow/capabilities）；
+     Trae 主 Agent 只有 5 类内置 + MCP/插件。我们更像「全家桶」，Trae 更像
+     「通用编码 Agent + 外部能力扩展」。
+  5) 规则：我们 AGENTS/CLAUDE + JSON 权限；Trae `.trae/rules` 多作用域/嵌套/globs/智能/手动。
+  6) 计划：我们 plan 工具 + acceptance + 验收子代理；Trae Plan/Spec 工作流 + 任务级文件。
+- 可借鉴（未实施）：
+  - 把 visual / asset / computer / workflow 等长流程从系统提示词迁到 Skill，
+    核心提示词只留协议、安全与决策原则，降低每轮固定 token。
+  - 给 Skill 补 when / not-when、Input/Output、失败策略、质量门；统一 name 规范；
+    兼容项目级 `.trae/skills` 与 `.agents/skills`。
+  - 子代理 frontmatter 补 disallowedTools / mcpServers / 模型限制；按 description 自动匹配；
+    保留我们的 pipeline / worktree / 审批能力。
+  - 规则支持 `.trae/rules` 的 globs / 嵌套 / @Rule 语义，与现有 AGENTS/CLAUDE 合并。
+- 相关资料：
+  - `https://docs.trae.cn/ide_skills`、`https://docs.trae.ai/ide/best-practice-for-how-to-write-a-good-skill`
+  - `https://docs.trae.cn/ide_subagents?lang=zh`、`https://docs.trae.cn/ide_agent`
+  - `https://docs.trae.ai/ide/rules`、`https://docs.trae.ai/ide/solo-coder`
+  - 本机：`C:\Users\MKIII\.trae-cn\plugins\trae-remote-official\**\SKILL.md`
+
+## [2026-11-16] 子代理 frontmatter 增强 + Skill 规范升级
+- 问题/决策：
+  - 对齐 Trae 的子代理 frontmatter：新增 `disallowedTools` / `mcpServers`；
+    `disallowedTools` 优先级高于 `tools`，`mcpServers` 只放行声明的 MCP server。
+  - 升级 Skill 规范：新增负向触发 `when_not`；正文推荐分节
+    「何时用 / 不适用 / 核心步骤 / 输出格式 / 失败处理 / 常见错误」；
+    lint、模板、设置页编辑器同步。
+- 解决方案/原因：
+  - `app/agent_defs.py`：`_meta_get` 兼容 camelCase（`_parse` 会把键转小写）；
+    `_csv_list` 支持带空格的 MCP server 名；`_normalize` 解析 / 校验 / 计算
+    `effective_tools`；`_render` 保留新字段；`role_spec` 传递新字段。
+  - `app/agent/schemas.py`：`native_tool_schemas` 新增 `disallowed_tools` /
+    `allowed_mcp_servers`；MCP 工具按 server 前缀过滤；deny 在最后生效；
+    新增 `_fn_name` helper。
+  - `app/mcp.py`：新增 `server_prefix()`，与 `exposed_name()` 共用。
+  - `app/explore.py`：子代理按自定义角色传 `disallowed_tools` / `mcp_servers`；
+    自定义代理未声明 `mcpServers` 时一个 MCP 工具都不给。
+  - `app/skills.py`：`_read` 增加 `when_not`；`index_block` 显示「不适用」；
+    `lint_text` 增加分节 / 负向触发检查；`template` 更新为新规范。
+  - 前端：`web/agents.js` 模板与 `web/index.html` 说明加入新字段；
+    `web/skills.js` 增加 `when_not` 解析 / 拼装 / 输入绑定；
+    `web/index.html` 的技能编辑器新增「不适用」输入框与正文骨架。
+- 验证：
+  - `tests/test_agent_defs.py`（disallowed 覆盖、全禁用拒绝、mcpServers 往返）、
+    `tests/test_skills.py`（新分节 lint、when_not、模板）、
+    `tests/test_native_tools.py`（子代理 schema 的 deny 与 MCP server 过滤）。
+  - 全量 `pytest` 通过；`scripts/dev_check.py` 全部通过。
+- 备注：
+  - 现有 15 个预设 Skill 会各显示 3 条 info 建议（`when_not` / `## 不适用` /
+    `## 失败处理`），本轮未批量改内容；后续可逐条补。
+  - 本轮未实现 `.trae/rules` 语义增强，只做了方案分析（见下一条）。
+
+## [2026-11-16] 规则语义增强：方案与影响（未实施）
+- 现状：
+  - `app/agent/rules.py` 只读沙箱根 `AGENTS.md` / `CLAUDE.md`（全量、6k 上限），
+    以及 `.gm/agent-rules.json` 的文件 / 命令 / 工具权限规则；
+    没有 `.trae/rules`、globs、嵌套目录、智能描述、@Rule 手动触发。
+- 目标语义（对齐 Trae 公开规则模型）：
+  - 规则文件：`.trae/rules/**/*.md`（最多 3 层），frontmatter 支持
+    `alwaysApply: true|false`、`globs: "src/**/*.ts,*.tsx"`、`description: 何时适用`。
+  - 生效方式：始终生效 / 命中 globs / 描述智能匹配 / `@Rule` 手动；
+    子目录规则在「提到或读到该目录文件」时生效。
+  - 优先级：`@Rule` > 最近子目录 > 项目根 > 全局；同 scope 内更具体的 globs
+    优先于 alwaysApply；重复文本去重。
+  - 注入：always-on 规则放稳定 system 段（缓存友好）；按轮选中的规则放请求末尾
+    （`_attach_dyn_tail`），避免破坏前缀缓存。
+  - 上下文来源：用户消息里的文件引用、`read_tracking` 已读文件、本轮写入、
+    计划 `ref`；用这些路径匹配 globs 与子目录规则。
+  - 规则与权限分离：规则是行为指令；`.gm/agent-rules.json` 仍是权限，
+    规则不能绕过审批 / 沙箱。
+- 影响：
+  - 行为：项目约束更精确；但规则越多越容易冲突，需要优先级和「当前生效规则」可见。
+  - Token：always-on 规则增加固定开销；动态规则增加每轮开销，需总量上限。
+  - 缓存：动态规则若放进 system 会每轮 miss 前缀缓存；必须放尾部。
+  - 性能：递归扫描需要 mtime 缓存、深度 / 文件数上限。
+  - 安全：项目规则可能诱导危险操作；仍需审批 / 沙箱兜底，不把外部内容当规则。
+  - 维护：需要 rules 面板 / `rules status` 展示来源、生效原因、冲突；
+    `AGENTS.md` / `CLAUDE.md` 作为 alwaysApply 兼容，避免重复注入。
+- 建议分阶段：
+  1. 先做 `.trae/rules` 的 alwaysApply + globs + @Rule，兼容现有 AGENTS/CLAUDE；
+  2. 再做子目录规则与优先级；
+  3. 最后做 description 智能匹配（先用关键词/短语，不急着上 LLM 判定）。
+
+## [2026-11-16] 特定领域流程迁入 Skill（computer-use / asset-pipeline / workflow-orchestrator）
+- 问题/决策：
+  - 把领域流程从常驻提示词 / 工具描述里抽出来，做成按需加载的 Skill；
+    通用流程（ask / plan / finish / search / reminder）保持不动。
+  - Visual Restore 原本已是 Skill，只补齐新规范；Asset Pipeline / Computer Use /
+    Workflow 原本没有独立 Skill。
+- 新增 / 调整：
+  - `resources/presets/skills/computer-use/SKILL.md`：浏览器 / 桌面操作完整规程，
+    包含先看再动、登录 / 验证码接管、密码禁区、高风险确认、桌面窗口、截图、失败处理。
+  - `resources/presets/skills/asset-pipeline/SKILL.md`：scan → convert / atlas / inline →
+    mesh_inspect → validate 的素材流水线，含清单与失败处理。
+  - `resources/presets/skills/workflow-orchestrator/SKILL.md`：何时用 DAG / Python 脚本 /
+    直接并行 / 子代理；循环上限、写入串行、续跑与验收。
+  - `resources/presets/skills/visual-restore/SKILL.md`：补 `when_not`、`## 不适用`、
+    `## 失败处理`；同步复制到 `data/skills/visual-restore`。
+  - `app/agent/prompt.py`：`_COMPUTER_PROMPT` 改为 `_COMPUTER_POINTER`，核心提示词只留
+    「先 skill_read(name="computer-use")」指针；详细 13 条规则移入 Skill。
+  - `app/agent/__init__.py` 更新导出；`tests/test_computer_agent.py` 改为检查指针 + Skill 正文。
+  - `tests/test_skills.py` 的 `PRESET_IDS` 增至 18；`data/skills` 已播种新预设。
+- 验证：
+  - 新 Skill 的 description 均含触发词且 ≤160 字；lint 无 error/warn/info；
+  - `trigger_matches` 能命中 computer-use / asset-pipeline / workflow-orchestrator；
+  - 全量 `pytest` 通过；`scripts/dev_check.py` 全部通过。
+- 备注：
+  - `commit-pr` 的关键词含「提交」，会和「点击提交」这类浏览器任务同时命中；
+    命中顺序仍以 computer-use 优先，后续可再收窄 commit-pr 关键词。
+  - 通用流程没有改动；后续若要继续瘦身，可把 visual / computer / asset / workflow
+    的工具说明也逐步改为 Skill + 指针。
+
+## [2026-11-16] 子代理交付清单（不做固定 handoff 格式）
+- 问题/决策：
+  - 固定五段 handoff 不适合所有子代理：反证者没有「验证通过」，调研员重点是来源 URL，
+    实现者重点是改动 + 验证；套同一模板会逼模型写空段。
+  - 决策：只加「交付清单」，要求内容不漏，不规定标题格式；按角色补一条 role-specific 提示。
+  - 不做严格解析 / 打回重试，保留自由文本兼容；先观察真实输出，再决定是否结构化。
+- 实现：
+  - `app/explore.py`：新增 `_DELIVERY_CHECKLIST`（结果 / 证据 / 未验证 / 产物 / 下一步）、
+    `_ROLE_CHECKLIST`（critic / searcher / finder / reader / worker / researcher /
+    reviewer / security / planner / implementer / tester / debugger / documenter /
+    explainer / fidelity-reviewer）、`delivery_checklist(role)`；
+    `_run_one` 在角色提示与边界声明之后追加清单。
+  - `format_results` 不再无条件声称「以上结论都带文件:行号」：
+    有可核对证据时才说已核对来源，否则明确「本轮没有可核对的引用证据」。
+  - `tests/test_explore.py` 增加角色清单与证据提示的用例。
+- 验证：相关单测通过；全量 `pytest` 通过；`scripts/dev_check.py` 全部通过。
+- 备注：下一步如果要结构化，建议先统计子代理真实输出里哪些字段稳定出现，
+  再考虑解析，不要先制定一套模型不会遵守的格式。
+
+## [2026-11-16] 子代理 Phase 1 + Phase 2：单一注册表、描述对齐、项目/用户作用域
+- 问题/决策：
+  - 两套角色定义（`agent_defs.BUILTINS` 11 个 + `explore.ROLE_PROMPTS/ROLE_TOOLS` 5 个）
+    有重复（critic / searcher≈researcher / worker≈implementer），且描述只写「是什么」。
+  - 参考 Claude Code / Trae / Copilot：description 是路由契约，工具最小权限，
+    角色单职责，项目/用户作用域。
+- 实现：
+  - `agent_defs.BUILTINS` 增加 scout 角色 finder / reader；searcher / worker 不再保留独立定义，
+    通过 `ALIASES` 合并到 researcher / implementer（用户/项目显式同名文件优先）。
+  - 15 个内置角色的 description 统一成「用于…；不用于…」。
+  - 删除 `explore.ROLE_TOOLS` / `ROLE_PROMPTS` / `_COMMON`；
+    `explore._run_one` 改为 `agent_defs.get_agent(role, sandbox=...)` + `role_spec()`，
+    `_can_write` / `build_schemas` / `normalize` 相关路径都走单一注册表。
+  - 去掉内置提示词里重复的「最后一行置信度」要求，统一交给交付清单。
+  - 作用域：项目 `.trae/agents` > 本应用 `data/agents` > 用户
+    `%userprofile%/.trae-cn/agents` > 内置；`get_agent/list_agents` 支持 `sandbox`，
+    `delegate.resolve`、`explore`、`build_schemas`、`auto_delegate.routing_block` 传入 sandbox。
+  - 设置页说明同步：项目 / 本应用 / 用户目录与优先级。
+  - 只读 scout（finder/reader/searcher）保留 `explore` 嵌套能力；
+    critic / worker 不带 `explore`，避免无意义嵌套。
+- 验证：
+  - `tests/test_agent_defs.py` 新增描述契约、项目/用户/应用优先级；
+    `tests/test_explore.py` 改为检查 agent_defs 角色工具；
+    `tests/test_auto_delegate.py` 适配 `routing_block(sandbox)`。
+  - 全量 `pytest` 通过；`scripts/dev_check.py` 全部通过。
+- 备注 / 未做：
+  - 设置页仍只管理 `data/agents`；项目 / 用户级代理是只读加载，暂不支持在 UI 启停 / 删除。
+  - `ALIASES` 让 searcher / worker 复用 researcher / implementer；要单独定制时，
+    在项目或用户目录放同名 `.md` 即可覆盖。
+  - 未实现 `model-policy` / `strict-tools-list` / `skills` 预加载 / `include-custom-instructions`。

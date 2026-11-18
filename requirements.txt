@@ -27,3 +27,9 @@ Pillow>=10.0
 reportlab>=4.0
 # 译文导出：识别好的公式用 mathtext 排成数学（缺失时自动回退裁图）
 matplotlib>=3.7
+# 手机访问（局域网远控）：密钥 / 证书 / E2E 帧加密
+cryptography>=42
+# 手机访问：PC 端二维码（SVG，不需要 Pillow）
+qrcode>=7.4
+# 手机访问：移动网关（HTTPS + WebSocket + SSE 透传）
+aiohttp>=3.9

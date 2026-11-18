@@ -18,7 +18,7 @@
     crops: {},            // crop key -> objectURL
     cur: 1, zoom: 1, zoomMode: 'width', mode: 'pdf',
     fileType: 'pdf',      // pdf | docx | pptx（后两者没有原页图像）
-    transOn: false,       // 是否已启用分栏 + 翻译（默认只看 PDF 原页）
+    transOn: false,       // 是否已启用分栏 + 翻译（打开后默认双语：左原页 + 右译文流）
     job: null, stream: null, streaming: false,
     pending: new Set(),   // 还没翻译的页（任务跑完后再接着发）
     requested: new Set(), // 本会话已经请求过的页
@@ -56,10 +56,10 @@
     if (root) return root;
     root = document.createElement('div');
     root.id = 'rd-root';
-    root.className = 'rd-root hidden';
+    root.className = 'rd-root rd-ws hidden';
     root.innerHTML =
       '<div class="rd-bar">' +
-        '<button class="rd-icon" data-act="back" title="返回编辑器（Esc）">←</button>' +
+        '<button class="rd-icon" data-act="back" title="关闭阅读器（Esc）">←</button>' +
         '<div class="rd-meta">' +
           '<div class="rd-name"></div>' +
           '<div class="rd-sub">' +
@@ -68,91 +68,114 @@
             '<span class="rd-stat"></span>' +
           '</div>' +
         '</div>' +
-        '<div class="rd-modes">' +
-          '<button data-mode="pdf" title="只看 PDF 原页，不翻译（Alt+0）">原页</button>' +
-          '<button data-mode="orig" title="只看原文（Alt+1）">原文</button>' +
-          '<button data-mode="dual" title="原文 + 译文（Alt+2）">双语</button>' +
-          '<button data-mode="trans" title="只看译文（Alt+3）">译文</button>' +
-          '<button data-mode="page" title="按原页版式显示译文（图像 / 表格 / 公式原位保留）">译页</button>' +
-          '<button data-mode="page-dual" title="左原页 / 右译页，按页对照">版式对照</button>' +
-        '</div>' +
-        '<div class="rd-actions">' +
+        '<div class="rd-pager">' +
           '<button class="rd-icon" data-act="prev" title="上一页（←）">‹</button>' +
           '<button class="rd-icon" data-act="next" title="下一页（→）">›</button>' +
-          '<button class="rd-btn" data-act="page" title="翻译当前页">译本页</button>' +
-          '<button class="rd-btn primary" data-act="all" title="翻译整篇（已译过的会跳过）">译全文</button>' +
-          '<button class="rd-btn" data-act="annos" title="本文批注（点击跳转）">批注<b class="rd-anno-n"></b></button>' +
-          '<button class="rd-icon" data-act="find" title="全文查找（Ctrl+F）">⌕</button>' +
-          '<button class="rd-icon" data-act="thumbs" title="缩略图">▤</button>' +
-          '<button class="rd-icon" data-act="full" title="全屏 / 退出全屏">⤢</button>' +
-          '<button class="rd-icon" data-act="settings" title="阅读设置">Aa</button>' +
         '</div>' +
+        '<div class="rd-modes" title="阅读视图">' +
+          '<button data-mode="pdf" title="只看 PDF 原页（Alt+0）">原页</button>' +
+          '<button data-mode="dual" title="左原文 / 右译文（Alt+2）">双语</button>' +
+          '<button data-mode="trans" title="只看译文（Alt+3）">译文</button>' +
+          '<button data-mode="page" title="按原页版式显示译文（Alt+4）">译页</button>' +
+        '</div>' +
+        '<div class="rd-actions">' +
+          '<button class="rd-btn rd-trans" data-act="page" title="翻译当前页">译本页</button>' +
+          '<button class="rd-btn primary rd-trans" data-act="all" title="翻译整篇（已译过的会跳过）">译全文</button>' +
+          '<button class="rd-icon" data-act="find" title="全文查找（Ctrl+F）">⌕</button>' +
+          '<button class="rd-icon" data-act="settings" title="阅读设置">Aa</button>' +
+          '<button class="rd-icon" data-act="more" title="更多">⋯</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="rd-more hidden">' +
+        '<button data-act="full"><span>全屏阅读</span><em>⤢</em></button>' +
+        '<button data-act="meta"><span>文献信息</span><em>ⓘ</em></button>' +
+        '<button data-act="anno-export"><span>导出批注</span><em>↓</em></button>' +
+        '<button data-mode="orig"><span>纯原文视图</span><em>Alt+1</em></button>' +
+        '<button data-mode="page-dual"><span>版式对照</span><em>Alt+5</em></button>' +
       '</div>' +
       '<div class="rd-progress"><i></i></div>' +
-      '<div class="rd-find hidden">' +
-        '<input class="rd-find-input" placeholder="在全文里查找…（Enter 下一个，Shift+Enter 上一个）">' +
-        '<span class="rd-find-stat"></span>' +
-        '<button class="rd-find-prev" title="上一个（Shift+Enter）">↑</button>' +
-        '<button class="rd-find-next" title="下一个（Enter）">↓</button>' +
-        '<button class="rd-find-x" title="关闭（Esc）">✕</button>' +
-        '<div class="rd-find-list"></div>' +
-      '</div>' +
-      '<div class="rd-settings hidden">' +
-        '<div class="rd-set-row"><span>正文字号</span>' +
-          '<button data-fs="-">A−</button><b class="rd-fs-val">16</b><button data-fs="+">A+</button></div>' +
-        '<div class="rd-set-row"><span>行距</span>' +
-          '<button data-lh="1.6">紧</button><button data-lh="1.85">中</button>' +
-          '<button data-lh="2.1">松</button></div>' +
-        '<div class="rd-set-row"><span>原页缩放</span>' +
-          '<button data-pz="-">−</button><b class="rd-pz-val">100%</b><button data-pz="+">+</button></div>' +
-        '<div class="rd-set-row"><span>缩放适配</span>' +
-          '<button data-zm="width" class="on">页宽</button>' +
-          '<button data-zm="page">页高</button>' +
-          '<button data-zm="actual">实际</button></div>' +
-        '<div class="rd-set-row"><span>原页对照</span>' +
-          '<button data-left="toggle" class="rd-left-toggle">隐藏</button></div>' +
-        '<div class="rd-set-row"><span>公式识别</span>' +
-          '<button class="rd-formula-toggle" title="用视觉模型把公式转成 LaTeX">开</button></div>' +
-        '<div class="rd-set-row"><span>翻译</span>' +
-          '<button class="rd-retry-page" title="忽略缓存，重新翻译当前页">重译本页</button>' +
-          '<button class="rd-retry-fail" title="只补译没有译文的段落，不动已译内容">重试失败段</button>' +
-          '<button class="rd-gloss-open" title="查看 / 编辑本文术语表">术语表</button></div>' +
-        '<div class="rd-gloss hidden">' +
-          '<div class="rd-gloss-head"><span>术语表</span><b class="rd-gloss-n"></b>' +
-            '<button class="rd-gloss-regen" title="从全文重新抽取">重新生成</button>' +
-            '<button class="rd-gloss-save">保存</button></div>' +
-          '<div class="rd-gloss-list"></div>' +
-        '</div>' +
-        '<div class="rd-set-row rd-exp-row"><span>重排导出</span>' +
-          '<button data-exp="mono" title="纯译文重排：字体嵌入、标题书签、页码">仅译文 PDF</button>' +
-          '<button data-exp="dual" title="原文 + 译文对照，适合精读">双语 PDF</button>' +
-          '<button data-exp="md" title="Markdown，公式与图表以图片内嵌">Markdown</button></div>' +
-        '<div class="rd-set-row rd-exp-row"><span>版式导出</span>' +
-          '<button data-exp="layout-mono" title="保留原页版式：图表 / 公式 / 表格不动，译文原位覆盖">版式译文 PDF</button>' +
-          '<button data-exp="layout-dual" title="同页左右并排：左原页 / 右译页">版式双语 PDF</button></div>' +
-      '</div>' +
       '<div class="rd-body">' +
-        '<div class="rd-thumbs hidden"><div class="rd-thumbs-inner"></div></div>' +
+        '<aside class="rd-nav">' +
+          '<div class="rd-nav-head">' +
+            '<button data-nav="toc" class="on">目录</button>' +
+            '<button data-nav="thumbs">页面</button>' +
+            '<button data-nav="annos">批注<b class="rd-anno-n"></b></button>' +
+            '<button data-nav="find">搜索</button>' +
+          '</div>' +
+          '<div class="rd-nav-body">' +
+            '<div class="rd-nav-panel rd-toc-wrap" data-nav-panel="toc"><div class="rd-toc"></div></div>' +
+            '<div class="rd-nav-panel rd-thumbs hidden" data-nav-panel="thumbs">' +
+              '<div class="rd-thumbs-inner"></div></div>' +
+            '<div class="rd-nav-panel rd-anno-drawer hidden" data-nav-panel="annos">' +
+              '<div class="rd-anno-drawer-head"><span>本文批注</span>' +
+                '<span class="rd-anno-drawer-acts">' +
+                  '<button class="rd-anno-meta" title="文献信息（标题 / 作者 / 年份 / DOI）">文献</button>' +
+                  '<button class="rd-anno-export" title="导出批注（Markdown）">导出</button>' +
+                '</span></div>' +
+              '<div class="rd-anno-drawer-filters">' +
+                '<button data-f="all" class="on">全部</button>' +
+                '<button data-f="highlight">高亮</button>' +
+                '<button data-f="qa">问答</button>' +
+                '<button data-f="excerpt">摘录</button>' +
+                '<button data-f="note">批注</button>' +
+              '</div>' +
+              '<div class="rd-anno-list"></div>' +
+            '</div>' +
+            '<div class="rd-nav-panel rd-find hidden" data-nav-panel="find">' +
+              '<div class="rd-find-top">' +
+                '<input class="rd-find-input" placeholder="在全文里查找…">' +
+                '<span class="rd-find-stat"></span>' +
+                '<button class="rd-find-prev" title="上一个（Shift+Enter）">↑</button>' +
+                '<button class="rd-find-next" title="下一个（Enter）">↓</button>' +
+              '</div>' +
+              '<div class="rd-find-list"></div>' +
+            '</div>' +
+          '</div>' +
+        '</aside>' +
         '<div class="rd-left"><div class="rd-pages"></div></div>' +
-        '<div class="rd-split" title="拖动调整宽度"></div>' +
+        '<div class="rd-split" title="拖动调整原页宽度"></div>' +
         '<div class="rd-right"><div class="rd-tpages hidden"></div><div class="rd-flow"></div>' +
         '<div class="rd-loading">正在解析 PDF…</div></div>' +
-      '</div>' +
-      '<div class="rd-anno-drawer hidden">' +
-        '<div class="rd-anno-drawer-head"><span>本文批注</span>' +
-          '<span class="rd-anno-drawer-acts">' +
-            '<button class="rd-anno-meta" title="文献信息（标题 / 作者 / 年份 / DOI）">文献</button>' +
-            '<button class="rd-anno-export" title="导出批注（Markdown）">导出</button>' +
-            '<button class="rd-anno-drawer-x" title="关闭">✕</button>' +
-          '</span></div>' +
-        '<div class="rd-anno-drawer-filters">' +
-          '<button data-f="all" class="on">全部</button>' +
-          '<button data-f="highlight">高亮</button>' +
-          '<button data-f="qa">问答</button>' +
-          '<button data-f="excerpt">摘录</button>' +
-          '<button data-f="note">批注</button>' +
-        '</div>' +
-        '<div class="rd-anno-list"></div>' +
+        '<aside class="rd-settings hidden">' +
+          '<div class="rd-set-head"><span>阅读设置</span><button class="rd-set-x" title="关闭">✕</button></div>' +
+          '<div class="rd-set-scroll">' +
+            '<div class="rd-set-group">阅读</div>' +
+            '<div class="rd-set-row"><span>正文字号</span>' +
+              '<button data-fs="-">A−</button><b class="rd-fs-val">16</b><button data-fs="+">A+</button></div>' +
+            '<div class="rd-set-row"><span>行距</span>' +
+              '<button data-lh="1.6">紧</button><button data-lh="1.85">中</button>' +
+              '<button data-lh="2.1">松</button></div>' +
+            '<div class="rd-set-row"><span>原页缩放</span>' +
+              '<button data-pz="-">−</button><b class="rd-pz-val">100%</b><button data-pz="+">+</button></div>' +
+            '<div class="rd-set-row"><span>缩放适配</span>' +
+              '<button data-zm="width" class="on">页宽</button>' +
+              '<button data-zm="page">页高</button>' +
+              '<button data-zm="actual">实际</button></div>' +
+            '<div class="rd-set-row"><span>原页对照</span>' +
+              '<button data-left="toggle" class="rd-left-toggle">隐藏</button></div>' +
+            '<div class="rd-set-row"><span>公式识别</span>' +
+              '<button class="rd-formula-toggle" title="用视觉模型把公式转成 LaTeX">开</button></div>' +
+            '<div class="rd-set-group">翻译</div>' +
+            '<div class="rd-set-row"><span>操作</span>' +
+              '<button class="rd-retry-page" title="忽略缓存，重新翻译当前页">重译本页</button>' +
+              '<button class="rd-retry-fail" title="只补译没有译文的段落，不动已译内容">重试失败段</button>' +
+              '<button class="rd-gloss-open" title="查看 / 编辑本文术语表">术语表</button></div>' +
+            '<div class="rd-gloss hidden">' +
+              '<div class="rd-gloss-head"><span>术语表</span><b class="rd-gloss-n"></b>' +
+                '<button class="rd-gloss-regen" title="从全文重新抽取">重新生成</button>' +
+                '<button class="rd-gloss-save">保存</button></div>' +
+              '<div class="rd-gloss-list"></div>' +
+            '</div>' +
+            '<div class="rd-set-group">导出</div>' +
+            '<div class="rd-set-row rd-exp-row"><span>重排导出</span>' +
+              '<button data-exp="mono" title="纯译文重排：字体嵌入、标题书签、页码">仅译文 PDF</button>' +
+              '<button data-exp="dual" title="原文 + 译文对照，适合精读">双语 PDF</button>' +
+              '<button data-exp="md" title="Markdown，公式与图表以图片内嵌">Markdown</button></div>' +
+            '<div class="rd-set-row rd-exp-row"><span>版式导出</span>' +
+              '<button data-exp="layout-mono" title="保留原页版式：图表 / 公式 / 表格不动，译文原位覆盖">版式译文 PDF</button>' +
+              '<button data-exp="layout-dual" title="同页左右并排：左原页 / 右译页">版式双语 PDF</button></div>' +
+          '</div>' +
+        '</aside>' +
       '</div>' +
       '<div class="rd-meta-modal hidden">' +
         '<div class="rd-meta-card">' +
@@ -173,9 +196,8 @@
           '</div>' +
         '</div>' +
       '</div>';
-    // 停靠进主内容区：左侧应用侧栏（笔记 / 会话）保持可用；需要专注时再全屏
-    var host = document.getElementById('main') || document.body;
-    host.appendChild(root);
+    // 阅读器是独立的全屏工作区：挂到 body，盖住主界面（Electron 下让出标题栏）
+    document.body.appendChild(root);
     bindFullscreenSync();
     try {
       if (localStorage.getItem('rd_fullscreen') === '1') {
@@ -241,6 +263,102 @@
     savePrefs();
   }
 
+  function hideMore() {
+    var m = document.querySelector('.rd-more');
+    if (m) m.classList.add('hidden');
+  }
+
+  function toggleSettings(force) {
+    var box = document.querySelector('.rd-settings');
+    if (!box) return;
+    var show = typeof force === 'boolean' ? force : box.classList.contains('hidden');
+    box.classList.toggle('hidden', !show);
+    hideMore();
+    if (show) {
+      var s = $('.rd-set-scroll', box);
+      if (s) s.scrollTop = 0;
+    }
+    setTimeout(resizePages, 80);
+  }
+
+  /* 左栏导航：目录 / 页面 / 批注 / 搜索，一次只显示一个面板 */
+  function showNav(name) {
+    var root = document.getElementById('rd-root');
+    if (!root) return;
+    if (['toc', 'thumbs', 'annos', 'find'].indexOf(name) < 0) name = 'toc';
+    RD.nav = name;
+    Array.prototype.forEach.call(root.querySelectorAll('[data-nav]'), function (b) {
+      b.classList.toggle('on', b.dataset.nav === name);
+    });
+    Array.prototype.forEach.call(root.querySelectorAll('[data-nav-panel]'), function (p) {
+      p.classList.toggle('hidden', p.dataset.navPanel !== name);
+    });
+    if (name === 'toc') {
+      markTocActive();
+    } else if (name === 'thumbs') {
+      RD.thumbsOn = true;
+      buildThumbs();
+      setTimeout(function () { markThumbActive(true); resizePages(); }, 40);
+    } else if (name === 'annos') {
+      RD.thumbsOn = false;
+      renderAnnoDrawer();
+    } else if (name === 'find') {
+      RD.thumbsOn = false;
+      var inp = $('.rd-find-input', root);
+      if (inp) { inp.focus(); inp.select(); if (inp.value.trim()) findSchedule(); }
+    }
+    if (name !== 'thumbs') setTimeout(resizePages, 60);
+  }
+
+  /* 目录：从解析出的标题块生成，点击翻页并在阅读流里定位 */
+  function buildToc() {
+    var box = document.querySelector('.rd-toc');
+    if (!box) return;
+    var heads = ((RD.doc && RD.doc.blocks) || []).filter(function (b) {
+      return b.kind === 'heading' && String(b.text || '').trim();
+    });
+    if (!heads.length) {
+      box.innerHTML = '<div class="rd-toc-empty">这份文档没有可识别的标题</div>';
+      return;
+    }
+    box.innerHTML = heads.map(function (b) {
+      var lv = Math.max(1, Math.min(3, Number(b.level) || 1));
+      return '<button class="rd-toc-row" data-id="' + escapeHtml(b.id) + '" data-page="' + b.page + '"' +
+        ' style="--lv:' + (lv - 1) + '">' +
+        '<span class="rd-toc-t">' + escapeHtml(String(b.text).trim().slice(0, 120)) + '</span>' +
+        '<span class="rd-toc-p">' + b.page + '</span></button>';
+    }).join('');
+    Array.prototype.forEach.call(box.querySelectorAll('.rd-toc-row'), function (row) {
+      row.onclick = function () {
+        var page = Number(row.dataset.page) || 1;
+        var id = row.dataset.id;
+        goPage(page);
+        if (!RD.transOn) return;
+        ensureFlow().then(function () {
+          var el = RD.blockEls[id];
+          if (!el) return;
+          el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+          el.classList.add('rd-flash');
+          setTimeout(function () { el.classList.remove('rd-flash'); }, 1200);
+        });
+      };
+    });
+    markTocActive();
+  }
+
+  function markTocActive() {
+    var box = document.querySelector('.rd-toc');
+    if (!box) return;
+    var rows = box.querySelectorAll('.rd-toc-row');
+    var best = null;
+    for (var i = 0; i < rows.length; i++) {
+      if (Number(rows[i].dataset.page) <= RD.cur) best = rows[i];
+      else break;
+    }
+    Array.prototype.forEach.call(rows, function (r) { r.classList.toggle('on', r === best); });
+    if (best && RD.nav === 'toc') best.scrollIntoView({ block: 'nearest' });
+  }
+
   function wireShell(root) {
     Array.prototype.forEach.call(root.querySelectorAll('[data-mode]'), function (btn) {
       btn.onclick = function () { setMode(btn.dataset.mode); };
@@ -259,11 +377,28 @@
           RD.allRequested = true;
           if (!RD.transOn) setMode(modeForTranslate());
           translate(null);
-        } else if (act === 'settings') $('.rd-settings', root).classList.toggle('hidden');
-        else if (act === 'annos') toggleAnnoDrawer();
-        else if (act === 'find') toggleFind();
-        else if (act === 'thumbs') toggleThumbs();
-        else if (act === 'full') toggleFullscreen();
+        } else if (act === 'settings') {
+          toggleSettings();
+        } else if (act === 'more') {
+          var more = $('.rd-more', root);
+          if (more) more.classList.toggle('hidden');
+        } else if (act === 'meta') {
+          showDocMeta();
+          hideMore();
+        } else if (act === 'anno-export') {
+          exportAnnos();
+          hideMore();
+        } else if (act === 'annos') {
+          toggleAnnoDrawer(true);
+          hideMore();
+        } else if (act === 'find') toggleFind();
+        else if (act === 'thumbs') {
+          toggleThumbs();
+          hideMore();
+        } else if (act === 'full') {
+          toggleFullscreen();
+          hideMore();
+        }
       };
     });
     Array.prototype.forEach.call(root.querySelectorAll('[data-fs]'), function (b) {
@@ -382,7 +517,8 @@
     }, true);
     var drawer = $('.rd-anno-drawer', root);
     if (drawer) {
-      $('.rd-anno-drawer-x', drawer).onclick = function () { toggleAnnoDrawer(false); };
+      var drawerX = $('.rd-anno-drawer-x', drawer);
+      if (drawerX) drawerX.onclick = function () { toggleAnnoDrawer(false); };
       var metaBtn = $('.rd-anno-meta', drawer);
       if (metaBtn) metaBtn.onclick = showDocMeta;
       var expBtn = $('.rd-anno-export', drawer);
@@ -397,6 +533,26 @@
         };
       });
     }
+    // 左栏导航：目录 / 页面 / 批注 / 搜索
+    Array.prototype.forEach.call(root.querySelectorAll('[data-nav]'), function (b) {
+      b.onclick = function () { showNav(b.dataset.nav); };
+    });
+    var setX = $('.rd-set-x', root);
+    if (setX) setX.onclick = function () { toggleSettings(false); };
+    // 点空白处收起「更多」菜单与设置抽屉；点抽屉/菜单内部不关
+    document.addEventListener('mousedown', function (e) {
+      var more = $('.rd-more', root);
+      if (more && !more.classList.contains('hidden') && !e.target.closest('.rd-more')
+          && !e.target.closest('[data-act="more"]')) {
+        more.classList.add('hidden');
+      }
+      var set = $('.rd-settings', root);
+      if (set && !set.classList.contains('hidden') && !e.target.closest('.rd-settings')
+          && !e.target.closest('[data-act="settings"]')) {
+        set.classList.add('hidden');
+        setTimeout(resizePages, 60);
+      }
+    });
     var metaModal = $('.rd-meta-modal', root);
     if (metaModal) {
       $('.rd-meta-x', metaModal).onclick = function () { metaModal.classList.add('hidden'); };
@@ -1012,8 +1168,56 @@
     return '高亮';
   }
 
+  /* 角标悬停提示：用 Markdown 渲染，公式才不是 $...$ 源码。
+     原生 title 只能纯文本，所以换成自绘浮层（pointer-events: none，不挡点击）。 */
+  var annoTip = null;
+
+  function ensureAnnoTip() {
+    if (annoTip) return annoTip;
+    var el = document.createElement('div');
+    el.className = 'rd-anno-tip hidden';
+    document.body.appendChild(el);
+    // 鼠标移到角标以外就收起：同时覆盖「角标被重渲染移除」导致的残留
+    document.addEventListener('mouseover', function (e) {
+      if (!(e.target && e.target.closest && e.target.closest('.rd-anno-dot'))) hideAnnoTip();
+    });
+    document.addEventListener('scroll', hideAnnoTip, true);
+    annoTip = el;
+    return el;
+  }
+
+  function hideAnnoTip() {
+    if (annoTip) annoTip.classList.add('hidden');
+  }
+
+  function showAnnoTip(a, anchor) {
+    var tip = ensureAnnoTip();
+    var src = String(annoTitle(a) || '');
+    var md = (typeof safeRenderMarkdown === 'function')
+      ? safeRenderMarkdown(src) : escapeHtml(src);
+    tip.innerHTML = '<div class="rd-anno-tip-head">' + kindLabel(a) + '</div>' +
+      '<div class="rd-anno-tip-body">' + md + '</div>';
+    tip.classList.remove('hidden');
+    var w = tip.offsetWidth;
+    var h = tip.offsetHeight;
+    var r = anchor.getBoundingClientRect();
+    var left = Math.max(8, Math.min(window.innerWidth - w - 8,
+      r.left + r.width / 2 - w / 2));
+    var top = r.top - h - 8;
+    if (top < 8) top = Math.min(window.innerHeight - h - 8, r.bottom + 8);
+    tip.style.left = left + 'px';
+    tip.style.top = Math.max(8, top) + 'px';
+  }
+
+  function bindAnnoTip(dot, a) {
+    dot.addEventListener('mouseenter', function () { showAnnoTip(a, dot); });
+    dot.addEventListener('focus', function () { showAnnoTip(a, dot); });
+    dot.addEventListener('blur', hideAnnoTip);
+  }
+
   /* onlyId：译文回填后只重画那一段，避免整篇重扫 */
   function applyReaderAnnos(onlyId) {
+    hideAnnoTip();                       // 角标会被重建，先把悬停提示收掉
     var ids = onlyId ? [onlyId] : Object.keys(RD.blockEls);
     var by = {};
     var no = annoNumbers();
@@ -1036,7 +1240,7 @@
         dot.type = 'button';
         dot.className = 'rd-anno-dot';
         dot.textContent = String(no[a.id] || '');
-        dot.title = kindLabel(a) + '：' + String(annoTitle(a)).slice(0, 60);
+        bindAnnoTip(dot, a);
         dot.onclick = function (e) {
           e.stopPropagation();
           e.preventDefault();
@@ -1069,8 +1273,8 @@
     var d = document.querySelector('.rd-anno-drawer');
     if (!d) return;
     var open = typeof force === 'boolean' ? force : d.classList.contains('hidden');
-    d.classList.toggle('hidden', !open);
-    if (open) renderAnnoDrawer();
+    if (open) showNav('annos');
+    else if (RD.nav === 'annos') showNav('toc');
   }
 
   function renderAnnoDrawer() {
@@ -1156,6 +1360,7 @@
   }
 
   function showReaderAnno(items, anchor) {
+    hideAnnoTip();                       // 点开详情就收起悬停提示，避免两层叠着
     var pop = ensureReaderAnnoPop();
     var no = annoNumbers();
     pop.innerHTML = '<div class="rd-anno-head">本文批注 · ' + items.length + '</div>' +
@@ -1240,7 +1445,11 @@
     });
     document.addEventListener('mousemove', function (e) {
       if (!dragging) return;
-      var w = Math.max(220, Math.min(window.innerWidth * 0.7, e.clientX));
+      // e.clientX 是整窗坐标，要减掉左导航的宽度才是原页栏的宽度
+      var body = $('.rd-body', root);
+      var base = body ? body.getBoundingClientRect().left : 0;
+      var max = Math.max(260, (body ? body.clientWidth : window.innerWidth) - 320);
+      var w = Math.max(220, Math.min(max, e.clientX - base));
       left.style.width = w + 'px';
     });
     document.addEventListener('mouseup', function () {
@@ -1265,6 +1474,18 @@
       if (readerAnnoPop && !readerAnnoPop.classList.contains('hidden')) {
         e.preventDefault();
         readerAnnoPop.classList.add('hidden');
+        return;
+      }
+      var more = document.querySelector('.rd-more');
+      if (more && !more.classList.contains('hidden')) {
+        e.preventDefault();
+        more.classList.add('hidden');
+        return;
+      }
+      var setBox = document.querySelector('.rd-settings');
+      if (setBox && !setBox.classList.contains('hidden')) {
+        e.preventDefault();
+        toggleSettings(false);
         return;
       }
       var drawer = document.querySelector('.rd-anno-drawer');
@@ -1404,6 +1625,9 @@
   async function open(rel) {
     var root = ensureRoot();
     root.classList.remove('hidden');
+    if (typeof gmPageIn === 'function') {
+      gmPageIn(root.querySelector('.rd-card') || root);
+    }
     $('.rd-loading', root).classList.remove('hidden');
     $('.rd-name', root).textContent = rel;
     $('.rd-flow', root).innerHTML = '';
@@ -1436,13 +1660,15 @@
     var thInner = $('.rd-thumbs-inner', root);
     if (thInner) { thInner.innerHTML = ''; thInner.dataset.doc = ''; }
     RD.thumbs = {}; RD.thumbOrder = [];
-    var thBtn = $('[data-act="thumbs"]', root);
-    if (thBtn) thBtn.classList.remove('on');
     refreshTransBtns();
     applyPrefs();
     var setBox = $('.rd-settings', root);
     if (setBox) setBox.classList.add('hidden');
-    setMode('pdf');          // 默认只看 PDF 原页，翻译由用户点按钮才启动
+    hideMore();
+    var tocBox = $('.rd-toc', root);
+    if (tocBox) tocBox.innerHTML = '';
+    showNav('toc');
+    setMode('pdf');          // 文档打开前先只渲染原页，拿到块数据后再切默认视图
     try {
       var r = await api('/api/reader/open', {
         session_id: sessionId(), path: rel, lang: 'zh',
@@ -1454,21 +1680,25 @@
       RD.annos = r.annotations || [];
       RD.docMeta = r.document || null;
       root.classList.toggle('rd-docmode', RD.fileType !== 'pdf');
-      $('.rd-name', root).textContent = r.name + ' · ' + r.pages + ' 页';
+      $('.rd-name', root).textContent = r.name;    // 页数在页码徽标里，标题不再重复
       if (RD.fileType === 'pdf') {
         await loadPdf();
         buildPages();
         buildTransPages();
       }
-      // 阅读流按需构建（pdf 模式只看原页，不必为 1000 页文档先建 2.7 万个节点）
+      buildToc();
       applyTranslations(r.translations || {});
-      applyReaderAnnos();
-      restorePos();
       updateProgress();
       $('.rd-loading', root).classList.add('hidden');
-      if (RD.fileType === 'pdf') rdEnsurePages([1]);
-      else {
-        setMode('orig');      // Word / PPT：没有原页图像，直接看原文阅读流
+      if (RD.fileType === 'pdf') {
+        setMode(savedSplitMode());      // 默认左原页 + 右译文流
+        applyReaderAnnos();
+        restorePos();
+        rdEnsurePages([1]);
+      } else {
+        setMode('orig');                // Word / PPT：没有原页图像，直接看原文阅读流
+        applyReaderAnnos();
+        restorePos();
         ensureFlow();
       }
     } catch (e) {
@@ -1525,6 +1755,7 @@
     root.classList.add('hidden');
     var setBox = $('.rd-settings', root);
     if (setBox) setBox.classList.add('hidden');
+    hideMore();
     if (window.AskKit) window.AskKit.close();
     document.body.classList.remove('rd-resizing');
   }
@@ -1836,7 +2067,7 @@
         dot.type = 'button';
         dot.className = 'rd-anno-dot';
         dot.textContent = String(no[a.id] || '');
-        dot.title = kindLabel(a) + '：' + String(annoTitle(a)).slice(0, 60);
+        bindAnnoTip(dot, a);
         dot.onclick = function (e) {
           e.stopPropagation();
           e.preventDefault();
@@ -2196,6 +2427,7 @@
       RD.pages[n].el.classList.toggle('on', Number(n) === RD.cur);
     });
     markThumbActive();
+    markTocActive();
   }
 
   /* ---------------- 联动高亮（仅临时，不落库） ----------------
@@ -2436,11 +2668,10 @@
     var box = document.querySelector('.rd-find');
     if (!box) return;
     var show = typeof force === 'boolean' ? force : box.classList.contains('hidden');
-    box.classList.toggle('hidden', !show);
     if (show) {
-      var inp = $('.rd-find-input', box);
-      if (inp) { inp.focus(); inp.select(); if (inp.value.trim()) findSchedule(); }
+      showNav('find');
     } else {
+      if (RD.nav === 'find') showNav('toc');
       clearLive();
     }
   }
@@ -2520,16 +2751,8 @@
     var box = document.querySelector('.rd-thumbs');
     if (!box) return;
     var show = typeof force === 'boolean' ? force : box.classList.contains('hidden');
-    box.classList.toggle('hidden', !show);
-    RD.thumbsOn = show;
-    var btn = document.querySelector('[data-act="thumbs"]');
-    if (btn) btn.classList.toggle('on', show);
-    if (show) {
-      buildThumbs();
-      setTimeout(function () { markThumbActive(true); resizePages(); }, 40);
-    } else {
-      setTimeout(resizePages, 60);
-    }
+    if (show) showNav('thumbs');
+    else if (RD.nav === 'thumbs') showNav('toc');
   }
 
   function buildThumbs() {
@@ -3033,8 +3256,12 @@
     if (!btn) return;
     var on = host.classList.contains('rd-fullscreen');
     btn.classList.toggle('on', on);
-    btn.title = on ? '退出全屏（恢复停靠）' : '全屏';
-    btn.textContent = on ? '⤡' : '⤢';
+    btn.title = on ? '退出全屏（恢复窗口）' : '全屏阅读';
+    var label = btn.querySelector('span');
+    var em = btn.querySelector('em');
+    if (label) label.textContent = on ? '退出全屏' : '全屏阅读';
+    if (em) em.textContent = on ? '⤡' : '⤢';
+    else if (!label) btn.textContent = on ? '⤡' : '⤢';
   }
 
   /* ------------------------------------------------------------ 导出译文 */

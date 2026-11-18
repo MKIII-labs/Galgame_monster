@@ -33,6 +33,7 @@ import time
 import uuid
 
 from app import code_mode
+from app import winproc
 
 MAX_CALLS = 2000
 MAX_WORKFLOWS = 16
@@ -289,7 +290,8 @@ def run(sandbox, code, caps=None, stop_event=None, emit=None, timeout=0,
                                      allow_cmd=allow_cmd, allow_outside=allow_outside,
                                      extra_allow=(work,)),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", bufsize=1)
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=winproc.no_window())
     except Exception as e:
         shutil.rmtree(work, ignore_errors=True)
         return "❌ run_workflow_script：启动失败：%s" % e, {"calls": 0, "workflows": 0, "agents": 0}

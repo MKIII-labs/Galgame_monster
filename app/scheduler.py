@@ -316,15 +316,8 @@ def _fire_auto(task, now):
         _reschedule_auto(task, now)
         return
     _append_message(sid, text)
-    events.publish({"type": "auto_msg", "session_id": sid, "text": text,
-                    "character_id": _char_id(sid)})
+    events.publish({"type": "auto_msg", "session_id": sid, "text": text})
     _reschedule_auto(task, now, silent=0)
-
-
-def _char_id(sid):
-    from app.sessions import load_sessions, find_session
-    s = find_session(load_sessions(), sid)
-    return (s or {}).get("gal_character_id") or ""
 
 
 def send_now(sid):
@@ -336,8 +329,7 @@ def send_now(sid):
     if not text:
         return ""
     _append_message(sid, text)
-    events.publish({"type": "auto_msg", "session_id": sid, "text": text,
-                    "character_id": _char_id(sid)})
+    events.publish({"type": "auto_msg", "session_id": sid, "text": text})
     return text
 
 
@@ -365,15 +357,6 @@ def generate_auto_message(sid):
 
 def _auto_system_prompt(s):
     name, persona = "助手", ""
-    if s.get("gal_enabled") and s.get("gal_character_id"):
-        try:
-            from app import gal
-            ch = gal.load_character(s.get("gal_character_id"))
-            if ch:
-                name = ch.get("name") or "角色"
-                persona = (ch.get("profile") or "")[:1500]
-        except Exception:
-            pass
     return "\n".join([x for x in [
         "你是「%s」。现在由你**主动**给对方发消息。" % name,
         persona,

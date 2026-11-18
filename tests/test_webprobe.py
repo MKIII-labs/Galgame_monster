@@ -126,6 +126,21 @@ def test_check_without_browser(monkeypatch):
     monkeypatch.setattr(webprobe, "edge_path", lambda: "")
     text = webprobe.check(__file__)
     assert "没找到 Edge" in text and "GAL_EDGE" in text
+    # 环境失败要算失败：以前用 ⚠️ 返回，result_ok 当成成功，模型会白跑重试
+    assert text.startswith("❌")
+    assert agent.result_ok("render_check", text) is False
+
+
+def test_check_probe_failure_is_failure(tmp_path, monkeypatch):
+    """浏览器会话异常（没有回传探针结果）必须计入失败，而不是 ⚠️ 成功。"""
+    page = tmp_path / "p.html"
+    page.write_text("<html><body>x</body></html>", encoding="utf-8")
+    monkeypatch.setattr(webprobe, "edge_path", lambda: "dummy-browser")
+    monkeypatch.setattr(webprobe, "_dump_dom",
+                        lambda *a, **k: (None, "stderr: browser session died"))
+    text = webprobe.check(str(page))
+    assert text.startswith("❌") and "没有回传探针结果" in text
+    assert agent.result_ok("render_check", text) is False
 
 
 def test_check_rejects_non_html(monkeypatch):
