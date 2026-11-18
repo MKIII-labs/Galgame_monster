@@ -1,5 +1,16 @@
 # NOTES
 
+## [2026-11-18] 3.5 发布与 GitHub 推送网络问题
+
+- 问题：本机访问 `github.com:443` 超时（curl 28），但 `api.github.com`、百度、
+  `ssh.github.com:443` 正常；系统代理指向 `127.0.0.1:7897` 但端口未监听，`gh` CLI 未安装。
+- 处理：本地已完成提交 `2822efc` 与 `v3.5.0` 注解标签（含完整更新说明），
+  README 升到 3.5；全量 pytest、ruff、`scripts/dev_check.py` 均通过。
+- 待办：开启代理 / VPN 后执行 `git push origin main` 与 `git push origin v3.5.0`；
+  GitHub Release 需在网页创建（标签说明可直接用作更新说明）。
+- 排查命令：`curl -I https://github.com`、`Test-NetConnection 127.0.0.1 -Port 7897`、
+  `git status -sb`。
+
 ## [2026-11-18] 修复：设置搜索结果无法用鼠标点击跳转
 
 - 问题：设置里搜到结果后，用鼠标点结果项没反应；键盘 ↑↓ + Enter 正常，
