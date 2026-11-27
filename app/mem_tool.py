@@ -587,7 +587,10 @@ def merge_notes(notes):
                 dst.setdefault(kind, set()).update(ids or ())
     out["summary"] = "；".join(summaries)
     out["problems"] = list(dict.fromkeys(problems))[:3]
-    out["changed"] = changed
+    # 合并时用 set 去重，但返回值要能直接进 JSON（mem_write SSE / 落库）：
+    # 与 apply_memory_ops 的 changed_out 保持一致，统一转成排序后的 list。
+    out["changed"] = {scope: {kind: sorted(ids) for kind, ids in part.items() if ids}
+                      for scope, part in changed.items()}
     out["applied"] = sum(int(n.get("applied") or 0) for n in items)
     return out
 

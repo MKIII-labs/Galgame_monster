@@ -188,12 +188,35 @@ def _same_path(a, b):
         return (a or "") == (b or "")
 
 
+def refresh_shell_icons():
+    """让资源管理器重新读取图标（不重启 explorer）。
+
+    只在 .lnk 因为图标更新被重写后调用：SHCNE_ASSOCCHANGED 通知外壳刷新，
+    再让 ie4uinit 走一遍缓存重建。两者都失败也不影响应用启动。
+    """
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+    except Exception:
+        pass
+    try:
+        import subprocess
+        subprocess.Popen(["ie4uinit.exe", "-show"],
+                         creationflags=0x08000000,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def ensure(lnk, target, args="", icon="", aumid=AUMID, workdir="",
            desc="Galgame_monster"):
     """确保快捷方式存在、内容与期望一致，且带上了 aumid。
 
     内容已经对就完全不碰文件：重复覆盖 .lnk 会让资源管理器重新解析图标来源，
     容易再退化成通用占位图标。
+    例外：图标文件比 .lnk 新（重新生成过 app.ico）时重写一次并刷新外壳图标缓存，
+    否则任务栏 / 通知会一直用缓存里的旧低清图标。
     返回 (是否已就绪, 说明)。
     """
     if not sys.platform.startswith("win"):
@@ -202,11 +225,18 @@ def ensure(lnk, target, args="", icon="", aumid=AUMID, workdir="",
         return False, "目标不存在：%s" % target
 
     cur = read(lnk)
-    if (cur and (cur.get("aumid") or "") == (aumid or "")
-            and _same_path(cur.get("target"), target)
-            and _same_path(cur.get("workdir"), workdir)
-            and _same_path(cur.get("icon").split(",")[0] if cur.get("icon") else "", icon)
-            and os.path.normcase(cur.get("args") or "") == os.path.normcase(args or "")):
+    same = bool(cur and (cur.get("aumid") or "") == (aumid or "")
+                and _same_path(cur.get("target"), target)
+                and _same_path(cur.get("workdir"), workdir)
+                and _same_path(cur.get("icon").split(",")[0] if cur.get("icon") else "", icon)
+                and os.path.normcase(cur.get("args") or "") == os.path.normcase(args or ""))
+    icon_newer = False
+    try:
+        if icon and os.path.isfile(icon) and os.path.isfile(lnk):
+            icon_newer = os.path.getmtime(icon) > os.path.getmtime(lnk) + 2
+    except OSError:
+        icon_newer = False
+    if same and not icon_newer:
         return True, "已存在"
 
     ole32 = ctypes.windll.ole32
@@ -248,6 +278,9 @@ def ensure(lnk, target, args="", icon="", aumid=AUMID, workdir="",
         persist = _query(link, _guid(_IID_PERSIST_FILE))
         # IPersistFile: 6=Save
         _fn(persist, 6, ctypes.c_wchar_p, ctypes.c_int)(persist, lnk, 1)
+        if icon_newer:
+            refresh_shell_icons()
+            return True, "已刷新图标"
         return True, "已创建"
     except Exception as e:
         return False, "写入失败：%s" % e
@@ -255,3 +288,25 @@ def ensure(lnk, target, args="", icon="", aumid=AUMID, workdir="",
         _release(persist)
         _release(store)
         _release(link)
+
+
+def ensure_app_identity(aumid=AUMID, name="Galgame_monster", icon=""):
+    """把 AUMID 注册到 HKCU，让通知中心显示自己的应用名 / 图标。
+
+    未打包的 Electron 只调用 app.setAppUserModelId 时，Windows 通知常回落到
+    "Electron"；补上 HKCU\\Software\\Classes\\AppUserModelId\\<AUMID> 的
+    DisplayName / IconUri 后即可显示自己的名字。返回 (是否成功, 说明)。
+    """
+    if not sys.platform.startswith("win") or not aumid:
+        return False, "非 Windows 或缺少 AUMID"
+    try:
+        import winreg
+        key_path = r"Software\Classes\AppUserModelId\%s" % aumid
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0,
+                                winreg.KEY_WRITE) as key:
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, name)
+            if icon and os.path.isfile(icon):
+                winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, icon)
+        return True, key_path
+    except Exception as e:                # noqa: BLE001  注册失败只影响显示名
+        return False, "写入失败：%s" % e

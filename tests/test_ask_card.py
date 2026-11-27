@@ -228,17 +228,21 @@ def test_session_agent_toggle_sets_live_flags(monkeypatch):
     take_live_flags("s_live")
     h = _H({"id": "s_live", "agent_enabled": True, "sandbox": "D:/work"})
     sandbox._api_session_agent(h)
-    assert peek_live_flags("s_live") == {"agent_enabled": True, "sandbox": "D:/work"}
-    assert take_live_flags("s_live") == {"agent_enabled": True, "sandbox": "D:/work"}
+    assert peek_live_flags("s_live") == {"agent_enabled": True, "sandbox": "D:/work",
+                                         "approval_mode": "ai"}
+    assert take_live_flags("s_live") == {"agent_enabled": True, "sandbox": "D:/work",
+                                         "approval_mode": "ai"}
     assert take_live_flags("s_live") is None
-    # 只改审批模式不需要即时开关（工具权限没变）
+    # 审批档位也要即时生效：回合内下一次工具调用就用新档位判定
     h2 = _H({"id": "s_live", "approval_mode": "ask"})
     sandbox._api_session_agent(h2)
-    assert take_live_flags("s_live") is None
+    assert take_live_flags("s_live") == {"agent_enabled": True, "sandbox": "D:/work",
+                                         "approval_mode": "ask"}
     # 清空目录也要即时生效（回到未选目录的只读模式）
     h3 = _H({"id": "s_live", "sandbox": ""})
     sandbox._api_session_agent(h3)
-    assert take_live_flags("s_live") == {"agent_enabled": True, "sandbox": ""}
+    assert take_live_flags("s_live") == {"agent_enabled": True, "sandbox": "",
+                                         "approval_mode": "ask"}
 
 
 def test_persist_session_keeps_live_agent_flags(monkeypatch):
@@ -247,13 +251,29 @@ def test_persist_session_keeps_live_agent_flags(monkeypatch):
 
     s = {"id": "s_persist", "agent_enabled": False, "sandbox": ""}
     monkeypatch.setattr(chat, "load_sessions",
-                        lambda: {"sessions": [], "current": ""})
-    monkeypatch.setattr(chat, "save_session", lambda x: None)
+                        lambda copy=True: {"sessions": [], "current": ""})
+    monkeypatch.setattr(chat, "save_session", lambda x, **k: None)
     set_live_flags("s_persist", {"agent_enabled": True, "sandbox": "D:/work"})
     chat._persist_session(s)
     assert s["agent_enabled"] is True and s["sandbox"] == "D:/work"
     # peek 不消费：工具循环的下一轮仍要取到它来重建 schema
     assert take_live_flags("s_persist") == {"agent_enabled": True, "sandbox": "D:/work"}
+
+
+def test_persist_session_keeps_live_approval_mode(monkeypatch):
+    """回合内改过审批档位：落库时不能被会话内存快照里的旧值覆盖回去。"""
+    from app.store import set_live_flags, take_live_flags
+
+    s = {"id": "s_am", "agent_enabled": True, "sandbox": "D:/work",
+         "approval_mode": "ai"}
+    monkeypatch.setattr(chat, "load_sessions",
+                        lambda copy=True: {"sessions": [], "current": ""})
+    monkeypatch.setattr(chat, "save_session", lambda x, **k: None)
+    set_live_flags("s_am", {"agent_enabled": True, "sandbox": "D:/work",
+                            "approval_mode": "ask"})
+    chat._persist_session(s)
+    assert s["approval_mode"] == "ask"
+    take_live_flags("s_am")
 
 
 def test_question_policy_falls_back_to_ask():

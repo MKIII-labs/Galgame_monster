@@ -13,6 +13,7 @@ import base64
 import fnmatch
 import os
 import tempfile
+import time
 
 from app.computer import stop, winapi
 
@@ -29,6 +30,7 @@ HIGH_RISK_WORDS = ("支付", "付款", "购买", "下单", "转账", "汇款", "
 
 MAX_NODES = 600          # 单次遍历的控件上限（大树也不至于卡死）
 MAX_ITEMS = 200          # 收集上限
+MAX_TEXTS = 12           # 只读文字上限（结果 / 状态这类，不能点击）
 MAX_DEPTH = 12
 
 _WINDOWS = {}            # key -> {hwnd, pid, exe, title}
@@ -82,6 +84,20 @@ def _uia():
     return auto
 
 
+_UIA_HINT = ("桌面操作依赖 uiautomation（Windows UIA），当前 Python 环境里没有安装。"
+             "请在应用使用的 Python 环境执行 `pip install uiautomation`"
+             "（或 `pip install -r requirements.txt`）后重启应用。")
+
+
+def available():
+    """UIA 依赖是否可用：缺依赖时给可执行的提示，而不是抛 ImportError。"""
+    try:
+        import uiautomation  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def _ensure_hotkey():
     """第一次用桌面能力时注册急停热键（全局 Ctrl+Alt+Shift+Esc）。"""
     winapi.register_stop_hotkey(lambda: stop.toggle("hotkey"))
@@ -93,10 +109,13 @@ def _ensure_hotkey():
 
 def list_windows():
     if not enabled():
-        return "⚠️ 桌面操作未开启：设置 → Agent → Computer Use → 「允许操作桌面程序」。"
+        return ("⚠️ 桌面操作未开启：设置 → Agent → Computer Use → 「允许操作桌面程序」"
+                "（改完点页面底部「保存」才生效）。")
     if not unrestricted_enabled() and not allowed_exes():
         return ("⚠️ 桌面程序白名单是空的。请先在设置里填入允许操作的 exe 名"
                 "（如 notepad.exe），或打开「无限制」开关；否则任何窗口都不会列出来。")
+    if not available():
+        return "❌ " + _UIA_HINT
     _ensure_hotkey()
     auto = _uia()
     try:
@@ -154,13 +173,23 @@ def _window(key):
         return None, "窗口编号 %s 不存在：先调用 computer_windows 看看有哪些窗口。" % key
     if not exe_allowed(info["exe"]):
         return None, "窗口 %s 的程序 %s 已不在白名单里，拒绝操作。" % (key, info["exe"])
-    try:
-        auto = _uia()
-        ctrl = auto.ControlFromHandle(info["hwnd"])
-    except Exception as e:
-        return None, "窗口可能已关闭：%s" % e
+    if not available():
+        return None, _UIA_HINT
+    ctrl, err = None, None
+    # UIA 在窗口切换 / 界面重绘时会抛瞬态 COM 错误（「事件无法调用任何订户」等）：
+    # 直接判「窗口已关闭」会逼模型放弃，先短重试两次再报错。
+    for _ in range(3):
+        try:
+            ctrl = _uia().ControlFromHandle(info["hwnd"])
+            err = None
+            break
+        except Exception as e:             # noqa: BLE001
+            ctrl, err = None, e
+            time.sleep(0.15)
     if ctrl is None:
-        return None, "窗口 %s 已经关闭了，请重新 computer_windows。" % key
+        _WINDOWS.pop(str(key), None)       # 编号已失效：让模型重新枚举
+        return None, ("读取窗口失败（可能已关闭或界面正在切换）：%s。"
+                      "重新 computer_windows 取新编号后再试。" % err)
     return ctrl, ""
 
 
@@ -172,6 +201,36 @@ def window_title(key):
 # 快照
 # ============================================================
 
+# 截图坐标原点：截图是窗口客户区，坐标动作与快照都统一用「截图坐标（左上角 0,0）」。
+_SHOT_ORIGIN = {}
+
+
+def _local_origin(info):
+    """截图坐标系原点（屏幕物理像素）：优先用最近一次截图的实测原点。"""
+    hwnd = int((info or {}).get("hwnd") or 0)
+    hit = _SHOT_ORIGIN.get(hwnd)
+    if hit:
+        # 窗口移动过就作废：旧截图的坐标已对不上，按当前客户区重新算（必要时重截图）
+        if hit[2] and hit[2] == winapi.window_rect(hwnd):
+            return hit[0], hit[1]
+        _SHOT_ORIGIN.pop(hwnd, None)
+    org = winapi.client_origin(hwnd)
+    if org:
+        return org
+    rect = winapi.window_rect(hwnd)
+    return (rect[0], rect[1]) if rect else (0, 0)
+
+
+def _to_screen(info, x, y):
+    """截图坐标 → 屏幕坐标（window_at / send_click 用屏幕坐标）。"""
+    ox, oy = _local_origin(info)
+    return ox + int(x), oy + int(y)
+
+def _is_glyph(name):
+    """图标字体（私有区字符）不算可读文字。"""
+    return all(0xE000 <= ord(c) <= 0xF8FF or c.isspace() for c in name)
+
+
 def snapshot(key, start=0, limit=30):
     ctrl, err = _window(key)
     if err:
@@ -182,12 +241,13 @@ def snapshot(key, start=0, limit=30):
                 "按安全策略不操作提权窗口。" % key)
     start = max(0, int(start or 0))
     limit = max(1, min(60, int(limit or 30)))
-    items, mapping = [], {}
-    queue = [(ctrl, 0)]
+    items, mapping, texts = [], {}, []
+    ox, oy = _local_origin(info)
+    queue = [(ctrl, 0, "")]
     visited = 0
     ref = 0
     while queue and visited < MAX_NODES and len(items) < MAX_ITEMS:
-        node, depth = queue.pop(0)
+        node, depth, parent_type = queue.pop(0)
         visited += 1
         if depth >= MAX_DEPTH:
             continue
@@ -201,30 +261,44 @@ def snapshot(key, start=0, limit=30):
                     continue
                 ctype = ch.ControlTypeName or ""
                 name = (ch.Name or "").strip()
+                if ctype == "TextControl":
+                    # 结果 / 状态这类只读文字也带上：否则点完「=」模型看不到结果
+                    if (name and name not in texts and len(name) >= 2
+                            and parent_type not in INTERESTING
+                            and len(texts) < MAX_TEXTS and not _is_glyph(name)):
+                        texts.append(name[:60])
+                    continue
                 if ctype not in INTERESTING or not name:
-                    queue.append((ch, depth + 1))
+                    queue.append((ch, depth + 1, ctype))
                     continue
                 rect = ch.BoundingRectangle
                 ref += 1
+                sx, sy = (int(rect.left + rect.width() / 2),
+                          int(rect.top + rect.height() / 2))
                 meta = {
                     "ref": ref,
                     "type": ctype.replace("Control", ""),
                     "name": name[:48],
                     "enabled": bool(ch.IsEnabled),
                     "pass": _is_password(ch),
-                    "x": int(rect.left + rect.width() / 2),
-                    "y": int(rect.top + rect.height() / 2),
+                    # x/y 是截图坐标（左上角 0,0），与 computer_shot 的网格一致
+                    "x": sx - ox,
+                    "y": sy - oy,
+                    # sx/sy 是屏幕坐标，内部点击 / 命中校验用
+                    "sx": sx,
+                    "sy": sy,
                     "w": int(rect.width()),
                     "h": int(rect.height()),
                 }
                 mapping[ref] = (ch, meta)
                 items.append(meta)
-                queue.append((ch, depth + 1))
+                queue.append((ch, depth + 1, ctype))
             except Exception:
                 continue
     _REFS[str(key)] = mapping
     data = {"key": str(key), "title": info["title"], "exe": os.path.basename(info["exe"]),
-            "count": len(items), "start": start, "items": items[start:start + limit]}
+            "count": len(items), "start": start, "items": items[start:start + limit],
+            "texts": texts}
     _LAST[str(key)] = data
     return render(data)
 
@@ -246,6 +320,8 @@ def render(data, max_chars=4000):
     lines = ["# 桌面窗口 %s · %s · %s" % (d.get("key"), d.get("title") or "(无标题)",
                                           d.get("exe") or "?")]
     items = d.get("items") or []
+    if items:
+        lines.append("坐标为截图坐标：左上角 (0,0)，x 向右、y 向下（与 computer_shot 网格一致）")
     for it in items:
         bits = ["[%s]" % it.get("ref"), it.get("type") or "?"]
         bits.append("「%s」" % it.get("name"))
@@ -257,11 +333,17 @@ def render(data, max_chars=4000):
         lines.append(" ".join(bits))
     start, count = int(d.get("start") or 0), int(d.get("count") or 0)
     shown = start + len(items)
+    texts = d.get("texts") or []
+    if texts:
+        lines.append("")
+        lines.append("文字（只读，不能点击）：")
+        lines.extend("「%s」" % t for t in texts)
     if count > shown:
         lines.append("（共 %d 个控件，已显示 %d–%d；继续用 start=%d）"
                      % (count, start + 1, shown, shown))
     elif count == 0:
-        lines.append("（没有可操作控件：可能是自绘界面，需要用 computer_shot 看画面）")
+        lines.append("（没有可操作控件：可能是自绘界面。用 computer_shot 看画面，"
+                     "再用 computer_act 带 x / y 点坐标；输入支持中文粘贴）")
     out = "\n".join(lines)
     if len(out) > max_chars:
         out = out[:max_chars] + "\n…（快照过长已截断）"
@@ -299,7 +381,59 @@ def classify(key, action, ref):
     return "low", ""
 
 
-def act(key, action, ref=None, value="", clear=False):
+def _hit_error(hwnd, x, y):
+    """坐标是否落在目标窗口上（先置顶，避免点/输入落到别的窗口）。"""
+    winapi.raise_window(hwnd)
+    hit = winapi.window_at(x, y)
+    if hit and int(hwnd) not in (hit, winapi.root_window(hit)):
+        return "❌ 坐标 (%d,%d) 命中的不是目标窗口，已取消（请重新截图确认位置）。" % (x, y)
+    return ""
+
+
+def _click_at(hwnd, x, y):
+    err = _hit_error(hwnd, x, y)
+    if err:
+        return err
+    winapi.send_click(x, y)
+    return ""
+
+
+def _wait_foreground(hwnd, timeout=0.6):
+    """点击后窗口激活需要一点时间：轮询前台，别一看到旧句柄就放弃。"""
+    hwnd = int(hwnd)
+    end = time.time() + max(0.05, timeout)
+    while time.time() < end:
+        fg = winapi.foreground_hwnd()
+        if fg == hwnd or winapi.root_window(fg) == hwnd:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _coord_type(info, x, y, text, clear):
+    """按截图坐标聚焦后输入文本：中文走剪贴板 + Ctrl+V（SendKeys 对中文不稳）。"""
+    sx, sy = _to_screen(info, x, y)
+    err = _click_at(info["hwnd"], sx, sy)
+    if err:
+        return err
+    hwnd = int(info["hwnd"])
+    if not _wait_foreground(hwnd):
+        # 点击一般会激活窗口；仍失败时才尝试强制置前，避免输入落到别的窗口
+        winapi.force_foreground(hwnd)
+        if not _wait_foreground(hwnd, 0.4):
+            return "❌ 点击后目标窗口仍未激活，已取消输入（避免落到别的窗口）。"
+    auto = _uia()
+    if clear:
+        auto.SendKeys("{Ctrl}a", interval=0.01)
+        auto.SendKeys("{Delete}", interval=0.01)
+    if winapi.set_clipboard_text(text):
+        auto.SendKeys("{Ctrl}v", interval=0.01)
+        return "已在截图坐标 (%d,%d) 粘贴 %d 个字符" % (int(x), int(y), len(text))
+    auto.SendKeys(text, interval=0.01)
+    return "已在截图坐标 (%d,%d) 输入 %d 个字符（键盘回退）" % (int(x), int(y), len(text))
+
+
+def act(key, action, ref=None, value="", clear=False, x=None, y=None):
     if not enabled():
         return "⚠️ 桌面操作未开启。"
     if stop.is_stopped():
@@ -313,30 +447,68 @@ def act(key, action, ref=None, value="", clear=False):
     act_name = str(action or "").lower()
     if act_name not in ("click", "type", "press", "scroll", "hover"):
         return "❌ 不支持的动作：%s" % action
+    try:
+        pos = (int(x), int(y)) if x is not None and y is not None else None
+    except (TypeError, ValueError):
+        pos = None
     target, meta = _ctl(key, ref)
-    if act_name in ("click", "type", "hover") and not meta:
-        return "❌ 编号 %s 无效或已过期：请重新 computer_see。" % ref
+    if act_name in ("click", "type", "hover") and not meta and pos is None:
+        return ("❌ 需要 ref 或坐标 (x,y)：先 computer_see 取编号；"
+                "自绘界面用 computer_shot 看画面后直接给 x / y。")
 
     try:
         if act_name == "click":
-            note = _do_click(ctrl, target, meta)
+            if pos:
+                sx, sy = _to_screen(info, *pos)
+                err = _click_at(info["hwnd"], sx, sy)
+                if err:
+                    return err
+                note = "已点击截图坐标 (%d,%d)" % pos
+            else:
+                note = _do_click(ctrl, target, meta)
         elif act_name == "type":
-            if meta.get("pass"):
+            if meta and meta.get("pass"):
                 return "❌ 密码框：按安全策略不读取、不填写。"
-            note = _do_type(target, meta, str(value), bool(clear), info["hwnd"])
+            if pos:
+                note = _coord_type(info, pos[0], pos[1], str(value), bool(clear))
+            else:
+                note = _do_type(target, meta, str(value), bool(clear), info["hwnd"])
         elif act_name == "press":
+            if pos:
+                sx, sy = _to_screen(info, *pos)
+                err = _click_at(info["hwnd"], sx, sy)
+                if err:
+                    return err
+                time.sleep(0.1)
             note = _do_press(target, str(value or "Enter"), info["hwnd"])
         elif act_name == "hover":
-            winapi.set_foreground(info["hwnd"])
-            winapi.send_move(meta["x"], meta["y"])
-            note = "已移到「%s」上" % meta.get("name")
+            if pos:
+                sx, sy = _to_screen(info, *pos)
+                err = _hit_error(info["hwnd"], sx, sy)
+                if err:
+                    return err
+                winapi.send_move(sx, sy)
+                note = "已移到截图坐标 (%d,%d)" % pos
+            else:
+                sx, sy = meta.get("sx", meta["x"]), meta.get("sy", meta["y"])
+                winapi.send_move(sx, sy)
+                note = "已移到「%s」上" % meta.get("name")
         else:
             try:
                 dy = int(value or 600)
             except ValueError:
                 dy = 600
-            winapi.set_foreground(info["hwnd"])
-            winapi.send_wheel(meta["x"] if meta else 600, meta["y"] if meta else 400, -dy)
+            if pos:
+                sx, sy = _to_screen(info, *pos)
+            elif meta:
+                sx, sy = meta.get("sx", meta["x"]), meta.get("sy", meta["y"])
+            else:
+                rect = winapi.window_rect(info["hwnd"])
+                sx, sy = (rect[0] + 400, rect[1] + 300) if rect else (600, 400)
+            err = _hit_error(info["hwnd"], sx, sy)
+            if err:
+                return err
+            winapi.send_wheel(sx, sy, -dy)
             note = "已滚动 %d" % dy
     except Exception as e:
         return "❌ 操作失败：%s" % e
@@ -344,13 +516,86 @@ def act(key, action, ref=None, value="", clear=False):
     return "%s\n\n%s" % (note, brief)
 
 
+def read_window(key):
+    """窗口客观信息（标题 / 进程 / 类名 / UIA 节点数）：替代模型现场写 PowerShell 探测。"""
+    info = _WINDOWS.get(str(key or ""))
+    if not info:
+        return "❌ 窗口编号 %s 不存在：先 computer_windows。" % key
+    if not exe_allowed(info["exe"]):
+        return "❌ 程序 %s 不在白名单，拒绝读取。" % os.path.basename(info["exe"])
+    if not available():
+        return "❌ " + _UIA_HINT
+    ctrl, err = _window(key)
+    kinds, nodes = [], 0
+    if ctrl is not None:
+        queue = [(ctrl, 0)]
+        while queue and nodes < 300:
+            node, depth = queue.pop(0)
+            if depth > 6:
+                continue
+            try:
+                for ch in node.GetChildren():
+                    nodes += 1
+                    t = (ch.ControlTypeName or "").replace("Control", "")
+                    if t and len(kinds) < 8 and t not in kinds:
+                        kinds.append(t)
+                    queue.append((ch, depth + 1))
+            except Exception:
+                continue
+    lines = [
+        "# 窗口 %s" % key,
+        "标题：%s" % (info.get("title") or "（无标题）"),
+        "程序：%s · pid=%s" % (os.path.basename(info["exe"]), info.get("pid")),
+        "句柄：%s · 类名：%s" % (info.get("hwnd"), winapi.class_name(info.get("hwnd")) or "?"),
+        "UIA 节点：%d（%s）" % (nodes, "、".join(kinds) or "无可读类型"),
+    ]
+    if err:
+        lines.append("UIA 读取失败：%s" % err)
+    if nodes <= 3:
+        lines.append("判断：自绘界面，UIA 读不到内容。用 computer_shot 看画面，"
+                     "再用 computer_act 带 x / y 点坐标（输入支持中文粘贴）。")
+    return "\n".join(lines)
+
+
+def _win_sig(window, ctrl=None):
+    """点击前后的廉价指纹：窗口大小 / 顶层子节点数 / 前台句柄 / 目标控件名。
+
+    自绘界面（微信等）会暴露 Invoke 但不响应：调用返回成功、界面毫无变化。
+    有指纹才能判断这次 Pattern 点击到底有没有生效。
+    """
+    try:
+        r = window.BoundingRectangle
+        child = ""
+        if ctrl is not None:
+            try:
+                child = (str(ctrl.Name or ""), bool(ctrl.IsEnabled))
+            except Exception:              # noqa: BLE001  控件可能已随窗口销毁
+                return None
+        return (int(r.width()), int(r.height()), len(window.GetChildren()),
+                winapi.foreground_hwnd(), child)
+    except Exception:                      # noqa: BLE001
+        return None
+
+
 def _do_click(window, ctrl, meta):
+    sig0 = _win_sig(window, ctrl)
     for pat in ("Invoke", "Toggle", "SelectionItem", "ExpandCollapse"):
         try:
             if pat == "Invoke":
                 p = ctrl.GetInvokePattern()
                 if p:
                     p.Invoke()
+                    time.sleep(0.35)
+                    unchanged = sig0 is not None and _win_sig(window, ctrl) == sig0
+                    name = str(meta.get("name") or "").lower()
+                    risky = any(w in name for w in HIGH_RISK_WORDS)
+                    if unchanged and not risky:
+                        # Invoke 假成功：补一次真实鼠标点击（高危按钮不重试，避免重复提交）
+                        if winapi.force_foreground(window.NativeWindowHandle):
+                            winapi.send_click(meta.get("sx", meta["x"]),
+                                              meta.get("sy", meta["y"]))
+                        return ("已点击「%s」（Invoke 无响应，已改用真实鼠标点击）"
+                                % meta.get("name"))
                     return "已点击「%s」（Invoke）" % meta.get("name")
             elif pat == "Toggle":
                 p = ctrl.GetTogglePattern()
@@ -373,9 +618,25 @@ def _do_click(window, ctrl, meta):
                     return "已折叠「%s」" % meta.get("name")
         except Exception:
             continue
-    winapi.set_foreground(window.NativeWindowHandle)
-    winapi.send_click(meta["x"], meta["y"])
+    winapi.force_foreground(window.NativeWindowHandle)
+    winapi.send_click(meta.get("sx", meta["x"]), meta.get("sy", meta["y"]))
     return "已点击「%s」（坐标回退）" % meta.get("name")
+
+
+def _caret_to_end(ctrl, hwnd):
+    """把输入光标移到末尾。
+
+    ValuePattern.SetValue 只改文本、不动光标：设值后光标可能停在开头，
+    紧接着的 press（Enter/Tab）就会插到文本最前面（实测记事本出现 "\\rBBBAAA"）。
+    这里在 SetValue 之后统一把光标送到末尾，保持“接着写”的语义。
+    """
+    try:
+        winapi.set_foreground(hwnd)
+        ctrl.SetFocus()
+        _uia().SendKeys("{Ctrl}{End}", interval=0.01)
+        return True
+    except Exception:
+        return False
 
 
 def _do_type(ctrl, meta, text, clear, hwnd):
@@ -384,6 +645,7 @@ def _do_type(ctrl, meta, text, clear, hwnd):
         if vp:
             old = "" if clear else (vp.Value or "")
             vp.SetValue(old + text)
+            _caret_to_end(ctrl, hwnd)
             return "已输入 %d 个字符（SetValue）" % len(text)
     except Exception:
         pass
@@ -407,11 +669,33 @@ KEYMAP = {
     "Home": "{Home}", "End": "{End}",
 }
 
+# 模型经常写小写 / 别名（enter、return、esc、down…）：统一归一，别让大小写毁掉一次点击。
+_KEY_ALIASES = {
+    "return": "Enter", "enter": "Enter", "tab": "Tab",
+    "escape": "Escape", "esc": "Escape", "backspace": "Backspace",
+    "delete": "Delete", "del": "Delete", "space": "Space", "spacebar": "Space",
+    "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight",
+    "arrow_up": "ArrowUp", "arrow_down": "ArrowDown",
+    "arrow_left": "ArrowLeft", "arrow_right": "ArrowRight",
+    "home": "Home", "end": "End",
+}
+
+
+def _norm_key(key):
+    k = str(key or "").strip()
+    if not k:
+        return "Enter"
+    if k in KEYMAP:
+        return k
+    return _KEY_ALIASES.get(k.lower(), k)
+
 
 def _do_press(ctrl, key, hwnd=None):
+    key = _norm_key(key)
     name = KEYMAP.get(key)
     if not name:
-        return "❌ 不支持的按键：%s" % key
+        return "❌ 不支持的按键：%s（可用：%s）" % (
+            key, "、".join(dict.fromkeys(KEYMAP)))
     if hwnd:
         winapi.set_foreground(hwnd)
     try:
@@ -426,12 +710,63 @@ def _do_press(ctrl, key, hwnd=None):
 # 截图
 # ============================================================
 
+def _annotate_shot(path):
+    """在截图上叠加坐标网格（100px/格，每 200px 标数字），返回 (w, h)。
+
+    模型看的是像素，光给窗口截图很难猜准坐标；网格 + 标尺能让它直接读出 x/y。
+    没有 Pillow 时静默跳过，不影响截图本身。
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return None
+    try:
+        im = Image.open(path).convert("RGB")
+        w, h = im.size
+        draw = ImageDraw.Draw(im, "RGBA")
+        for x in range(100, w, 100):
+            strong = (x % 200 == 0)
+            draw.line([(x, 0), (x, h)], fill=(255, 90, 90, 64 if strong else 22), width=1)
+        for y in range(100, h, 100):
+            strong = (y % 200 == 0)
+            draw.line([(0, y), (w, y)], fill=(90, 160, 255, 64 if strong else 22), width=1)
+        try:
+            font = ImageFont.load_default(size=14)
+        except Exception:
+            font = ImageFont.load_default()
+
+        def tag(xy, text):
+            try:
+                box = draw.textbbox(xy, text, font=font)
+                draw.rectangle([box[0] - 3, box[1] - 2, box[2] + 3, box[3] + 2],
+                               fill=(0, 0, 0, 150))
+                draw.text(xy, text, fill=(255, 255, 255, 235), font=font)
+            except Exception:
+                pass
+
+        for x in range(200, w, 200):
+            tag((x + 3, 3), str(x))
+        for y in range(200, h, 200):
+            tag((3, y + 3), str(y))
+        tag((6, max(0, h - 24)), "坐标：左上(0,0)  x→  y↓  网格 100px")
+        im.save(path)
+        return (w, h)
+    except Exception:
+        return None
+
+
 def shot(key, sandbox=None):
     if not enabled():
         return "⚠️ 桌面操作未开启。"
     ctrl, err = _window(key)
     if err:
         return "❌ " + err
+    info = _WINDOWS.get(str(key)) or {}
+    hwnd = int(info.get("hwnd") or 0)
+    if hwnd:
+        winapi.force_foreground(hwnd)
+        time.sleep(0.12)
+    front = winapi.foreground_hwnd()
     path = tempfile.mktemp(suffix=".png", prefix="cu_shot_")
     err = ""
     try:
@@ -441,9 +776,29 @@ def shot(key, sandbox=None):
         err = e
     if not ok or not os.path.isfile(path):
         return "❌ 截图失败：这个窗口可能不允许截图（%s）" % err
+    # 先用原图做视觉描述（网格会干扰识别），再叠加网格用于展示与坐标动作
     try:
         with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        b64 = ""
+    size = _annotate_shot(path)
+    if hwnd:
+        ox, oy = winapi.client_origin(hwnd) or (0, 0)
+        cs = winapi.client_size(hwnd)
+        wr = winapi.window_rect(hwnd)
+        # 截图尺寸更接近整个窗口（含边框 / 标题栏）时，原点用窗口左上角
+        if size and cs and wr:
+            if (abs(size[0] - cs[0]) > 12 or abs(size[1] - cs[1]) > 12):
+                if (abs(size[0] - (wr[2] - wr[0])) <= 12
+                        and abs(size[1] - (wr[3] - wr[1])) <= 12):
+                    ox, oy = wr[0], wr[1]
+        _SHOT_ORIGIN[hwnd] = (ox, oy, wr)
+    try:
+        with open(path, "rb") as f:
+            shown_b64 = base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        shown_b64 = b64
     finally:
         try:
             os.remove(path)
@@ -451,7 +806,7 @@ def shot(key, sandbox=None):
             pass
     try:
         from app.computer.shots import save_png
-        rel = save_png(b64, sandbox, "win")
+        rel = save_png(shown_b64, sandbox, "win")
     except Exception:
         rel = ""
     try:
@@ -460,7 +815,11 @@ def shot(key, sandbox=None):
     except Exception as e:
         desc = "⚠️ 视觉描述不可用：%s" % e
     pic = ("\n![实机截图](%s)" % rel) if rel else ""
-    return "【窗口截图 %d KB】%s\n%s" % (len(b64) // 1024, pic, desc)
+    warn = ""
+    if hwnd and front != hwnd:
+        warn = "\n（注意：窗口可能不在前台，截图未必是目标窗口；已尝试置前）"
+    grid = " · 网格 100px" if size else ""
+    return "【窗口截图 %d KB%s】%s\n%s%s" % (len(shown_b64) // 1024, grid, pic, desc, warn)
 
 
 def read_value(key, ref):

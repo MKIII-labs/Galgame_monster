@@ -1,5 +1,1533 @@
 # NOTES
 
+## [2026-11-26] 发布前自检：README 全量更新 + 提交检查
+
+- 问题/决策：
+  - 推送前 README 与代码脱节：版本徽章仍是 3.5、设置页写成「6 个一级页面」、代码高亮仍写依赖 CDN，
+    且缺少部署 / 文档生成 / 会话交接 / 存储维护等新能力。
+- 解决方案：
+  - 徽章升到 3.5.2（对齐 `app/store.py::APP_VERSION`）；新增「近期更新（3.5 → 3.5.2）」，
+    原 v3.5 说明改为「主要变化」。
+  - 能力表补「文档与部署」；4.2 工具分组补 doc_create / archify / deploy；4.1 补「会话交接」与头像三档；
+    4.11 设置结构改为「4 组 13 页」；技术栈把 highlight.js 改为本地内置并补子集字体行。
+  - 术语同步：设置入口统一为「模型接入 / 子代理与流程 / 手机访问」；IDE 布局补默认宽度 245 / 518。
+  - 已知限制与 FAQ 补：部署仅本机 / 局域网、doc_create 只出基础版式、archify 需要 Node。
+- 相关代码/指令：
+  - 自检：`pytest tests --ignore=tests/test_archify.py -q`（全绿）、`ruff check app tests scripts`、
+    `compileall -q app scripts main.py server.py`、改动 JS 全部 `node --check`。
+  - 仓库审计：`data/` 未被跟踪；无 >2MB 新增大文件；untracked 文件无密钥模式；
+    `git diff --check` 清理了 5 处 EOF 多余空行（storage.py / trajectory.py / 两个 tests / notes.css）。
+  - 注意：`scripts/ui/verify_reader_tip.mjs` 是临时验证脚本（文件头已注明），提交时应排除或删除。
+
+## [2026-11-26] AI 头像：注意力闸门 + 扫视，三档动效
+
+- 问题/决策：
+  - 旧实现有三个「刻意感」来源：① `pointermove` 逐帧把眼睛贴到光标（没有注意力层，鼠标横穿也会一路目送）；
+    ② idle 每 0.6–2.2s 均匀随机一次满幅张望 + 30% 概率 170ms 后机械「修正」；
+    ③ 视点上限 4.4px 已经贴到眼白边缘，读起来像「用力盯」。
+  - 参考：Convai 的 Gaze & Attention 是「先选注视目标，再驱动眼 / 扫视 / 眨眼」两层；
+    眼动研究里人眼是「扫视（几十毫秒跳一次）+ 注视（保持）」，不是平滑跟随；
+    Rive 头像范例是 idle 随机 + 关键帧眨眼，按状态切换。
+- 解决方案：
+  - `web/chat.js` 重写头像眼动：
+    - 注意力闸门：光标在消息上停住约 320ms（活泼 140ms）才注视；直接指着头像则 120ms；快速划过不理会。
+    - 扫视：目标变化 >0.55px 且间隔 ≥150ms 才跳一次，过渡 200–260ms，不再逐帧插值。
+    - idle 偏态分布：约 70% 小幅 / 25% 中幅 / 5% 一次稍大侧瞥，垂直压扁，停留 1.6–4.2s（活泼 0.7–2.4s），过渡 380–700ms。
+    - 缓动从 `cubic-bezier(.2,.8,.2,1)`（起步即冲出去，像瞬间跳）改为 `cubic-bezier(.42,.04,.2,1)`（有起步和收尾）。
+    - 生成中：最后一条 AI 消息视点缓慢右下滑（900–1400ms，像在看自己写出的字），写完 340ms 回中并眨一次。
+    - 光标久停不动（≈3.6s）主动移开视线，交回随机张望；视点上限收到 3.4px。
+  - 三档开关 `avatar_motion`：lively / calm（默认）/ off；后端 `app/config.py` 加默认值，
+    设置页「外观与对话」新增下拉，`dirty/modal/preview/core` 同步；保存后调用 `avaMotionSync()` 立即生效。
+  - `web/css/base.css`：极轻呼吸 `ava-breathe`（5s / 活泼 3.4s），off 与 `prefers-reduced-motion` 下停用。
+  - 系统「减少动态效果」在 `avaMode()` 里直接等同 off。
+- 相关代码/指令：
+  - 新增全局 `gmAvatarMotionSync()`；`init()` 取到 config 后调用一次，`<html data-avatar-motion>` 首帧即正确。
+  - 「转得太快」的定位：用项目自带 CDP 客户端 + 真实时间采样 `getComputedStyle(::before).translate`，
+    确认过渡一直在生效（300ms 内 0.5 → 1.25 → 3px），快感来自时长过短与 ease-out 起步；调时长 / 曲线即可，不需要改动画机制。
+  - 验证：`node --check` 通过；`pytest test_settings_defaults/test_settings_center/test_api_handlers_smoke` 通过；`ruff` 通过；
+    Edge headless dump-dom 确认 `data-avatar-motion="calm"`、设置项三档渲染、无 JS 报错。
+    headless 下 `document.hidden` 为真，眼睛保持居中属预期，眼动体感需真窗口确认。
+
+## [2026-11-26] IDE 两侧宽度默认值改为 245 / 518
+
+- 问题/决策：
+  - 用户把文件管理区拖到 245px、主对话栏拖到 518px 后要求「把这个位置设为默认」，
+    即新默认值，而不是恢复旧默认（260 / 460）。第一次理解反了，已改正。
+- 解决方案：
+  - 三层一起改，避免「拖动后记住的值」与「双击复位 / 新装用户」不一致：
+    - `data/config.json`：`ide_side_width: 245`、`ide_chat_width: 518`
+      （通过 `POST /api/config` partial patch 写入，history_id `1795685208663-6374ea`）。
+    - `web/init.js`：左侧引入 `DEFAULT_SIDE_W = 245`（注释 / persist 兜底 / 双击复位共用），
+      右侧 `DEFAULT_W = 518`。
+    - CSS fallback：`web/css/ide.css` 的 `--ide-side-w`、`web/css/base.css` 的 `--ide-chat-w`。
+  - 右侧 localStorage `gm.ideChatW` 只在加载时被 config 值覆盖，重载一次后即为 518。
+  - 窄屏媒体查询（≤1200px 强制 320 / 更小 280）属响应式约束，不动。
+- 相关代码/指令：
+  - 复位入口：双击两侧拖拽条 → `apply(DEFAULT_*) + persist()`。
+  - 验证：`node --check web/init.js` 通过；`data/config.json` 读回 245 / 518。
+
+## [2026-11-24] CUA 截图坐标网格：让模型直接读坐标
+
+- 问题/决策：
+  - 自绘界面（微信等）只能靠截图点坐标，但纯截图没有标尺，模型只能猜 x/y，
+    试错一次就是一轮大 prompt。
+  - 另外原先 `x / y` 实际是**屏幕坐标**，而截图是窗口客户区，坐标语义不一致。
+- 解决方案：
+  - `desktop._annotate_shot()`：截图叠加 100px 网格（200px 加粗并标数字），
+    左下角标注「坐标：左上(0,0) x→ y↓ 网格 100px」；无 Pillow 时静默跳过。
+  - 坐标统一为**截图坐标**（窗口客户区左上角 0,0）：`snapshot` 打印的 `(x,y)`
+    改为截图坐标，内部另存 `sx/sy` 屏幕坐标供点击；`computer_act x/y` 通过
+    `_to_screen()` 加原点后再点击 / 命中校验。
+  - 截图时记录原点与窗口矩形（`_SHOT_ORIGIN`）；窗口移动后自动作废旧原点。
+  - 视觉描述仍用**未叠加网格的原图**，避免网格干扰识图；展示与落盘用带网格版本。
+  - `_wait_foreground()`：点击后轮询前台最多 0.6s（再强制置前 0.4s），
+    避免「刚点完就判失败」；拿不到前台就取消输入，防止输入落到别的窗口。
+  - `force_foreground` 改为附加「目标线程 + 当前前台线程」并 `SwitchToThisWindow`，
+    后台进程抢前台成功率更高。
+- 相关代码/指令：
+  - 真机验证（记事本）：`see` 打印截图坐标 (951,584)；`computer_shot` 返回
+    「窗口截图 82 KB · 网格 100px」；`act {action:'type', x:951, y:584, value:'网格坐标测试'}`
+    → 「已在截图坐标 (951,584) 粘贴 6 个字符」，读回 `网格坐标测试`。
+  - 单测新增：`_to_screen` 原点换算、网格绘制像素校验；全量 pytest、ruff、
+    `GM_LIVE_DESKTOP=1` 均通过。
+  - 后端改动需重启应用；技能文档已更新「坐标读网格」用法（预设 + data 副本同步）。
+
+## [2026-11-24] 收尾重排保留折叠展开状态与视口位置
+
+- 问题/决策：
+  - 流式期间用户手动展开的旧过程折叠，在 `done` 按 blocks 重排时会被重新建成收起状态
+    （旧逻辑只保留「最后一组」的展开态），看起来像「看完又被收起来」。
+  - 重排替换整段 DOM，非贴底阅读时页面还可能跳走。
+- 解决方案：
+  - `web/stream/stream-core.js`：重排前收集存活折叠的开合状态 `openMap`，
+    传入 `buildBlocksView`；没有 `doneBlocks` 的旧路径不受影响。
+  - `web/chat.js::buildBlocksView`：新增 `options.openMap`，只有数量与重建后的过程组
+    完全一致时才按索引沿用，否则回退「只开最后一组」，避免错位。
+  - 重排前记录视口里第一条过程折叠的屏幕位置，重建后按差值补偿 `scrollTop`
+    （贴底跟随时不补偿，仍走原来的 `scrollToBottom`）。
+- 相关代码/指令：
+  - 验证（无头 Edge，真实页面）：`openMap:[true,false]` → 折叠状态 `[false,true]`；
+    长度不匹配 `[true]` 时回退 `[true,false]`（只开最后一组）。
+  - `node --check web/chat.js web/stream/stream-core.js` 通过；纯前端，`Ctrl+R` 生效。
+
+## [2026-11-24] 流式过程折叠：点旧折叠却动到最后一条
+
+- 问题/决策：
+  - 现象：流式跑到第 15 步时，点开第 4 条「过程 · 已完成」，展开/收起的是最后一条，
+    内容看起来永远是最后一步。
+  - 根因 1：`stream-core.js::ensureFlow` 里 `toggle` 闭包用的是**外层共享变量 `flowWrap`**，
+    每次新建折叠都会把 `flowWrap` 改指向最新一条；而 `body` 是本次调用的局部变量。
+    于是点旧折叠时 `foldIsOpen/foldTransition` 作用在最新壳上，动画却作用在旧 body 上。
+  - 根因 2：`toolGroup(row)` 只要 `row._toolGroup` 存在就直接复用，跨过程折叠时会把
+    新步骤继续追加到旧折叠的组里。
+  - 参考 Trae 的做法：每个过程段是**独立可折叠行**，DOM 与状态都绑定自己那一段；
+    已完成的段是冻结快照，只有正在跑的那段原地更新，点任意一段只影响它自己。
+- 解决方案：
+  - `ensureFlow` 里新增 `const selfWrap = flowWrap`，`toggle` 与「查看失败」都用
+    `selfWrap`，保证闭包永远指向自己这条折叠。
+  - `toolGroup(row)` 复用前检查 `row._toolGroup.el.parentNode === row._flow`，
+    不属于当前折叠就另起一组。
+- 相关代码/指令：
+  - 验证：`node --check web/chat.js web/stream/stream-core.js` 通过；页面 `Ctrl+R` 后
+    下次流式输出即可验证（运行中应用未重启也能生效，纯前端）。
+  - 历史回显走 `buildProcessFold`，`wrap/body` 本来就是局部变量，不受影响。
+
+## [2026-11-24] 对齐 Trae：桌面坐标动作 / 视觉兜底 / 窗口信息
+
+- 问题/决策：
+  - Trae 一类 CUA 是「结构优先 + 视觉兜底」：DOM / a11y 读不到就立刻走截图 + 坐标，
+    不让模型现场研究控件树。我们之前缺坐标动作，自绘窗口（微信 4.x）只能失败。
+  - 目标：对齐这个思路，并在本地化、安全闸门、中文输入上做得更细。
+- 解决方案：
+  - `computer_act` 支持 `x / y`：click / type / press / hover / scroll 都可以不走 ref；
+    `computer_see` 空树与 `render` 提示都直接给「用 shot 看画面 + x/y 点坐标」。
+  - `winapi.py`：新增 `raise_window()`（TOPMOST 提升，不要求前台权限）、`window_at()`
+    （WindowFromPoint 命中校验）、`root_window()`、`force_foreground()`（AttachThreadInput）、
+    `class_name()`、`set_clipboard_text()`（ctypes 声明返回类型，64 位句柄不再被截断）。
+  - 坐标动作流程：置顶 → 命中校验（坐标必须落在目标窗口）→ 点击 → 校验前台 → 输入；
+    输入走「剪贴板 + Ctrl+V」，中文不再依赖 SendKeys。
+  - `computer_read(kind="window")`：返回标题 / 进程 / pid / 句柄 / 类名 / UIA 节点数，
+    节点 ≤3 时直接判定自绘界面并给下一步，替代模型现场写 PowerShell / UIA 脚本。
+  - 截图前强制置顶，前台不一致时在结果里标注「截图可能不是目标窗口」。
+  - `computer-use` 技能补充「自绘界面」章节与错误清单：一次 see 没控件就走截图 + 坐标，
+    禁止反复 see、禁止用 run_command 探测 UIA 树。预设与 `data/skills` 副本已同步。
+- 相关代码/指令：
+  - 真机验证（记事本）：`computer_act {action:"type", x:1338, y:886, value:"微信测试 abc"}`
+    → 返回「已在 (1338,886) 粘贴 8 个字符」，读回 `微信测试 abc`。
+  - 单测新增：坐标点击无 ref、缺 ref 与坐标时的提示、空快照提示、窗口信息自绘判定；
+    `pytest tests --ignore=tests/test_archify.py -q` 全过，`GM_LIVE_DESKTOP=1` 通过，ruff 通过。
+  - 后端改动需重启应用生效；技能副本已写入 `data/skills/computer-use/SKILL.md`。
+
+## [2026-11-24] 流式期间过程折叠之间的大空行 / 中间步骤打不开
+
+- 问题/决策：
+  - 现象：流式输出时，多个「过程 · 已完成」折叠之间出现大片空白；且中间的步骤
+    看起来打不开，只能看到当前正在跑的那一步。结算后（按 blocks 重排）空白消失。
+  - 根因 1：`stream-core.js` 每个 `step` 事件都会 `acc += '\n\n'; pushText('\n\n')`；
+    若上一段正文已收口（`answerClosed`），`pushText` 会新建一个**只含空行的 `.content`**，
+    紧接着又开下一个过程折叠 → 折叠之间多出空白块。结束重排时空白文本块被跳过，所以只在流式可见。
+  - 根因 2：展开外层过程折叠时，里面已自动收起的 `.tool-group` 仍是折叠状态，
+    打开的只是外层，看起来仍「什么都看不到」。
+- 解决方案：
+  - `web/stream/stream-core.js::pushText`：`answerClosed` 且本次文本全是空白时直接返回，
+    等真正有字再开新的正文段（`acc` 仍保留段落分隔，最终 markdown 不受影响）。
+  - 新增 `web/chat.js::expandFoldSteps(body)`：展开过程折叠时把内层
+    `.tool-group.collapsed` 一并打开（清掉 maxHeight、更新 aria）；
+    `buildProcessFold` 与流式 `newFlow` 的 toggle 在展开时都调用它。
+- 相关代码/指令：
+  - 验证：`node --check web/chat.js web/stream/stream-core.js` 通过；
+    无头 Edge 打开历史消息：26 个折叠、空白正文段 0 个，点最后一条折叠后
+    `collapsed=false`、body 正常展开。
+  - 页面 JS 改动需 `Ctrl+R` 生效；下一次流式输出即可看到空行消失。
+
+## [2026-11-24] 验收卡矛盾：头部「未通过」、下一步却写「验收通过」
+
+- 问题/决策：
+  - 现场（trajectory `s_2eed2dd969cf` turn 490）：验收卡头部「验收未通过 · 1/1 项通过」，
+    差距「2 个工具调用失败后没有修复」，下一步却写「本轮验收通过，无需返工」。
+  - 根因：头部由系统判定 `passed` 决定（`facts.unresolved` 有 2 条未修复的工具失败 → 硬伤 → false）；
+    `next_action` 是验收模型（deepseek-flash）的自由文本，它只看 criteria（全过）就写了「验收通过」。
+    代码没有做两者一致性校验，于是同一张卡自相矛盾。
+- 解决方案：
+  - `app/quality_gate.py`：新增 `_claims_pass()`；`merge_report()` 在 `passed=False` 且
+    `next_action` 出现「验收通过 / 无需返工 / 已通过」时，改成系统口径：
+    「先修复：<差距>（修完后重新验收）」；`passed=True` 时仍清空 next_action。
+- 相关代码/指令：
+  - 用真实报告复算：`merge_report(rep, rep["facts"])` → `passed=False`，
+    `review_text` 不再出现「验收通过」。
+  - 新增测试 `tests/test_quality_gate.py::test_fail_overrides_pass_wording_in_next_action`；
+    `pytest tests --ignore=tests/test_archify.py -q` 全过，`ruff` 通过。
+
+## [2026-11-24] 操作电脑：微信「进入微信」点不动 + press enter 不支持
+
+- 问题/决策：
+  - 现场（同一会话 turn 490）：微信 4.x 登录窗能读到按钮，但 `computer_act` 点「进入微信」
+    两次都没反应；模型改用 `press enter` 得到「不支持的按键：enter」；随后 `computer_see`
+    报「窗口可能已关闭：(-2147220991, '事件无法调用任何订户')」。
+  - 根因 1：微信登录窗是自绘控件，UIA 暴露了 Invoke，但 `Invoke()` 返回成功、界面毫无变化；
+    `_do_click` 只要调用没抛异常就返回「已点击（Invoke）」，从不回退真实鼠标点击。
+  - 根因 2：`KEYMAP` 大小写敏感，模型传小写 `enter` 被判为不支持。
+  - 根因 3：UIA 在窗口切换时抛瞬态 COM 错误，`_window()` 一次失败就判「窗口可能已关闭」。
+  - 产品限制（非 bug）：微信主界面 UIA 树为空，`computer_see` 返回「没有可操作控件」，
+    聊天列表 / 消息发送仍无法程序化完成。
+- 解决方案：
+  - `app/computer/desktop.py`：Invoke 后等 350ms 比对窗口指纹（尺寸 / 顶层子节点数 / 前台句柄 /
+    控件名）；无变化且不是高危按钮时补一次真实鼠标点击，高危按钮不重试（避免重复提交）。
+  - 按键归一化 `_norm_key()`：大小写不敏感，支持 return / esc / down / spacebar 等别名；
+    不支持的键会列出可用键名。
+  - `_window()` 对 `ControlFromHandle` 短重试 3 次（0.15s 间隔），失败时清掉失效编号并提示重新枚举。
+  - `app/computer/winapi.py`：新增 `foreground_hwnd()`（指纹用）。
+- 相关代码/指令：
+  - 新增测试：`test_norm_key_is_case_insensitive`、`test_window_retries_transient_com_error`、
+    `test_click_falls_back_when_invoke_does_nothing`、`test_click_does_not_retry_high_risk_button`。
+  - 真机验证：记事本 `press value="enter"` → 返回「已按键 Enter」，读回 `AAA\r`；
+    `GM_LIVE_DESKTOP=1` 真机测试通过；全量 pytest / ruff 通过。
+  - 仍未解决：微信主界面没有 UIA 结构，需要另找方案（OCR / 读本地数据库 / 用户手动）。
+
+## [2026-11-24] 修复编辑器代码偶发「纯白」：Monaco AMD loader 被 UMD 库污染
+
+- 问题/决策：
+  - 现象：IDE 编辑器有时候整片代码没有语法着色（纯白 / 近白），刷新后时好时坏。
+  - 证据（127.0.0.1:52665 实测）：`window.echarts` / `window.vis` 是 undefined，但
+    `window.__libs` 为 true；控制台有 `Duplicate definition of module 'vs/editor/editor.main'`。
+  - 根因：Monaco 在 window.load 注入 AMD loader（安装全局 `define.amd`）；head 的
+    `loadLazyLib` 与 `feature-loader` 在 load / idle 后加载 UMD 库（echarts / vis / hljs / xterm / katex）。
+    UMD 看到 `define.amd` 就走 AMD 分支 → 注册成匿名模块：全局变量挂不上，
+    正在加载的 Monaco 模块（editor.main / 语言分词器）也会被匿名 define 顶掉或重复定义 → 着色失败。
+- 解决方案：
+  - `web/index.html`：新增 `window.__gmEvalUmd(url)` —— fetch 后用
+    `new Function('define','module','exports','require', code)` 执行，把 `define` 遮成 undefined，
+    UMD 必然走「挂到 window」分支，与加载先后顺序无关；`loadLazyLib` 的 echarts / vis 走它，
+    `__fb`（katex CDN 兜底）也走它。
+  - hljs / mermaid 是「顶层 var」的普通脚本（没有 UMD 包装），不能用 Function 执行
+    （var 会被困在函数作用域），继续用 script 标签；它们不检测 define，不会污染 AMD。
+  - katex 从 `async` 改为 `defer`：保证它在 window.load（Monaco loader 注入）之前执行。
+  - `web/feature-loader.js`：`loadOne` 仍保留 `__gmAmdGuard`（加载期间隐藏 `define.amd`），
+    给 xterm 等 UMD 组兜底（正常路径下 xterm 已经在 Monaco 之前加载完）。
+- 相关代码/指令：
+  - 验证（无头 Edge + 仓库自带 CDP 客户端，页面脚本改动可直接测）：
+    Solo / IDE 启动两种情况下 `window.echarts` / `vis` / `hljs` 最终均为 object，
+    `window.monaco` 正常，控制台没有 `Duplicate definition of module 'vs/editor/editor.main'`；
+    IDE 打开 `_verify_pages.py`（242 个 token span）得到 6 类以上 `mtk*` 颜色。
+  - 对照组（临时 URL 参数禁用 guard）：echarts / vis 变回 undefined，editor.main 重复定义复现。
+  - `Duplicate definition of module 'vs/basic-languages/python/python'` 在开 / 关 guard 下都存在，
+    且 python.js 只请求 1 次，属 Monaco 自带噪声，不影响着色。
+  - `node --check web/feature-loader.js` 通过；页面 JS 改动需 `Ctrl+R` 生效。
+
+## [2026-11-24] 过程步骤里的截图改为打开全屏图片查看器
+
+- 问题/决策：
+  - 工具卡（过程步骤）里的截图原来点击是原地切换 `.is-zoomed`（去掉 max-height 局部放大），
+    长图会把整条消息撑高，且没有缩放 / 拖动能力。
+  - 改为复用聊天里已有的全屏图片查看器 `imgZoomOpen`（滚轮缩放 / 拖动平移 / Esc 关闭）。
+- 解决方案：
+  - `web/chat.js::applyToolResultImage`：`.tool-result-media` 的点击处理改为
+    `imgZoomOpen(img.currentSrc || img.src, img.alt || '实机截图')`；
+    图片 title 文案改为「点击查看大图」。
+  - `web/css/base.css`：删除 `.tool-result-media img.is-zoomed` 规则与
+    只为它服务的 `transition: max-height`；`cursor: zoom-in` 保留。
+- 相关代码/指令：
+  - 验证：`node --check web/chat.js` 通过；用户实测点击已打开全屏查看器。
+  - 图片仍限制 `max-height: 240px` 缩略展示，点击后才加载全屏查看。
+
+## [2026-11-23] 操作电脑（Computer Use）排查：缺依赖 + 桌面/浏览器回归修复
+
+- 问题/决策：
+  - 23:53:01 的异常记录：`computer_windows` 直接抛 `ModuleNotFoundError: No module named 'uiautomation'`；
+    当时配置是 `computer_desktop_enabled=false`、`computer_apps=[]`（设置里改完没点保存）。
+  - 根因 1：`requirements.txt` 已声明 `uiautomation`，但当前 `.venv` 没装（`comtypes` 也没有）。
+  - 根因 2：`desktop.list_windows()` 在 try 之外 `import uiautomation`，`dispatch` 的
+    `computer_windows` 分支也没有兜底 → 原始异常直接冒给模型，导致它去查系统 Python / Miniconda。
+  - 根因 3：桌面快照失败时仍走自动补图，同一句错误返回两遍。
+  - 根因 4（实测）：`type` 走 `ValuePattern.SetValue` 后光标不在末尾，紧接着的 Enter / Tab
+    插到文本开头（记事本实测 `\rBBBAAA`）。
+  - 根因 5（实测）：CDP 读线程沿用 20s socket 超时，模型思考 / 用户没动作的安静期会把连接判死；
+    `Page.captureScreenshot` 在窗口被遮挡时偶发 30s 超时。
+  - 根因 6（实测）：桌面快照只收可交互控件，计算器 / 终端这类只读结果文字看不到，
+    模型点完「=」无法确认结果，只能额外截图。
+- 解决方案：
+  - `.venv` 安装 `uiautomation 2.0.29` + `comtypes 1.5.0`（与 requirements.txt 一致）。
+  - `app/computer/desktop.py`：新增 `available()` 与可执行提示；`list_windows` / `_window`
+    先判依赖；`_caret_to_end()` 在 SetValue 后把光标送到末尾；快照新增 `texts`
+    （只读文字，上限 12，跳过按钮内文字与图标字体）。
+  - `app/computer/__init__.py`：`computer_windows` 包 try；快照失败（返回 ❌/⚠️）时不再补截图。
+  - `app/computer/cdp.py`：握手后改为阻塞读；`close()` 先 `shutdown` 唤醒读线程。
+  - `app/computer/browser.py`：新增 `capture_png()`，首次失败后 `bringToFront` +
+    `fromSurface=false` 重试一次；`computer.shot` 改用它。
+  - `web/settings/panes-agent.js`：白名单说明补一句「UWP 应用显示为 ApplicationFrameHost.exe」。
+- 相关代码/指令：
+  - 验证：`pytest tests --ignore=tests/test_archify.py -q` 全过；`ruff check app tests`、
+    `node --check web/settings/panes-agent.js` 通过。
+  - 真机联调（`GM_LIVE_BROWSER=1` / `GM_LIVE_DESKTOP=1`）通过；另跑场景：
+    记事本列窗口 / 快照 / 输入 / 回车 / 截图；计算器 7+8= 快照出现「显示为 15」；
+    浏览器 example.com 空闲 25s 后 see / shot / click 正常。
+  - 仍需用户操作：设置 → 能力与工具 → Computer Use 打开「允许操作桌面程序」并填写白名单
+    （或开「无限制」），点「保存」；后端改动需重启应用生效。
+  - 已知限制：UWP 窗口的 exe 统一是 `ApplicationFrameHost.exe`（白名单会过宽）；
+    桌面动作目前不校验执行结果（例如点了被忽略的按钮仍会报「已点击」）。
+
+## [2026-11-23] 设置页全局规则：收起态截断预览，随窗口宽度变长
+
+- 问题/决策：
+  - 原来每条规则默认渲染一个 textarea，长规则在小框里反复滚动，且设置页要
+    为所有规则承担完整文本布局。
+  - 改为「收起 = 只读截断预览、展开 = 编辑框」：窄窗只显示开头几行，宽窗自动多显示，
+    与参考稿的规则列表一致。
+- 解决方案：
+  - `web/settings/modal.js`：规则行增加 `.rule-preview`；新增
+    `syncProfileRuleOpen(row, open)` 统一切换预览 / 编辑框、按钮文案与 `aria-expanded`；
+    有内容的规则默认收起，空规则默认展开并聚焦。
+  - `web/settings/search.js`：展开按钮事件委托改为调用 `syncProfileRuleOpen`，
+    收起时会用 textarea 当前值刷新预览。
+  - `web/css/polish.css`：`.rule-preview` 用 `-webkit-line-clamp` 截断 ——
+    默认 2 行，`≥1100px` 4 行，`≥1500px` 6 行；保留 `white-space: pre-wrap`，
+    停用态（`.rule-item.off`）与编辑框同样变暗。
+- 相关代码/指令：
+  - 验证：`node --check web/settings/modal.js web/settings/search.js` 通过。
+  - 浏览器实测（127.0.0.1:52665，窗口 562px）：规则默认 `.rule-preview` 可见、
+    `.rule-text` 为 `display:none`；预览计算 `-webkit-line-clamp:2`、高度 41px，
+    两条规则 `scrollHeight` 分别 887 / 1464，确实被截断；
+    点「展开」后 textarea 240px 可见、预览隐藏，点「收起」恢复；控制台无报错。
+  - 保存逻辑不变：`collectProfileRules()` 仍从 textarea 读值，隐藏不影响保存。
+
+## [2026-11-23] F3.2：IDE 面板改为 `<template>` 惰性挂载
+
+- 问题/决策：
+  - IDE 面板是首屏静态 DOM 里最大的一块（约 340 个标签，含侧栏 / 编辑区 / 底部面板 /
+    浮层），但只有进入 IDE 模式才用；Solo 首屏也要为它做 CSS 匹配与布局计算。
+  - 工作台此前已经用 `<template>` + `ensurePanelMounted`，这里沿用同一套机制，
+    不引入新框架。
+- 解决方案：
+  - `web/index.html`：`#ide-panel` 内容整体移入 `<template id="tpl-ide-panel">`。
+  - `web/ide-core.js`：`applyUiModeNow('ide')` 第一步 `ensurePanelMounted('ide-panel')`，
+    之后 `ideInitOnce` / `loadIdeTree` / 宽度测量都能查到节点。
+  - `web/init.js`：IDE 面板内的控件绑定抽成 `bindIdePanelUI()`，监听
+    `gm:panel-mounted` 事件后执行一次；左侧侧栏拖拽（`setupIdeSideResizer`）一起迁入。
+    缩放按钮拆成 `bindZoomButtons()`（用 `onclick` 赋值，挂载后重复调用不会叠加监听）。
+  - `web/ide-bottom.js`：IIFE 改为 `ideBottomBind()`，挂载后再取节点，带来
+    `data-ibound` 幂等保护。
+  - `web/ide-core.js`：`debugBindControls()` 增加「已绑定」标记，并同样监听
+    `gm:panel-mounted`（原先只在 DOMContentLoaded 绑定一次）。
+- 相关代码/指令：
+  - 验证：`node --check web/init.js web/ide-core.js web/ide-bottom.js` 通过；
+    `pytest tests --ignore=tests/test_archify.py -q` 全过。
+  - 浏览器实测（127.0.0.1:52665）：Solo 首屏 `.ide-body` 为 0；点 IDE 后挂载 1 份，
+    文件树 / Monaco / 活动栏都可见；Solo ↔ IDE 往返不重复挂载；控制台 0 报错。
+    第二轮验证 `#ide-refresh` / `#ide-newfile` / `#ide-save` / `#debug-start` 的
+    `onclick` 均存在，`window.ideBottom` 正常，点终端页签后 `#ide-term` 可见。
+  - 已知既有现象（非本次引入）：问题数为 0 时点底部「问题」页签会把底部面板收起
+    （`ide-bottom.js` 的 select 先关终端、再点隐藏的问题页签）。
+
+## [2026-11-23] 热路径落盘：进度快照只写事件、落盘移出全局锁
+
+- 问题/决策：
+  - 生成过程中 `_save_progress` 每 15 秒落一次进度快照，原实现会整份重写会话物化缓存
+    （大会话 13MB），并且全程持有 `store._lock`：写盘和流式输出抢同一个线程与磁盘，
+    其它请求也要等锁。
+  - 事件流 `data/sessions/<id>/events.jsonl` 才是事实源，物化缓存可重建；
+    进度快照只用于崩溃恢复，没必要每次都刷新缓存。
+- 解决方案：
+  - `app/sessions.py::save_session(s, cache=True)`：新增 `cache=False`，只追加事件、
+    跳过 `_write_cache`。
+  - `app/api/chat.py::_persist_session(s, cache=True)`：锁内只做内存聚合
+    （`load_sessions(copy=False)` + `cache_sessions`），`save_session` 移到锁外；
+    新增 `_session_write_lock(sid)`（按 sid 的独立锁）保证同一会话的事件 diff
+    仍按顺序追加，不同会话互不阻塞。
+  - `_save_progress` 改用 `load_session(sid)`（单会话克隆）替代
+    `find_session(load_sessions(), sid)`（全量克隆），并传 `cache=False`。
+- 相关代码/指令：
+  - 验证：`pytest tests --ignore=tests/test_archify.py -q` 全过；`ruff check app tests` 通过。
+  - 新增测试：`tests/test_session_store.py::test_progress_save_skips_cache_and_rebuilds_from_events`
+    （缓存字节不变、重启后按事件流恢复最新进度）。
+  - 临时基准（9 个会话 / 13.9MB，大会话 12.9MB）：进度落盘最慢 40ms → 2ms。
+  - 兼容性：`_load_one` 已有「事件 ts 比缓存 saved_at 新就用事件流重建」的判断，
+    所以缓存落后不影响启动恢复；回合收尾仍会正常写缓存。
+
+## [2026-11-23] 编辑器 / 主聊天框独立缩放
+
+- 问题/决策：
+  - 以前 Electron 的 `Ctrl+= / Ctrl+- / Ctrl+滚轮` 统一缩放整个 `webContents`，
+    编辑器字号和右侧聊天文字只能一起变大变小。
+  - 现在拆成两个独立因子：编辑器用 Monaco 的 `fontSize`，聊天框用 CSS `zoom`
+    只缩 `#chat` 与 `.composer`，不改变聊天栏宽度。
+- 解决方案：
+  - `web/init.js`：新增 `chatZoomValue / editorZoomValue / applyChatZoom /
+    applyEditorZoom / setChatZoom / setEditorZoom`；`applyChatZoom()` 写
+    `--chat-zoom`；`applyEditorZoom()` 按 `state.ideMonacoDefaults.fontSize × zoom`
+    更新 Monaco 字号；两者都通过 `/api/config` 防抖保存
+    `chat_zoom` / `ide_editor_zoom`。
+  - 交互：Ctrl+滚轮按鼠标位置分别缩编辑器 / 对话；Ctrl+Alt+= / - / 0 编辑器；
+    Ctrl+Shift+= / - / 0 对话；点百分比恢复 100%。
+  - `web/index.html`：IDE 状态栏与输入区提示行各加「− 100% +」控件。
+  - `web/css/base.css`：`.chat-col #chat, .chat-col .composer { zoom: var(--chat-zoom,1); }`
+    与共用控件样式。
+  - `web/ide-core.js`：Monaco 创建完成后调用 `window.gmApplyEditorZoom()`。
+  - `desktop/main.js`：Ctrl+= / - / 0 只在没有 Alt / Shift 时缩放整页；
+    删除 `zoom-changed`，Ctrl+滚轮交给页面按区域处理。
+  - `app/config.py`：新增默认值 `ide_editor_zoom: 1.0`、`chat_zoom: 0.9`、
+    `ui_zoom_level: -0.5`（当前窗口的整体缩放约 91%）。
+  - `desktop/main.js`：`configUiZoom()` 读 `data/config.json` 的 `ui_zoom_level`
+    （缺失时回退 -0.5）；`did-finish-load` 时只在 `getZoomLevel()===0`（没有手动缩放记录）
+    的情况下应用，用户用 Ctrl+± 调过以后以 Electron 保存的 per-host zoom 为准。
+  - 已通过 `/api/config` 把 `ui_zoom_level: -0.5` 写入当前用户配置，三个缩放值都显式存在。
+- 相关代码/指令：
+  - 验证：`node --check web/init.js web/ide-core.js desktop/main.js` 通过；
+    `ruff check app tests` 通过。
+  - CDP 实测（1147px）：聊天 120% 时 `#chat` 高度 676→604、输入框 176→248，
+    编辑器宽度 718px 与字号 14px 不变；编辑器 130% 时字号 14→18，聊天保持 1.2；
+    重置后都回 100%，两个控件文字同步。
+  - 生效范围：页面 JS/CSS 按 `Ctrl+R` 生效；`desktop/main.js` 的快捷键改动
+    需要重启 Electron 窗口（或直接用页面里的按钮 / Ctrl+滚轮）。
+
+## [2026-11-23] IDE 左侧瘦身：紧凑资源管理器 + 窄屏自动收起
+
+- 问题/决策：
+  - 用户选择方案 B：左侧三层（应用导航 56 + IDE 活动栏 48 + 资源管理器约 240）
+    占掉太多宽度，右侧编辑器只剩约 478px（CSS 宽度 1147 时）。
+  - 目标：窄屏默认收起资源管理器，展开时也用更紧凑的宽度和行高。
+- 解决方案：
+  - `web/css/shell.css`：资源管理器上限 `≤1200 200px`、`≤900 180px`、`≤760 140px`。
+  - `web/css/ide.css`：`.ide-sides` 全局 `max-width: 280px`（宽屏也不再保留 300+）；
+    树行 22→20px、缩进 8→6、左右 padding 8→6、图标 16→15；工作区行同步 20px。
+  - `web/ide-core.js`：`ideAutoCollapseOnEnter()` 在进入 IDE 且窗口 <1200px 时自动收起
+    资源管理器；窗口跨越 1200px 阈值时自动恢复/收起；手动展开或收起会清掉自动标记，
+    不再反复覆盖；自动收起不写入配置，避免下次宽屏启动也被收起。
+- 相关代码/指令：
+  - 验证：`node --check web/ide-core.js` 通过。
+  - CDP 实测（1147px）：进入 IDE 自动收起，`#ide-sides` 0px、编辑区 718px、聊天栏 320px；
+    点活动栏资源管理器后展开到 200px、编辑区 518px；重新进入仍是收起；
+    窗口拉宽到 1300px 自动恢复，侧栏 280px、编辑区 540px；树行 20px、图标 15px。
+  - 实际 Electron 窗口需按 `Ctrl+R` 重新加载 JS/CSS；窗口 <1200px 时进入 IDE 会先看到
+    收起后的活动栏，点文件夹图标即可展开。
+
+## [2026-11-23] 删除 IDE「文献库」侧栏
+
+- 问题/决策：
+  - 用户要求删除文献库功能。按范围删除 **IDE 侧边栏入口 / 面板 / 列表接口**；
+    阅读器里的文献元数据（标题 / 作者 / 年份 / DOI）与 `/api/doc/get|save`
+    保留，因为批注引用与「文献摘录」导出仍依赖它。
+- 解决方案：
+  - `web/index.html`：删除活动栏 `data-act="docs"` 按钮与 `#ide-side-docs` 面板。
+  - `web/ide-core.js`：`IDE_SIDE_LABEL` / `ideSyncSideUI` 映射 / `ideSwitchSide`
+    的 docs 分支 / 命令面板「显示文献库」/ `ideDocsLoad` / `ideDocsRender` 全部移除。
+  - `web/init.js`：删除文献库刷新与搜索输入的事件绑定。
+  - `web/css/ide.css`：删除 `.ide-doc-*` 样式段。
+  - `app/api/anno.py`：删除 `/api/doc/list` 路由；`app/anno.py`：删除
+    `list_documents()`（仅该路由使用）。
+  - `readme.md`：侧边栏清单与功能表移除文献库条目。
+- 相关代码/指令：
+  - 验证：`node --check web/ide-core.js web/init.js` 通过；`ruff check app tests`
+    通过；`pytest tests/test_reader.py tests/test_api_handlers_smoke.py -q` 通过。
+  - 运行中的服务端已返回的 HTML 不再包含 `data-act="docs"` / `ide-side-docs`；
+    `grep` 无残留引用（NOTES 历史记录除外）。
+  - 后端路由删除需要重启应用才生效；前端已不再调用 `/api/doc/list`，不重启也不影响使用。
+  - 保留：`documents` 表、阅读器「文献信息」编辑弹窗、`/api/doc/get|save`，
+    以及 PDF 批注里的引用行。
+
+## [2026-11-23] IDE 窄屏聊天栏保持右侧侧栏（不再横向滚动成两页）
+
+- 问题/决策：
+  - 用户实际窗口在 1721px 物理宽度 + 高 DPI 缩放下，CSS 宽度约 860–900px。
+  - `web/css/shell.css` 的 `@media (max-width: 900px)` 原来把 `#main.ide-mode` 改成
+    `overflow-x: auto`，并让 IDE 与聊天栏各占 92vw：聊天栏被推到右侧，初始视口只看到
+    一条空白带，看起来像独立页面 / 悬浮弹层，而不是挤压编辑区的侧栏。
+  - 先按「旁注问答停靠」理解实现了一版，用户澄清指右侧主聊天栏后已全部撤回
+    （`askkit.js` / `askkit.css` / `#ide-ask-dock` / `ide-core.js` 的 undock 调用恢复原状）。
+  - 跟进：用户反馈「首页有效、代码文件无效」。实测是其桌面拖拽过的 IDE 侧栏宽
+    355px：860px 窗口下 activity 48 + 侧栏 355 + 聊天 275，编辑区只剩 134px；
+    欢迎页内容居中时不明显，代码页就表现为代码被裁成几个字符。
+- 解决方案：
+  - `web/css/shell.css` ≤900 规则改为：
+    - `#main.ide-mode { overflow-x: hidden; overflow-y: hidden; }`
+    - `#main.ide-mode #ide-panel { flex: 1 1 auto; min-width: 0; }`
+    - `#main.ide-mode .chat-col { flex: 0 0 clamp(240px, 32vw, 320px); ... min-width: 220px; }`
+  - 不再把 IDE / 聊天栏铺成 92vw 的横向滚动两页；聊天栏始终在右侧挤压编辑区。
+  - 窄屏同时给 IDE 侧栏加上限，避免桌面拖拽宽度吃掉编辑区：
+    `≤1200` 240px、`≤900` 200px、`≤760` 150px；`.ide-side` 改为 100% 填充容器。
+- 相关代码/指令：
+  - 验证：`node --check web/askkit.js web/ide-core.js` 通过；`git diff` 确认 askkit
+    两个文件已无改动。
+  - CDP 实测（无头 Edge）：宽度 1600 / 1280 / 1100 / 1000 / 900 / 800 / 700 时聊天栏
+    都在右侧且与 IDE 不重叠（-5 是 5px 分隔条）；≤900 时 `#main` overflowX=hidden；
+    聊天栏宽度 900→288、800→256、700→240。
+  - 860px 打开 `_verify_pages.py`：IDE 侧栏 355→200，编辑区 134→289px，Monaco 288px，
+    聊天栏 275px；欢迎页与代码页布局一致。
+  - **实际 Electron 窗口复测**：窗口 1721×1033，渲染进程 `--device-scale-factor=1.5`，
+    但当时缩放不在 100%，页面也没有重新加载，仍是旧 CSS。对窗口发送 `Ctrl+0`（重置缩放）
+    + `Ctrl+R`（`desktop/main.js` 绑定到 `reloadIgnoringCache`）后，实际窗口里右侧聊天栏
+    出现，打开代码文件与首页表现一致；`≤1200` 侧栏上限 240 同时生效。
+    调试时把用户的缩放重置成了 100%（用户可再用 Ctrl+± 调整）。
+  - 排查经验：Electron 壳的 `Ctrl+R` 才会忽略缓存重载；页面长期不刷新时，改 CSS/JS
+    不会自动生效。`F12` 可开 DevTools，`Ctrl+0` 重置缩放。
+  - 用户需刷新页面（Ctrl+R）加载新 CSS；静态资源是 `no-cache` + ETag，刷新即生效。
+
+## [2026-11-23] 深色画布对齐 VS Code Dark+
+
+- 问题/决策：
+  - 深色主背景原为 `#151517`，比 VS Code 的编辑区更黑；新会话首屏第三块氛围光斑是青色
+    （`rgba(20,184,166,.3)`），大面积模糊后会把画布下缘染绿，整体显得「不是那种黑」。
+  - 只调画布会导致侧栏（原 `#1b1b1c`）反而比画布暗、层级翻转，因此侧栏同步提到
+    VS Code 的 `#252526`。
+- 解决方案：
+  - `web/css/tokens.css` 深色：`--bg: #1e1e1e`、`--bg-side: #252526`；
+    图谱画布 `--kb-graph-bg / --kb-label-bg` 跟随 `#1e1e1e`；
+    代码块 `--code-bg: #1e1e1e`、`--code-head: #252526`，与 VS Code 编辑区/面板同底。
+  - `web/css/home.css`：深色下 `.nh-blob-3` 从青色改为强调色冷蓝 `rgba(86,134,254,.26)`，
+    保留氛围层但不引入绿色。
+  - `web/css/ui.css` 主题预览、`web/core.js` 的 `THEME_META.dark.title`、
+    `web/index.html` 的 `theme-color` 与主题卡文案同步为 `#1e1e1e`。
+- 相关代码/指令：
+  - 浏览器实测（127.0.0.1:52665，深色）：`html/body` 计算背景 `rgb(30,30,30)`，
+    侧栏 `rgb(37,37,38)`；首页三处光斑为蓝/紫，全页无 >400px² 的绿色元素；
+    设置页深浅切换持久化，控制台无本次改动引入的错误。
+  - 备注：IDE 工作区 ↔ Solo 切换时偶发
+    `Can only have one anonymous define call per script file ... monaco/vs/loader.js`；
+    2026-11-24 已定位为 UMD 懒加载库与 Monaco AMD loader 抢跑，并加 `__gmAmdGuard` 修复
+    （见「修复编辑器代码偶发纯白」条目）。
+
+## [2026-11-23] F5 P1：设置页「运行状态」健康面板
+
+- 问题/决策：
+  - `/api/health` 已有存储体积、孤儿目录、运行态缓存与分段耗时，但没有任何界面入口；
+    出现「索引 / 事件目录不一致」时只能查日志。
+  - 只做只读展示：`scripts/prune_session_events.py` 已有校验 + 隔离流程，不在界面新增
+    可直接删数据的按钮。
+- 解决方案：
+  - `web/index.html`：数据页新增「运行状态」分组（`#health-body` / `#health-refresh`）。
+  - `web/settings/data.js`：新增 `loadHealth()`，渲染会话数、事件流 / 最大单会话 / 物化缓存
+    体积、孤儿目录（>0 橙色提示）、墓碑、活跃流 / SSE / 事件缓存 / JSON 缓存，以及最近
+    200 轮的装配 / 首 token / 总耗时 p50/p90/p99。
+  - `web/settings/search.js`：打开数据页时自动刷新，按钮可手动刷新；同时修正
+    `updateSettingsPageHead` 里判断旧页名 `system` 的笔误（已统一为 `data`），
+    否则应用信息 / 移动状态 / 配置历史在打开数据页时根本不会刷新。
+  - `web/core.js`：`api(path, body, opts)` 支持 `opts.method`，GET 时不带 body；
+    `/api/health` 只注册了 GET，之前前端没有任何 GET 调用入口。
+  - 过时文案：会话压缩提示里的 `sessions.json` 改为「会话缓存目录」。
+- 相关代码/指令：
+  - 验证：`node --check web/settings/data.js web/settings/search.js web/core.js` 通过；
+    `pytest tests/test_health.py -q` 通过。
+  - 浏览器实测（127.0.0.1:52665）：「数据与用户 → 运行状态」PASS，显示会话数 9、
+    事件流 190.3 MB、最大单会话 55.8 MB、孤儿目录 84；刷新按钮更新时间变化；
+    控制台 0 报错、0 个 4xx/5xx。
+  - 备注：分段耗时是进程内 `_TIMING_RING`，重启后需跑若干轮才有数据，显示「暂无数据」
+    属预期。F4.2 DOM 窗口化暂缓：首屏只画最近 30 条，向上每次补 30 条，
+    `content-visibility` 已覆盖离屏行；等实测出现 >50ms 长任务再做。
+
+## [2026-11-23] 前端 F2.1 / F3.2：done 增量消费与工作台懒挂载
+
+- 问题/决策：
+  - 前端每轮 `done` 都吃整份 `sessions`；后端虽已发 `session_patch`，但前端若直接不吃
+    `sessions`，当前会话的 `messages` 会少掉本轮新增消息。
+  - 工作台面板整块静态 DOM 在首屏解析，但实际只有进入 work 模式才用到。
+- 解决方案：
+  - `app/api/chat.py`：`done` 新增 `message`（当前 assistant 消息，去掉 blocks/tools，
+    这两项 done 已有），供前端增量更新。
+  - `web/chat.js`：新增 `applySessionPatch(p, message)`，更新会话摘要行 + 当前消息；
+    同步更新 `msgCache`。
+  - `web/stream/stream-core.js`：有 `session_patch` 时优先增量更新，找不到会话才回退
+    `applySessionsPayload(obj.sessions)`。
+  - `web/index.html`：`#work-panel` 内容移入 `<template id="tpl-work-panel">`。
+  - `web/ide-core.js`：新增 `ensurePanelMounted(id)`，进入 work 模式时先 clone；
+    `web/work/core.js` 的 `workEnterMode` / `workOpenDialog` 也先确保挂载。
+- 相关代码/指令：
+  - 验证：`pytest tests --ignore=tests/test_archify.py -q` 全过；`ruff check app tests` 通过；
+    `node --check web/chat.js web/stream/stream-core.js web/ide-core.js web/work/core.js` 通过。
+  - 浏览器实测（127.0.0.1:52665）：未进工作台时 `.work-cols` 为 0；进入后出现 1 个，
+    切出再切回不重复挂载；四个子视图、刷新、263 条网络请求均无报错。
+  - 未做：IDE / 大厅面板仍留静态 DOM —— 它们的绑定分散在多个脚本的加载期，需要逐个面板
+    审计「加载时查询」还是「进入时查询」后再迁移。
+
+## [2026-11-23] 前端 F2.3 / F3.1：搜索取消与去掉 CSS @import
+
+- 问题/决策：
+  - 会话搜索每次按键都发请求，快速输入时旧请求可能后返回、覆盖新结果。
+  - `base.css` 用 `@import url("tokens.css")`，浏览器要多一次串行 RTT 才拿到设计令牌。
+- 解决方案：
+  - `web/core.js`：`api(path, body, opts)` 支持 `opts.signal`。
+  - `web/chat.js`：会话搜索加入 `AbortController`，新按键 / 关闭浮层时取消上一发；
+    用 `ssState.ctrl !== ctrl` 丢弃过期响应。
+  - `web/index.html`、`web/_stock_preview.html`：`tokens.css` 改为 `<link>` 前置；
+    `web/css/base.css` 删除 `@import`。
+- 相关代码/指令：
+  - 验证：`node --check web/core.js web/chat.js web/settings/panes-infra.js` 通过；
+    `ruff check app tests` 通过。
+  - 备注：F2.1（前端消费 `done.session_patch`）暂未切换——如果不再吃整份 `sessions`，
+    当前会话的 `messages` 会少掉本轮新增消息；需要后端在 `done` 里补一条当前消息增量后再切。
+
+## [2026-11-23] 检索条数设置移到「信息量上限」并澄清含义
+
+- 问题/决策：`search_count`（每个检索式取几条，默认 8）一直可在设置里改，但控件在
+  「检索行为」分组，和下面「信息量上限」里的「单次合并条数上限 12」分开，容易被误认为
+  只有 12 一个可配项。
+- 解决方案：`web/settings/panes-infra.js`：
+  - 把 `search-count` 输入移到「信息量上限」分组；
+  - 标签改为「每个检索式取多少条（1–20）」与「合并后给模型的条数上限（1–50）」；
+  - 增加一行说明：多个检索式各取 N 条 → 去重排序 → 最终最多保留合并上限条。
+- 相关代码/指令：
+  - 配置键仍是 `search_count` / `search_merged_max`；后端 [search.py] 按设置值请求，
+    不再强制至少 3 条（设置 1/2 也会如实下发）。
+  - 验证：`node --check web/settings/panes-infra.js` 通过。
+
+## [2026-11-23] 自动续跑只保留「关闭 / 无上限」两档
+
+- 问题/决策：设置页和 Agent 菜单原来有 4 档（0 / 3 / 5 / -1）。用户要求只保留
+  「关闭」（0）与「无上限」（-1），删掉 3 次和 5 次。
+- 解决方案：
+  - `app/agent/base.py::normalize_auto_continue`：0 → 0，其它任何值（含旧的 3 / 5）→ -1；
+    非法值回落到 -1。避免界面显示「无上限」但实际只跑 3 次。
+  - `app/config.py`：默认值 3 → -1；注释同步。
+  - `app/api/chat.py`：读取默认值改为 -1。
+  - `web/settings/panes-agent.js`：删掉 3 / 5 两个按钮；旧值统一显示为「无上限」。
+  - `web/index.html` 的 Agent 菜单：删掉 `data-continue="3"` / `"5"` 两个按钮。
+  - `web/settings/misc.js`：菜单高亮与 `setAutoContinue` 只处理 0 / -1。
+  - `readme.md`：`agent_auto_continue` 默认 -1，说明只保留两档。
+- 相关代码/指令：
+  - 测试：`tests/test_agent_limits.py::test_normalize_auto_continue` 改为断言 5 / 99 / "3" 都归一为 -1。
+  - 验证：`pytest tests --ignore=tests/test_archify.py -q` 全过；`ruff check app tests` 通过；
+    `node --check web/settings/panes-agent.js web/settings/misc.js` 通过。
+
+## [2026-11-23] 后端 B4.4 + 前端 F1：搜索索引与渲染热路径
+
+- 问题/决策：
+  - 会话搜索每次按键都遍历全部消息并现场 `lower()`；长会话（1,681 条）会卡。
+  - 侧栏被 SSE `pending` 事件高频触发，`renderSessions` 每次 `innerHTML=''` 全量重建。
+  - `turndots` 滚动时每帧对所有消息跑预览正则，并对所有已渲染消息逐个
+    `getBoundingClientRect()`（强制布局）。
+  - `renderMessages` 即使在签名未变、直接 return 的路径上，也会先排一次笔记捕获。
+  - `rich-media` 的 `imgCache` 只增不减，objectURL 常驻。
+- 解决方案：
+  - `app/api/sessions.py`：会话搜索索引 `_SEARCH_INDEX`（sid → 指纹 + 小写正文行），
+    指纹 = `updated_at + 消息数 + 最后一条正文/块长度`；索引上限 32，删除会话时清理。
+  - `web/turndots.js`：`tdItems()` 按会话指纹缓存；`tdActiveIdx()` 改为对消息行二分查找，
+    每帧只读 O(log n) 个 rect。
+  - `web/chat.js`：`renderSessions()` 增加数据签名，未变化时只更新状态行；
+    `notesScheduleCaptures()` 移到消息签名判断之后，只有真的重排 DOM 才排捕获。
+  - `web/rich-media.js`：`imgCache` 改为 LRU 24，淘汰时 `revokeObjectURL`。
+- 相关代码/指令：
+  - 文件：`app/api/sessions.py`、`web/turndots.js`、`web/chat.js`、`web/rich-media.js`；
+    测试：`tests/test_api_handlers_smoke.py`（搜索索引复用/失效）。
+  - 验证：`pytest tests --ignore=tests/test_archify.py -q` 全过；`ruff check app tests` 通过；
+    `node --check web/turndots.js web/chat.js web/rich-media.js` 通过。
+  - 未做：F1.3「切会话双渲染」已有 `sameWindow` 去重，暂不需要改；F2/F3/F4 等前端契约项
+    放到下一段。
+
+## [2026-11-23] 排查：会话里的附件为什么失效
+
+- 现象：`助手9.0`（`s_2eed2dd969cf`，1,685 条消息）里的图片 / 文档打不开；统计到 190 个
+  附件引用，磁盘只剩 75 个文件。
+- 根因 1（今天 19:35）：应用在「只剩 1 个空会话」的索引下启动，`uploads.sweep_uploads()`
+  把 `data/uploads/s_2eed…` 整个目录当成孤儿会话目录，移进了
+  `data/uploads/.orphan/20261123-193525/`（74 个文件）。
+  - 恢复：把这 74 个文件移回 `data/uploads/s_2eed…/`。恢复后消息 1093~1683 的附件全部可用
+    （66 条带附件消息）。
+- 根因 2（更早，无法本地恢复）：消息 57~1089 的附件在 2026-11-09 12:16 之前就已消失。
+  这与 `app/uploads.py` 里记录的事故时间吻合：2026-11-09 live 测试把 `SESSION_FILE` 指到
+  临时文件，启动清理把真实 `data/uploads` 当孤儿直接删除。`os.remove` 不进回收站，
+  `data/backup` 只有 sessions.json / kb，没有带 uploads 的 zip 备份。
+  - 结论：这 101 条消息的附件在本机已无副本，只能从更早的外部备份恢复。
+- 修复/防护：
+  - `app/uploads.py`：新增两道防误清：
+    1. 只加载到 1 个空会话且 uploads 下还有目录 → 直接跳过清理（本次事故形态）；
+    2. 不属于会话列表的目录 ≥3 且多于已知目录 → 跳过清理（会话数据疑似不完整）。
+  - `QUARANTINE_KEEP` 从 3 提到 10：附件是用户数据，隔离批次不要过快删除。
+  - 测试：`tests/test_uploads_guard.py::test_sweep_skips_single_empty_session`。
+- 相关代码/指令：
+  - `app/uploads.py`（`sweep_uploads` / `QUARANTINE_KEEP`）。
+  - 验证：`pytest tests/test_uploads_guard.py tests/test_backup.py -q` 通过；
+    `ruff check app tests` 通过。
+  - 复盘：以后判断「附件是否完整」用 `_referenced_files()` 对照
+    `data/uploads/<sid>/`，不要只看目录是否存在。
+
+## [2026-11-23] 后端升级续：多图并发 / 内存上限 / done 增量字段
+
+- 问题/决策：
+  - `vision` 模式下多张图串行调用识图接口，4 张图要等 4 次往返。
+  - `session_events._LAST` 为每个会话常驻一份完整 clone，会话多时内存随会话数增长。
+  - 事件日志单会话已到 44MB，但没有任何体积告警入口。
+  - `done` 每轮回传整份 `sessions`，前端必须全量解析才能更新当前会话摘要。
+- 解决方案：
+  - `app/api/chat.py`：多图识图改为 `ThreadPoolExecutor`（最多 4 路），结果按原顺序回收，
+    图片编号不变；单张失败只进 fails，不影响其它图。
+  - `app/session_events.py`：`_LAST` 改为 `OrderedDict` + `LAST_CAP=64`，按最近使用淘汰。
+  - `app/sessions.py`：`storage_stats()` 新增 `largest_event_bytes` / `event_warn`
+    （单会话事件 ≥64MB 时告警，append-only 不自动删）。
+  - `app/api/chat.py`：`done` 新增 `session_patch`（sid / title / updated_at / msg_total /
+    msg_idx / pinned / compress_marks），旧 `sessions` 字段保留，前端可渐进切换。
+- 相关代码/指令：
+  - 文件：`app/api/chat.py`、`app/session_events.py`、`app/sessions.py`；
+    测试：`tests/test_session_events.py`（`_LAST` 上限）、`test_session_store.py`（事件体积字段）。
+  - 验证：`pytest tests --ignore=tests/test_archify.py -q` 全过；`ruff check app tests` 通过。
+  - 刻意未做：文档附件仍串行解析（每份文档有逐页进度 SSE，打乱顺序会破坏界面定位）；
+    B3.1 写队列、B4.3 `/api/state` 拆分留到下一段，需要配合前端契约。
+
+## [2026-11-23] 后端升级 B2.1/B2.2/B2.5：代码索引扫描缓存 / 查询向量缓存 / 单会话读取
+
+- 问题/决策：
+  - `codeindex.get_index()` 每次 search 都先 `os.walk` 全仓并逐个 `os.stat`（本仓实测冷扫描 668ms），
+    同一轮多个工具调用会重复付这个成本。
+  - 同一条 query 在检索 / 重试里会重复 embedding。
+  - `parse_chat_request` 和 `_persist_session` 每轮多次 `load_sessions()` 深拷贝整份会话
+    （实测 34ms/次），只为拿一条会话。
+- 解决方案：
+  - `app/codeindex.py`：
+    - 新增 `_walk_files()` 路径清单缓存（TTL 8s + 根目录 mtime/size 指纹）；`_scan()` 仍对每个
+      文件重新 stat，所以文件内容修改能立刻被发现，不会因缓存漏更新。
+    - 实测：冷扫描 668ms → 热扫描 68ms（1,336 个文件）。
+    - `MAX_FILES` 默认从 0 改为 20000（安全上限，避免十万级文件打爆内存）。
+    - `_embed_texts()` 对单条短查询加 LRU（128 条）缓存，检索 / 重试不再重复 embedding。
+  - `app/sessions.py`：新增 `load_session(sid, copy=True)`，只取一个会话。
+  - `app/api/chat_prepare.py`：改用 `load_session(sid)`，不再为定位会话深拷贝全部会话。
+  - `app/api/chat.py`：`_persist_session` 只浅拷贝会话列表骨架（`list(...)`）后替换单条，
+    不再整份深拷贝。
+- 相关代码/指令：
+  - `app/codeindex.py`、`app/sessions.py`、`app/api/chat_prepare.py`、`app/api/chat.py`；
+    更新 `tests/test_chat_prepare.py`、`tests/test_ask_card.py`。
+  - 验证：`pytest tests --ignore=tests/test_archify.py -q` 全过；`ruff check app tests` 通过。
+
+## [2026-11-23] 后端升级 B1：观测与止血
+
+- 问题/决策：
+  - 原 `[耗时]` 只有 load/assemble/doc/compress/first_token/total，`load_ms` 把请求体、参数解析和
+    全量 `load_sessions()` 混在一起（p50 显示 0，但单次 clone 实测约 34ms），装配 p90 3.3s 无法归因。
+  - 每回合结束仍 `with _lock: flush_sessions()`，在全局锁内重写全部会话缓存（约 22MB）；
+    而本轮会话已在 `_persist_turn → _persist_session` 落过事件与缓存，这次全量写是纯浪费。
+  - 自动标题同步调用 `_quick_chat`（timeout 3/6s），阻塞 `done`。
+  - `memory._signature()` 仍读已删除的 `data/sessions.json`，导致会话记忆索引永不刷新。
+- 解决方案：
+  - `app/api/chat_prepare.py`：`ChatRequest` 新增 `parse_at` / `sess_load_ms`，单独测量
+    `load_sessions()` 的耗时。
+  - `app/api/chat.py`：
+    - 埋点拆成 `body_ms / parse_ms / sess_load_ms / load_ms / refs_ms / tool_prompt_ms /
+      skills_ms / base_prompt_ms / hooks_ms / tail_prompt_ms / assemble_ms / doc_ms /
+      compress_ms / first_token_ms / total_ms`；日志与 `timing` SSE 同时携带。
+    - 新增 `_TIMING_RING`（最近 200 轮）与 `timing_stats()`（p50/p90/p99/max）。
+    - 删除回合末 `flush_sessions()`；单会话落盘已足够。
+    - 自动标题改后台线程 `auto-title`，成功后 `events.publish({"type":"session_title"})`。
+  - `web/auto.js`：收到 `session_title` 只更新对应会话行标题并重绘侧栏（不重拉 `/api/state`）。
+  - `app/memory.py`：索引指纹改为 `sessions/index.json` + `session_store/*.json`（跟随
+    `sessions.SESSION_FILE` 所在目录，测试可隔离）。
+  - `app/sessions.py`：新增只读 `storage_stats()`（30s TTL）：会话数、缓存/事件字节、孤儿事件目录、
+    墓碑数；`app/api/misc.py` 新增 `GET /api/health`，汇总存储、运行态（活跃流 / SSE job /
+    `_LAST` / JSON 缓存）与最近耗时分位数。
+- 相关代码/指令：
+  - `app/api/chat.py`、`app/api/chat_prepare.py`、`app/api/misc.py`、`app/memory.py`、
+    `app/sessions.py`、`web/auto.js`。
+  - 测试：新增 `tests/test_health.py`；更新 `test_chat_prepare.py`（分段字段）、
+    `test_resume.py`（标题改后台线程后用等待断言）、`test_session_store.py`（storage_stats）。
+  - 验证：`pytest tests --ignore=tests/test_archify.py -q` 全过；`ruff check app tests` 通过；
+    `node --check web/auto.js` 通过。`dev_check.py` 因应用正在运行未执行（新守卫会拒绝）。
+
+## [2026-11-23] 事故复盘：迁移期间应用在运行，索引被覆盖导致会话「消失」
+
+- 问题/现象：
+  - 用户反馈所有会话记录消失，界面上只剩一个「新对话」。
+  - 实际数据仍在：`data/session_store/*.json`（9 个会话）与 `data/sessions/<id>/events.jsonl`
+    完好，只有 `data/sessions/index.json` 变成了 1 条。
+- 根因：
+  - 我在应用运行期间执行了 `scripts/dev_check.py`，其 `create_server` 触发了
+    `sessions.json` 迁移并删除了该文件。
+  - 当时仍在运行的旧进程按旧逻辑发现 `sessions.json` 不存在 → 新建一个「新对话」并
+    重新写出只含 1 个会话的 `sessions.json`。
+  - 应用重启后，新代码把这个 1 会话文件迁移进新存储并覆盖了 `index.json`，
+    于是启动只加载到 1 个空会话。
+- 恢复：
+  - 备份被覆盖的索引：`data/sessions/index.json.before-recover-20261123-193905`。
+  - 关闭应用后按物化缓存重建索引：
+    `sessions._scan_store()` → `sessions._write_index(...)`，current 回到
+    `s_387bd09ac144`（最后一次真实对话）。
+  - 校验：`load_sessions()` 恢复 10 条（9 个真实会话 + 误建的空对话），消息数与事件流一致；
+    `s_387…` 还从事件流补回了迁移时未落缓存的 1 轮。
+- 修复/防护：
+  - `app/sessions.py`：`index.json` 增加 `deleted` 墓碑；启动加载时扫描
+    `session_store/`，把「不在索引、也没有墓碑」的缓存自动并回列表并重写索引
+    （删除会话会写墓碑并删缓存，所以不会复活）。
+  - `scripts/dev_check.py`：启动前检查 `data/server.json` 端口，应用在运行就直接拒绝自检，
+    避免再次并发读写真实数据。
+  - 新增测试：`test_stray_cache_is_merged_back`、`test_tombstoned_session_is_not_revived`。
+- 相关代码/指令：
+  - `app/sessions.py`（`_TOMBSTONES` / `_build_aggregate` / `_write_index` / `drop_session_files`）。
+  - 验证：`pytest tests/test_session_store.py tests/test_session_events.py ... -q` 通过；
+    `ruff check app tests scripts` 通过。
+  - 教训：以后涉及真实 `data/` 的迁移 / 自检，必须先确认应用已关闭；不要在应用运行时跑
+    `dev_check.py` 或手工迁移。
+
+## [2026-11-23] 会话存储改为每会话 append-only JSONL / 思考不再截断
+
+- 问题/决策：
+  - 旧结构里 `data/sessions.json` 是整份快照（20MB 级），每次冷路径落盘都要全量重写；
+    事件流只是旁路日志，读取仍依赖整份 JSON。
+  - 思考落库有上限（`chat_reasoning_keep_chars`）和开关（`chat_persist_reasoning`），
+    超限时会丢最早的思考块并给最后一块加「…（较早思考已省略）」，前端因此偶尔显示被截断的思考。
+  - 决定：事实源切到每会话 `data/sessions/<id>/events.jsonl`（只追加、不滚动、永久保留）；
+    `data/session_store/<id>.json` 降级为可重建的物化读缓存；`data/sessions/index.json`
+    只存顺序与 current；思考始终原样落库，不截断、不开关。
+- 解决方案：
+  - `app/sessions.py`：
+    - `load_sessions()` 首次调用时构建进程内读模型 `_AGG`（index + 物化缓存装载；
+      缓存缺失或事件流更新时用 `session_events.rebuild()` 重建），之后不再解析整份文件。
+    - `save_session()` 只追加事件 + 写该会话缓存；`save_sessions()` 写 index + 各会话缓存。
+    - 老 `data/sessions.json` 首次加载时迁移：每个会话追加一条 `session/baseline`、
+      写物化缓存与 index，然后删除 sessions.json（迁移日志会打印会话数）。
+    - `index.json` 丢失时按 `session_store/*.json` 重建；缓存丢失时按事件流重建。
+  - `app/session_events.py`：
+    - 去掉 32MB 滚动（`_rotate` / `events.1.jsonl` 只保留读取兼容），严格 append-only。
+    - 新增 `message/append_blocks` / `message/append_block_text`：流式思考与新增块只记增量，
+      避免取消上限后每次进度落库都整段重写 blocks。
+    - 新增 `append_baseline()` / `seed_last()`；`record()` 返回最后事件 ts。
+    - `_sig()` 纳入 blocks 数量与最后一块文本长度，否则「只有思考变长」会被当成没变化跳过。
+  - 思考：删除 `_reasoning_cap` / `_trim_reasoning_blocks` / `_strip_reasoning_blocks`
+    与 `TurnResult.reason_cap/persist_reason`；`_merge_continuation` 与回合收尾不再裁剪。
+    旧配置键 `chat_persist_reasoning` / `chat_reasoning_keep_chars` / `session_store`
+    加入 `_OBSOLETE_KEYS`，保存配置时清掉。
+  - 备份：`session_store/` 与 `sessions/` 加入 `_DIR_NAMES`；`sessions.json` 保留在清单里
+    仅用于恢复老备份（恢复后首次加载自动迁移）。`_clear_caches` 会重置进程内会话缓存。
+  - 存储维护接口 `/api/storage/compact` 改为统计/备份 `session_store/` 目录。
+- 相关代码/指令：
+  - `app/sessions.py`、`app/session_events.py`、`app/config.py`、`app/settings_center.py`、
+    `app/api/chat.py`、`app/api/storage.py`、`app/backup.py`、
+    `web/settings/panes-model.js`、`scripts/prune_session_events.py`、`tests/conftest.py`。
+  - 测试：重写 `tests/test_session_store.py`（迁移 / 缓存重建 / 索引重建 / 删除不复活）；
+    `tests/test_session_events.py` 增加思考增量事件用例；更新 `test_chat_blocks.py` /
+    `test_resume.py` / `test_settings_defaults.py`。
+  - 验证：`pytest tests --ignore=tests/test_archify.py -q` 全过（约 2600 项）；
+    `ruff check app tests` 通过；`node --check web/settings/panes-model.js` 通过；
+    `scripts/dev_check.py` 全部通过。
+  - 注意：事件流与缓存正常同步；极端情况下（写缓存失败 / 崩溃前最后一段进度）事件流可能
+    落后一次落库，缓存丢失时重建会少最后这点增量（旧实现同样「最多丢最后 15 秒进度」）。
+
+## [2026-11-23] 分享面板无障碍 / 外链图片内联 / 窄屏右侧互斥 / 检索正文缓存
+
+- 问题/决策：
+  - 分享面板是运行时创建的 `.modal`，没走 `showWithAnim`，不在焦点栈里：Tab 能跑到背景、
+    没有 `aria-modal`、Esc 不关闭、关闭后不还焦点。
+  - `inlineImages` 只处理同源 / blob 图片，外链 `http(s)` 原样保留，离线分享会裂图。
+  - 1250px 左右同时开搜索侧栏（340）和检查器（320），聊天区只剩约 300px。
+  - 检索列表有 `search_cache`，但正文抓取没有缓存，跨轮 / 子代理会重复抓同一页面。
+- 解决方案：
+  - 分享面板补 `role="dialog"` / `aria-modal` / `aria-label`，`hidden` 后走 `showWithAnim`
+    接入焦点栈；Esc 捕获阶段优先关闭；关闭改走 `hideWithAnim`，焦点按现有规则恢复。
+  - 分享预览时把外链图片经 `/api/share/image` 代理回来内联：只允许公网 http(s)、
+    跟随重定向每跳校验、只收 `image/*`、单张上限 3MB；失败时在预览状态提示未内联数量。
+  - `<1400px` 时打开搜索自动收起检查器，打开检查器自动收起搜索；`≥1400px` 允许并排。
+  - 新增 `app/page_cache.py`：URL + 检索式 + 抓取档位做短 TTL（默认 30 分钟）正文缓存，
+    `_fetch_doc` 命中直接返回，最多 300 条。
+  - `msgCache` 统一走 `trimMsgCache()`（最多 3 份），`applySessionsPayload` 与切会话都收敛。
+- 相关代码/指令：
+  - `web/share.js`、`web/chat.js`、`web/ui-shell.js`、`web/core.js`、`web/css/base.css`、
+    `app/api/share.py`、`app/search.py`、新增 `app/page_cache.py`。
+  - 新增测试：`tests/test_page_cache.py`、`tests/test_share_image.py`。
+  - 验证：`pytest tests -q --ignore=tests/test_archify.py` 全过；`ruff check app tests` 通过；
+    `node --check` 通过；`scripts/dev_check.py` 全部通过；
+    无头 Edge 1250×800：搜索打开后检查器收起；分享面板 Tab 24 次未跑出、Esc 可关。
+
+## [2026-11-23] 修复：笔记停靠与右侧面板互斥 / 关闭不抢聊天焦点
+
+- 问题/决策：
+  - 笔记停靠层 `z-index: 50`，搜索侧栏是 40、检查器是普通 flex 子项；笔记打开后两者都被盖住，
+    点「搜索到 N 个网页」看起来像没反应。
+  - `hideWithAnim` 关闭时无条件把焦点还给弹窗 opener；用户在聊天框里按 Esc 关停靠笔记，
+    焦点会被抢回工具栏的「笔记」按钮。
+- 解决方案：
+  - 笔记停靠时自动收起搜索侧栏与检查器；打开检查器时先收起笔记（全屏笔记同理）。
+  - `html.notes-docked` 下把搜索侧栏定位到笔记左侧（`right: var(--note-dock-w)`），
+    两者可同时查看且不重叠。
+  - `hideWithAnim` 关闭前判断焦点是否在弹窗内：焦点在聊天等外部可交互元素上时保留焦点，
+    不再无条件 `restoreFocusAfterModal()`。
+- 相关代码/指令：
+  - `web/notes.js`、`web/ui-shell.js`、`web/settings/modal.js`、`web/css/base.css`。
+  - 验证：无头 Edge 1440×900，笔记 420px + 搜索栏 340px 无重叠（x 650–990），检查器互斥；
+    焦点在 `#input` 时关闭笔记，`activeElement` 仍为 `#input`；`scripts/dev_check.py` 全部通过。
+
+## [2026-11-23] 修复：笔记停靠时聊天输入框无法聚焦 / 输入
+
+- 问题/决策：
+  - 笔记停靠（`.notes-dock`）时，`settings/modal.js` 的全局 `focusin` 约束仍把它当成模态：
+    点击聊天输入框后，焦点会被立刻拉回笔记里的第一个可聚焦元素（`#nt-dock-files`），
+    表现为「看得见输入框、点不出光标、打不了字」。
+- 解决方案：
+  - `_topModal()` 跳过带 `.notes-dock` 的弹窗：停靠笔记是与对话并排的面板，不是模态，
+    不参与 Tab / focusin 约束。
+  - `applyDock()` 同步 `aria-modal`：停靠时 `false`，全屏时 `true`。
+- 相关代码/指令：
+  - `web/settings/modal.js`、`web/notes.js`。
+  - 验证：无头 Edge 1440×900，笔记停靠 420px 时 `elementFromPoint` 命中 `#input`；
+    真实鼠标点击后 `document.activeElement` 为 `#input`，可正常输入；`scripts/dev_check.py` 全部通过。
+
+## [2026-11-23] 分享历史缓存 / slim 接口 / 单会话只读 / 搜索面板 a11y / 流式引用
+
+- 问题/决策：
+  - 分享切一次选项就重新拉一遍全部旧消息，且每页带 `blocks/tools/timing` 等重字段；长会话预览很慢。
+  - `/api/session/messages` 仍用 `load_sessions()` 深拷贝整份 21MB 会话，只为读一个 sid。
+  - 搜索结果面板计数显示「已加载 N 条」，与标题「搜索到 M 个网页」口径不一致；结果链接没有键盘焦点样式。
+  - 引用 `[n]` 只在回答结束后才变成按钮，流式输出期间不可点。
+- 解决方案：
+  - `share.js` 增加 `_histCache`（sid + total + full）缓存已拉取的旧消息；默认请求 `slim: true`，勾选思考/工具时才拉完整字段；从「当前最早的一条」继续往前，不再重复拉 `msg_loaded_start`。
+  - `/api/session/messages` 支持 `slim` 参数（剥掉 `blocks/tools/timing/plan/usage/memory/reasoning/end_reason`，保留正文与来源）；它与会话搜索都改用 `load_sessions(copy=False)`，只读路径不再深拷贝整份会话。
+  - 面板计数改为「已加载 N / 共 M」，容器加 `aria-live="polite"`，补结果链接与关闭按钮的 `:focus-visible`。
+  - 流式渲染时只装饰本次新插入的片段；`message-ops` 从源码视图切回渲染视图时也重新装饰。
+- 相关代码/指令：
+  - `app/sessions.py`、`app/api/sessions.py`、`web/share.js`、`web/chat.js`、`web/stream/stream-core.js`、`web/stream/message-ops.js`、`web/index.html`、`web/css/base.css`。
+  - 验证：`pytest tests/test_session_store.py tests/test_search_history.py -q` 通过；`ruff check app tests` 通过；`node --check` 通过；`scripts/dev_check.py` 全部通过。
+
+## [2026-11-23] 审查补丁：浏览进度 / 侧栏失效 / 分享用户消息与竞态 / favicon 失败重试
+
+- 问题/决策：
+  - 多轮搜索抓同一页面时，`search_fetching` 累加总数而 `search_read` 按 URL 去重，进度会永远停在「浏览 3/8」。
+  - 整块重排 `#chat` 后，搜索结果侧栏仍指向已移除的旧 trace，会显示过期结果。
+  - 分享「整段会话」时用户行取的是 `.content`，但用户气泡实际是 `.bubble` / `.user-wrap`，导致用户消息只剩「我」标签、图片与文档全丢。
+  - 分享预览没有请求序号：快速切换选项时旧结果可能覆盖新结果，导出也可能用到上一份 payload。
+  - favicon 失败缓存没有过期时间：一次断网 / 被墙后同站点在本进程内永远不再重试。
+- 解决方案：
+  - 抽出 `_searchPageLabel`；重复页面命中时把虚高的 `_pagesTotal` 减回去再刷新进度。
+  - `renderMessages` 整块重排前关闭搜索结果侧栏。
+  - 会话分享的用户行改为克隆 `.user-wrap`（含气泡 / 图片 / 文档）；未渲染的旧用户消息用 `.bubble` 保留换行；分享页补用户气泡、附件样式。
+  - `doPreview` 增加 `_previewSeq` / `_previewing`：只认最后一次预览，导出前先等当前预览结束，避免导到旧内容。
+  - favicon 失败缓存带 `at`，10 分钟后允许重新探测。
+- 相关代码/指令：
+  - `web/chat.js`、`web/share.js`、`app/share/render.py`。
+  - 验证：`node --check` 通过；`pytest tests/test_session_store.py tests/test_search_history.py -q` 通过；
+    `ruff check app tests` 通过；`scripts/dev_check.py` 全部通过。
+
+## [2026-11-23] 搜索计数 / 老数据规范化 / 会话读取提速 / 分享整段会话
+
+- 问题/决策：
+  - 一轮多次搜索时，`search_hits` 只带单批数量，前端直接覆盖标题；第二次搜索失败时会显示 0，刷新后又变回总数。
+  - 旧数据 1217 条来源全都没有研究台账编号 `n`，还有 133 条重复 URL；正文 `[n]` 点击后可能定位到错误条目。
+  - `load_sessions()` 每次用 `clone_containers` 复制 21MB 会话结构；本机实测单次约 32ms，而一次请求里有多处调用。
+  - 每个搜索结果的 favicon 都各自探测 3 个根路径图标，同一站点、每次重绘都会重复请求。
+  - 分享「整段会话」只遍历 `#chat .msg` 的 DOM；长会话只渲染最近几十条，导出会丢历史。
+- 解决方案：
+  - 前端 `searchSetHits` 改为只增不减；`appendSearchSources` 用合并去重后的总数回写标题（复用来源时跳过）。
+  - `sessions.normalize_session_search` / `slim_message_for_client`：按 URL 去重；老来源没有 `n` 且正文 `[n]` 都在 `1..N` 内时按顺序补编号，超出范围不动。展示层在副本上修正，冷路径 `save_sessions` 顺手把磁盘数据收敛。
+  - `load_sessions(copy=False)`：只读路径跳过结构复制；`slim_sessions(load_sessions(copy=False))` 全部改走该入口，实测 32ms → 0.2ms。
+  - `_searchFaviconImg` 增加 `host → {ok, src}` 进程内缓存：成功复用解析出的 URL，失败直接退回字母头像。
+  - 分享前按 `msg_loaded_start` 逐页拉 `/api/session/messages`（每页 200）；旧消息默认只导正文 + 搜索来源，勾选思考/工具时再用 `rowForMsgSafe` 完整重建；拉取失败会在预览状态标注「部分历史未加载」。
+- 相关代码/指令：
+  - `app/sessions.py`、`app/api/chat.py`、`app/api/misc.py`、`web/chat.js`、`web/share.js`、`web/stream/stream-core.js`。
+  - 验证：`pytest tests -q --ignore=tests/test_archify.py` 全过（archify 为独立浏览器用例）；
+    `scripts/dev_check.py` 全部通过；`ruff check app tests` 通过；`node --check` 通过。
+
+## [2026-11-23] 联网搜索：来源去重 / 引用联动 / 停靠侧栏 / 分享保留来源
+
+- 问题/决策：
+  - 同一轮多次搜索会让 `sources` 里出现重复 URL（实测旧数据约 11%），历史里的「搜索到 N 个网页」偏大。
+  - `slim_items` 只保留 5 个展示字段，把研究台账的 `n` 丢了；正文里的 `[n]` 无法和侧栏条目对齐。
+  - 侧栏每次刷新都全量重建列表，流式期间会重置滚动；favicon 叠层也是每加一个站点就重建全部图标。
+  - 搜索 trace 在 `.content-wrap`，分享默认只克隆 `.content`，关闭思考/工具选项时来源会整块丢失。
+  - `#search-panel` 是 fixed 浮层，宽屏会盖住右侧检查器。
+- 解决方案：
+  - `_search_persist_payload` 按 `url || title` 去重后再落库；`_merge_search_msg` 即使没有新页面也写回 `hits`。
+  - `slim_items` 保留 `n`；三处 `sources.extend(...)` 改为带 `n` 的 numbered 副本，SSE `sources` 也发 `n`。
+  - 侧栏改为增量追加（`_searchResultNode` + `_items/_count`），重绘前保存并恢复 `scrollTop`；favicon 增量 append。
+  - 正文 `[n]` 由 `decorateCitations` 包成 `.cite-ref` 按钮，点击打开对应 trace 的侧栏并按 `data-n` 滚动高亮。
+  - trace 头行 toggle + `aria-expanded/controls` + `active` 态；关闭时焦点回到头行。
+  - 分享时无条件带上 `.search-trace`，`stripChrome` 保留 cite 文本；分享页补静态 trace / cite 样式。
+  - 宽屏（≥1200px）侧栏改为 `#app` 的 flex 子项停靠，窄屏仍为浮层。
+- 相关代码/指令：
+  - `app/search.py`、`app/api/chat.py`、`web/chat.js`、`web/stream/stream-core.js`、
+    `web/share.js`、`web/init.js`、`web/css/base.css`、`app/share/render.py`。
+  - 验证：`pytest tests/test_search_*.py -q`（52 项）、`ruff check app tests`、
+    `node --check` 四个改动 JS；实机确认侧栏、引用定位与宽屏停靠正常。
+
+## [2026-11-22] 安全修复：附件路径穿越 + 审批规则归属
+
+- 问题/决策：
+  - `uploads._upload_dir()` 允许 `.` / `..`，`/api/attach/get` 只对文件名取 basename；传 `session_id=".."`、`name="config.json"` 可读到 `data/config.json`（含 API 密钥）。
+  - `_api_agent_approve` 的「始终允许」用请求体 `session_id` 取沙箱，却用审批记录里的工具/参数写规则；跨会话请求会把规则写进错误项目。
+- 解决方案：
+  - `app/uploads.py` 新增 `_safe_sid()` 去掉首尾点号；`_upload_path()` 拒绝 `/`、`\\`、NUL、`.`、`..`，并用 `realpath + commonpath` 防止符号链接逃逸。
+  - `app/api/sandbox.py::_api_agent_approve` 以审批记录的 `sid` 为准，请求体 sid 不一致返回 409；用记录的 sid 取沙箱写规则；改用 `h._sb()`，避免会话不存在时二次发响应。
+  - `app/agent/approval.py::resolve_approval` 支持可选 `sid` 校验；前端审批卡带上流所属 sid，发送时优先用它。
+- 验证：新增 `test_upload_path_rejects_session_traversal`、`test_resolve_approval_requires_matching_sid`、`test_approve_rejects_cross_session`、`test_approve_uses_record_sandbox`；
+  `pytest tests/test_moved_helpers.py tests/test_agent_guards.py tests/test_chat_attach.py -q` 全过；`scripts/dev_check.py` 全过；
+  真实 HTTP 复测：`session_id=".."` 请求返回 404，正常附件读取返回 200。
+
+## [2026-11-22] P0 收尾：读缓存隔离 / 写失败上抛 / 流租约原子认领
+
+- 问题/决策：
+  - `store.read_json` 返回共享缓存对象，`load_config` / `load_sessions` 直接在返回值上补默认键，未保存的改动会变成「已生效」，其它线程也能读到半成品。
+  - `write_json` 失败只打日志；`save_config` 仍返回成功，设置页显示「已保存」但磁盘没变。
+  - `_api_chat` 入口的 `if sid in ACTIVE_STREAMS` 与 `ACTIVE_STREAMS[sid] = ev` 分两步执行，两个并发请求可能都通过检查。
+- 解决方案：
+  - `store.py`：新增 `read_json_copy()`（克隆容器骨架）与 `put_cache()`（只更新读缓存、不落盘）；`write_json` 成功/失败返回 bool。
+  - `config.py`：`load_config` 改用 `read_json_copy`；`save_config` 在写入失败时抛 `OSError`（设置中心的 `save_patch` / `rollback` 已捕获）。
+  - `sessions.py`：`load_sessions` 改用 `read_json_copy`；启动对账（快照 / 事件流合并）结果用 `put_cache` 回写缓存，再把返回值再克隆一份，避免调用方污染缓存；新增 `cache_sessions()`；`save_sessions` 返回是否写成功。
+  - `chat.py`：`_persist_session` 在替换单条会话后调用 `cache_sessions(fresh)`，保持「只写单会话快照、后续读立刻可见」的热路径语义；入口改为 `claim_active()` 原子认领 + `_reject()` 统一释放，watchdog 与停止逻辑不变。
+- 踩坑：
+  - `load_sessions` 不能只克隆不回收：启动对账会改 `data`，而 `_MERGED` 已置位；若不 `put_cache`，恢复出来的会话在本次调用后丢失。若把同一个对象既放进缓存又返回，调用方修改仍会污染缓存，所以缓存与返回值各一份。
+  - 21MB 的 `sessions.json` 克隆约 30ms；`_persist_session` 每 15 秒一次的进度落库会多这一份开销，可接受；不要把克隆放进高频轮询的循环里。
+  - `_persist_session` 仍必须用 `load_sessions()` 的副本做「读-改-写」，否则两个会话并发落库会互相覆盖。
+- 验证：`test_read_json_copy_does_not_pollute_cache`、`test_put_cache_only_affects_memory`、`test_load_sessions_returns_isolated_copy`、`test_save_sessions_returns_bool`、`test_load_config_mutation_does_not_pollute_cache`、`test_save_config_raises_on_write_failure`、`test_save_patch_reports_write_failure`、`test_claim_active_is_atomic` 通过；
+  全量 `pytest -q` 通过；`scripts/dev_check.py` 全过。顺手修掉既有的时间敏感用例 `test_search_pipeline.py::test_rank_prefers_fresh_for_news_intent`（写死的 2026-11-10 改为「今天减 1 天」）。
+
+## [2026-11-23] 搜索 favicon：优先站点真实图标，失败退回字母
+
+- 问题/决策：
+  - 之前 favicon 全部用「域名首字母 + 稳定色」的自制圆点；用户希望尽量显示网站真实图标，只有拿不到才退化。
+- 解决方案：
+  - `chat.js` 新增 `_searchFaviconUrls()`：按 `origin` 依次尝试 `/favicon.ico` → `/favicon.svg` → `/favicon.png`；`_searchFaviconImg()` 用 `<img>` 的 `onerror` 链式重试，全部失败就移除 img，露出底下的字母。
+  - 不接第三方 favicon 服务（国内可达性 / 隐私），直接请求站点自身；`referrerpolicy="no-referrer"`、`loading="lazy"`、`decoding="async"`。
+  - 加载成功时隐藏字母；`naturalWidth/Height <= 1` 视为空白图，继续尝试下一个候选。
+  - trace 头部的 favicon 叠层与右侧结果侧栏共用同一套逻辑；`searchAddFavicon` 额外记录 host→原始 URL，保证能拿到正确 origin。
+- 踩坑：
+  - 有些站点根目录的 `/favicon.ico` 返回空白/1×1 图，不能只看 onload，必须检查 naturalWidth。
+  - 只声明 `<link rel="icon" href="/static/...">` 的站点（如 Wikipedia）根目录候选可能拿到空白图；要做到 100% 需要后端解析 HTML 的图标地址并缓存，当前先接受字母/空白退化。
+  - 移动端 gateway 的 CSP 是 `img-src 'self' data: blob:`，外链图标会被拦，`onerror` 会自然退回字母。
+- 验证：`node --check`、`scripts/dev_check.py`、全量 `pytest -q` 通过；无头 Edge 用百度 / 知乎 / CSDN / 搜狐 / 简书结果实测显示真实图标，叠层显示 4 个 + `+N`；Wikipedia 在当前网络环境被拦，退化为字母/空白。
+
+## [2026-11-23] 修复：重启窗口后搜索 trace 退化为「参考来源」
+
+- 问题/根因：
+  - 搜索 trace（搜索到 N 个网页 / 浏览 N 个页面 / 右侧结果栏）只在流式 SSE 阶段用 DOM 建出来，没有进入消息的 `blocks`。
+  - 落库时 `_build_new_assistant_message` 只保存了 `slim_items(tr.sources)`；`content` / `evidence`（哪些页面真抓过正文）被丢掉，也没有命中数。
+  - 重启后 `buildAiRowFromBlocks` 只按 `m.sources` 画了旧的「参考来源 · N」折叠块，所以看起来“退化”了。
+- 解决方案：
+  - 后端：新增 `_search_persist_payload()`，在 slim 之前把 `content/evidence` 的页面提取成 `{title,url}`；`msg["search"] = {hits, pages}`。续写路径用 `_merge_search_msg()` 合并 sources / pages。
+  - 前端：`buildAiRowFromBlocks` 遇到 `m.sources` 时用 `buildSearchBox()` 重建 trace；`m.search.pages` 还原「浏览 N 个页面」，老消息没有 pages 时隐藏浏览行、不伪造；`searchSetAllItems()` 把全部来源交给右侧结果栏。
+- 踩坑：
+  - `slim_items` 会丢 `content/evidence`，必须在落库前取「浏览过哪些页面」。
+  - 老消息没有 pages 元数据：只显示「搜索到 N 个网页」+ 侧栏，不能猜 5 个页面。
+  - `buildSourcesBlock` 仍保留给没有 `blocks` 的旧消息，不能直接删除。
+- 验证：新增 `tests/test_search_history.py` 2 项（落库 pages / 续写合并）；`node --check`、全量 `pytest -q`、`scripts/dev_check.py` 通过；用真实落库的 13 条来源消息重建历史行，确认标题变为「搜索到 13 个网页」且浏览行按预期隐藏。
+
+## [2026-11-23] 联网搜索结果侧栏：点击「搜索到 N 个网页」展开
+
+- 问题/决策：
+  - 对话里的搜索 trace 只显示「浏览 N 个页面」的少量链接，用户看不到全部命中（常见几十条）。
+  - 参考 DeepSeek 网页版：点击搜索计数，右侧滑出独立的「搜索结果」侧栏，逐条展示站点 / 日期 / 标题 / 摘要。
+- 解决方案：
+  - `index.html` 新增 `#search-panel` 固定右侧栏（顶栏下方，340px / 窄屏全宽），含标题、条数、关闭按钮与滚动列表。
+  - `chat.js`：`buildSearchBox` 的头行不再折叠，改为点击 `openSearchPanel(box)`；新增 `renderSearchPanel`，每条结果渲染序号、favicon（域名首字母 + 稳定色）、站点 / 日期、标题、摘要；`appendSearchSources` 按 URL 去重合并全部 `sources`，侧栏打开时实时重绘。
+  - `init.js` 绑定关闭按钮与 Esc；`selectSession` 切会话时收起侧栏。面板打开后焦点放到面板本身（Tab 可达结果的关闭按钮）。
+- 踩坑：
+  - `sources` 是所有命中，不能整批塞进「浏览页面」列表；侧栏用全部，trace 仍只用 `search_read` 的抓取页。
+  - 一轮多次搜索时按 URL 合并，不能后一次覆盖前一次。
+  - 面板 `top` 用 `calc(var(--tb-h, 0px) + 48px)`：Electron 有自绘标题栏，普通浏览器没有 `--tb-h`。
+  - 不要自动 focus 关闭按钮，否则鼠标点击也会留下焦点环；focus 面板本身即可。
+- 验证：`node --check`、`scripts/dev_check.py`、全量 `pytest -q` 通过；无头 Edge（1280×900）确认侧栏宽 340px、顶栏下方展开、6 条结果含序号 / favicon / 站点日期 / 标题 / 摘要，关闭按钮无多余焦点环。
+
+## [2026-11-23] 移除后台任务提示栏 + 搜索外链改用 sprite 图标
+
+- 问题/决策：
+  - 输入框上方的「任务仍在后台运行 / 回到实时输出」提示栏与自动恢复职责重叠：刷新 / 断流后 `keepRecovering` 已经会挂轻量回放，提示栏只在「回放中 / 自动恢复失败」时提供升级入口。
+  - 用户确认移除该提示栏；完整实时流的入口保留在最后一条消息操作条的「回到流式输出」chip 上（`resumeLiveOutput` 未删除）。
+  - 联网搜索的页面外链仍用 Unicode `↗`，与项目其它图标风格不一致。
+- 解决方案：
+  - 删除 `#resume-bar` 及其 CSS / `refreshResumeBar()` / `init.js` 的按钮绑定；`refreshStreamingUI()` 不再调用它。自动恢复与消息 chip 保持不变。
+  - `buildSearchPageLink()` 的外链箭头改用 `icon('external')`（SVG sprite）；样式改为 10px 的 `.search-page-arrow .ic`。搜索 / 列表 / favicon 叠层本来就用自制样式。
+- 踩坑：
+  - 只删 UI 不能删 `resumeLiveOutput`：`chat.js` 的 `msg-run-resume` chip 和 `message-ops.js` 的「回到流式输出」仍在调用。
+  - 历史 NOTES 里关于 `#resume-bar` 的条目属于当时的实现记录，不再作为当前状态依据。
+- 验证：`node --check`、`scripts/dev_check.py` 通过；全量 `pytest -q` 通过（首次跑 `test_archify` 两个浏览器用例受同时启动的多个无头 Edge 影响超时，单独重跑 `tests/test_archify.py` 16/16 通过，与本次改动无关）；无头 Edge 截图确认搜索外链为 sprite 图标。
+
+## [2026-11-23] 联网搜索显示：极简 trace（搜索到 N 个网页 + 浏览页面链接）
+
+- 问题/决策：
+  - 原搜索块是一串纯文本步骤（已判断 / 命中 / 读取网页 0/N / ✓ 标题 / ─── 参考来源 ───），层级平、信息噪音大；来源列表还与答案上方的来源块重复。
+  - 参考 Trae 的展示：一行「搜索到 N 个网页」+ 站点 favicon 叠层，一行「浏览 N 个页面」+ 页面标题外链，检索式作为小字。
+- 解决方案：
+  - `chat.js`：`buildSearchBox()` 改为 `.think.search-trace`，头行搜索图标 + 计数 + favicon 叠层；体行 `.search-pages` 放「浏览 N 个页面」与 `.search-page-link`（下划线 + ↗）；`searchSetHits/searchSetQueries/searchSetFetching/searchAddPage/searchWarn` 负责增量更新。
+  - favicon 不走外部服务：按域名生成首字母 + 稳定色相的小圆点，最多 4 个，超出显示 +N（避免隐私与网络依赖）。
+  - `stream-core.js`：`searching / search_queries / search_hits / search_fetching / search_read / sources / search_reuse / search_error` 全部改用上述 helper；`ensureSearchBox()` 统一懒建。
+  - `base.css`：新增 `.search-trace`、`.search-favicon`、`.search-pages`、`.search-page-link` 等样式；删除旧的 `.search-steps / .search-step / .search-src`。
+- 踩坑：
+  - `sources` 事件带的是**全部命中**（可能几十条），不是「已浏览页面」；只有 `search_read` 才是真正抓取过的页面。因此已有 read 事件时 `appendSearchSources` 只补 favicon，不再追加链接，避免「浏览 5 个页面」变成 36 条。
+  - 一轮可能搜多次：`search_fetching` 的 total 要累加，`search_read` 的 done 也累加，标签才不会出现「浏览 8/5」。
+  - 搜索 trace 插在 `row._wrap` 最前面，`done` 重排只清理过程组/正文段，不会误删它；刷新后仍以答案上方的统一来源块为准。
+- 验证：`node --check`、`scripts/dev_check.py`、全量 `pytest -q` 通过；无头 Edge 插入样例数据截图确认「搜索到 36 个网页 + favicon 叠层 / 浏览 5 个页面 + 5 条标题外链 / 检索式小字」布局与参考图一致。
+
+## [2026-11-22] 过程折叠视觉优化：状态点 / 动作摘要 / 时间线 / 失败可发现
+
+- 问题/决策：
+  - 折叠头只有 25px 高、12px 字，窄屏标题常被右侧统计挤到只剩几个字；状态只靠 6px 圆点，失败不明显。
+  - 历史消息所有过程组都默认收起，哪怕里面有失败步骤；用户刷新后只看到一个红点。
+  - 展开体是扁平列表，步骤之间没有时间线；运行中折叠头只写「过程 · 进行中」，收起时实时秒表也不刷新。
+  - 多组长过程在长回答里像一排碎片，自动收起又太快（600ms），用户刚看到最后一步就消失。
+- 解决方案：
+  - CSS（`base.css`）：折叠头 `min-height:34px` / `padding:7px 10px` / hover 背景；状态点保持 6px 简约圆点，按运行 / 完成 / 失败 / 停止四色区分（运行保留脉冲）；新增 `.process-fold-chips`、`.process-fold-fail`、`.process-fold.just-done`、`.process-fold.is-older.collapsed`；展开体加细滚动条；步骤左侧加时间线节点 + 连接线；`pointer: coarse` 下折叠头 42px；`prefers-reduced-motion` 停掉脉冲。
+  - 历史（`chat.js`）：`buildProcessFold` 在 `st.failed > 0` 或失败结束原因时强制展开；新增动作摘要 chips（复用 `TOOL_SUMMARY`）、「查看失败」按钮（展开并滚动/高亮第一个失败卡）、`aria-controls` / `aria-label`；消息操作条新增「展开 / 收起全部过程」。
+  - 流式（`stream-core.js`）：`setLive()` 同步当前动作到折叠头标题；收起时也刷新「已 Ns」；`ensureFlow` 加 chips / 失败按钮 / aria；`styleFlow` 更新摘要与失败态，非最后一组加 `is-older`；自动收起改为 620ms 后闪绿边、再 520ms 收起。
+- 踩坑：
+  - chips 依赖 `TOOL_SUMMARY`（定义在 `chat.js` 更靠后的位置）；只在运行时调用，不能在建表阶段引用。
+  - `aria-controls` 的 id 必须全局唯一：历史与实时各用一个计数器（`_foldSeq` / `_liveFoldSeq`）。
+  - `is-older` 只应在收起时降低透明度，展开后要保持正文可读，所以选择器是 `.is-older.collapsed`。
+  - 失败组默认展开后不能再套自动收起，否则错误又会被藏起来。
+- 验证：`node --check` 通过；`scripts/dev_check.py` 全过；全量 `pytest -q` 通过；`GM_LIVE_UI=1 pytest tests/test_continue_resume_live.py tests/test_stream_parallel_live.py` 通过；
+  `scripts/ui/repro_process_narration.mjs` 场景全部 PASS；无头 Edge 实测折叠头 34px、状态点 6px 四色、时间线节点与竖线可见、窄视口 chips 隐藏、失败组「查看失败」按钮可见。
+
+## [2026-11-22] P1：流状态按会话隔离 / 恢复单例化 / 发送绑定 sid / 批注迁移
+
+- 问题/决策：
+  - P1-6：`state.streaming` / `state.stopping` 是全局快照，停 A 时切到正在生成的 B，B 的停止键可能被禁用；压缩状态只存在 `#chat` 的 DOM 里，切会话 / 重绘就丢。
+  - P1-7：`keepRecovering` / `waitJobThenRefresh` 没有按 sid 单例化，刷新恢复、断流恢复、手动停止可能同时挂 attach；`_replays` 覆盖旧句柄时也没取消。
+  - P1-8：`sendMessage` 在 await 后才创建气泡，而 `streamChat` 开头重新读 `state.sessions.current`，等待期间切会话会发错。
+  - P1-9：笔记改名 / 移动 / 删除只迁移对话捕获索引，`notes:<rel>` 的批注不跟着走。
+- 解决方案：
+  - 前端状态：`core.js` 新增 `stoppingSids` / `compressingSids`；`live.js` 的 `refreshStreamingUI()` 按当前 sid 计算 stopping，停止键在切到未停止的会话时立即恢复；`registerStream` / `unregisterStream` 同步清理该 sid 的 stopping。
+  - 压缩状态：`chat.js` 新增 `compressSyncPending()`；`compressPending(sid)` / `compressPendingClear(sid)` / `compressIsPending()` 都以 `state.compressingSids` 为准，DOM 只作投影；`renderMessages` 末尾与 `refreshStreamingUI` 都会补回分隔线；`auto.js` 的 `context_update` / `context_compressing` 按事件 sid 清理 / 设置。
+  - 恢复单例：`recover.js` 新增 `_recoverLoops`、`_jobWaits`，同一 sid 只跑一条恢复循环 / 一个 attach 等待；`_replays` 覆盖前先调用旧句柄的 `stop()`；`startJobReplay` 遇到已有 replay 时复用句柄，不再新建 DOM。
+  - 发送归属：`send.js` 在 draft materialize 后固定 `targetSid`，队列项、`resend`、`streamChat` 全部带这个 sid；编辑确认框返回后发现会话已切走则中止并保留输入；`stream-core.streamChat(extra, resume, attach, opts)` 用 `opts.sid`，请求体的 `session_id` 不再现读 `state.sessions.current`。
+  - 批注：`anno.py` 新增 `remap_note_keys()` / `drop_note_keys()`（同时处理 `annotations` 与 `documents`）；`notes.py` 在 rename / move / delete 前先 `migrate_legacy()`，成功后迁移或清理 `notes:<rel>`。
+- 踩坑：
+  - 恢复单例的 Promise 必须在 `finally` 里按引用比较后再删 Map，否则新任务会被旧任务的收尾误删。
+  - `engine` 侧的 `streamChat` 不能只改局部 `sid`：请求体里的 `session_id: state.sessions.current` 也要一起改，否则「归属 sid」只是渲染层自嗨。
+  - 批注迁移必须在文件系统改名之前先导入旧版 JSON 批注，否则迁移后仍按旧路径入库，变成孤儿。
+  - `state.streaming` 仍有外部读取（composer / hall），保留为「当前会话的派生值」；消息操作的忙判断统一改用 `isStreaming()`，不要再读快照。
+- 验证：新增 `test_notes_move.py` 4 项（改名 / 移动文件夹 / 删除笔记 / 删除文件夹只清子项）；全量 `pytest -q` 通过；`scripts/dev_check.py` 全过；`GM_LIVE_UI=1 pytest tests/test_continue_resume_live.py tests/test_stream_parallel_live.py` 均通过（顺手修正后者把 `newSession()` 当真实会话的过期用法）。
+
+## [2026-11-22] P0-5 第一批：_api_chat 请求入口解析拆分
+
+- 问题/决策：`_api_chat` 约 5163 行单体状态机；先拆「入口参数解析 + 会话定位」（原 2668–2764 行），SSE、模型调用与工具循环保持不动。
+- 解决方案：新增 `app/api/chat_prepare.py`：
+  - `question_policy_of` 移到该模块，`chat.py` 回导，保持测试导入路径不变。
+  - `ChatRequest` dataclass 承载原来的一批局部变量；`parse_chat_request(body, sid, reject, question_policy)` 负责解析 `/plan`、resend / 续写标记、图片 / 文档附件、reuse_* 与空请求校验，并读取会话。
+  - 压缩中 / 空请求 / 无会话的早退统一走传入的 `reject`（由 `_api_chat` 定义，先释放租约），返回 None 表示本轮结束。
+  - 租约认领、`_reject` 与 watchdog 仍留在 `_api_chat`：原子认领是 P0-4 的关键，不藏进新模块。
+- 踩坑：
+  - 新模块不要直接 `import load_config`：`_api_chat` 读配置后把 `question_policy` 传进去，测试或调用方替换 `chat.load_config` 时才仍然生效。
+  - 原块里的 `for it / for im` 等循环变量会泄漏到函数作用域，后续代码有同名复用；拆分时只返回业务字段，不把这些临时变量带出去。
+  - `data`（整份会话）在后续代码里会重新赋值，不是每轮必需；只返回 `s` 即可。
+- 验证：新增 `tests/test_chat_prepare.py`（压缩中 409 / 空请求 400 / 无会话 404 / `/plan` 前缀与图片解析）；全量 `pytest -q` 通过；`scripts/dev_check.py` 全过。
+- 后续批次：附件编辑与续写 / 重发（原 2765–2920）、轨迹与落库（原 2921–3034）。
+
+## [2026-11-22] 聊天正文渲染重构：内联过程组 + 全部正文可见（结构规则）
+
+- 问题/决策：原实现把「最后一次真实工具之后」的正文才算答案，工具前写好的长交付会被折进过程区；流式时任意工具一开始就无条件折走当前正文。参考 DeepSeek Harness（`AssistantMarkdown.tsx`：所有 `text` 块都交给 `MarkdownText`；`reasoning` 独立折叠；`tool-call` 归组）和 Trae 的 part 流，改为**结构规则**：
+  - 所有助手 `text` 块都是正文，按出现顺序内联显示，**不做字数 / 词表语义判定**；
+  - 过程折叠只收 `reasoning` / `tool` / Skill / 子代理；
+  - 提问卡直接进正文流；
+  - 旧消息同样按这个结构渲染。
+- 清理：
+  - 删除 `ANSWER_MIN_CHARS`、`NARRATION_MAX_CHARS`、`PROCESS_CUE_RE`、`ANSWER_CUE_RE`、`isSubstantiveAnswer`、`isProcessNarration`。
+  - 删除后端 `_mark_answer_blocks`、`_is_substantive_answer`、`_is_process_narration`、`_ANSWER_SKIP_TOOLS`、`_block_tool_name` 与 `ans` 标记；blocks 只保留 `text / reasoning / tool`。
+  - `finish` 只是完成声明，不再生成工具卡。
+- 前端（`web/chat.js`）：
+  - `buildBlocksView` 产出有序 `segments`：连续过程块合并成一个 `.process-fold`，每个 text 块都生成正文段；提问卡是 `.content-wrap` 直接子节点。
+  - `buildAiRowFromBlocks` / `buildLiveRow` 按 `segments` 顺序追加；多个过程组只有最后一组显示整轮耗时 / 结束原因。
+  - 目录只在第一个含 ≥3 个标题的正文段插入一次；多段正文之间补 16px 间距。
+- 流式（`web/stream/stream-core.js`）：
+  - `ensureFlow` 从「单个 flowWrap」改为「当前过程组 + `liveFlows` 数组」；每次过程阶段在当前正文段之后新建一组。
+  - `beginProcessPhase` 只收口当前正文段并创建过程组，**不搬走任何文本**；`pushText` 在 `answerClosed` 时新建 `.content`。
+  - `splitAtAsk` 关闭当前过程组，把提问卡插到正文流；`foldLiveProcess` 收尾本轮所有过程组。
+  - `done` 重排会移除本轮所有 live 过程组、正文段、提问卡，再按 `segments` 重建。
+- 踩坑：
+  - 续写不能复用 `row._flowWrap`：那是上一轮的过程组，会把新工具卡塞到旧答案上方；现在每轮用局部 `liveFlows`，开始时清空 `row._flow*` 指针。
+  - `done` 前后会有短暂的 live 旧结构；收尾重建后空 `.content` 段会被清掉，稳定态才是最终排版。
+  - 多过程组后 `row._flowWrap/_flow/_flowHead...` 只能代表「当前组」；历史行指向最后一组，收尾时全部置空。
+  - 目录原来每个正文段各插一次，多段时会重复；改为只对第一个命中的正文段插入。
+- 验证：`pytest tests/test_chat_blocks.py tests/test_resume.py tests/test_stream_stop.py tests/test_continue_resume_live.py -q` 全部通过；`scripts/dev_check.py` 全过；
+  `scripts/ui/repro_process_narration.mjs` 的 A/B/C 场景 + 历史重排 + 提问卡检查全部 PASS（所有 text 均在正文，过程折叠只收工具）；
+  无头 Edge 截图确认「过程折叠 → 正文 → 提问卡 → 正文」的内联顺序、单个目录和间距正常。
+
+## [2026-11-22] 对话 ⇄ 笔记：右侧停靠学习台 + 显式捕获 / 来源回链
+
+- 问题/决策：笔记全屏弹窗会盖住对话，边看边记很割裂。不做「统一文档」或实时双向同步，改为
+  **空间并排 + 数据分离 + 动作显式**：右侧停靠面板、只在你点选时写入、只在你点选时引用。
+- 前端（`web/notes.js` / `web/index.html` / `web/css/notes.css`）：
+  - 默认停靠右侧（420px，可拖 340–760px，记忆在 `gm.notes.dock` / `gm.notes.dockW`）；全屏只作专注模式。
+  - 停靠时隐藏文件树与右栏，顶栏改为紧凑文件下拉 + 「大纲/批注」抽屉；≤900px 自动回退全屏。
+  - 停靠时划词「引用 / 提问引用」不再关闭笔记；全屏时仍先收起再回到输入框。
+  - 对话划词新增「记入笔记」；消息操作条新增「整段记入笔记」；小面板可选当前笔记 / 今日收件箱 / 新建笔记，可填「我的想法」。
+  - 输入框工具栏新增「参考整篇笔记」：当前笔记全文走 `addQuote`（沿用 4000 字上限），仅显式加入本轮。
+- 后端（`app/notes.py` / `app/api/notes.py`）：
+  - `capture_from_chat()` 追加 `## 对话摘录 · HH:MM` 引用块 + 来源行；`target=current|inbox|new`，收件箱为 `学习收件箱/YYYY-MM-DD.md`。
+  - `data/note_links.json` 只记录来源索引（会话 / 消息序号 / 笔记路径 / 摘要 / 时间），不复制会话；同消息同文本按 SHA1 去重。
+  - `rename_path` / `move_note` / `move_path` / `delete_note` / `delete_folder` 同步重映射或清理索引，删除笔记不级联删除对话。
+  - 新接口：`/api/notes/capture`、`/api/notes/captures`。
+- 回链：来源块写入 `[回到对话 #N](/__gm/chat?session=…&msg=N)`；阅读/编辑视图统一拦截该链接，停靠时原地定位消息，全屏时先收起笔记。
+  对话消息在渲染后按会话拉取 captures，挂「已记入笔记」chip，点击打开对应笔记。
+- 踩坑：
+  - Electron 下 `#notes-modal.modal` 原有 `top: var(--tb-h)` 优先级更高；停靠需要额外覆盖为 `calc(var(--tb-h) + 48px)`。
+  - 停靠态写了 `animation: none`，关闭时不会触发 `animationend`，需补 `.notes-dock.modal.closing` 动画，否则要等 300ms 兜底。
+  - 捕获到「当前笔记」前必须先 `saveNoteNow()`，否则服务端追加会和编辑器里的未保存内容互相覆盖。
+  - 内置浏览器面板只有 435px 宽，会走窄屏全屏回退；停靠验证要用 1400px 左右的无头 Edge。
+- 验证：`tests/test_notes_capture.py` + `tests/test_notes_move.py` 共 12 项通过；`scripts/dev_check.py` 全过；
+  无头 Edge（1440×900）实测停靠宽 420、对话列 666px 且无重叠、全屏/停靠切换、右栏抽屉、捕获面板；
+  捕获写入临时笔记后来源块/回链/索引均正确，删除笔记后索引清空；对话消息「已记入笔记」chip 与来源回链定位正常；测试数据已清理。
+
+## [2026-11-22] 删除雾光主题 + 采用 DeepSeek 网页版明暗配色
+
+- 决策：删除 aurora（雾光）整条主题链，只保留浅色 / 深色；配色直接采用 DeepSeek 网页版（chat.deepseek.com）的语义色值。原雾光的「氛围 / 动效」一并下线（系统 `prefers-reduced-motion` 降级仍保留）。
+- 取色方式：用无头 Edge 打开 chat.deepseek.com 登录页，读取 `body[data-ds-dark-theme]` 两种状态下 `--dsw-alias-*` / `--dsw-specific-*` 的计算值，再映射到本站语义 token。
+- 配色（`web/css/tokens.css`）：
+  - 浅色：画布 `#fff`、侧栏 `#f9fafb`、hover `#f1f3f5`、选中 `#ebeef2`、正文 `#0f1115`、强调 `#3964fe`、气泡 `#edf3fe`。
+  - 深色：画布 `#151517`、侧栏 `#1b1b1c`、hover `#2c2c2e`、选中 / 浮层 `#353638`、正文 `#f9fafb`、强调 `#5686fe`、气泡 `#2c2c2e`。
+  - 描边改为黑色 / 白色透明层（浅色 4/10/16%，深色 6/12/20%）；阴影改中性黑，不再带蓝。
+  - 图谱 / 代码块 / 输入框 / 滚动条同步改为 DeepSeek 的冷灰蓝阶。
+- 清理：
+  - 删除 `web/css/aurora.css` 与 `index.html` 中的样式引用、`aurora-atmos` 氛围 DOM、`data-style` / `data-mood` / `data-motion`。
+  - `core.js` 的 `THEME_META` 收敛为 `light/dark`，`normalizeTheme()` 把旧 `aurora` 与未知值统一迁移到 `light`。
+  - 设置页外观区改为「浅色 / 深色」两张主题卡（`data-theme-choice`），移除风格卡、深浅模式行、氛围与动效区块；`settings/theme.js` 删除 `AURORA_MOODS` / `applyMood` / `applyMotion` / `cycleMood` / `syncAuroraPrefs`。
+  - 左下角按钮固定为「深浅」切换；首屏脚本只恢复 light/dark，旧 `gm.theme=aurora` 自动落到浅色。
+- 踩坑：
+  - 设置页关闭按钮是 `closeX.onclick = closeModal`，点击事件对象被当成 `force` 参数传入，导致永远强制关闭、不会回滚未保存的主题预览。改为 `onclick = () => closeModal()`。
+  - 主题按钮原来在 API 回调里才更新 `state.config.theme`，打开设置过快时「已保存主题」还是旧值；改为先同步内存再发请求，失败回滚。
+- 验证：无头 Edge 实测浅色 `rgb(255,255,255)` / 深色 `rgb(21,21,23)`、侧栏与强调色值与 DeepSeek 一致；设置页两张主题卡、取消回滚、`gm.theme=aurora` 迁移均正常，控制台无报错；`scripts/dev_check.py` 全过。
+
+## [2026-11-21] 笔记界面对标 Obsidian：中性皮肤 + 文件树分类（多选 / 拖拽 / 内联重命名）
+
+- 目标：笔记工作区视觉与文件管理交互对齐 Obsidian；存储仍是 `data/notes` 下的 Markdown。
+- 视觉（`web/css/notes.css`）：
+  - 仅对 `#notes-modal` 覆盖语义变量，形成 Obsidian 明/暗皮肤（`--obs-bg/side/text/border/accent` 等），不污染全站主题。
+  - 左栏改为「文件」标题 + 新建笔记 / 新建文件夹 / 排序 / 全部折叠图标行 + 搜索 + 文件树；
+    行高 26px、13px 字号、文件夹优先、当前文件左侧紫色强调条、缩进用 `--depth`。
+  - 编辑区顶部改为路径面包屑（文件夹灰色 / 文件名加粗）；右栏、状态栏、菜单、滚动条一并收敛。
+- 文件树（`web/notes.js`）：
+  - 多选：Ctrl/⌘ 点选、Shift 连选；右键多选给出「移动 N 项 / 删除 N 项 / 取消选择」。
+  - 拖拽：笔记或文件夹拖到任意文件夹行或树空白处（根目录）；自动展开悬停文件夹；禁止拖进自身/子目录。
+  - 内联重命名：双击名称或 F2，Enter 确认、Esc 取消、失焦确认。
+  - 「移动到…」改为 Obsidian 风文件夹选择器（根目录 + 全部文件夹，可筛选），不再手输路径。
+  - 排序（名称 / 修改时间）与文件夹展开状态写入 localStorage（`gm.notes.sort` / `gm.notes.openDirs`）。
+  - 删除文件夹/批量删除按路径前缀去重，当前笔记被删或所在文件夹被删时回到空状态。
+- 后端（`app/notes.py` / `app/api/notes.py`）：
+  - 新增 `move_path()`：同时支持文件和文件夹；校验目标存在、同名冲突、禁止移入自身或子目录。
+  - `/api/notes/move` 支持 `paths` 批量移动，返回 `moved: [{from,to}]` 与逐项错误。
+- 踩坑：
+  - `WS` 初始化时直接调用 `loadOpenDirs()`，而它读取的 `OPEN_KEY` 是后面的 `const`，触发 TDZ，整个笔记脚本加载失败。改为先给默认值，常量声明后再赋值。
+  - 置顶/最近与文件树会出现同一路径的重复行；Shift 连选按可见顺序做区间时要用 Set 去重，DOM 上的 `.sel` 数量不能当作选中数。
+  - 移动/重命名文件夹后，`pins/recents/openDirs/当前笔记路径` 都要按前缀重映射，否则会出现「当前笔记路径失效」。
+- 验证：`tests/test_notes_move.py` 6 项通过（含文件夹移动、自身/子目录、同名冲突）；`dev_check.py` 全过；
+  无头 Edge 实测多选（2 项 / Shift 区间）、F2 重命名、两文件拖入文件夹、文件夹拖入文件夹、
+  文件夹选择器移动到根目录、排序、全部折叠、批量右键菜单，源码/编辑同步与暗色皮肤均正常，控制台无报错；测试数据已清理。
+
+## [2026-11-21] 笔记编辑对齐 Obsidian：三态视图 + 自由分栏 + 输入即格式 / Tab / [[ 补全
+
+- 目标：不改 Markdown 存储，把笔记编辑体验对齐 Obsidian 的常用输入规则与快捷键。
+- 视图与分栏（`web/index.html` / `web/notes.js` / `web/css/notes.css`）：
+  - 模式改为 `编辑 / 源码 / 阅读` 三态，`分栏` 独立开关；分栏条可选左右各自视图，默认左编辑右阅读。
+  - 分栏、单栏模式、左右选择都存 localStorage（`gm.notes.view` / `gm.notes.split` / `gm.notes.splitLeft` / `gm.notes.splitRight`）。
+  - 约束：`编辑` 与 `源码` 是两种可编辑内核，可同时出现在左右两栏；同一类型不能重复，重复时另一栏自动改为阅读。
+  - 窄屏 ≤1160px 隐藏分栏入口，打开工作区时自动退出分栏，避免只剩阅读栏无法编辑。
+  - 阅读栏改为按需创建 `.nt-read-box`（不再共享 `#nt-preview-box`）；预览、批注、SelKit 选区、双链点击都改为遍历/代理多个阅读栏。
+- 编辑器（`web/notes-blocks.js`）：
+  - 输入即格式：`# ` / `## ` / `### `、`- `、`1. `、`> `、`- [ ] `、代码围栏（三个反引号）立即转块；输入 `---` / `***` / `___` 后回车转分割线。
+  - Tab / Shift+Tab：列表与待办用 `meta.indent` 缩进（每级 22px），回车续行继承缩进；代码块 Tab 插入两空格、Shift+Tab 去两空格。
+  - 列表缩进写入 Markdown 为每级两个空格；`parse` 不再把缩进的列表行并进上一项，改为独立块并保留 `indent`。
+  - `[[` 输入时弹出笔记库补全（`opts.wikiSearch`），↑↓ 选择、Enter/Tab 插入、Esc 关闭。
+  - Ctrl+K 插入外链（有选区时以选区为文字），Ctrl+B/I/S/E 保持。
+- 踩坑：切到源码/阅读后，编辑器 DOM 会被 `mountPanes()` 移出文档；此时 `document.querySelector('#nb-editor')` 已经找不到它，再切回编辑会变成空白阅读栏。解决：模块内缓存 `editorEl` / `sourceEl`，统一用 `edNode()` / `taNode()` 取节点。
+- 验证：`scripts/dev_check.py` 全过；无头 Edge 实测 `# `、`- `、`> `、代码围栏、`---` 输入转换，Tab/Shift+Tab 缩进与续行继承，`[[target` 补全并插入 `[[_ui_obsidian_target]]`，三态切换、分栏左右选择与源码↔编辑同步均正常，控制台无报错；测试笔记已删除。
+
+## [2026-11-21] 轨迹 P1：全量轮次索引 + 全量搜索 + 聊天侧入口
+
+- 现状：轨迹只加载最近 8 轮，左侧导航和搜索都只看已加载 cells；入口藏在检查器里。
+- 后端：
+  - `trajectory.turn_index()` → `/api/trajectory/turns`：全量轮次摘要
+    （steps / tools / errors / writes / subagents / reviews / tokens / title / reason）。
+  - `trajectory.search()` → `/api/trajectory/search`：直接扫事件账本
+    （user / assistant / reasoning / tool 参数与结果 / review / plan），
+    支持 kinds / tool / errors / writes / subagent 过滤、分页与 LRU 缓存。
+  - `/api/trajectory` 支持 `turn=N`：直接加载该轮窗口（内部转成 `before=N+1`）。
+  - 新增用户消息 `traj_turn` 落库，作为聊天 → 轨迹的定位锚点。
+- 前端：
+  - `web/trajectory.js`：左侧 rail 改用全量轮次索引；点击未加载轮次 `jumpTurn(n)` 直接拉取；
+    搜索框改为服务端全量搜索，结果按轮次分组，点击跳到命中 cell。
+  - `web/chat.js`：AI 消息操作条新增「查看轨迹」，按最近一条 user 消息的 `traj_turn` 打开。
+  - `web/css/trajectory.css`：新增 `.traj-hit` 搜索结果样式。
+- 验证：`tests/test_trajectory.py` 14 项通过（含 turn_index / search / API 路由）；
+  `node --check` 与 `scripts/dev_check.py` 全部通过。
+- 备注：后端改动需重启应用生效；UI 的轨道路径需要在重启后人工点一次验证。
+
+## [2026-11-21] 轨迹 P2/P3：时间线回放 + 观测抽屉 + 检查器收起 + 懒渲染 / 移动端 / HTML 导出
+
+- 目标：主视图从「三栏流水表」改为时间线回放，降低查看成本；长会话不卡；手机上可用。
+- 前端结构（`web/trajectory.js` / `index.html` / `trajectory.css`）：
+  - 工具栏新增「时间线 / 列表」分段切换（`T.view`，默认 timeline）与「观测 / 检查器」开关。
+  - 时间线：轮次卡（标题取首个 user 消息）→ 步骤卡（序号 / 标题 / token / 耗时 / 失败）→
+    记录行（类型色点 + 标题 + 元信息）；点击记录在本行内联展开输入 / 思考 / 输出 / 差异 / Schema，
+    正文超过 6000 字截断并提示用检查器。
+  - 观测图表改为覆盖在流水区上的抽屉（默认关闭），旧「收起」按钮改为「关闭」。
+  - 右侧检查器默认收起（`ins-off`），需要时从工具栏或内联详情的「检查器」按钮打开。
+  - 懒渲染：步骤 body 先留空，用 IntersectionObserver（root=流水区，rootMargin 600px）
+    进入视口才生成 cell；`gotoTurn/select/搜索跳转` 会先 `revealCell()` 补齐再定位。
+  - 移动端：≤1080px 轮次导航变左侧抽屉（顶栏「轮次」开关）；≤900px 检查器变底部弹层。
+- 后端（`app/trajectory.py` / `app/api/trajectory.py`）：
+  - `trajectory.export_html(sid)`：自包含只读 HTML（内联 CSS、浅/暗自适应、
+    轮次/步骤/记录 `<details>` 摘要），`/api/trajectory/export` 增加 `format=html`。
+  - 导出菜单新增「导出 HTML（只读页面）」。
+- 验证：
+  - `tests/test_trajectory.py` 14 项通过；`scripts/dev_check.py` 全过。
+  - 无头 Edge 实测当前会话（424 轮 / 58 个已加载步骤）：时间线渲染 118 条记录，
+    58 个步骤 body 中仅 26 个按视口生成（懒渲染生效）；内联详情、观测抽屉、检查器、
+    列表视图、移动端轮次抽屉均正常，控制台无报错。
+  - `export_html` 单测脚本验证：内容含 `<details>`、HTML 转义正确、结构闭合。
+- 备注：后端导出 HTML 需重启应用生效。
+
+## [2026-11-21] 修复：只读轮次被历史 missing_files 误判 + 文件监控去重
+
+- 现象：turn 8 只读审计 `written=0`、`changed_files=[]`，验收仍报
+  「写过的文件在磁盘上找不到：architecture.html、app/agent.py」；
+  两项都是前几轮写过、现在不存在的文件。
+- 根因：`missing_written_files()` 扫描整个会话的 undo 记录；
+  `_review_facts()` 无条件把它当成本轮硬伤。
+- 修复：
+  - `missing_written_files(..., since=None)` 增加时间过滤：只统计 `since` 之后的写操作。
+  - 回合开始记录 `_turn_wall0`；`_review_facts` 仅在本轮有写入时检查缺失，
+    且只查 `since=_turn_wall0` 之后的写操作（只读轮次 missing_files 恒为空）。
+  - 文件监控警告按会话去重：`file_watch_warned` 只保留当前仍缺失的路径，
+    历史遗留只提醒一次；恢复 / 主动删除后移出集合，下次再丢失会重新提醒。
+- 相关代码：`app/agent/tools_files.py`、`app/api/chat.py`（`_review_facts` /
+  `_file_watch_new`）、`tests/test_agent_recover.py`、`tests/test_chat_blocks.py`。
+- 验证：新增 `since` 过滤测试与文件监控去重测试；
+  `test_agent_recover` / `test_chat_blocks` / `test_agent_accept` / `test_quality_gate`
+  全过；`scripts/dev_check.py` 全部通过。
+
+## [2026-11-20] 审批档位改为回合内实时生效
+
+- 问题：`approval_mode` 在回合开始时只读一次，运行中在设置 / 工具栏改档位要等下一轮
+  才生效；而且回合收尾落库时，旧的内存快照可能把新档位覆盖回去。
+- 解决：
+  - `/api/session/agent` 改审批档位也写 live flags（与 agent_enabled / sandbox 同一份）。
+  - 主循环每轮 `take_live_flags` 后同步 `approval_mode` / `_unrestricted`；
+    每个工具批次开始前再 `peek_live_flags` 一次，覆盖「模型生成期间改档位」的情况。
+  - 档位变化时重建 native tools（full 会增减 git_commit）。
+  - `_persist_session` 合并 live 的 approval_mode，避免旧快照覆盖。
+- 相关代码：`app/api/sandbox.py`、`app/api/chat.py`（`_sync_approval_from_flags`）、
+  `tests/test_ask_card.py`。
+- 验证：`test_ask_card` / `test_agent_guards` / `test_gal_scope` 全过；
+  `scripts/dev_check.py` 全部通过。
+- 备注：子代理 / 工作流通过 `_wf_make_env` 注入 `approval_now`，
+  `_wf_exec_node` 每次执行前刷新 env 里的档位；长任务里改档位也会在下一次工具执行时生效。
+
+## [2026-11-20] 性能：模式切换去掉 View Transition + IDE 文件树缓存
+
+- 实测（1440×900，Edge/Chromium）：solo↔ide 的 View Transition 314–379ms；
+  直接切换 + 淡入 22–31ms；前端渲染 2000 行文件树约 30ms；
+  后端冷缓存全量扫盘 330–500ms。
+- P1：`applyUiMode` 的顶层模式切换不再走 `gmPageTransition`（快照 #main），
+  改为直接 `applyUiModeNow` + `gmPageIn`；`gmPageTransition` 保留给大厅 / 工作台内部切换。
+- P2：`TREE_TTL` 3s → 12s。写 / 删 / 移动已有 `invalidate_tree` 主动失效，
+  IDE 每 5 秒轮询不再每次重扫；实测 4.5s 后第二次取树 1.6ms。
+- P3：`loadIdeTree` 用 `state.ideTreeSid` / `state.ideTreeSig` 去重；同会话内容未变时
+  保留已渲染 DOM，不再每次进 IDE 都重建 2000 行。
+- P4：Electron 启动时把 `app.getGPUFeatureStatus()` 写入 `data/desktop.log`，
+  用于确认 `gpu_compositing` 是否启用（软件渲染会放大切换与毛玻璃开销）。
+- 相关代码：`web/ide-core.js`、`web/core.js`、`app/agent/sandbox.py`、`desktop/main.js`。
+- 验证：`node --check` 通过；性能脚本 `switch_ms = 31ms`；`scripts/dev_check.py` 全部通过。
+- 备注：后端 TTL 与 Electron 日志需要重启应用生效；前端改动刷新页面生效。
+
+## [2026-11-19] 工具名口径：能力工具强制按 schema 下划线名调用
+
+- 问题/决策：模型会按内部 canonical 能力 id 写点号（calendar.list），而 schema 下发的是
+  `calendar_list`。点号不符合主流 function name 约束，且服务商一旦因此 400，会触发
+  `native_fell_back` 丢掉整批 tools、降级文本协议；所以**不删** dot→underscore 转换。
+- 解决（选 C：只收紧提示词）：能力边界提示增加一句「调用工具必须使用清单里的名字原文，
+  能力工具是下划线形式（calendar_list / memory_apply），不要写点号（calendar.list）」。
+  仅在挂了能力工具时注入（`cap_names`），紧凑模式不占提示词预算。
+- 相关代码：`app/agent/prompt.py` 的 `_TOOL_NAME_RULE` / `capability_boundary` /
+  `build_agent_prompt`。
+- 验证：新增提示词断言；`test_prompt_budget` / `test_prompt_assembly` 通过；
+  `scripts/dev_check.py` 全部通过。
+
+## [2026-11-19] 验收契约按任务作用域隔离
+
+- 问题/决策：`s["acceptance"]` 只在模型主动 `acceptance(clear)` 时清空，跨任务一直保留；
+  `_review_facts` 又把会话里全部旧 criteria 注入任务书，旧项若非 passed
+  会变成新任务的永久硬伤（turn 417 的 facts 里还带着简历任务的 5 条）。
+- 解决：
+  - `chat_accept._acceptance_criteria(s, scope=None)`：给 scope 时只返回同作用域
+    的验收项；没有 scope 字段的旧契约直接忽略（status 查看仍可见）。
+  - `chat_accept._acceptance_scope(plan)`：用计划 goal 当作用域。
+  - `acceptance(set)` 写入 `scope`；`_plan_tool` 在“先 set 后建计划”时补绑当前 goal；
+    已绑定旧 goal 的契约不迁移，换任务自动失效。
+  - 验收事实、验收提醒、计划↔验收联动三处都按当前作用域过滤。
+- 相关代码：`app/api/chat_accept.py`、`app/api/chat.py`。
+- 验证：新增作用域 / 旧契约测试；`test_acceptance`、`test_quality_gate`、
+  `test_agent_accept`、`test_chat_blocks`、`test_agent_guards`、
+  `test_agent_plan`、`test_native_tools` 全过；`scripts/dev_check.py` 全部通过。
+- 备注：验收代理自己的工具调用目前不落轨迹（只有 SSE `review_tool`），
+  无法事后确认它当时到底用了哪个名字；要定位这类问题需补轨迹记录。
+
+## [2026-11-19] 修复：只读 / 对话模式下 finish 描述误导模型
+
+- 现象：教学对话（用户只说「下一个」）里，模型在思考中反复权衡要不要调 `finish`，
+  并引用「仅写正文、不调任何工具就停下会被系统判成未完成」。
+- 根因：这句话来自 `finish` 的工具描述，不是系统提示。只读模式（Agent 关 + 保留沙箱）
+  的 schema 仍用 `agent_on or read_on` 构建并下发 `finish`，但系统提示不含
+  `_FINISH_PROMPT`，且 `_needs_finish_nudge` 要求 `agent_on` 且本轮用过工具——
+  实际根本不会催收。
+- 解决：`finish` 描述按 `read_only` 分两种口径：只读 / 对话模式明确「直接写正文结束即可，
+  不会被判未完成」；Agent 模式补「只有本轮用过工具才要求 finish，纯聊天直接正文即可」。
+- 相关代码：`app/agent/schemas.py` 的 `native_tool_schemas`（finish 定义前）。
+- 验证：两种模式描述检查；`test_native_tools` / `test_agent_guards` /
+  `test_agent_plan` / `test_quality_gate` 全部通过。
+
+## [2026-11-19] 验收代理：reviewer 补充项改为「视情况补充」
+
+- 问题/决策：`REVIEW_SYSTEM` 原写「source=reviewer：你自己补充的检查（1–4 条）」，
+  固定条数会诱导验收代理为凑数补充与任务无关的检查（本次复盘任务出现了
+  「把结果写成沙箱内文件」这类额外证据形式要求，导致多一轮返工）。
+- 解决：改为「根据任务书与上文理解，视情况补充（有几条写几条，不必凑数；
+  没有补充就不写）」，severity 仍默认 advisory、不否决交付。
+- 相关代码：`app/quality_gate.py` 的 `REVIEW_SYSTEM`。
+- 验证：`tests/test_quality_gate.py` 27 项通过。
+
+## [2026-11-19] 修复：设置里子代理开关点不动 / 误打开编辑器
+
+- 现象：点子代理行上的开关（可见轨道）没有切换启用状态，反而打开了编辑器。
+- 根因：开关结构是 `label.ui-switch > input + span.ui-switch-track`；
+  只有 `input` 的 click 阻止了冒泡，点可见的 `span` 轨道时 click 冒泡到整行，
+  触发 `row.onclick = open()` 打开编辑器；label 的默认切换仍会发生，但被编辑器盖住，看起来像开关失效。
+- 解决：`web/agents.js` 建 `label.ui-switch` 时加 `sw.onclick = e => e.stopPropagation()`；
+  label 默认的「点击切换 checkbox」仍然生效，行点击只在非开关区域打开编辑器。
+- 验证：headless 探针点 `.ui-switch-track`：编辑器保持隐藏，checkbox 与
+  `/api/agents` 的 `enabled` 同步变化；`scripts/ui/settings_interaction.mjs`
+  与 `scripts/dev_check.py` 通过。
+
+## [2026-11-19] 修复：设置页按需挂载后「子代理」列表不显示
+
+- 现象：设置 → 能力与工具 → 子代理与流程里，子代理列表为空。
+- 根因：设置页改成按需挂载后，`agents` 这个静态 pane 经常处于 detached 状态；
+  `openModal()` 里提前调用的 `loadAgents()` 找不到 `#agents-list`，直接 return；
+  之后切到「子代理与流程」虽然把 pane 挂回来了，但不会再次拉列表。
+- 解决：`web/settings/search.js` 的 `setSettingsTab()` / `setSettingsSub()`
+  在可见 pane 包含 `agents`、且 `attachPane` 完成后再调用 `loadAgents()`。
+- 验证：headless 探针第二次打开设置 → 能力与工具 → 子代理与流程，
+  `#agents-list` 显示 13 个代理；`scripts/ui/settings_interaction.mjs`
+  与 `scripts/dev_check.py` 全部通过。
+
+## [2026-11-19] 内置 Skill：编码四律（CLAUDE.md）
+
+- 需求：把用户提供的 CLAUDE.md 四条编码行为守则做成内置 Skill。
+- 来源：Andrej Karpathy 的 CLAUDE.md（GitHub 上广泛传播的版本），
+  四条守则为 Think Before Coding / Simplicity First / Surgical Changes /
+  Goal-Driven Execution；原文完整保留在 Skill 正文里。
+- 实现：
+  - 新增预设 `resources/presets/skills/coding-discipline/SKILL.md`，
+    frontmatter：name=编码四律，包含触发 description / keywords / enabled；
+    正文补了本项目里的执行顺序与交付检查。
+  - `tests/test_skills.py` 的 PRESET_IDS 增加 `coding-discipline`。
+  - 已跑 `skills.seed_defaults()` 并同步到 `data/skills/coding-discipline`，
+    当前会话的设置 → Skill 列表应该能直接看到。
+- 验证：`tests/test_skills.py` 全过；Skill 元数据读取正常。
+
+## [2026-11-19] 子代理 / Skill / 提问卡移入过程折叠
+
+- 需求：这三类卡片和审批卡一样放进过程折叠，按事件顺序对应到具体步骤。
+- 改动：
+  - 实时流：`subagent_start` 先 `foldSegmentToProcess('subagent')` 再 append 到
+    `ensureFlow()`；Skill 工具同样进 flow；提问卡 `splitAtAsk` 先把提问前旁白折进
+    过程区，再把卡片放进 flow，答案区继续承接后续输出。
+  - 历史重建：`buildBlocksView` 把 ask / Skill / 后台探索批次按 block 顺序直接
+    append 到 `chat-flow`；`asks` 单独返回，`buildAiRowFromBlocks` /
+    `buildLiveRow` 使用 `view.asks`，不再把 Skill 卡追加到正文外。
+  - 懒展开：特殊卡在懒加载前先建；展开工具列表时 `buildToolCards(..., true)`
+    跳过已放进过程流的提问卡，避免重复。
+  - `processStats` 统计 tool / subagent / explore-batch / skcard / ask-card；
+    折叠头的「N 步」包含这些卡片。
+  - 没有 blocks 的旧消息仍走原 `buildAiRow` 排版，不做迁移。
+- 验证：
+  - headless 探针构造 reasoning + 旁白 + ask + skill + explore + 答案：
+    ask/skill/explore 的 `closest('.process-fold-body')` 均为真，
+    折叠头显示「3 步 · 3 次工具」，正文 parts 仍只有最终答案。
+  - `scripts/dev_check.py` 全绿（含前端语法 / Markdown / 快捷键回归）。
+
+## [2026-11-19] 修复：提问卡粘贴附件泄漏到主输入框 + 两处引用边界
+
+- 现象：在提问卡里粘贴附件并提交后，主输入框出现「待发送 附件 1」。
+- 根因：`init.js` 在 `document` 上监听 `paste`，任何位置粘贴文件都会追加到主输入框；
+  提问卡自己的 `paste` 处理只 `preventDefault()`，没有阻断冒泡，于是同一份文件
+  同时进了提问卡和主输入框。
+- 解决：
+  - 提问卡 `ask-input` 的 `paste` 增加 `stopPropagation()`；附件只留在卡片内。
+  - `fileref.expand()` 去掉「必须先有沙箱」的限制：没有目录时 `@绝对路径`
+    仍能读取（与只读模式一致）；相对路径保持原文不动（`_read_one` 返回 None）。
+  - `fileref.from_client()` 给展开后的引用补 `type`（file/code/terminal/git/
+    problems/rule/doc/memory）；`folder_refs()` 的每个文件标 `type=file`；
+    `_past_chat_ref()` 标 `type=chat`；`_refs_public()` 回传时保留 `type`，
+    前端刷新后仍能按类型选图标 / 判断能否点开。
+- 验证：
+  - headless 探针：往提问卡粘贴 `粘贴测试.txt`，卡片附件 1 个，主输入框
+    `state.pendingDocs=0`、附件 chip 0 个。
+  - 新增 `test_expand_absolute_path_without_sandbox`、类型保留断言；
+    全量 `pytest`、`ruff check`、`scripts/dev_check.py` 通过。
+
+## [2026-11-19] 修复：「添加到对话」引用丢失 / 对话记录不显示
+
+- 现象：点「添加到对话」后引用条出现，但发送后模型没看到引用，对话记录里也没有；
+  切换会话后再发，引用同样没有生效。
+- 根因：
+  - `loadComposerDraft` 调用了不存在的 `renderQuotes()`（实际函数名是
+    `renderQuoteBar`），切会话时引用条不刷新：界面还显示上一个会话的旧引用，
+    但 `state.pendingQuotes` 已经是空数组，发送时引用被丢掉。
+  - 引用只拼进本轮请求、不写入用户消息，所以气泡 / 刷新 / 重新发言 / 下一轮追问
+    都看不到引用。
+  - 发送与排队只传 `{text}`，`addQuote(text, label)` 的来源 label 被丢掉。
+- 解决：
+  - 修正 `renderQuoteBar` 调用，切会话时按当前会话的 pendingQuotes 重建 / 隐藏。
+  - `context.normalize_quotes` / `quotes_block`：引用按上限规整后挂到用户消息
+    `quotes` 字段，由 `_msg_text` 统一注入；历史、追问、重新发言、分支都保留。
+  - 用户气泡渲染可折叠「引用 · N」块（短引用默认展开）；纯引用消息补占位文案。
+  - 发送 / 排队 / 队列编辑保留来源 label；前端先渲染一份 echo，服务端落库后一致。
+- 验证：
+  - headless 探针：切会话后旧引用条消失；请求体含 `{text,label}`；
+    用户气泡出现「引用 · 1」与原文；草案发送保留引用。
+  - 新增 `test_context_injects_stored_quotes_with_label` 等；
+    全量 `pytest`、`ruff check`、`scripts/dev_check.py` 通过。
+
+## [2026-11-19] 修复：Agent 关闭但留有沙箱时模型误以为没有文件能力
+
+- 问题：会话 `s_2eed2dd969cf` 已设置沙箱目录，但 `agent_enabled=false`。模型在
+  reasoning 里说「我在对话模式，没有文件工具」，并引用系统提示
+  「当前模式：对话（没有文件 / 命令工具）」。
+- 根因：
+  - `chat.py` 只按 `agent_enabled` 决定文件能力；`read_on` 只覆盖「Agent 开 + 无目录」，
+    「Agent 关 + 有目录」既没有全量工具，也没有只读工具。
+  - `build_agent_prompt` 只判断 `agent_enabled`，因此即使沙箱路径还在，
+    也会注入 `_NO_AGENT_CAPABILITY` 的「对话模式」文案。
+  - UI 在 Agent 关闭时隐藏沙箱按钮，但保留目录，界面上看不到这个矛盾状态。
+- 解决：
+  - `chat.py`：`read_on` 改为「Agent 与沙箱恰好有一个」；中途实时开关的
+    `_read_live` 同步修改；只读模式下保留读取类意图提示。
+  - `prompt.py`：新增「未开启 Agent，仅只读」分支，说明沙箱内相对路径 /
+    沙箱外绝对路径；「对话模式没有文件工具」只在 Agent 关且无目录时注入；
+    决策提示按是否有沙箱选择路径写法。
+  - 写入 / 删除 / 命令仍然要求 Agent + 沙箱，不受影响。
+- 验证：
+  - 新增 `test_prompt_tells_read_only_when_agent_off_with_sandbox`；
+    原有只读、schema、prompt 测试通过；
+  - 全量 `pytest`、`ruff check`、`scripts/dev_check.py` 通过。
+
 ## [2026-11-18] 3.5 发布与 GitHub 推送网络问题
 
 - 问题：本机直连 `github.com:443` 超时（curl 28）；`api.github.com` 正常，
@@ -350,6 +1878,8 @@
   当前会话已还原。
 
 ## [2026-11-16] 修复：流式期间长过程旁白留在正文 / 停止后正文全是旁白【已修复】
+
+> 已过时：2026-11-22 改为「所有 text 都是正文」的结构规则，不再有答案/旁白判定；见顶部条目。
 
 - 问题/决策：截图里 `过程 · 已停止` 下方是一大段「先摸清两件事…先更新计划…开始写页面…」，
   用户补充「流式期间这个过程性说明也会出现」。定位到工作区未提交的那轮「答案归属改成多处标记」：
@@ -5814,6 +7344,8 @@
   `web/chat.js:1443-1457/1486-1499/1500-1540/1587-1597`、`web/init.js:983-998`。
 
 ## [2026-11-12] 修复：finish 后被自动续跑 / 验收返工，正文被当作过程折叠
+
+> 已过时：2026-11-22 改为「所有 text 都是正文」的结构规则，不再有答案/旁白判定；见顶部条目。
 - 现场：会话「模拟」中完成时间 09:54:55 的一条消息（blocks 114 / tools 82）答案区为空，全部正文进过程折叠。
   末尾块序列：104 reasoning → 105 run_command → 106 text(98) → 107 reasoning → 108 edit_file →
   109 reasoning(427) → **110 finish**（工具返回带「【验收子代理】未通过 · 40 分」）→ 111 reasoning(3105) →
@@ -6625,8 +8157,10 @@
   - 按需加载：动态插入脚本时 `async=false` 保证组内执行顺序，`Promise.all` 并发下载；
     组只加载一次并缓存。
   - **关键坑**：xterm.js / addon-fit.js 是 UMD，`define.amd` 存在时会注册成 AMD 模块而不是全局变量。
-    Monaco 的 `loader.js` 会安装 `define.amd`，所以必须**先加载 xterm、再调用 `ideInitOnce()`**；
+    Monaco 的 `loader.js` 会安装 `define.amd`，所以要保证 xterm 先于 `ideInitOnce()` 加载；
     否则终端报 `Can only have one anonymous define call per script file` 且 `window.Terminal` 为空。
+    2026-11-24 起 `feature-loader.js` / `loadLazyLib` 已在加载 UMD 脚本时统一隐藏 `define.amd`，
+    顺序不再是唯一保障（见「修复编辑器代码偶发纯白」条目）。
   - 兼容性兜底：通知跳工作台任务先加载 work 组；设置里的备份按钮首次点击加载 work 组；
     插件入口在 `ui-shell.js` 兜底绑定；`?hall=<id>` 等大厅组加载完再打开模块。
   - 大厅去重：`.hall-title` / `.work-title` 始终隐藏（顶栏已有），`.hall-sub` 保留为模块说明；
@@ -7074,3 +8608,1128 @@
   - `ALIASES` 让 searcher / worker 复用 researcher / implementer；要单独定制时，
     在项目或用户目录放同名 `.md` 即可覆盖。
   - 未实现 `model-policy` / `strict-tools-list` / `skills` 预加载 / `include-custom-instructions`。
+
+## [2026-11-25] 笔记索引：搜索 / 反链 / 图谱 / 改名不再全量读盘
+- 问题/决策：
+  - 笔记库是普通 Markdown，没有任何索引：`search`、`graph`、`backlinks`、`_name_index`、
+    重命名时的 `_rewrite_links` 每次都 `os.walk` + 读全部文件；搜索框每敲一次都重来一遍。
+  - 方案：内存索引 + mtime/size 指纹。每次调用仍列目录（成本低），但内容没变就复用上次读到的文本。
+- 实现（`app/notes.py`）：
+  - 新增 `_INDEX = {rel: {mtime_ns, size, text, title, stem, links}}`，`_INDEX_LOCK`（RLock）保护。
+  - `_refresh_index()`：os.walk + os.stat，`st_mtime_ns`/`size` 都没变的条目直接复用；
+    消失的文件顺手剔除；`_INDEX_ROOT` 与当前 `NOTES_DIR` 不一致时整表清空（测试 monkeypatch 目录靠这个隔离）。
+  - `_notes_meta()` 返回浅拷贝供调用方遍历；`_all_notes()` 兼容旧接口，改为从索引拼 `{rel: text}`。
+  - `search` / `graph` / `backlinks` / `_name_index` / `_rewrite_links` 全部改用索引里的
+    `text` / `title` / `stem` / `links`，不再各自解析全文；输出结构不变。
+  - 写入路径精确失效：`write_note` / `create_note` / `delete_note` / `delete_folder` /
+    `rename_path` / `move_note` / `move_path` 成功后调 `_invalidate_index(rel[, is_dir])`；
+    外部编辑器改动靠 mtime+size 发现（显式失效是兜底，同 mtime 同 size 的极端情况才可能滞后）。
+- 验证：
+  - 新增 `tests/test_notes_index.py`（缓存命中不重读、外部改写后刷新、写/删失效、改名迁移、
+    图谱与幽灵节点、切换笔记根目录清表）；笔记相关 4 个测试文件 + 全量 pytest 通过，ruff 通过。
+  - 真机 `data/notes`（9 篇）：search 冷 2.0ms → 热 0.7ms，graph 热 0.7ms。
+- 备注 / 未做：
+  - 索引常驻内存（纯文本，个人笔记量级可忽略）；没有做容量上限 / LRU。
+  - `write_note` 的原子写已补上，见下一条。
+
+## [2026-11-25] 笔记原子写：临时文件 + os.replace
+- 问题/决策：
+  - 原来 `write_note` / `create_note` 直接 `open(..., "w")`，先截断再写；
+    写一半崩溃 / 断电 / 磁盘写满会留下空文件或半截笔记，编辑器 900ms 自动保存会反复触发这个窗口。
+  - 方案：同目录 `tempfile.mkstemp` 写完后 `os.replace` 覆盖目标（同盘 rename，Windows 上是原子的）。
+- 实现（`app/notes.py`）：
+  - 新增 `_atomic_write(p, text)`：mkstemp(prefix=".gm-", suffix=".tmp") → `os.fdopen(..., "w", encoding="utf-8")`
+    → `os.replace`；失败时删临时文件并把 OSError 抛回调用方。
+  - `write_note` / `create_note` 改走它，其余行为（错误提示、索引失效、返回值）不变。
+  - 临时文件名以 `.` 开头：`_refresh_index` 与 `list_tree` 本来就跳过隐藏文件，不会把半截临时文件当笔记。
+- 验证：
+  - 新增 `tests/test_notes_write.py`：写完无残留 tmp、`os.replace` 失败时旧内容完好且临时文件被清理、
+    新建笔记同样原子；笔记相关 5 个测试文件 + 全量 pytest 通过，ruff 通过。
+- 备注 / 未做：
+  - 未做版本备份 / 回收站；`os.replace` 在目标文件被其它程序独占打开时仍会失败（与旧行为一致，返回 False）。
+
+## [2026-11-25] 下线图片生成（本地 ComfyUI）
+- 问题/决策：
+  - 图片生成依赖本机 ComfyUI + FLUX 工作流，属于可选功能；确认不再需要，整体移除，避免设置页与工作台留死入口。
+- 删除内容：
+  - 后端：`app/image_gen.py`、`app/api/image.py`（含 `/api/image/status`、`/api/image/generate`、能力 `image.generate`），
+    `app/httpd.py` 的模块导入；`app/config.py` 里 `image_enabled` / `image_comfy_url` / `image_workflow` /
+    `image_timeout` / `image_dir` 五个默认键，并整组加入 `_OBSOLETE_KEYS`（下次保存设置时自动从 config.json 清掉）。
+  - 前端：工作台「更多 → 图片」按钮与 `workOpenImageDialog()`；设置页「图像」pane、侧栏子项、
+    `SETTINGS_PAGES` / `SETTINGS_TAB_ALIAS` / `STATIC_RESET_KEYS` / `SETTINGS_PANE_SECTIONS` 里的 image 条目；
+    设置保存与回填里的 `image_*`；命令面板的「图片生成」入口。
+  - 测试：`tests/test_image_gen.py`。文档：`readme.md` 三处功能表 + 6.9 节（后续 6.10/6.11 顺延为 6.9/6.10）。
+- 保留：
+  - `image_compare` / `image_analyze` / `see_image` 等「看图」类工具与产物图片预览（与生成无关）。
+  - `NOTE.md` 里 FLUX / ComfyUI 的调研笔记、`NOTES.md` 历史条目、`docs/UI_REFACTOR_PLAN.md` 的历史规划表（仅作历史记录，未改）。
+- 验证：
+  - `python -c "import app.httpd"` 正常；全量 pytest（ignore archify）通过；ruff 通过；改动的前端文件 `node --check` 通过。
+  - 本地 `data/config.json` 仍残留 `image_*` 键：不主动改用户配置，下次在设置页保存时由 `_OBSOLETE_KEYS` 清掉。
+
+## [2026-11-25] 下线 B 站数据读取
+- 问题/决策：
+  - B 站读取（视频信息 / 官方总结 / 字幕 / 弹幕 / 评论 / UP 主投稿）依赖 SESSDATA 与本机直连接口，
+    确认不再需要，整体移除；能力域与提示词里的 `bili.*` 一并清掉，避免模型调到不存在的工具。
+- 删除内容：
+  - 后端：`app/bilibili.py`（含 bili.analyze / transcript / danmaku / comments / timeline / up 六个能力）、
+    `app/api/bili.py`（`/api/bili/status`）、`tests/test_bilibili.py`；`httpd.py` 与 `task_engine.py` 的模块导入。
+  - 配置：`bili_sessdata` / `bili_comment_pages` 默认键删除并加入 `_OBSOLETE_KEYS`（下次保存设置清掉旧值）；
+    `agent_cap_tools` 注释里的 bili 域、`agent_hall_prompt` 注释里的 B 站说明同步更新。
+  - 提示词 / 路由：`agent/prompt.py` 的 `_bili_hint` 与 `intent_hint` 注册项、B 站工具使用约定段、
+    非 hall 模式过滤 `("stock.", "bili.")`；`agent/groups.py` 的 `TOOL_ALIASES` bili 别名与 `_CAP_NAMESPACES`；
+    `api/chat_nudge.py` 的 `_CAP_DOMAIN_KEYS["bili"]`；`main.py` 的代码热重载文件列表。
+  - 前端：`settings/panes-infra.js` 的 `buildBiliPane()`（SESSDATA / 评论页数 / 测试登录）、
+    `settings/modal.js` 的挂载与「B 站（可选）」分区、`settings/core.js` 的页面描述、
+    `settings/dirty.js` 与 `index.html` 里「B 站 SESSDATA 会保留」的文案、设置搜索关键词与空态提示、
+    `settings/panes-agent.js` 的大厅提示词说明。
+  - 测试：`test_agent_intent.py`（B 站意图用例与 bili.up 断言）、`test_agent_tool_format.py`（示例工具换成 memory.search）、
+    `test_prompt_budget.py`（bili 域改为 calendar / stock 域校验）、`test_hall_prompt.py`（去掉 bili 样例行）。
+  - 文档：`readme.md` 功能表 / 6.6 节 / 设置页说明 / 出网说明 / 目录树里的 bilibili 条目。
+- 保留：
+  - 功能大厅「图寻」里的 AI 角色「宇科君（tag=B站）」：只是角色来源标签，不调用 B 站接口，`tests/test_hall.py` 仍覆盖。
+  - `NOTES.md` / `NOTE.md` 历史记录与 `docs/` 下的历史规划文档未改。
+- 验证：
+  - `python -c "import app.httpd; from app import task_engine"` 正常；全量 pytest（ignore archify）通过；
+    ruff 通过；改动的 6 个前端文件 `node --check` 通过；全仓 grep 只剩大厅角色 tag 与 `_OBSOLETE_KEYS` 中的键名。
+
+## [2026-11-25] 设置页重构：一页一主题 + 高级卡片默认折叠
+- 问题/决策：
+  - 原结构 6 页里 3 页是「拼盘」：模型与对话 = 接口 + 上下文；界面与提醒 = 外观 + 语音 + 快捷键 + 主动聊天；
+    数据与用户 = 用户规则 + 手机 + 系统维护。
+  - 「能力与工具」一页塞 5 个 pane + 3 个二级分段，是唯一有二级分段的页；再加上右侧锚点条、分区标题、卡片标题，
+    同时存在 4 层导航，主次不清。
+  - `registry.js` 的「基础 / 进阶 / 专家」级别条依赖 `#settings-level-bar`，该元素早已不在 DOM 里，属死代码；
+    真实生效的可见性机制只有分区「显示高级项」+ 卡片折叠。
+  - 决策（用户拍板）：一页一主题；高级项改为「卡片默认折叠」；右侧本页目录始终保留。
+- 新结构（13 页 / 4 组）：
+  - 常用：模型接入(chat) / 上下文与记忆(context) / 联网与检索(search)
+  - Agent：执行与审批(agent) / 子代理与流程(agents+flow) / 工具与扩展(ext+skills)
+  - 体验：外观与对话(appearance) / 语音与提醒(speech+remind) / 快捷键(keys)
+  - 系统：用户规则(profile) / 手机访问(mobile) / 系统维护(data) / 帮助(help)
+- 实现：
+  - `settings/core.js`：重建 `SETTINGS_PAGES`，`SETTINGS_TAB_ALIAS` 只保留旧页 → 新页（model→chat、tools→agent、
+    ui→appearance、system→data、agents→flow、skills→ext、remind→speech）；删除 `settingsSubOfPane`。
+  - `index.html`：左侧导航改 13 项四组（图标复用 sprite）；删除 `#settings-subnav`。
+  - `settings/search.js`：删除二级分段状态与渲染（`SETTINGS_SUB_STATE` / `renderSettingsSubnav` / `setSettingsSub`）；
+    `settingsVisiblePanes` 直接返回页内全部 pane；页头加载拆分（data 只载应用信息/健康/历史，mobile 单独载设备）；
+    主题页判断由 `ui` 改 `appearance`；搜索排序先按 pane → 页再排；默认页回退改 `chat`。
+  - `settings/modal.js`：重写 `SETTINGS_PANE_SECTIONS`（新增 agents/flow/ext/keys/remind/mobile/data 的细分区）；
+    删除 `settings_section_adv_v1` 整套逻辑与分区按钮；`isAdvancedCard` = 手工清单 ∪ registry 的 expert 级；
+    `syncCardCollapse` 默认收起高级卡；`renderSettingsAnchors` 只在没有条目时隐藏。
+  - `settings/registry.js`：删掉级别条 UI、标签与 `meta-hidden`；只保留 `SETTINGS_PANE_META` / `SETTINGS_CARD_RULES`
+    与 `settingsCardMeta`（供默认折叠用）。
+  - `css/settings-center.css`：删除 `settings-subnav`、`set-section-adv`、`adv-hidden`、级别/标签/`meta-hidden` 死样式。
+  - `palette.js`：命令面板的设置入口改成 13 个新页面。
+  - 顺带修复：打开设置时 `refreshBalance('vision', panes[1])` 传错 pane（视觉余额永远不查），改为 `panes[0]`。
+- 验证：
+  - `node --check` 覆盖 6 个改动 JS 全部通过；临时一致性脚本确认导航 13 项 = 页面 13 个、16 个 pane 全部有归属、
+    `SETTINGS_PANE_META` / `SETTINGS_PANE_SECTIONS` 无缺项。
+  - 浏览器实测（`?settings=chat&embed=1`）：4 个分组标题 + 13 项导航；默认页「模型接入」显示「接口与账户」；
+    切到「子代理与流程」显示「团队与自动派发 / 脚本编排与隔离 / 并行探索与嵌套 / 研究闸门与工作流」，无白屏。
+- 未做 / 注意：
+  - `scripts/ui_smoke.mjs`、`scripts/ui/settings_interaction.mjs` 里仍按旧的级别条 / 二级分段 / `meta-hidden`
+    断言（这些机制在本次重构前就已失效），本次未改；直接重跑会失败，需要单独重写这两段 UI 冒烟。
+
+## [2026-11-25] 下线 AI 主动聊天
+- 问题/决策：
+  - 主动聊天要常驻进程 + 调模型，确认不再需要；整体移除后端调度、会话开关字段、设置项与前端推送分支，
+    避免设置页留死入口、`tick` 里永远不触发的任务类型。
+- 删除内容：
+  - 调度器 `app/scheduler.py`：`auto_chat` 任务类型与生成逻辑（`_fire_auto` / `generate_auto_message` /
+    `send_now` / `_auto_system_prompt` / `_last_is_auto` / `_next_auto_at` / `_reschedule_auto` /
+    `_user_active_recently`、`COOLDOWN` / `MAX_SILENT`）；`tick` 只处理 reminder，旧 `auto_chat` 任务直接忽略；
+    `add_task` 去掉 `gap_min/gap_max`，`_default_title` 不再区分类型。
+  - API `app/api/tasks.py`：删除 `autochat` / `autochat_test` 两个操作与 `_set_session_field`；
+    `add` 只接受 `kind=reminder`。
+  - 配置：`auto_chat_enabled` 默认键删除并加入 `_OBSOLETE_KEYS`（下次保存设置清掉旧值）；
+    `app/api/misc.py` 的 `REMINDER_SWITCH_KEYS` 去掉该键。
+  - 会话：`sessions.py` 的 `auto_chat` 默认字段与 `/api/state` 回传字段。
+  - 前端：设置页「主动聊天」卡片与 `autochat-on/min/max/test/list`；`auto.js` 的 `auto_msg` 事件分支、
+    主动聊天列表、`toggleAutoChat` / `updateAutoChatGap` / `testAutoChat` / `sessionTitle`；
+    `init.js` 的四个绑定；提醒分区合并为单块「定时提醒」；导航搜索词去掉「主动聊天」。
+  - 测试：`tests/test_reminder_switches.py` 移除 auto_chat 开关用例，新增「旧 auto_chat 任务被忽略」回归。
+  - 文档：`readme.md` 6.8 改名「提醒」、能力表与限制说明去掉主动消息。
+- 保留：
+  - 定时提醒（含 Windows 计划任务）、系统通知、常驻 `/api/events` SSE、提醒开关全部不动。
+  - `data/tasks.json` 里可能残留的旧 `auto_chat` 任务不主动删除，运行时忽略即可（当前数据为空）。
+- 验证：
+  - `python -c "import app.httpd; from app import scheduler"` 正常；全量 pytest（ignore archify）通过；
+    ruff 通过；5 个改动前端文件 `node --check` 通过。
+  - 浏览器实测 `?settings=speech&embed=1`：页面只显示「语音输入 / 定时提醒」，全文档无「主动聊天」文本、
+    无 `autochat-*` 控件，提醒表单正常渲染。
+
+## [2026-11-25] 会话持久化 P0：元数据操作改单会话落盘
+- 问题/决策：
+  - 改名 / 置顶 / 排序原来「锁外 deep copy 整份会话 → 锁内 save_sessions」：既重写所有会话缓存，
+    又把并发流式追加的消息写回旧快照（重启后丢消息）。排序 / 删除还白写一遍所有缓存。
+- 实现：
+  - `app/sessions.py` 新增：`session_write_lock(sid)`（按会话写锁，与流式落库共用）、
+    `mutate_session(sid, fn)`（锁内改内存 → 锁外只写这一条）、`mutate_sessions(fn)`（列表结构变更：
+    锁内 deep copy → 改 → `cache_sessions` 原子换读模型）、`save_index()`（只写顺序 / current / 墓碑）。
+  - `app/api/chat.py` 的 `_persist_session` 改用 `sessions.session_write_lock`，两处不再各建一份锁表。
+  - `app/api/sessions.py`：新建 / 改名 / 置顶 / 拖拽排序 / 删除 / 分组删除 / 提问标记全部改走上述接口；
+    新建与删除不再 `save_sessions`，只写单会话缓存 + 索引。
+  - `_keep_fresh_summary` 增加「manual 标题 / pinned / qmarks 以内存最新值为准」，
+    避免流式落库用回合开始时的旧对象覆盖这些字段。
+- 验证：
+  - 新增 `tests/test_session_persist_targeted.py`：其它会话缓存 mtime 不变、并发追加后改名不丢消息、
+    排序/删除/新建只写索引或单会话。
+  - `test_session_api_contract.py` / `test_qmarks.py` 改为在 conftest 隔离的临时会话库上验证真实持久化路径。
+  - 全量 pytest（ignore archify）通过；ruff 通过。
+- 未完成 / 后续：
+  - 「清空会话 / 撤回消息 / 附件重解析」仍走 `save_sessions`（消息级操作，先保证正确性，留给 P1）。
+  - 其它模块（知识库 / 记忆 / 工作台等）的 `save_sessions` 仍属冷路径全量写，未改。
+- P0-2（拆 5,158 行的 `_api_chat`）阶段 1（2026-11-25）：
+  - 新增 `tests/test_chat_entry.py`：缺 session_id 400、busy 409、早退释放租约、`_continue_basis` 读取规则。
+  - 抽出 `_continue_basis(s, cont)`（继续输出的起点：sources / 正文 / 已有工具数 / 错误），
+    替换函数内 15 行内联块；对外行为不变。
+  - 后续阶段（按顺序，每阶段全量 pytest + ruff 通过再进下一阶段）：
+    2. 抽 SSE 输出层（`_write` / `sse` / `_heartbeat` / `_sink`）→ 独立 StreamWriter；
+    3. 抽工具编排（`_plan_tool` / `_accept_tool` / `_apply_worktree` / `_acceptance_review`）；
+    4. 抽收尾（done payload + `_persist_turn` 后的落库与事件）；
+    5. 最后把 5k 行主流程拆成「请求阶段 / 回合循环 / 收尾」三个函数。
+
+## [2026-11-25] 桌面壳：通知应用名 + 关窗最小化到托盘
+- 问题/决策：
+  - 系统通知显示「Electron」：未打包 Electron 只设 AUMID 不够，Windows 还需要
+    `HKCU\Software\Classes\AppUserModelId\<AUMID>` 的 DisplayName / IconUri。
+  - 关窗直接退出，无法后台常驻；改为「关窗最小化到托盘，托盘菜单退出」。
+- 实现：
+  - `app/win_shortcut.py` 新增 `ensure_app_identity(aumid, name, icon)`：写注册表 DisplayName / IconUri。
+  - `main.py` 启动时对「当前快捷方式的 AUMID（可能是 AutoGenerated）+ 兜底 AUMID」各注册一次；
+    控制台提示改为「关窗最小化到托盘，托盘菜单退出」。
+  - `desktop/main.js`：`app.setName('Galgame_monster')`；新增 `Tray`（打开主窗口 / 退出）、
+    关窗 `preventDefault + hide`（首次弹气泡）、`before-quit` 置 quitting、`will-quit` 销毁托盘；
+    托盘创建失败时回退「关窗即退出」。
+- 验证：
+  - `node --check desktop/main.js`、`py_compile` 通过；新增 `tests/test_win_shortcut_identity.py`；
+    全量 pytest（ignore archify）通过；ruff 通过。
+  - 已在本机为 `Microsoft.AutoGenerated.{...}` 与 `GalgameMonster.Desktop` 写入 DisplayName；
+    重启应用后在通知中心核对名称。若仍显示 Electron，下一步用 electron-builder 出正式安装包。
+  - 关窗行为需重启 Electron 壳才生效；退出用托盘菜单，后端随 Electron 进程一起退出。
+
+## [2026-11-25] P1 批：事件日志 / JOBS 锁 / 单会话读取 / 前端超时
+- 事件日志（`app/session_events.py`）：
+  - 写锁从全局 `_LOCK` 改为按会话 `_write_lock(sid)`；事件先批量序列化，锁内只做 rotate + append，
+    不同会话不再互相排队。
+  - 新增 64MB 滚动：写前超阈值把 `events.jsonl` 挪成 `.1.jsonl`（只留两份）；
+    `rebuild()` 本来就按 `.1 → 当前` 顺序读，滚动后历史完整。新增回归测试 `test_rotation_keeps_history`。
+- JOBS 竞态（`app/api/chat.py`）：`_force_done_event`、看门狗、`_stream_alive`、attach 首帧读取
+  全部统一进 `JOB_LOCK`；`job["ts"]` 更新也在锁内，避免 done 判定与 SSE 线程互相踩。
+- `_sb()`（`app/httpd.py`）：改为 `load_sessions(copy=False)`，文件类接口不再为取一个 sandbox 深拷贝全量历史。
+- 前端（`web/core.js`）：`api()` 默认 30 秒超时；压缩 / 重建索引 / 翻译导出 / 备份等长任务白名单不设超时；
+  调用方主动 abort 仍按原样抛出。
+- 前端（`web/auto.js`）：SSE 重连计时器存进 `AUTO.timer`，重连 / 再次启动前清理。
+- 验证：`node --check`、`py_compile`、定向测试、全量 pytest（ignore archify）、ruff 全部通过。
+- 未做（后续单独立项）：
+  - P1-9 前端消息区整块重排 → 已完成，见下文「[2026-11-25] P1-9 消息区定向替换 + P1-10 全局作用域守门」。
+  - P1-10 前端全局作用域 → 已完成（重名守门测试，未做全量命名空间迁移），见同一节。
+  - 清空会话 / 撤回 / 附件重解析仍走 `save_sessions`；其它模块冷路径全量写未改。
+
+## [2026-11-25] 通知停留时长
+- 问题：通知还没看完就消失（应用内 toast 只有 1.8 秒；系统 toast 默认约 5 秒）。
+- 改动：
+  - `desktop/main.js`：Electron 系统通知加 `timeoutType: 'never'`（Windows 只支持默认/不自动消失两档），
+    提示条会留到点击或手动关闭，同时仍进通知中心。
+  - `web/core.js`：`TOAST_MS` 1800 → 5000（应用内轻提示，点击可提前关）。
+  - `scripts/notify.ps1`：Toast XML 加 `duration="long"`（计划任务提醒约 25 秒）。
+- 注意：Windows「设置 → 辅助功能 → 通知」里的显示时长可能覆盖长通知；`timeoutType: never` 需重启 Electron 壳生效，
+  应用内 toast 刷新页面即可。
+
+## [2026-11-25] P1-9 消息区定向替换 + P1-10 全局作用域守门
+- P1-9（`web/render.js` / `web/chat.js`）：
+  - `GM_RENDER` 新增 `messageSig(m)`（单条签名），`messagesSignature` 改为复用它，拼接格式不变
+    （签名只与自身历史值比较，不跨版本）。
+  - `renderMessages` 新增「定向替换」快路：窗口指纹（sid / start / total / 被实时行跳过的 idx / 压缩点）
+    与上次整窗一致、且只有 ≤4 条消息签名变化时，只 `replaceWith(rowForMsgSafe(...))` 这几条行，
+    只对它们调 `enhanceRichMedia`，不再全局 `disposeRichMedia()`（历史里的图表不会被销毁重画）。
+  - 退回整窗重建的条件：展开更早、forceWindow、有实时行 / live host、搜索高亮或搜索面板打开、
+    变化行里有 ECharts / Mermaid（dispose 是全局的，单摘会泄漏）、变化条数 > 4。
+  - 整窗重建时记录 `chat._rowKey` 与 `chat._rowSigs`（每行签名），供下次比较；空会话时清空。
+  - 收益场景：同一窗口内个别消息变化（后台状态回填、记忆撤销等）。注意：流式结束 / 停止 / 撤回 / 删除
+    会改变消息总数，窗口指纹随之变化，仍走整窗重建 —— 这是必要的，不是漏优化。
+- P1-10（`tests/test_web_global_scope.py`）：
+  - 实测桌面端 64 个脚本、1679 条顶层声明，跨文件重名 0 处；现有 10 处重名全在 `web/m/app.js`
+    （手机端独立页面），不参与检查。
+  - 新增守门测试：解析 `web/index.html` 的 `/static/*.js`（排除 vendor），对顶格声明
+    （function / class / const / let / var）做跨文件重名检查，并断言引用的脚本都存在。
+  - 结论：全量命名空间迁移暂不做（当前无真实覆盖 bug，改动面大、回归风险高）；新增脚本自动纳入守门。
+  - 约定：同页脚本不要声明同名顶层函数 / 变量；需要跨文件共享就挂到已有全局对象（如 `window.GM_RENDER`）。
+- 验证：`node --check web/chat.js`、`node --check web/render.js`、新增测试、全量 pytest（ignore archify）、
+  ruff 全部通过；运行中的应用已返回新版 `render.js`，前端改动 Ctrl+R 即可生效（无需重启后端）。
+- 待人工确认：长会话里触发一次「同一窗口内单条消息变化」（如撤销记忆更新），确认消息不闪、历史图表不重画。
+
+## [2026-11-25] 前端体感阶段 1：按需增强 + 去掉启动期 CDN
+- 调研方法与基线（无头 Edge + CDP，对正在运行的真实实例，1440×900）：
+  - `scripts/ui_probe.mjs` 量 FCP / LCP / TBT / CLS / DOM；另写一次性 timeline + CPU profile 定位热点。
+  - 基线（Solo）：FCP 116-144ms、LCP 548ms、TBT 105-277ms、DOM 24,671、`load` 1413ms；
+    切会话 176-188ms（缓存命中）；设置 LCP 3856ms。
+- 根因（timeline 证据）：
+  - `enhanceRichMedia` 对整窗所有富媒体立即渲染：首屏外消息里的 2 个 mermaid 块会触发
+    mermaid@11（约 3MB）在启动时下载 + 主线程执行 145ms，并生成大量 SVG 节点。
+  - `codeBlockHtml` 同步 `hljs.highlight`；`init.js` 的 `upgradeCode()` 在 hljs 就绪后又会整窗补高亮。
+  - head 里两个 highlight 主题 CSS 与一个已废弃的像素字体 CSS（108KB）都在 CDN（实测 3s / 844ms），
+    拖住 `load`；echarts / vis 还在首屏后空闲预加载。
+- 改动：
+  - `web/rich-media.js`：`enhanceRichMedia` 改为视口增强（IntersectionObserver，代码 300px / 富媒体 400px
+    预取）；代码块按需高亮，库未就绪时 `hlPump` 重试（20s 后放弃，保持纯文本）。
+  - `web/markdown.js`：`codeBlockHtml` 只输出转义纯文本 + `data-hl="pending"`。
+  - `web/init.js`：`upgradeCode()` 改为只触发增强器，不再整窗补高亮。
+  - `web/index.html`：去掉 dotgothic16 CSS（像素主题已不存在）、hljs 主题 CSS 改本地、hljs 脚本本地化
+    （`web/vendor/highlight/`）、空闲预加载只保留 hljs。
+- 效果（同一探针，两次复测稳定）：
+  - Solo：LCP 548 → 464-468ms、TBT 105 → 30-33ms、DOM 24,671 → 12,480、`load` 1413 → 157-192ms。
+  - 设置：LCP 3856 → 472-476ms、TBT 110 → 36-37ms、DOM 22,731 → 10,540。
+  - 大厅：DOM 51,195 → 15,714；工作台：DOM 51,333 → 15,852（CLS 0.085 → 0.055）。
+  - 启动期 CDN 请求 4 → 0；切会话 188 → 123ms（含本地网络往返，噪声较大）。
+  - 功能验证：滚到代码块才上色（文本不变、可复制）；滚到 mermaid 才出图；控制台无报错。
+- 约定：新的重渲染入口只要调用 `enhanceRichMedia`，代码高亮 / 富媒体就会自动按视口处理；
+  不要再用「整窗补高亮」的写法（`init.js upgradeCode` 已改）。
+- 阶段 2 候选：工作台 CLS 0.055；切会话缓存命中时重复 `renderSessions`；
+  首屏消息窗口瘦身（当前 24 条 ≈ 8.3k 节点）；CSS 分包（30 个样式表里 hall / work / reader 等仅特定模式用）。
+
+## [2026-11-25] 前端体感阶段 2：首屏消息窗口瘦身
+- 测量结论（固定会话 s_4dd8ac1e79f0，33 条消息，同一探针 A/B）：
+  - 首屏窗口 24 条 → 12 条：DOM 12,471 → 7,885（−37%），整窗重绘 16-20ms → 10-11ms。
+  - 滚到顶自动补齐实测：12 条 → 24 条，且保持视觉位置；靠的是原有 `autoOlderTick`（scrollTop ≤ 140 时代点
+    「展开更早」）与 `makeMoreBtn`，没有新增交互代码。
+- 改动：
+  - `web/chat.js`：新增 `FIRST_PAGE = 12`（会话首次上屏只画最近 12 条）；同一会话的后续重绘沿用
+    `chat.dataset.start`（用 `chat._msgSid` 记当前会话），避免后台刷新时窗口收缩把用户眼前内容抽走；
+    `RENDER_PAGE = 30` 只用于「展开更早」每次续载。
+- 实测后放弃的两项（避免无效改动）：
+  - 工作台 CLS：0.055 里主要是程序化切模式的测量伪影（真实点击被 `hadRecentInput` 排除）；真正可见的是
+    任务列异步加载后把下方顶下 56px。`#work-panel` 是整页滚动、列高随内容，试过 `grid-auto-rows: minmax(0,1fr)`
+    无效；要修得把「整页滚动」改成「列内滚动」，风险大于收益，暂不做。
+  - 切会话：缓存命中时前端已在等网络前渲染（31ms），剩余 54-117ms 在 `/api/session/select`（后端）；
+    `renderSessions` 实测两次共 1ms，`renderPendingCards` 0-1ms，没有优化价值。
+- 副作用提示：聊天内查找现在只覆盖首屏 12 条与已展开的部分（以前是 30 条）；会话列表搜索 / 对话记录跳转
+  走的是 `renderMessages(idx, true)`，不受影响。
+
+## [2026-11-25] 应用图标高清化（app.ico 按矢量逐尺寸重绘）
+- 问题：系统通知 / 任务栏 / 托盘里的应用图标发糊。
+- 根因：`app.ico` 的 6 帧（16/32/48/64/128/256）都是从一张低分辨率位图缩出来的，32px 帧在任务栏上
+  边缘明显发虚；而且缺 20 / 24 / 40 帧，125% / 150% DPI 下 Windows 只能拿 32 / 48 再缩一次。
+- 方案：新增 `scripts/make_icon.py`，用与标题栏 `.tb-logo` 完全相同的矢量几何（圆角方块 rx=5.6/32 +
+  四角星 8 个顶点），每个目标尺寸按 8 倍超采样重绘再 LANCZOS 降采样，输出 16/20/24/32/40/48/64/128/256
+  共 9 帧（全 PNG 帧，与旧文件一致）。小尺寸（≤24px）把星形放大 22%：1px 尖角在 16px 抗锯齿后会糊成
+  一团灰白，放大后才看得出「四角星」轮廓。
+- 影响面：`app.ico` 同时用于 Electron 窗口 / 托盘 / `webContents.startDrag`、Windows 通知的 AUMID
+  IconUri（`app/win_shortcut.ensure_app_identity`）和开始菜单快捷方式，所以只换文件即全部生效；
+  标题栏本身是内联 SVG，不受影响。
+- 生效条件：需重启 Electron 壳；Windows 可能缓存旧图标（`ie4uinit.exe -show` 或重启资源管理器刷新）。
+- 相关文件：`scripts/make_icon.py`（生成器）、`app.ico`、`desktop/main.js` 与 `web/index.html` 的注释。
+
+## [2026-11-25] AI 头像改成动态科技风（保留品牌四角星）
+- 需求：AI 消息头像改成简约科技感、要带 logo 元素、最好有动效。
+- 实现（纯 CSS，无新增资源 / 依赖）：
+  - `web/css/base.css` 的 `.avatar`：干净圆底（浅色 `#fff → #f1f5ff`，深色 `#242b40 → #171c2b`，1px 内描边）
+    + 一枚蓝→紫渐变的四角星（用与 `app.ico` / 标题栏相同的 path 做 mask）；`::before` 是星后的柔光呼吸，
+    `::after` 做 9s 扫色 + 4.6s 轻微缩放。只动 background-position / transform / opacity。
+  - 演进记录：初版是深蓝立体圆盘 + 旋转扫描弧，用户觉得「像黑色」且扫描弧在 27px 下像渲染残影；
+    现在改成参考 Gemini / Claude 的「干净底 + 渐变 spark」路线，去掉描边立体感与旋转弧。
+  - `prefers-reduced-motion: reduce` 时两条动画都关闭。
+  - `web/chat.js` 新增 `aiAvatar()` 统一建头像：原来 3 处各写一份 `textContent = '✦'`，现在删掉文字改由
+    CSS 绘制，并加 `aria-hidden="true"`。
+- 尺寸适配：沿用 `--msg-ava`（默认 30px，IDE 窄栏 24px）；≤340px 窄栏仍由原规则隐藏头像。
+- 验证：无头 Edge 把头像放大 8× 截了两帧（扫描弧在转、星在呼吸），另截上下文图确认 27px 下可读；
+  `node --check web/chat.js` 通过。
+- 备注：`docs/NOTES.md` 里「`.avatar` 与 `.empty-logo` 同款」已过时——`web/` 里不存在 `.empty-logo` 了。
+
+## [2026-11-25] 设计体系重构：真字重 + 令牌落地 + 响应式收敛
+- 审计（18,445 行 CSS）：tokens.css 本身完整，但业务样式基本没引用——字号裸值 1,500+ 处
+  （11.5px×309、12.5px×226、10.5px×106），字重 600×218（本机只有 MiSans Regular → 全是合成粗体），
+  圆角 7/9/12/4/5px 与 token 的 6/10/14 并存，断点 21 个；浅色 text-mute 3.71、danger 3.57、ok 2.92、
+  warn 2.95，均低于 WCAG AA 4.5。
+- 改动：
+  1. 字体：内置 `web/fonts/MiSans-Semibold.woff2`（4.79MB，MiSans 官方免费商用，OTF 转 WOFF2），
+     新增 `MiSans App` 族配对 400（local MiSans）/ 600（内置），`html { font-synthesis: none }`；
+     650/700/800 统一归到 600。
+  2. 对比度：浅色 text-mute #81858c→#696e74、danger #f14c4c→#c92a2a、ok #4aa96c→#2f7a4a、
+     warn #c98a12→#8f5f08、accent #3964fe→#3560f5；深色 danger→#f76a6a、accent→#6490ff。
+     浅色 / 深色两种主题在 白底 / 侧栏底 / 悬停底 上全部 ≥4.5:1。
+  3. 令牌化（脚本改写，只换值不改结构）：font-size 1,514 处、line-height 289 处、font-weight 317 处、
+     border-radius 510 处；新增 `--radius-xs`、`--lh-snug`。
+  4. 间距：3/5/7/9/11/13px → 最近偶数（644 处），保留 1px 发丝线与负 margin；2px 网格命中率 97.1%。
+  5. 断点：21 个 → 640 / 900 / 1200 / 1500（改写 30 处；901 作为 900 的 min-width 补集保留）。
+  6. 新增 `docs/design-system.md`：色彩 / 字体 / 间距 / 圆角 / 阴影 / 动效 / 断点 / 落地约束。
+- 验证：对比度脚本全 PASS；ui_probe 在 1440 / 1024 / 768 / 390 四档跑 solo（+work/settings）截图，
+  `overflow_x = 0`、`console_errors = []`；`load` 事件因字体从 ~242ms 升到 ~450-700ms（仅 load，
+  屏蔽字体做对照后 TBT 无显著差异，属测量噪声）。
+- 遗留：
+  - IDE 语法高亮色（#e2c08d / #73c991 等）属于 VS Code 调色板，未并入语义层。
+
+## [2026-11-25] 设计体系第二轮：组件一致 + 微交互 + 390px 裁切
+- 组件：按钮内边距从 6 种收敛成三档（常规 8/12、紧凑 6/12、极小 4/10），方角按钮统一
+  `--radius-sm`，`.modal-card` 从 18px 收到 14px；设置页 / IDE 工具栏 / 知识库 / 预设行都覆盖到。
+- 微交互：全局按下反馈从 `scale(.965)` 收到 `.98`；没有自定义过渡的按钮补一套 `--t-fast` 过渡；
+  禁用态统一 `opacity:.45 + not-allowed`（各模块原来写过 .35/.5/.55）。
+- 390px 输入区裁切（根因不是 zoom）：`.composer-body-inner` 是 grid 子项，默认 `min-width:auto`
+  被底部提示行撑到 469px，超过 390 视口。修法：grid 子项 `min-width:0`、提示行 `min-width:0`、
+  `.composer-hint` 单行截断；并在 ≤640px 关闭 `--chat-zoom`（手机不需要缩放）。
+  实测：composer 390/390、输入框 336px，移动端截图不再裁切。
+- 回归：1440 五模式 + 390 移动端，`overflow_x = 0`、`console_errors = []`；设置页按钮内边距已一致。
+- 规范文档同步：`docs/design-system.md` 新增「9. 通用组件细则」（按钮三档 / 输入框 / 卡片 / 输入区 / 导航）。
+
+## [2026-11-25] 修复：点通知回到对话后 AI 输出消失
+- 现象：发送消息后把窗口挂到后台，点系统通知跳回对话，AI 的回复不显示（输出「消失」）。
+- 根因：通知点击走 `notifyJump()` → 对**最新一条**也调用 `ssFocusMessage(idx)`，后者执行
+  `renderMessages(start, true)` 强制整窗重建。后台刚结束时 `state.messages` 可能还没同步到最终回复
+  （`done` 的 session patch 尚未应用），重建会丢掉正在显示的实时行；当通知里的 `messageIndex`
+  比本地消息新时，`fromIndex` 越界还会渲染出一个空窗口。
+- 修复：
+  - `web/auto.js notifyJump()` 分三档：目标行已在 DOM → 只滚动（新 `chatScrollRow`）；
+    最新一条 → `attachStreamHost()` + `scrollToBottom()`，**不重建**；只有「更早且不在窗口」才先拉一次
+    `/api/session/select` 再走搜索式定位。
+  - `web/chat.js`：新增 `chatScrollRow(row)`；`ssFocusMessage` 增加越界保护（按 `messages.length` 与
+    `msg_total` 取大者判断）；`renderMessages` 的 `expanding` 起点钳到最后一页，避免越界渲染空窗口。
+- 验证：无头浏览器对当前会话连续触发 4 种跳转（最新 / 越界 / 窗口内较早 / 窗口外较早）：
+  前三种 DOM 完全不变（行数 12、innerHTML 496,361、元素 expando 仍在、末条 2,611 字文本未变）；
+  窗口外跳转会重建（12 → 34 行）且目标行存在、无控制台错误。
+- 待真机确认：发送 → 关窗/最小化到托盘 → 点通知回来，确认输出仍在。
+
+## [2026-11-25] 视觉设计体系五维调研与优化路线
+- 产出：`docs/design-audit-2026-11.md`（五维现状 + 同类产品对标 + P0/P1/P2 清单 + 四个专项 + 迭代路径 + 验收标准）。
+- 关键数据：`:hover` 485 / `:active` 21 / `:focus-visible` 53；`aria-label` 132、`role=` 94、`aria-live` 仅 8；
+  加载态 11 种 pulse、8 种 spin、骨架在 JS 里 65 处引用；深色模式 11 处写死白底中 9 处是刻意
+  （文档预览 / 分享预览 / 开关滑块），2 处待复核（`.share-result-img`、`.ui-switch-track::after`）。
+- 结论：最优先「加载态统一（骨架替代转圈）」「高频操作反馈统一」「aria-live 状态播报」「深色裸色收尾」；
+  工作台 56px 跳动、字体 4.79MB 的 load 成本、IDE 语法色列为 P1/P2。
+- 对标要点：AI 产品普遍用骨架屏（感知等待约 -40%）+ 状态旁白 + `role="status"` 播报，装饰克制、深色同等完成度。
+
+## [2026-11-25] P0 视觉优化落地（加载态 / aria-live / 操作反馈 / 深色复核）
+- 问题/决策：
+  - 加载态碎片化：8 个 `@keyframes *spin*`、多处本地 spinner 与「正在加载」文案各写一套；
+    行内 spinner 尺寸 14/15/16px、配色（透明边 vs 强调色弧）也不一致。
+  - 流式状态没有显式播报；`.live-sec` 每秒变动会被读屏当成内容反复朗读。
+  - 高频操作（发送 / 停止 / 切会话 / 切模式）过渡时长有 170ms、130ms、无过渡三种。
+- 解决方案：
+  - `web/css/polish.css` 新增唯一一套加载态：`.gm-spin`（15px / 2px 边 / `--accent` 弧）、
+    `.gm-loading`（转圈 + 旁白，`.center` 居中版）、`@keyframes gmSpin`、`.gm-sr-only`。
+    `kb-spin / iv-spin / rd-spin / work-ai-spin / sendSpin` 全部改为引用 `gmSpin`，删掉各自 keyframes。
+  - `web/page-transition.js`：`gmSkeleton` 行宽改为「首行 38% + 逐行收窄」，加 `aria-busy`
+    与 `.gm-sr-only` 的「正在加载…」；新增 `gmLoadingHtml(text, extraClass)` 统一状态旁白 markup
+    （自动转义 + `role="status" aria-live="polite"`）。
+  - 接入：知识库图谱骨架（`kbGraphSkeleton`）、工作台 AI 占位（`workAiSkeleton`）、
+    数学考试四处加载（原先 `.math-spinner` 根本没有 CSS，等于没有转圈）、阅读器 PDF 解析提示。
+  - aria-live：聊天实时行 `.live-text` 加 `role="status" aria-live="polite"`，计时 `.live-sec`
+    与光球设为 `aria-hidden`；断线重试文案 `.rn-text` 同样加状态区。停止按钮补 `aria-busy`。
+  - 操作反馈：`.ms-btn` 过渡统一 `--t-fast` 并补 hover/active；`.icon` 补 active 底色；
+    `.send` 悬停底色改 130ms（按下仍是 `--t-press` + 全局 `scale(.98)`）。
+  - 深色复核：`hall-*.css / work.css / kb.css` 已无硬编码浅色底（只剩涨跌色与主题色）；
+    `.share-result-img`（截图 / 透明图垫白）、`.share-preview`（HTML 预览）、
+    `.ui-switch-track::after`（开关滑块）判定为刻意白色，保留并登记。
+- 验证：`node --check` 9 个改动 JS 全过；`ui_probe` 五模式 + 390px：
+  `overflow_x=0`、`console_errors=[]`，Solo CLS 0.0007 / LCP 928ms、Work CLS 0.0534（切换伪影）、
+  390 五模式 CLS 0/0.0166。`ui_smoke` 29/30：唯一失败为「未找到样例 PDF」（环境缺少样例），
+  设置级别条两条旧断言已随新版导航结构改为「导航分组 / 锚点与卡片」。`dev_check.py` 需要关掉应用才能跑，本轮未跑。
+
+## [2026-11-25] 体感 / 观感第二轮：令牌冲突与浮层收尾
+- 问题/决策：
+  - `--ring` 有两份定义：tokens.css 是 `0 0 0 3px`（box-shadow），polish.css 后来改成
+    `2px solid …`（outline 简写）。ui.css 的 `box-shadow: var(--ring)` 因此整条失效，
+    `.field-input / .ta` 在 #modal 之外聚焦时只剩边框变色。
+  - `--ease-out` 同样重复定义，运行时曲线是 `.22,.61,.36,1`，与 tokens / 设计规范里的
+    `.16,1,.3,1` 不一致。
+  - 深色主题没有覆盖 `--shadow-*`，弹窗 / 菜单在 `#1e1e1e` 上几乎没有抬升感；
+    notes 深色皮肤早已用 `.45 / .6`，全局却还是浅色那套 `.18`。
+  - `prefers-reduced-motion` 的全局规则把动画压到 `.001ms / 1 次`，加载转圈变成静止圆环。
+  - Toast 固定 `bottom:40px`，而输入区约 90–134px，会压住输入框；「回到底部」按钮
+    早已按输入区高度避让，Toast 没有。
+  - 会话列表出现滚动条时整列横移 8px（#chat 已有 scrollbar-gutter）。
+- 解决方案：
+  - `web/css/polish.css`：删掉重复的 `--ease-out` 与 `--ring`，只保留 `--dur-1/2/3`；
+    聚焦环回到 tokens 的 3px。
+  - `web/css/tokens.css`：深色块补 `--shadow-xs/sm/md/lg = .35/.40/.45/.60`。
+  - `web/css/polish.css` 的 reduce 块：`.gm-spin / .iv-spinner / .rd-loading::before /
+    .rd-btn.busy::after / .send.is-busy::after` 用 `!important` 保留 2s 慢转。
+  - `web/chat.js`：`positionToBottomBtn()` 顺手写 `--toast-bottom = 输入区高度 + 12px`
+    （输入区 display:none 时回 40px）；`web/css/base.css` 与 `ui.css` 的 `.toast-stack`
+    改读该变量；`web/ide-core.js` 在模式切换后同步一次。
+  - `web/core.js`：`TOAST_MS_OK = 2400`，成功提示 2.4s，错误/普通仍 5s。
+  - `web/css/base.css`：`.session-list { scrollbar-gutter: stable }`。
+- 验证（headless Edge 实测）：`--ring` 解析为 `0 0 0 3px #edf3fe`，
+  #modal 外的 `.field-input:focus` 计算值 3px；设置页仍保持自己的 2px 环。
+  Solo 输入区高 134px → toast bottom 146px、top 659 < composer top 671；切到大厅回 40px。
+  深色 `--shadow-lg` 为 `0 16px 44px rgba(0,0,0,.6)`；reduce 下 `.gm-spin` 为 `gmSpin 2s infinite`。
+  `ui_probe` 五模式 + 390px：`overflow_x=0`、`console_errors=[]`；390 单独测 work CLS 0.0019
+  （probe 报的 0.31 是跨模式累计伪影）。`ui_smoke` 29/30，唯一失败仍是缺少样例 PDF。
+- 下一批（2026-11-26 已处理，见下条）：主题切换只覆盖 6 个选择器（半动画）、空态 3 个大 blur 常驻、
+  Markdown 标题 em 不在 8 档、复制反馈离按钮太远、长会话 content-visibility 高度估算需实测。
+
+## [2026-11-26] 体感/观感第二批：主题切换 / 空态 / 标题 / 复制反馈
+- 问题/决策：
+  - 主题切换只给 body / #main / #sidebar / composer / modal-card 加 230ms 过渡，同屏的卡片、
+    菜单、工具卡仍是瞬切 → 238ms 内出现「半截动画」。
+  - 空态 3 个 86px blur 图层带 `will-change: transform` + `scale` 常驻动画，持续占 GPU，
+    且 scale 变化会让模糊图层反复栅格化。
+  - Markdown 标题用 em 换算（22.5 / 18.9 / 16.5px），脱离 8 档字号。
+  - 消息 / 代码复制成功只在屏幕底部弹 toast，离按钮和光标太远。
+- 解决方案：
+  - 主题切换改为全站瞬时：删除 `html.theme-anim` 的 CSS 过渡块与 JS 类切换，
+    与 VS Code 一致，也不再为配色切换做全页重绘。
+  - `web/css/home.css`：去掉 `.nh-blob` 的 `will-change`，`nhDrift1/2/3` 只保留
+    `translate3d`（不再 scale），视觉动线不变、避免重复栅格化。
+  - `web/css/base.css`：`.content h1/h2/h3/h4-h6` 改用 `--fs-xl / --fs-lg / --fs / --fs-md`
+    （20 / 17 / 15 / 14px）。
+  - 复制就地反馈：消息操作条的复制按钮成功后变成 ✓（`flashCopied`，1.2s 恢复，失败才 toast）；
+    代码块 `[data-copy]` 按钮短暂变「已复制」并加 `.done` 绿色态。
+- 验证：
+  - headless 实测：`applyTheme` 切换后无 `theme-anim` 类、body 背景立即变 `rgb(30,30,30)`；
+    临时 `.content` 里 h1–h4 计算字号为 20 / 17 / 15 / 14px。
+  - content-visibility 实测：三个最长会话（1742 / 46 / 33 条，窗口 12 行）强制全量布局后，
+    滚动高度与估算值差 0–0.2% → 不需要做高度缓存，保持现状。
+  - `ui_probe` 五模式 + 390：`overflow_x=0`、`console_errors=[]`；work CLS 0.3125 仍是
+    探针跨模式累计伪影（单独加载后切工作台实测 0.0019）。`ui_smoke` 29/30，仅缺样例 PDF。
+  - 注意：测量 content-visibility 时调用 `selectSession` 会改变服务端「当前会话」，
+    已切回 `s_2eed2dd969cf`（助手9.0）；后续做这类测量要先记下原 session id。
+
+## [2026-11-26] 一致性与键盘包：设置加载态 / 残余字号 / 折叠头 aria / reduce 滚动
+- 问题/决策：
+  - 设置页还留着两套加载实现：`usage.js` 自己拼 `.sk-line`（无行宽、无读屏文案），
+    图表与配置历史用纯文字「加载中…」。
+  - 仍有 8 处标题 / 关键数字是 16 / 21 / 26px 裸值，脱离 8 档字号。
+  - 上一轮判断「折叠头键盘不可达」不准确：`makeClickable` 早已统一补了
+    `tabindex` / `role=button` / Enter-Space；真正缺的只有 `think-head`、`tool-head`
+    没有 `aria-expanded`（过程 / 计划 / 工具组 / 分组头都已有）。
+  - 30 处 JS `behavior:'smooth'` 没有跟随 `prefers-reduced-motion`；只有 follow.js 判断过。
+- 解决方案：
+  - `web/page-transition.js` 抽出 `gmSkeletonHtml(rows)`（行宽递减 + `aria-busy` +
+    `.gm-sr-only` 旁白），`gmSkeleton` 改为复用它；暴露 `window.gmSkeletonHtml`。
+  - `web/settings/usage.js`：表格改用 `gmSkeletonHtml(5)`，两个图表改用
+    `gmLoadingHtml('正在统计…', 'center')`；`web/settings/history.js` 同样换成 `gmLoadingHtml`。
+  - 字号收口：设置页 / 工作台 / 数学选择器与弹窗 / 道场 / 面试 Markdown 标题 16→`--fs-lg`；
+    数学题面 21→`--fs-xl`；证明分数 26→`--fs-2xl`；面试环形数字 21→`--fs-xl`。
+  - `web/chat.js`：`think-head` 与 `tool-head` 补 `aria-expanded`（初始值 + toggle 同步）。
+  - `web/core.js` 新增 `GM_SMOOTH`（reduce 时 `auto`），替换 chat / reader / notes /
+    notes-blocks / settings help+modal / ui-shell / work / hall-dojo / hall-math 共 30 处。
+- 验证：
+  - headless（模拟 reduce）：`GM_SMOOTH='auto'`；当前会话 think 43/43、process 46/46、
+    tool 28/28、tool-group 11/11 均具备 `aria-expanded` + `role=button` + `tabindex=0`；
+    字号计算值 17 / 17 / 17 / 20 / 24 / 20 / 17px。
+  - usage：打开后 120ms 表格骨架与两个图表「正在统计」都在，2.6s 后消失；
+    `gmSkeleton` 3 行宽度 38/100/88、`aria-busy=true`、含 sr 文案，clear 正常。
+  - `ui_probe` 五模式 + 390：`overflow_x=0`、`console_errors=[]`；
+    `ui_smoke` 29/30（唯一失败仍是缺样例 PDF）。
+  - 观察到一次偶发 console error：IDE 模式下按需加载 mermaid 撞上 Monaco 的全局 `define`
+    （`Can only have one anonymous define call per script file`），复跑未再现；
+    单独在无 `define` 时加载 mermaid 正常（`window.mermaid.render` 可用）。
+    属存量加载顺序风险，本批未改，后续可考虑给 mermaid 做局部 define 隔离。
+- 顺带确认（无需改动）：折叠头键盘本来就可用；768 工作台单列、390 布局正常；
+  工作台进入只有整屏切换位移，没有任务列表到达的二次跳动。
+
+## [2026-11-26] AI 头像：随机张望的眼睛
+- 问题/决策：用户要保留圆底，把头像做成会张望的眼睛；并要求视点「随机一点，像真的在看东西，
+  不要固定轨道」，同时看看配色。固定 6 个视点的 keyframes 循环很容易被看出规律，改为 JS 驱动。
+- 解决方案（`web/css/base.css` + `web/chat.js`）：
+  - `.avatar` 圆底当眼白：浅色 `#fff → #f5f8ff → #e7edff` 径向 + 底部内阴影做球面，
+    深色 `#343c55 → #232a3c → #171b28`；内描边与外投影很淡。
+  - `.avatar::before` 虹膜：四角星（与 app.ico / 标题栏同 path），inset 12%，
+    浅色 `#7b95ff → #405df2 → #2c40c4`，深色 `#c3d0ff → #8aa4ff → #6079f0`。
+  - `.avatar::after` 3.5px 高光，与虹膜共用 `--eye-x/--eye-y` 与过渡，始终贴合。
+  - 动画改为 `translate` 变量 + `transition`；`@keyframes avGaze` 已删除。
+  - `chat.js` 新增眼动控制：每只眼睛 0.6–2.2s 随机挑视点（半径 1.2–4.4px、
+    30% 概率紧跟一次小幅修正）；眨眼 2.6–7.6s 随机、20% 连眨两下；
+    鼠标停在 AI 消息上时虹膜跟着光标看，离开恢复随机；`document.hidden` 时跳过移动。
+  - 运行时切到「减少动态效果」会通过 media query 监听立刻松开光标并回中；
+    正常 reduce 下每次 tick 回中，不再随机。
+  - 离屏消息仍由 `content-visibility` 跳过绘制，眼动只更新 CSS 变量，成本很低。
+- 验证：连续采样 `--eye-x/--eye-y` 得到 `(1.36,.14) → (.76,.79) → (-3.65,-1.09)` 等随机值，
+  不是固定轨道；在头像左右各 80px 派发 `pointermove`，读数 `+4.40px / -4.40px`；
+  9 秒内捕获到眨眼；模拟 reduce 后 3s 内回到 `(0,0)`。
+  浅色 / 深色截图确认圆底 + 星形虹膜、深色无白块；`ui_probe` solo
+  `overflow_x=0`、`console_errors=[]`、CLS 0.013。
+
+## [2026-11-26] 修复 mermaid 在访问 IDE 后加载失败
+- 问题：Monaco 初始化会安装全局 `define`。mermaid 走普通 `<script>`（`umd:false`），
+  bundle 里的依赖检测到 define 后走 AMD 分支，报
+  `Can only have one anonymous define call per script file`，`window.mermaid` 为 undefined；
+  加载器又在 `onload` 就标记 ready，之后不再重试 → 只要进过 IDE，流程图永久退化成源码。
+- 定位细节：
+  - 只隐藏 `define.amd` 不够——mermaid 的部分依赖只判断「define 是不是函数」。
+  - `fetch + new Function(define=undefined)` 也不行：顶层变量被函数作用域困住，
+    报 `Cannot read properties of undefined (reading 'default')`。
+- 解决方案（`web/index.html`）：
+  - 新增 `__gmDefineGuard`：引用计数地整体隐藏 `window.define`；
+  - 新增 `__gmRunScript`：先 `fetch` 文本（网络阶段不影响 Monaco），再用真实
+    `<script>` 执行，只在执行的那几十毫秒 enter / leave，执行后 `s.remove()` 释放 ~3.5MB 文本；
+  - `__gmLoadScript` 统一套 `__gmAmdGuard`（hljs 同样受益）；
+  - `loadLazyLib` 加载后校验 `window[name]`：缺失就换下一个 URL，全部失败返回 `false`
+    且不写 `__libs`，允许下次重试；
+  - `mermaid` 配置加 `shieldDefine: true`。
+- 验证（IDE 已初始化、`define.amd === true`）：
+  - mermaid：`ok=true`、`window.mermaid` 为 object、`render` 可用，实际渲染
+    `graph TD; A-->B` 产出 SVG；`define` 已恢复、Monaco 编辑器仍在、console 无报错。
+  - hljs 11.9.0 / echarts（含 `init`）均正常；坏 URL 返回 `false` 且 `__libs` 不置位。
+  - 回归：`ui_probe` 五模式 `overflow_x=0`、`console_errors=[]`；
+    `ui_smoke` 29/30（唯一失败仍是缺样例 PDF）。
+
+## [2026-11-26] 托盘气泡 / 系统通知换高清图标
+- 问题/决策：最小化到托盘时的 Windows 气泡把托盘图标（16–24px 帧）放大显示，明显发糊；
+  `notify:show` 创建的系统通知也没有显式图标，只能吃低分辨率默认图标。
+- 解决方案：
+  - `scripts/make_icon.py` 在生成多尺寸 `app.ico` 的同时，从同一条矢量导出
+    `app-512.png`（512×512，18KB）；托盘 / 窗口继续用多尺寸 ico。
+  - `desktop/main.js`：新增 `ICON_HD`，`tray.displayBalloon` 传
+    `icon: ICON_HD` + `iconType: 'custom'`；`new Notification` 也传 `icon: ICON_HD`。
+  - `app/win_shortcut.py`：`ensure()` 发现 `app.ico` 比 `.lnk` 新时重写一次快捷方式
+    （保留原 AUMID），并调用 `refresh_shell_icons()`：
+    `SHChangeNotify(SHCNE_ASSOCCHANGED)` + `ie4uinit.exe -show`，让资源管理器
+    重新读取任务栏 / 通知里的图标；两者失败也不影响启动。
+- 验证：`app-512.png` 已生成并目视为清晰矢量边缘（蓝底圆角方块 + 白色四角星）；
+  `node --check desktop/main.js`、`py_compile app/win_shortcut.py` 通过。
+  已手动执行一次 `ensure()`：返回「已刷新图标」，快捷方式 AUMID 仍是原来的
+  `Microsoft.AutoGenerated.{…}`，`.lnk` mtime 已晚于 `app.ico`。
+  **需要重启 Electron 壳**（Ctrl+R 只刷新页面，不会重载主进程；托盘气泡每次会话只弹一次）。
+- 说明：通知左上角的小图标来自 Windows 快捷方式 / AUMID，尺寸本来就是 16–24px，
+  仍可能偏软；这次已经重建快捷方式并通知外壳刷新缓存。若系统仍显示旧图标，
+  只能等 Windows 通知平台的缓存自行更新（清 `wpndatabase.db` 会清空所有应用通知，没做）。
+  气泡里的大图标现在走 512px PNG，会清晰很多。
+
+## [2026-11-26] 修复聊天区偶发停在对话中间
+- 现象：重启后打开会话偶发、AI 输出收尾偶发；聊天区停在半截（非顶非底），
+  收尾那次前面还能看到一次卡顿。
+- 排查：
+  - 先排除「整个应用窗口移动」：Electron 运行中没有 `center()` / `setBounds()` /
+    `setPosition()`；通知聚焦只做 `restore → show → focus`，不会改位置。
+  - 定位到布局时序：已经贴底之后仍有三类迟到的高度变化——
+    ① 5MB 的 MiSans Semibold 字体 swap 会让整段文字重排；
+    ② 图表 / mermaid 先以 90px 占位，进入视口后才撑到实际高度（图表固定 340）；
+    ③ 收尾时工具组、计划卡还要播 240ms 折叠动画。
+    这三种都会让视野停在「按旧高度算出的位置」。
+  - `renderMessages` 里早有一条同类注释（计划卡必须先折叠再定位），但收尾后的
+    异步变化没有兜底。
+- 解决方案：`web/follow.js` 新增 `settleChatBottom(delays)`：只在
+  `CHAT_FOLLOW.isPinned()` 时按时间点补 `snap()`；用户上翻（pinned=false）自动跳过。
+  接入四处：
+  - `renderMessages` 末尾（会话打开 / 重建）：0/160/500/1200/2600ms；
+  - `document.fonts.ready`（字体就绪，首屏 #empty 不处理）；
+  - 流式收尾 `scrollToBottom()` 之后：0/160/400/900/1800/3000ms；
+  - 图表 `setOption` 之后、mermaid SVG 落屏之后（仅 `#chat` 内）。
+- 验证（headless）：启动后 `pinned=true / distance=0`；程序写离底 300px 再 settle → 0；
+  主动 `unpin` 后 settle 不会拽回（仍 300px）；贴底时向最后一条消息插入 420px 高度块，
+  1s 后 `distance=0`；console 无报错。`ui_probe` solo/work `overflow_x=0`；
+  `ui_smoke` 29/30（唯一失败仍是缺样例 PDF）。
+
+## [2026-11-26] 排查「助手9.0」输出说到一半就停：mem_write 序列化崩溃
+
+- 现象：会话 `s_2eed2dd969cf` 的回答在「我把缺课范围记一下，然后你定路线：」处断掉，
+  没有 done/结尾；落库那条只有 `{role, content, tools, interrupted}`，没有
+  `done_at / usage / timing / blocks`，下一条用户消息之后被标成 `interrupted=True`。
+- 根因：`app/log/app.log` 里该轮在收尾阶段抛
+  `TypeError: Object of type set is not JSON serializable`，位置 `app/api/chat.py`
+  的 `sse({"type": "mem_write", "memory": mem_note})` → `[流] 异常收尾`。
+  - 本轮有 **2 次** `memory.apply`；`app/mem_tool.py` 的 `merge_notes()` 合并多张卡片时，
+    `changed` 的值写成 `set()`（`dst.setdefault(kind, set()).update(ids)`），
+    而 `knowledge.apply_memory_ops()` 在返回前会 `sorted()` 成 list——只有「合并」这条路径漏了转换。
+  - 异常发生在正式落库之前，所以这一轮只留下最后一次 15s 进度快照；下一次发消息时
+    `_api_chat` 把残留 `_progress` 转成 `interrupted=True`，界面看起来就是「话说一半停了」。
+- 影响面：同一会话在 11-15 起共 15 次同类崩溃（每次都是含记忆写入的回合），不是模型截断、
+  不是余额 / 断网 / 手动停止（`finish_reason=stop`、`truncated=False` 都正常）。
+- 修复（已实施）：`merge_notes()` 返回前把 `changed` 的值从 set 转成排序后的 list，
+  与 `apply_memory_ops` 的 `changed_out` 保持一致（消费方 `anchor_changed` / 前端都吃 list）。
+  验证：两条假 note 合并后 `json.dumps` 通过、`node_add` 去重为 `["n1","n2","n3"]`；
+  `pytest tests -k "memory or mem_tool or chat_ops"` 67 项全过。修复需重启后端才生效。
+- 相关代码：`app/mem_tool.py` L568-592、`app/knowledge.py` L1349-1355 / L1567-1568、
+  `app/api/chat.py` L7720-7723、`app/sessions.py` L686-718。
+
+## [2026-11-26] 归档 NOTE.md 前的技术经验抢救
+
+> 旧的 1MB `NOTE.md`（10-18~10-25 的功能实现说明书）已删除；下面只留**现在仍然有效、
+> 且 NOTES.md 里没有**的经验。被跳过的部分是目录/路由/schema/题库/prompt 模板等文档性内容。
+
+### 时序与竞态
+- **中文输入法组词期间的 Enter 不是发送**：`compositionend` 可能早于 `keydown`，只判
+  `e.isComposing` 不够；用 `compositionstart/end`（end 延迟一拍）+ `isComposing` +
+  `keyCode===229` 三层判定，所有输入框 / 搜索 / 弹窗键盘操作共用；相关：`web/core.js`
+  （`isImeComposing`）。
+- **滚动跟随不能「先判断是否贴底再贴底」**：内容一次长高超过阈值会让 `isAtBottom` 立刻为 false，
+  跟随被自己关掉；程序设 `scrollTop` 也会异步派发 scroll 事件，把刚建立的跟随误判成「用户上翻」。
+  做法：跟随意图与位置测量解耦、程序滚动加 quiet 时间窗、向上 wheel 立即 unpin、
+  高度突变用 ResizeObserver 补滚；相关：`web/follow.js`（`FOLLOW_SLOP` / `quietMs`）。
+- **vis-network 的 `stabilization.fit` 会覆盖程序化 focus**：默认稳定后自动 fit，focus 随后被
+  覆盖（实测 scale 1.15→0.245）；canvas 也不跟随容器尺寸。做法：`fit:false` +
+  `stabilizationIterationsDone`（1200ms 兜底）后再统一 fit/focus，配 `ResizeObserver→setSize`；
+  相关：`web/knowledge.js`。
+- **异步附件读取要能被作废**：多图连续粘贴用 `attachSeq` 保序、`attachEpoch` 在清空 / 发送后
+  丢弃晚到的读取结果，否则清空后图片会「自己冒回来」；相关：`web/stream/attach.js`。
+
+### 提示词与工具契约
+- **系统时钟要每轮重新注入**：历史消息、记忆、旧提示词里的日期都会过期，模型还会拿搜索快照
+  时间或训练数据猜时间、因「2026 晚于训练截止」怀疑时钟。做法：每轮把当前时间追加到 system
+  末尾并声明「晚于训练截止仍以此为准」，搜索规则把「现在几点 / 今天几号」列进不该搜；
+  相关：`app/prompt_assembly.py`。
+- **「已完成」要和工具结果对账，且不能一票否决**：`已写入 / 已加入` 但本轮无成功工具是假完成；
+  反过来 19 次成功写入被 1 条参数写坏的 `run_command` 判成「没做成」也是错的。判定分三态：
+  全无成功 / 写操作全失败 / 任一成功即通过；相关：`app/api/chat.py`（`_done_claim_verdict`）。
+- **空文本不得发 `replace`**：它本意是用最终正文替换裸工具 JSON，正文为空时会把已显示的 error
+  覆盖成「（无内容）」。前端兜底：收到过 error 后只接受非空替换；相关：`web/stream/stream-core.js`。
+- **能力注册表就是助手的世界模型**：没注册的能力，提示词里不会出现、模型会说「看不到」；
+  界面上下文只收白名单 ASCII 字段再拼一行，避免中文 / 尖括号注入；相关：`app/capabilities.py`、
+  `app/prompt_assembly.py`（`ui_context_line`）。
+- **不要在提示词里点名禁止的标签**：「写 `<tool>` 不会执行」等于把标签名教给模型，它会自创
+  `<tool_result>` 并自演结果。原生 tools 可用时只给纪律、不给示例；降级到文本协议时才给示例；
+  相关：`app/llm.py`、`web/markdown.js`。
+- **清洗协议标签要用「名字族」，不能用 ASCII 白名单**：白名单会连 SVG `<linearGradient>`、
+  占位符 `<YYYYMMDD>`、正文 `</body>` 一起删（实测 15 条里 12 条误伤）。规则应为「名字含 tool
+  或属于 parameter/invoke/function_calls/thinking/antml」，配对内容超长只删标签、替换成换行而
+  非空串（否则 `</tool>## 标题` 失效），且在抽代码块之前清洗；相关：`app/llm.py`、
+  `web/markdown.js`（`stripUnknownTags`）。
+- **输出上限不显式传就吃服务商默认值**：`reasoning` 与正文共享 `max_tokens`，可能出现
+  `reasoning_tokens == completion_tokens`、正文一个字不剩；用「整轮 completion 汇总」统计永远
+  凑不出单轮上限，会低估截断。做法：显式 `chat_max_tokens`、`finish_reason=length` 且无工具时
+  无条件提示、正文以冒号结尾视为未完成；相关：`app/llm.py`、`app/config.py`。
+- **流式看门狗只认 `data:` 行**：`: ping`、空行、`event:` 都不重置计时，所以「连接活着但不产
+  正文」也会在 90 秒被杀；排查要区分「连接半死」与「活着不产」（看 other_lines / first_data_ms）；
+  相关：`app/llm.py`（`chat_stream_idle_timeout`）。
+- **写前读 / 版本戳契约**：覆盖已有文件前必须 `read_file`（`READ_REQUIRED`），读过但 mtime/size
+  变了要重读（`STALE_VERSION`）；版本必须在写后自检 / 格式化之后记录，否则格式化改 mtime 会
+  制造假过期；`search_files` 只算命中、不算读过；相关：`app/tool_protocol.py`、
+  `app/agent/read_tracking.py`。
+- **富媒体与执行层的不变量**：围栏闭合后才渲染；模型给的 SVG 只能经 `<img>`（data URL），不得
+  直接 innerHTML；图表须在元素入 DOM 且有尺寸后初始化，重渲染前 `disposeRichMedia()`；
+  `deny` 规则永远优先；重复调用守卫只统计连续相同；相关：`web/rich-media.js`、
+  `app/agent/approval.py`。
+
+### 文件与 Git 安全
+- **命令白名单校验的是「名字」不是「行为」**：`python -c` / `node -e` / `python -m http.server`
+  都能当壳起任意 exe，「白名单外一律拒绝」是过度承诺。做法：禁内联执行、脚本必须落在沙箱内、
+  `-m` 只放行 `pytest/pip/unittest/compileall/json.tool`、`npm exec/x/dlx` 归高危；残留：脚本
+  内仍是任意代码，只能靠审批档位兜底；相关：`app/agent/tools_exec.py`。
+- **高危 git 在任何审批档位都要问**：`checkout/restore/reset/clean/push` 在 `full` 档曾被直接
+  放行；非交互（autopilot）没有可看的审批卡，应直接 `deny`；相关：`app/agent/tools_git.py`
+  （`_dangerous_git`）、`app/agent/approval.py`。
+- **事故：新建模块覆盖未跟踪的同名文件**：新编排模块直接写 `app/workflow.py`，覆盖工作台工作流，
+  且该文件未被 git 跟踪、无版本可回滚。教训：新建前先 Glob/Grep 同名，覆盖前确认目标不存在；
+  相关：`app/workflow.py`、`app/orchestrator.py`。
+- **事故：`git checkout HEAD -- .` 覆盖用户工作区**：模型把「用户清空的目录」误判为「误删」，
+  full 档放行、恢复范围写成 `.`；`checkout` 又不删未跟踪文件，于是新旧两套结构并存。
+  教训：HEAD 更完整 ≠ 用户想要；危险 git 必须问；相关：`app/agent/tools_git.py`。
+- **大 JSON 落盘要防写放大与半截文件**：`.tmp` 用唯一名（pid+随机）并对 `os.replace` 失败重试；
+  高频进度快照降频 + 内容签名（工具数 + 正文长度 + 尾部 200 字）判重，无变化不写；
+  相关：`app/store.py`（`write_json`）。
+- **pythonw 下起控制台子进程会闪黑框**：应用本身无控制台，任何 python/node/taskkill/cmd 子进程
+  都会被 Windows 分配新控制台。统一 `creationflags=CREATE_NO_WINDOW`；不要用 `DETACHED_PROCESS`，
+  它会让 `taskkill /T` 杀不到子进程树；相关：`app/winproc.py`。
+- **单实例检测必须防 PID 复用**：`data/server.json` 里刚退出的 pid 可能被新进程复用，
+  `_pid_alive` 为真而端口未监听 → 误报「旧实例还在」。做法：先跳过 `old_pid == os.getpid()`，
+  再用 `QueryFullProcessImageNameW` 确认镜像名是 python/pythonw；相关：`main.py`（`_pid_alive`）。
+
+### 性能与体感
+- **停止慢的根因是阻塞读只在「下一条数据」到达时才检查停止信号**：上游静默 20 秒时点停止仍要等
+  18.5 秒；Windows 下 `resp.close()` / `shutdown` / `sock.close()` 都唤不醒阻塞在 `recv` 的线程。
+  改成读线程 + 队列、主线程 0.2 秒轮询 `stop_event`，已收内容照常返回；相关：`app/llm.py`。
+- **首 token 延迟主要由输入规模决定**：<10k token 约 1.8s、>50k 约 5.8s；每轮固定注入曾达
+  29,344 字 ≈ 17.6k token。做法：工具 schema 按域挂载（43→15 个，省约 6.9k token）、删掉与
+  schema 重复的能力清单 / 工具对照表、记忆只列 id+标题；计时一律 `time.monotonic()`（系统时钟
+  跳变会产生负数耗时）；相关：`app/llm_caps.py`、`app/prompt_assembly.py`。
+- **目录树遍历不要逐条 `realpath`**：963 个节点每次 `resolve_path` 在 Windows 上约 2.3 秒；
+  改为不跟符号链接、只与沙箱根比较绝对路径，加 3 秒 TTL，写 / 撤后 `invalidate_tree()`，
+  降到 0.2 秒；相关：`app/agent/sandbox.py`。
+- **SQLite 百万行检索的硬结论**：中文子串检索只有 FTS5 `trigram` 可用（`unicode61` 把整句当
+  一个 token）；能力探测与建表要分开（模块级缓存会让新库没有 FTS 表）；按标的筛选不能先查几十万
+  id 再 `IN`（撞 `too many SQL variables`），要用关联表做驱动表 JOIN（9.5s→25ms）；精确
+  `COUNT(*)` 用 `LIMIT 20001` 封顶并标 `total_capped`；`ORDER BY` over FTS 命中集无法走索引，
+  深分页 OFFSET 本身就是成本；相关：`app/stock.py`。
+
+### 前端与 CSS 坑
+- **Windows 不要继承 `-webkit-font-smoothing: antialiased`**：只有 macOS 该开，Windows 上会让
+  中文发虚 / 过粗；IDE 面板显式改 `auto`，中文栈补 `Microsoft YaHei`，基准 13px/1.4；
+  相关：`web/css/base.css`、`web/css/ide.css`。
+- **`overflow-y:auto` 会把 `overflow-x:visible` 计算成 `auto`**：内容恰好等宽也会出现横向滚动条，
+  需显式 `overflow-x:hidden`；相关：`web/css/polish.css`。
+- **设置脏状态与 DOM 取值的老坑**：数组要 `JSON.stringify` 后再比，否则空数组被算成「改了 1 项」；
+  重复 DOM id 会让 `$('#x')` 拿到另一个元素（设置复选框曾与舞台容器同名 `gal-think`，保存时把
+  开关强制写成 false）；`localStorage` 读数字先判 `null` / `''`，`Number(null)===0` 会把
+  「未设置」读成 0；相关：`web/settings/dirty.js`。
+
+### 验证与排障手法
+- **`node --check` 只查语法，不查未定义标识符**：变量改名漏一处（多图重构残留 `const im`）会让
+  所有用户消息渲染抛 `ReferenceError`，而语法检查全绿；改完必须真机走关键路径；相关：`web/chat.js`。
+- **验证前端改动先整页重载**：子代理会复用浏览器内存里的旧脚本、上一轮遗留的浮层状态，造成
+  「点了没反应」的假失败；重载后确认静态资源是新内容（服务端 no-cache + ETag）；
+  相关：`scripts/dev_check.py`。
+- **无头浏览器有三类环境差异**：`browser_fill` 不留焦点，依赖 `activeElement` 的 Enter 不触发；
+  offscreen 按钮点击无效，需先 `scrollIntoView`；`--dump-dom` / `virtual-time-budget` 下
+  ResizeObserver 与 rAF 不执行，尺寸类验证要跑真实帧。
+
+## [2026-11-26] 旁注：标签页左新右旧 + 检查器「旁注」历史列表
+
+- 需求/决策：AskKit 头部线程标签原来按服务端顺序（旧 → 新）渲染，改为**左新右旧**（最新在最左）；
+  右侧检查器新增第 6 个页签「旁注」，按当前会话列出历史划词提问，点击回看。
+- 实现：
+  - `web/askkit.js`：`renderTabs()` 渲染前 `slice().reverse()`；`ensureThread()` 支持
+    `opts.threadId` 精确定位线程（检查器点进来不再靠 anchor + selection.text 猜）。
+  - `web/ui-shell.js`：新增 `loadAsides / renderAsides / openAsideThread`，`selectTab('aside')`
+    时拉取 `/api/ask/threads`（`op=list, scope=session:<sid>, source=chat`），按 `created_at`
+    倒序渲染（标题 / 最后一次问题 / 轮次 + 时间），点击用 `threadId` 打开同一张 AskKit 卡片。
+  - `web/aside.js`：`asideOnSessionChange` 额外调用 `uiInspectorRefreshAsides()`，切会话时列表跟着换。
+  - `web/index.html` + `web/css/shell.css`：新增页签与 pane；`.insp-tabs` 加横向滚动
+    （6 个页签在 320px 里会挤），`.insp-aside*` 列表样式复用现有 token。
+- 验证：`node --check web/askkit.js web/ui-shell.js web/aside.js` 通过；浏览器实测（376px 窄屏）
+  检查器「旁注」显示 20 条、最新的 dσ 那条在最上，点击后卡片显示「对话 · #1748」与 1 轮历史问答，
+  卡片标签页同样左新右旧；未发送消息、未改设置。
+- 备注：`scripts/dev_check.py` 在应用运行时拒绝执行（会读写真实 data/），本次只做了静态语法检查 +
+  浏览器实测；后端无改动。
+
+## [2026-11-26] 打开 / 使用笔记时保留旁注卡片（同日已移除）
+
+- 问题：AskKit 的「点击卡片外关闭」是捕获阶段 `document.pointerdown`，点左侧「笔记」按钮
+  或在笔记面板里点任何地方都会把旁注卡片一起收掉。
+- 当时的做法：在 `web/askkit.js` 的外部点击白名单里补 `#btn-notes, #notes-modal`。
+  笔记弹层 `z-index` 是 `--z-modal`(50)，AskKit 是 `--z-float-3`(9600)，只要不主动 `close()`，
+  卡片自然浮在笔记之上，不需要改层级。
+- **已移除（同日）**：后来改成通用方案——卡片头部加「钉住」开关（钉住后外部点击不关）+ 底部
+  「记入笔记」直接写入笔记，白名单里的 `#btn-notes, #notes-modal` 已删掉，避免「只有笔记这一种
+  操作有特权」的不一致。现在不钉住时点笔记面板会正常关闭卡片，钉住后则不关（见下方
+  「旁注：记入笔记 + 钉住」条目）。
+- 保留的结论：`@media (max-width: 900px)` 下 `#app-rail .rail-tools { display:none }`，
+  「笔记 / 知识库 / 插件」按钮在窄屏不可见，只能走命令面板（`palette.js` 的「笔记库」项
+  仍是 `getElementById('btn-notes').click()`）；另外笔记是全屏模态（z 50），它的 ✕ 会盖住
+  右上角检查器按钮，且 `openInspector()` 会先 `closeNotesModal()`——两者互斥，不能同屏。
+
+## [2026-11-26] 笔记「⋯」菜单补「新建笔记」
+
+- 需求：笔记工作区右上角「⋯」菜单原来只有新建文件夹 / 重命名 / 移动 / 导出 / 删除，缺「新建笔记」。
+- 实现：`web/notes.js` 的 `showMoreMenu()` 列表首项加 `{ k: 'new-note', label: '新建笔记' }`，
+  点击走已有 `newNote()`（与左侧文件树的「+」按钮、树右键「新建笔记」同一个函数：
+  `appPrompt` 询问标题 → `/api/notes/new` → 打开新笔记并切到编辑态）。
+- 验证（浏览器实测，376px 窄屏）：菜单顺序 = 新建笔记 / 新建文件夹 / 重命名当前笔记 /
+  移动当前笔记… / 导出 Markdown / 删除当前笔记；点「新建笔记」弹出「新笔记标题…」输入框，
+  点取消后弹窗关闭、`data/notes` 仍是 9 篇（没有误建文件）。
+
+## [2026-11-26] 旁注：记入笔记 + 钉住（面板不再被无关操作关掉）
+
+- 问题：AskKit 用捕获阶段的全局 `pointerdown` 关面板，白名单只有划词工具条与笔记面板；
+  用户想「把旁注内容记进笔记」时，一操作就把面板收掉，只能先复制再重建。
+- 方案（用户选 C）：
+  1) 卡片底部加「记入笔记」：把「原文 + 本线程全部问答」交给已有的 `window.notesCapture`
+     （`web/notes.js` 的三选一浮层：当前笔记 / 今日学习收件箱 / 新建笔记…），写入格式复用
+     `app/notes.py::_capture_block`（`## 对话摘录` + 引用块 + 来源回链），后端零改动。
+  2) 卡片头部加「钉住」开关：`S.pinned` 为真时外部点击不关闭（Esc / ✕ 仍可关），
+     开笔记 / 知识库 / 设置都不用重开面板。
+- 实现：
+  - `web/askkit.js`：新增 `pinned` 状态与 `.askkit-pin` 按钮（图标按钮：`#i-pin` 图钉，
+    22×22，`aria-label="钉住面板"`，不占文字宽度）；`[data-act="capture"]` 仅在
+    `opts.onCapture` 存在时显示（`renderHeader` 控制）；`captureToNote()` 把
+    `{quote, history}` + 按钮 rect 交给适配器；外部点击白名单补 `#nt-cap-pop`，
+    并在浮层存在期间整体放行（点外部只关浮层、不关卡片）。
+  - `web/aside.js`：新增 `asideNoteText()` / `captureAside()`，暴露 `window.asideCapture`；
+    划词提问与 IDE 选代码两条入口都传 `onCapture`。
+  - `web/ui-shell.js`：检查器「旁注」列表打开线程时同样传 `onCapture`（首轮漏了这处，
+    表现为从列表回看时按钮是 hidden）。
+  - `web/notes.js`：`capturePop` 的外部点击排除 `.askkit`，回到卡片里看回答不会关掉浮层。
+  - `web/css/askkit.css`：`.askkit-pin` 样式，钉住态用强调色。
+- 验证（浏览器实测 641px）：检查器 → 旁注 → 打开线程后底部有「记入笔记」；点击后浮层
+  （z 9999 > 卡片 9600）显示「今日学习收件箱 / 新建笔记…」；点外部空白 → 浮层消失、卡片保留；
+  再点空白 → 卡片关闭；钉住后点空白卡片不动，取消钉住后恢复关闭。测试未点浮层内按钮，
+  `data/notes` 仍 9 篇。
+
+## [2026-11-26] 笔记源码模式接入 Monaco：语法着色 + 波浪线纠错
+
+- 需求：笔记「源码」模式原来是一个裸 `<textarea>`，没有着色；MDLint 已经能给出
+  `line/col/endCol/severity`，但只渲染成底部「⚠ N 处问题」列表，文本上没有波浪线。
+- 方案：源码视图改用**本地内置的 Monaco**（与 IDE 同一份，走 `loadMonaco()` 懒加载），
+  `language: 'markdown'`；同一份 MDLint 结果写 `setModelMarkers(model, 'markdown', …)`，
+  得到与 IDE 一致的波浪线 + 悬停说明；Monaco 加载/创建失败时自动退回原 textarea。
+- 实现：
+  - `web/index.html`：`#nt-pane-left` 内新增 `#nt-src-editor` 宿主，textarea 保留作回退。
+  - `web/notes.js`：
+    - 新增 `srcHostEl / srcValue / srcSetValue`，以及 `ensureSrcEditor()`（懒加载、创建、
+      用 textarea 里的当前内容 seed、切回源码时聚焦）；
+    - 抽出 `onSourceInput()`：textarea 与 Monaco 共用同一套「标脏 / 900ms 自动保存 /
+      300ms 同步块编辑器 / 320ms 预览 / MDLint」节流；
+    - 新增 `lintApplyMarkers()`，在 `lintRun()` 与开关纠错时调用；
+    - `mountPanes()` 只在 pane 之间**移动**宿主节点并 `layout()`，不销毁编辑器实例；
+    - `sourceVisible / currentMarkdown / setMarkdownBoth / syncSourceIfVisible / applyContent /
+      onEditorChange / setView / toggleSplit / jumpToHeading / lintGoto` 全部改为优先走 Monaco，
+      textarea 分支保留为回退。
+  - `web/ide-core.js`：`ideSyncMonacoTheme()` 追加调用 `window.notesSourceSyncTheme()`，
+    明暗切换时笔记源码同步换主题。
+  - `web/css/notes.css`：`.nt-src-editor { flex: 1 1 auto; min-height: 0 }`。
+- 验证：
+  - 浏览器实测：源码视图出现 `.monaco-editor`（行号 1–7、token 着色 蓝/灰/加粗），
+    `getModelMarkers` 1 条、`.squiggly-warning` 1 处（文件末尾缺少换行），底部同步「⚠ 1 处问题」。
+  - headless CDP（1440×900）补测：单栏源码宿主 419×578；分栏（右栏=源码）两栏都可见、
+    仅 1 个编辑器实例（宽 208）；点纠错行后焦点进入 Monaco（`inputarea`）；切回编辑正文完整。
+  - 全程未输入字符，笔记文件未被改写。
+- 备注：`分栏` 按钮在 ≤1200px 视口被 `@media` 隐藏；前端改动需刷新页面（Ctrl+R）生效。
+
+## [2026-11-26] 移除 AI 消息操作条的两个按钮
+
+- 需求：删除 AI 回复操作条里的「展开 / 收起全部过程」和「回退到此（含文件改动）」。
+- 改动：`web/chat.js::buildMessageActions`
+  - 删掉扫描 `.process-fold` 的 `_folds` 块（整段一键展开/收起）；
+  - 删掉 `mk('reset', '回退到此（含文件改动）', () => rollbackMessage(index))`。
+- 未删的依赖：`foldTransition()` 仍被会话分组 / 工具卡 / 计划卡等十几处使用；
+  `rollbackMessage()` 仍被 `web/stream/message-ops.js` 的「撤回用户消息」调用（同一套还原逻辑），
+  所以只删按钮，不动函数。
+- 验证：headless CDP 打开当前会话，最后一条 AI 回复里有 3 个 `.process-fold`（按旧逻辑会显示
+  展开按钮），但操作条 `data-tip` 只剩 复制 / 整段记入笔记 / 选择文本 / 添加到对话 / 查看轨迹 /
+  创建分支 / 重新发言 / 分享 / 删除，两个按钮均不存在。前端改动需刷新页面生效。
+
+## [2026-11-26] 复盘「AI 下载 skill 失败」：fetch_url 只能取 3~6 段证据
+
+- 现场（会话 `s_71f077ae40b6`，11:59:44 被手动停止）：让 AI 把 `shadcn/improve` 的 skill
+  下载到沙箱。两个 manifest（599B / 234B）写成功且字节一致，4 个 md（15.1KB / 13.3KB /
+  8.5KB / 7.3KB）始终拿不到全文；14 轮 / 507 秒 / 65 万 token 后卡住，用户点停止
+  （`[停止] sid=...`、`end_reason=stopped`、`finish_reason=tool_calls`）。
+- 根因（实测）：`fetch_url` 复用了搜索的 `extract_evidence()`；它按「段落块」取证据，
+  `max_passages` 默认 3、且被 `min(..., 6)` 夹死，`chars` 只影响字符预算不影响块数。
+  - 原文 14,979 字 / 47 块 → `extract_evidence(默认)` 913 字；`max_passages=99` 仍只有 1,639 字；
+  - `fetch_text(chars=2000)` 与 `fetch_text(chars=20000)` 都返回 909 字 —— `chars` 完全无效。
+- 其余路径：`curl`/`wget` 在 `CMD_DENY_EXES` 里永久拒绝；`delegate` 无可用子代理；
+  `task_create` 仍要模型自己给内容；`git clone` 可用但模型刚说完「先试它」就被停止。
+- 修复：
+  - `app/search.py` 新增 `fetch_text_full()` / `_fetch_full_uncached()` / `_fetch_raw_text()`：
+    文件类 URL（raw.githubusercontent / 常见源码后缀）**直连取原文**，HTML 才去标签；
+    不做段落挑选，按 `chars` 截断，上限 40,000（`FETCH_URL_FULL_CHARS`）。
+  - `app/agent/tools_web.py::_t_fetch_url` 改用 `fetch_text_full`。
+- 验证：`fetch_text_full(SKILL.md, 20000)` → 14,979 字（与 `Content-Length: 15092` 一致），
+  工具结果 15,222 字；`fetch_text()` 搜索链路仍是 909 字（未受影响）。
+  `pytest tests/test_search_pipeline.py` 20 项通过，`ruff check` 通过。
+- 剩余瓶颈：`data/config.json` 的 `tool_result_max=8192`（代码默认 30,000），超过后只回灌
+  头 4096 + 尾 1024 + `read_tool_result(handle)` 句柄；要一次拿到全文需调高该值。
+- Trae 的做法（同平台对照）：内置工具是 Terminal/Bash + Read/Write/Edit + WebFetch + WebSearch，
+  网络访问由**沙箱 network 策略**（default allow + allow/deny 列表）管理，而不是硬禁 curl；
+  WebFetch 只负责「读进上下文」（大内容可能截断），落盘走终端或 Write。
+  结论：**「读进上下文」与「下载到磁盘」要分开**；我们缺的是后者（见下条待办）。
+- 待办：加 `download_file` 工具（服务端 URL → 沙箱文件，回字节数 + sha1，内容不过模型上下文）。**已完成，见下条。**
+
+## [2026-11-26] 新增 download_file 工具：URL 直接落盘，内容不过上下文
+
+- 目的：`fetch_url` 是「读进上下文」（受 `tool_result_max` / 句柄分片限制），
+  下载大文件再让模型 `write_file` 复刻既慢又容易失真。`download_file` 由服务端直接写盘，
+  只回字节数 + sha1。
+- 实现（`app/agent/tools_web.py::_t_download_file`）：
+  - 参数 `{url, path, overwrite?}`；只允许公网 http(s)（复用 `public_url_error`，每跳重定向都校验）；
+  - **默认不覆盖已有文件**，要覆盖必须 `overwrite=true`（ai 档会弹审批）；
+  - `stream=True` 按 64KB 分块写同目录临时文件，成功后 `os.replace`，失败删临时文件；
+  - 单文件上限 32MB（先看 `content-length`，再在写的过程中二次卡住）；
+  - 写入前 `_snap(p)` 记撤销快照，返回 `[undo_op]`，可被「回退」恢复。
+- 注册点（漏一个模型就看不到或绕过审批）：
+  `agent/dispatch.py`（handler + import）、`agent/groups.py`（`TOOLS` / `WRITE_TOOLS` /
+  `FILE_TOOLS` / `_REQUIRED_ARGS`）、`agent/schemas.py`（`_fn_tool`）、
+  `agent/approval.py`（覆盖已有文件时 ask）、`agent/undo.py`（写操作中文名）、
+  `file_caps.py`（能力表）、`agent_defs.py`（子代理 WRITE_TOOLS + 实现者工具）、
+  `agent/prompt.py`（文本协议工具清单）、`api/sandbox.py`（审批卡描述）。
+- 验证（临时沙箱目录实测）：
+  - 下载 `shadcn/improve` 的 SKILL.md → **15,092 字节**、sha1 `42a3e6bd…`、undo_ops=1；
+  - 同路径再下 → `CONFLICT 目标已存在…确认覆盖请传 overwrite=true`；
+  - `overwrite=true` → 覆盖成功；
+  - `http://127.0.0.1:…` → `不允许访问内网地址`；`../escape.md` → `SANDBOX_DENIED`；
+  - `native_tool_schemas(agent_on=True)` 里含 `download_file`（22 个工具）。
+  - `ruff check` 全过；`pytest` 的 agent / api smoke / stepctx / recover 共 229 项通过。
+
+## [2026-11-26] 网络域名白名单（对齐 Trae 的 sandbox network 策略）
+
+- 需求：给 Agent 的联网能力加一个可配置的域名白名单，默认空、留空不限制，用户在设置里自己填。
+- 配置：`app/config.py` 新增 `agent_net_allow: []`（列表，默认空）。空 = 不限制，
+  保持原行为；非空时只有命中名单的主机允许被 `fetch_url` / `download_file` 访问。
+- 规则（`app/agent/net_policy.py`）：
+  - 每行一条，支持 `github.com`、`*.github.com`、完整 URL（自动取 host）、逗号/换行/分号分隔；
+  - 匹配「同名或子域名」：`github.com` 放行 `api.github.com`，但不放行
+    `github.com.evil.com`（防后缀伪装）；
+  - `raw.githubusercontent.com` 是另一个域，要单独写（或写 `githubusercontent.com`）；
+  - 拒绝文案直接带设置路径，模型能据此告诉用户去改哪里。
+- 接线：`app/agent/tools_web.py` 的 `_t_fetch_url` 与 `_t_download_file` 在 SSRF 校验之后各加一次
+  `check_url()`；`download_file` 还对**重定向后的最终地址**再校验一次。
+  范围刻意只覆盖这两个工具：`web_search` 是检索链路，站点域名不可枚举，不参与白名单。
+- 设置页：`web/settings/panes-agent.js` 在 Shell 白名单下面加「网络域名白名单（每行一条，
+  留空 = 不限制）」textarea（`#agent-net-allow`），fill / collect 都走 `settingsList()`
+  （兼容数组与换行字符串）；`settings_center.validate_patch` 依据默认值 `[]` 校验为数组。
+- 验证：
+  - 新增 `tests/test_net_policy.py` 7 条：空名单放行、精确/子域名匹配、后缀伪装拒绝、
+    `*.` 与 URL 归一化、字符串拆分、fetch/download 两个工具被拦截 —— 全过；
+  - `validate_patch({'agent_net_allow': [...]})` → OK；传数字 → 「必须是数组」；
+  - headless CDP 打开「设置 → Agent」：`#agent-net-allow` 存在、值为空、
+    placeholder 为 `github.com / raw.githubusercontent.com`（未保存任何配置）。
+  - `ruff check` 与 `node --check web/settings/panes-agent.js` 通过。
+
+## [2026-11-26] 工具盘点：和 Trae 比缺什么
+
+- 盘点口径：`groups.TOOLS` 86 个 + `tool_meta.META` 15 个统一入口（read/edit/run/code/git/plan/
+  agent/web/history/visual/image/asset/audio/workflow/utility）+ 能力注册表（memory.apply /
+  set_reminder / note.* / search.web / doc.read / skill.read / observe.* 等）。
+- 已对齐（我们也有）：Read/Write/Edit、Glob/Grep（search_files 的 glob + search_code）、
+  终端（run_command + 持久 shell）、WebFetch/WebSearch、子代理（delegate/explore，含后台与
+  followup/status/cancel）、结构化提问（ask_user）、计划卡（update_plan/plan_patch）、
+  技能（skills + skill.read）、MCP、定时提醒（set_reminder + scheduler）、
+  浏览器与桌面自动化（computer_* + browser_ext）、只读代码编排（code_mode，默认禁写禁命令）。
+- 主要缺口（按价值）：
+  1. **部署/发布**：Trae 有 deployment 能力（部署成可访问 URL 并管理），我们没有；
+  2. **计划模式**：Trae 有 `EnterPlanMode/ExitPlanMode`（强制只读探索 + 计划审批后才动手），
+     我们只有计划卡，没有模式约束；
+  3. **交互式可视化**：Trae 能把 SVG/HTML 组件直接渲染进对话（PureShowWidget），
+     我们只能渲染 ```svg / ```echarts / ```mermaid 静态块；
+  4. **Office 创建**：我们只有 `doc.read`（读 docx/xlsx/pdf），没有生成 docx/xlsx/pptx；
+  5. **可写代码编排**：Trae 的 Exec 可编排任何工具（写/命令按授权），我们的 code_mode 白名单
+     只有 21 个只读工具，`code_mode_allow_write/cmd` 默认关；
+  6. **目标/预算原语**：Trae 有 create_goal / update_goal + token budget，我们只有内部
+     `task_goal` / 每日用量上限，没有对 Agent 暴露的 goal 工具；
+  7. **定时任务的完整 CRUD**：我们只能 set_reminder，Agent 不能 list/pause/resume/delete/立即执行；
+  8. **浏览器交还用户**：Trae 有 browser_waiting_for_user_interaction（登录/验证码交给用户），
+     我们的 computer_* 没有等价的 handoff；
+  9. **外部授权**：Trae 有 RequestAuthorization，我们依赖 MCP/插件各自处理；
+  10. **显式上下文移交**：Trae 有 new_context（只带 handoff 重开窗口），我们只有自动压缩；
+  11. **专用审查 skill**：Trae 有 code-review / security-review 技能，我们只有 acceptance /
+      quality_gate / check_code。
+- 我们比 Trae 多的（对方没有或弱）：Windows UIA 桌面自动化、音频自检（audio_probe/compare）、
+  渲染/几何/场景自检、资产与 mesh 工具、archify、工作流引擎（run_workflow/status/resume/cancel）、
+  步级撤销（list_steps/undo_step/redo_step/recover_file）、git_commit/split_commit、
+  知识库/笔记双链、记忆写入（memory.apply）、轨迹、审批分档与 OS 沙箱。
+
+## [2026-11-26] 文件引用跳转对齐 Trae：file:/// 链接单击打开
+
+- 问题：回答里的文件路径只是行内代码（要双击），且一律按沙箱根解析；模型写子目录内部相对路径
+  （`.claude-plugin/plugin.json`）就会「文件不存在」。
+- 方案（对齐 Trae：路径基准在写的时候就定死，点击不再猜）：
+  - `web/markdown.js`：新增 `parseFileHref()`，识别 `file:///绝对路径#L12` / `#L12-L34`，
+    渲染成 `<a class="file-link" href="#" data-file data-line data-end>`（不 `target=_blank`）；
+    同时接受「沙箱根相对」写法 `file:///skills/x.md`（去掉前导 `/`）。
+  - `web/chat.js`：新增 `openFileLink()` + document 捕获阶段 click 委托：沙箱内绝对路径先转相对，
+    再 `setUiMode('ide') → openIdeFile → ideRevealLine`；沙箱外文件提示不打开。
+    原有「双击行内代码路径」保留作兜底（历史消息仍可用）。
+  - `web/css/base.css`：`.content a.file-link` 点状下划线，可点更明显。
+  - `app/agent/prompt.py`：文件 Agent 的 intro 增加引用规范——
+    `[文件名](file:///沙箱绝对路径#L12)`，明确不要只写裸相对路径。
+- 验证（headless CDP，会话 `s_71f077ae40b6`，沙箱 `D:/Ai/Project/temp`）：
+  - 注入 `[plugin.json](file:///D:/Ai/Project/temp/skills/improve/.claude-plugin/plugin.json#L3)`，
+    渲染出 `file-link` + `data-file/data-line`，单击后 `state.uiMode=ide`、
+    `state.ideOpen=skills/improve/.claude-plugin/plugin.json`；
+  - 相对写法 `file:///skills/improve/.claude-plugin/marketplace.json#L2` 同样打开成功；
+  - `node --check web/markdown.js web/chat.js`、`ruff check app/agent/prompt.py` 通过。
+- 备注：prompt.py 改动需重启后端；前端需刷新页面。历史消息不会自动变成链接，新回答起生效。
+
+
+## [2026-11-26] 对齐 Trae 五项：计划模式 / 部署发布 / 交互可视化 / 文档生成 / 可写 Code Mode
+
+- 目标：只补弱于 Trae 的部分，已强于对方的能力（工作流、撤销、桌面自动化、视觉/音频自检等）不动。
+- 1) 计划模式（先探索再列计划）
+  - 输入区新增「计划」开关（`#btn-plan`，在「能力」浮层里；`localStorage.gm.planMode` 持久化），
+    与 `/plan` 前缀等价；开启后本轮只读 + 出计划卡，审批后转执行。
+  - 计划提示增加「1.1 先探索再列计划」；
+    `app/api/chat.py` 的 `_plan_tool` 在规划模式下若本轮零读取（tool_log 里只有 plan/ask_user 等）
+    就拒绝首次 `update_plan`，回灌「先读再列计划」。
+- 2) 部署 / 发布（自托管，对齐 Trae 的「目录 → 发布 → URL → 预览」流程）
+  - `app/deploy.py`：把沙箱内静态目录**只复制发布文件**到 `data/deploy/sites/<id>/public`
+    （跳过隐藏文件 / .git / node_modules / *.map，上限 500 文件 / 50MB），
+    用 `ThreadingHTTPServer` 监听 0.0.0.0:7801+；禁目录列表、加 no-store；
+    返回本机 + 局域网地址，同一来源重复发布会原地更新（端口保持不变）。
+  - 工具 `deploy_site(action=publish|list|stop)`（`app/agent/tools_deploy.py`），
+    结果带 `GM_PREVIEW_URL:`，前端沿用现有机制自动打开 IDE 预览面板。
+  - 不做外部平台上传：本地/局域网可见，数据不出网（与 Trae 云托管不同，已在工具结果里说明）。
+- 3) 交互可视化
+  - `web/markdown.js` 新增 ```html 围栏 → `kind=html`；`web/rich-media.js` 用
+    `<iframe sandbox="allow-scripts allow-popups allow-forms allow-modals" srcdoc>` 渲染，
+    不给 allow-same-origin（读不到本应用存储 / 父窗口 DOM），页面用 postMessage 上报高度自适应
+    （`web/css/base.css` `.rich-html-frame` 初始 120px）。
+  - 提示词 `_VISUAL_HEAD` 增加 ```html 的使用边界（单文件、内联 CSS/JS、不依赖外部 CDN）。
+- 4) 文档生成
+  - 新工具 `doc_create(path, title?, blocks?, sheets?, overwrite?)`（`app/agent/tools_doc.py`）：
+    .docx / .xlsx 用标准库 zipfile 写 OOXML（标题层级 / 段落 / 列表 / 表格 / 分页；xlsx 多 sheet、
+    数字与布尔按类型写、文本走 inlineStr），.pdf 用 reportlab（复用 reader_export 的中文字体注册）。
+  - 接入：groups(TOOLS/WRITE_TOOLS/FILE_TOOLS)、dispatch、schemas、undo 标签、file_caps、
+    approval（覆盖已有文件才问）、agent_defs、prompt。
+- 5) 可写代码编排（Code Mode）
+  - 补上 `run_script` 的原生 schema（此前只有提示词，原生 function calling 根本调不到）。
+  - `app/api/chat.py` 给脚本挂 `caps["approve_tool"]`：脚本内每次写文件 / 命令都先过
+    `judge_tool_rule` + `judge_write/judge_command/judge_shell`，需要时弹审批卡；
+    `app/code_mode.py::_exec_tool` 在执行前调用它，拒绝就以 `TOOL_DENIED` 返回给脚本。
+  - 设置页新增两个开关（Agent → 工具与写入 → Code Mode）：`code_mode_allow_write` /
+    `code_mode_allow_cmd`，默认关闭；打开后写入仍限沙箱内，并逐次走审批。
+- 工具数量：`doc_create` / `run_script` / `deploy_site` 都并入 meta（edit(doc) / run(script) /
+  web(deploy)），核心 schema 数量保持不增。
+- 验证：
+  - `pytest tests/test_doc_create.py tests/test_code_mode.py tests/test_deploy.py tests/test_agent_plan.py
+    tests/test_chat_plan.py tests/test_plan_review.py` 全通过（新增 4+2+4 个用例）。
+  - headless Edge CDP：计划开关 aria-pressed/localStorage 往返正常；```html 围栏生成
+    sandbox iframe（无 allow-same-origin）、srcdoc 正确、高度自适应 129px、下载/源码按钮存在、
+    控制台无报错。
+  - 已知既有失败（非本次引入）：`tests/test_prompt_budget.py::test_agent_prompt_without_domains_is_compact`
+    阈值 9000 已被此前未提交的改动撑到 9395+；`tests/test_tool_meta.py::test_core_tools_are_consolidated`
+    期望 ≤15、实际 16（`download_file` 仍是独立 schema，可考虑并入 edit(download)）。
+
+## [2026-11-26] 第二轮：提示词/schema 瘦身、PPT 生成、安全审查技能、上下文交接、存储维护
+
+- 背景：上一轮对齐 Trae 五项后做了一次体检。实测 data/ 约 4GB（sessions 198MB、
+  trajectory 153MB、undo 84MB、.browser_profile 551MB、.computer 518MB），
+  事件日志 202MB、单个会话事件文件 58MB、孤儿会话目录 84 个；静态提示 9495 字符
+  已超过 `test_prompt_budget` 的 9000 阈值；核心 schema 16 个 > 测试上限 15。
+- 提示词瘦身（9495 → 约 8700，两个红测试转绿）
+  - 压缩 `_REMINDER_PROMPT`（931 → 约 600）与 `_VISUAL_*`（945 → 约 700）、
+    文件 Agent 规则 1/10–15、`_META_ALIAS_PROMPT`、`_FINISH_PROMPT`。
+  - 保留测试依赖的关键措辞（本轮【当前时间】/ 主动落地 / 08:00 / 20:00 /
+    只是陈述事实 / 不要反问到用户自己动手 / 非 Agent 模式下不可用 / 沙箱路径）——
+    这些是行为约定，不是可随意改写的文案。
+- 核心 schema 15 个：`download_file` 并入 meta `edit(action=download)`；
+  `doc_create` / `run_script` / `deploy_site` 分别落在 edit(doc) / run(script) / web(deploy)。
+  `test_tool_meta` 的 16000 字节上限很紧，meta 描述每加一句都要同步删等量字符。
+- PPT 生成：`doc_create` 支持 `.pptx`（`app/agent/tools_doc.py` 的 `_pptx_bytes`）。
+  - 手写 PresentationML：presentation / slideMaster / slideLayout / theme / slides + 全部 rels；
+    每块一页（heading 开新页，type=slide 读 title/bullets），标题用真 title 占位符。
+  - 验证：pytest 校验 zip 结构 + 所有 XML 可解析；再用 PowerPoint COM
+    `Presentations.Open(..., WithWindow:=false)` 打开，读回 slides=3、Title=「季度汇报」。
+- 安全审查技能：`resources/presets/skills/security-review/SKILL.md`（只读、按严重度、
+  必须给触发路径、依赖漏洞只提示用 audit 工具核实）。新增 preset 要同步更新
+  `tests/test_skills.py` 的 `PRESET_IDS`（这是枚举型常量，不是放宽断言）。
+- 上下文交接（对齐 Trae 的 new_context）
+  - `POST /api/session/handoff`：把源会话压成确定性摘要（目标 / 计划进度 / 验收项 /
+    最近请求 / 最后结论 / 用户补充），新会话第一条消息就是它，并继承 sandbox /
+    agent_enabled / approval_mode / ai_write / scene；生成中（ACTIVE_STREAMS）拒绝。
+  - 侧栏「新建对话」下新增「带摘要续」按钮（`#btn-handoff`），确认后切到新会话。
+  - 不调用模型，零成本；细节仍可回原会话查。
+- 存储维护（系统维护 → 磁盘占用 / 事件日志与孤儿目录）
+  - `POST /api/storage/usage`：按 data 子目录递归统计体积（40 万条目上限，防卡死）。
+  - `POST /api/storage/maintenance`：dry-run / apply 压缩事件日志（复用
+    `session_event_prune.plan/apply_row`）+ 移走孤儿目录（`scan_orphans/apply_orphan`）。
+    写回前自动备份到 `data/event_prune_backup/<时间戳>/`；有流在跑时拒绝。
+  - live 安全：逐会话持有 `session_events._write_lock` 替换文件，完成后用
+    `seed_last(当前内存会话)` 重新对齐 `_LAST`，避免后续 diff 基于被重写前的事件。
+  - 设置项 `storage_auto_prune`（默认关）：启动维护线程里若事件日志 >256MB 自动执行。
+  - 前端：`web/settings/search.js` 三个按钮 + 开关；`modal/dirty/core` 按现有设置链路回填与收藏。
+- 验证：全量 pytest 通过（含新增 test_storage_maintenance 4 / test_session_handoff 3 /
+  pptx 1）；ruff 与 node --check 通过；headless CDP 确认「带摘要续」按钮、
+  磁盘/事件日志控件存在、清理按钮初始禁用、自动压缩默认关闭、控制台无报错。
+- 注意：后端改动需重启应用生效；首次压缩 200MB 级事件日志会同时生成一份等体积备份，
+  确认无误后可手动删 `data/event_prune_backup/` 里的旧备份。
+
+## [2026-11-26] 体感优化：大厅秒开、字体瘦身、API gzip、katex 按需、会话悬停预取
+
+- 起点（headless Edge，1440×900，本机）：冷启动传输 6.19MB（其中 MiSans-Semibold 4.9MB =
+  79%）；67 个 defer 脚本、2 个长任务 95/136ms；`/api/state` 276–361KB 未压缩；
+  先开 IDE 再首次进大厅，卡片要 2525ms；切会话首次 73–90ms。
+- 1) 大厅即时反馈（`web/hall.js`）
+  - `hallRegister` 每注册一个功能就增量补卡片（`hallRefreshCards`，rAF 合并、带 id 去重），
+    不再等 8 个脚本（626KB）全部加载完才 `hallRenderHome`。
+  - 入口悬停即预取；来过大厅的用户（`localStorage.gm.hall.visited`）在 load 后空闲预取整组。
+  - 实测：先开 IDE（Monaco 已加载）再进大厅，全部卡片 2525ms → **64ms**。
+- 2) 字体瘦身（`web/fonts/MiSans-Semibold.woff2` + `web/css/tokens.css`）
+  - 用 fontTools 子集化到 GB2312 + ASCII + 拉丁补充/常用标点/全角 + 扫 web/ 与
+    resources/presets 里真实出现过的非 ASCII 字：29601 → 7793 字形，**4905KB → 1102KB**。
+  - `@font-face` 先 `local("MiSans Semibold")` 等系统字体，没装才下载子集。
+  - 子集外的生僻字按字符回退到 MiSans Regular / 雅黑（排版略有不一致，但不缺字）。
+  - 原字体备份在 `_backup/fonts/MiSans-Semibold.orig.woff2`（该目录被 gitignore）。
+    需要更大字集时用原文件重跑：
+    `python -m fontTools.subset in.woff2 --text-file=chars.txt --flavor=woff2 --output-file=out.woff2`
+- 3) API JSON gzip（`app/httpd.py`）
+  - 新增 `gzip_json_body()`：≥8KB 且客户端接受 gzip 时压缩，带 `Content-Encoding` + `Vary`。
+    `/api/state` 预计 361KB → 30–50KB。小响应保持明文，省 CPU。
+  - 注意：手机网关走 WebSocket + base64 分片、不转发 Accept-Encoding，这条改动只惠及桌面端；
+    要惠及手机需在网关侧压缩（另开一项）。
+- 4) katex 按需加载（`index.html` / `markdown.js` / `init.js`）
+  - 去掉 271KB 的 defer 脚本，改成 `loadLazyLib('katex')`：`mathHtml` 或
+    `scheduleMathUpgrade` 发现待渲染公式时才拉；库就绪后 `__onLibReady` → `upgradeMath` 补齐。
+  - 实测 katex 资源 startTime 280ms（DCL 168ms 之后），无公式的会话完全不加载。
+- 5) 会话悬停预取（`web/chat.js`）
+  - 会话行 `pointerenter` 时用只读的 `/api/session/messages` 拉最后一屏写进 `msgCache`
+    （带 `msg_total`），点击时走已有缓存路径：先出内容，网络只做校准。
+  - 不做空闲批量预取：消息里带工具结果时单次响应可达 1MB+，4 个会话平白多 3MB；
+    实测那一版 boot 传输从 2.4MB 涨到 5.2MB，已回退成「悬停 + 单次」。
+- 刻意没做的：notes / knowledge / trajectory / git 仍是首屏加载。它们在脚本执行时
+  就绑定了静态 DOM 与 document 级监听、并被 inline onclick 直接引用，改成按需加载需要
+  先重构各自的入口与绑定时机，收益（约 300KB 解析）与回归风险不成比例。
+- 验证：全量 pytest 通过（新增 `tests/test_httpd_gzip.py` 3 个用例）；ruff / node --check 通过；
+  headless 实测 boot 传输 **6192 → 2416KB**、字体 1102KB、katex 延迟加载、
+  大厅 64ms 出全部卡片、悬停后 `msgCache` 命中、控制台零报错。
+- 备注：`app/httpd.py` 的 gzip 需要重启应用生效；前端改动刷新即可。

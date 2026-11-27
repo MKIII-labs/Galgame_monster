@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
-"""定时任务调度：定时提醒 + AI 主动聊天。
+"""定时任务调度：定时提醒。
 
-任务落在 data/tasks.json（独立文件，不塞进 sessions.json）。一个守护线程每
+任务落在 data/tasks.json（独立文件，不塞进会话存储）。一个守护线程每
 SCAN_INTERVAL 秒扫一次到期任务。
 
 分工（别搞重，否则会重复通知）：
 - **系统通知**：reminder 由 Windows 计划任务负责（app/notify.py）——程序没开也能弹；
   这里的调度器**不再弹一次**。
 - **会话消息 + 前端实时插入**：由这里负责（追加进 messages + publish 事件）。
-- **主动聊天**：需要调模型，只能在本程序运行时发生（程序没开就没有）。
 """
 import datetime
-import random
 import threading
 import time
 import uuid
@@ -21,8 +19,6 @@ from app.store import TASKS_FILE, read_json, write_json
 
 SCAN_INTERVAL = 15       # 秒
 STALE_AFTER = 86400      # 一次性提醒错过超过一天（关机等）就不再补弹
-COOLDOWN = 180           # 用户刚有活动时，主动聊天先让路（秒）
-MAX_SILENT = 2           # 连续这么多次主动都没得到回应就自动暂停
 
 _lock = threading.RLock()
 _started = False
@@ -113,23 +109,20 @@ def _update(task_id, **fields):
 # ------------------------------------------------------------
 # 增删改
 # ------------------------------------------------------------
-def _default_title(kind, text):
-    if kind == "auto_chat":
-        return "主动聊天"
+def _default_title(text):
     t = (text or "").strip()
     return ("提醒：" + t[:24]) if t else "提醒"
 
 
-def add_task(session_id, at, text="", kind="reminder", repeat="",
-             title="", gap_min=40, gap_max=120):
-    """新增任务；reminder 会同时注册 Windows 计划任务（系统通知的唯一来源）。"""
+def add_task(session_id, at, text="", kind="reminder", repeat="", title=""):
+    """新增提醒；reminder 会同时注册 Windows 计划任务（系统通知的唯一来源）。"""
     task = {
         "id": _new_id(),
         "session_id": session_id,
         "kind": kind,
         "at": float(at),
         "text": text or "",
-        "title": title or _default_title(kind, text),
+        "title": title or _default_title(text),
         "repeat": repeat or "",
         "enabled": True,
         "paused": False,
@@ -138,9 +131,6 @@ def add_task(session_id, at, text="", kind="reminder", repeat="",
         "last_fired": 0.0,
         "fired": 0,
     }
-    if kind == "auto_chat":
-        task["gap_min"] = int(gap_min or 40)
-        task["gap_max"] = int(gap_max or 120)
     with _lock:
         data = load_tasks()
         data["items"].append(task)
@@ -262,117 +252,11 @@ def _fire_reminder(task, now, deliver=True):
         _retire(task)
 
 
-def _user_active_recently(sid, secs):
-    """会话最近是否刚有活动（用作「别在用户刚说完话时插嘴」的粗略判断）"""
-    from app.sessions import load_sessions, find_session
-    s = find_session(load_sessions(), sid)
-    if not s:
-        return False
-    return (_now() - float(s.get("updated_at") or 0)) < secs
-
-
-def _last_is_auto(sid):
-    from app.sessions import load_sessions, find_session
-    s = find_session(load_sessions(), sid)
-    msgs = (s or {}).get("messages") or []
-    return bool(msgs and msgs[-1].get("auto"))
-
-
-def _next_auto_at(task, now):
-    lo = int(task.get("gap_min") or 40)
-    hi = int(task.get("gap_max") or 120)
-    if hi < lo:
-        hi = lo
-    return now + random.randint(lo, hi) * 60
-
-
-def _reschedule_auto(task, now, silent=None, pause=False):
-    fields = {"at": _next_auto_at(task, now), "last_fired": now,
-              "fired": int(task.get("fired") or 0) + 1}
-    if silent is not None:
-        fields["silent"] = int(silent)
-    if pause:
-        fields["paused"] = True
-    _update(task["id"], **fields)
-
-
-def _fire_auto(task, now):
-    sid = task["session_id"]
-    # 首次（开启后的开场那条）不做冷却判断 —— 否则你刚开完开关、要的即时反馈会被顺延掉
-    if task.get("fired") and _user_active_recently(sid, COOLDOWN):
-        _reschedule_auto(task, now)          # 用户刚在说话，先让路
-        return
-    if _last_is_auto(sid):
-        silent = int(task.get("silent") or 0) + 1
-        if silent >= MAX_SILENT:
-            print("[主动聊天] 连续 %d 次无回应，自动暂停（会话 %s）" % (silent, sid))
-            _reschedule_auto(task, now, silent=silent, pause=True)
-            return
-        _update(task["id"], silent=silent)
-    else:
-        _update(task["id"], silent=0)
-    text = generate_auto_message(sid)
-    if not text:
-        _reschedule_auto(task, now)
-        return
-    _append_message(sid, text)
-    events.publish({"type": "auto_msg", "session_id": sid, "text": text})
-    _reschedule_auto(task, now, silent=0)
-
-
-def send_now(sid):
-    """立刻生成并发送一条主动消息（供设置里的「立即试一次」用）。返回文本或空串。
-
-    与定时触发的差别：不做冷却判断、不改任务的下次时间。
-    """
-    text = generate_auto_message(sid)
-    if not text:
-        return ""
-    _append_message(sid, text)
-    events.publish({"type": "auto_msg", "session_id": sid, "text": text})
-    return text
-
-
-def generate_auto_message(sid):
-    """让模型生成一句「主动开口」的话；失败返回空串（调用方按跳过处理）。"""
-    from app.config import get_api_conf
-    from app.llm import _quick_chat, recent_dialog
-    from app.sessions import load_sessions, find_session
-    s = find_session(load_sessions(), sid)
-    if not s:
-        return ""
-    api_key, api_url, api_model = get_api_conf("chat")
-    if not api_key:
-        return ""
-    msgs = [{"role": "system", "content": _auto_system_prompt(s)}]
-    recent = recent_dialog(s, limit=8, each=120)
-    if recent:
-        msgs.append({"role": "user",
-                     "content": "（以下是你们最近聊过的内容，仅供你避免重复，不要引用）\n" + recent})
-    msgs.append({"role": "user", "content": "现在请你主动开口，发一句话。"})
-    text = _quick_chat(api_key, api_url, api_model, msgs,
-                       max_tokens=200, source="auto_chat")
-    return (text or "").strip()
-
-
-def _auto_system_prompt(s):
-    name, persona = "助手", ""
-    return "\n".join([x for x in [
-        "你是「%s」。现在由你**主动**给对方发消息。" % name,
-        persona,
-        "要求：",
-        "1. 只输出你这一句话，不要解释、不要加引号、不要写旁白说明；",
-        "2. 像真人发消息一样：口语、简短（20–60 字），可以是个小话题、关心、吐槽或分享；",
-        "3. **不要复述**之前聊过的内容，不要连着追问，也不要问「在吗」「在干什么」这类空话；",
-        "4. 不要提「我是 AI」「根据设定」之类的话。",
-    ] if x])
-
-
 def tick(now=None):
     """扫一遍到期任务，返回本轮触发的任务 id 列表（测试用）。"""
     now = now or _now()
     if not switch_on("reminders_enabled"):
-        return []                        # 总开关关闭：提醒 / 主动聊天 / 外部来源全部暂停
+        return []                        # 总开关关闭：提醒与外部来源全部暂停
     fired = []
     for task in list_tasks():
         if not task.get("enabled") or task.get("paused"):
@@ -380,16 +264,13 @@ def tick(now=None):
         at = float(task.get("at") or 0)
         if at <= 0 or at > now:
             continue
-        if task.get("kind") == "reminder" and (now - at) > STALE_AFTER:
+        if task.get("kind") != "reminder":
+            continue                     # 旧版主动聊天任务：功能已下线，忽略
+        if (now - at) > STALE_AFTER:
             _retire(task)                     # 错过太久：直接作废，不补弹
             continue
         try:
-            if task.get("kind") == "reminder":
-                _fire_reminder(task, now, deliver=switch_on("reminder_inapp_enabled"))
-            else:
-                if not switch_on("auto_chat_enabled"):
-                    continue             # 主动聊天总开关关闭：保留任务，不触发
-                _fire_auto(task, now)
+            _fire_reminder(task, now, deliver=switch_on("reminder_inapp_enabled"))
             fired.append(task["id"])
         except Exception as e:
             print("[调度] 任务 %s 触发失败：%s" % (task.get("id"), e))

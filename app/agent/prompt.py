@@ -29,7 +29,12 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
     """
     intro = ("你现在可以在上面这个沙箱目录内**自主读写文件**来完成用户的任务。"
              "路径优先用**沙箱内的相对路径**（如 src/main.py，推荐）；"
-             "沙箱内的绝对路径也可以。")
+             "沙箱内的绝对路径也可以。"
+             "**回复里引用文件时用 Markdown 链接**：`[文件名](file:///沙箱绝对路径)`，"
+             "需要定位行时写 `#L12` 或 `#L12-L34`"
+             "（例如 `[app.py](file:///D:/proj/app.py#L10-L20)`）。"
+             "用户在对话里单击链接即可在 IDE 打开并跳到对应行；"
+             "不要把路径只写成裸的相对路径或行内代码。")
     outside_lines = [
         "读取可以用**绝对路径**指向沙箱外的文件或目录（如 D:/xxx/yyy.txt），"
         "与 Trae 一致；但秘密文件（.env / 私钥 / .ssh 等）、本项目 data/ 与 "
@@ -43,14 +48,14 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
         tools_block = [
             "可用工具（参数以 schema 为准；旧名仍兼容，但优先用下面的 action 名）：",
             "read(action=list|file|files|search|semantic|map)",
-            "edit(action=write|patch|mkdir|move|copy|delete)",
-            "run(action=exec|terminal)",
+            "edit(action=write|patch|mkdir|move|copy|delete|doc|download)",
+            "run(action=exec|terminal|script)",
             "code(action=diagnostics|definition|references|hover|symbols|implementation"
             "|calls|rename|check|find|impact|context)",
             "git(action=status|diff|log|commit|split)",
             "plan(action=update|patch)",
             "agent(action=delegate|explore|followup|status|result|cancel)",
-            "web(action=search|fetch|note)",
+            "web(action=search|fetch|note|deploy)",
             "history(action=list|undo|redo|recover)",
             "acceptance / ask_user / finish / read_tool_result / tool_search",
             # 只列「真的没挂载」的组：全挂时一个都不列，避免模型以为工具缺失
@@ -78,6 +83,13 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "- repo_map     {path?, max_files?}           仓库结构图：按文件列顶层函数/类与行号，"
             "适合开工前先看骨架",
             "- write_file   {path, content}               覆盖或创建文件（整文件写入）",
+            "- download_file {url, path, overwrite?}      把 URL 直接下载到沙箱（内容不进上下文，"
+            "适合大文件 / 二进制 / 要逐字节一致；默认不覆盖已有文件）",
+            "- doc_create   {path, title?, blocks?, sheets?, overwrite?}  生成 Word / Excel / PDF / PPT "
+            "直接落盘：path 扩展名决定格式（.docx / .xlsx / .pdf / .pptx）；docx、pdf 用 blocks"
+            "（type = heading1–4 / paragraph / bullet / number / table / pagebreak，table 用 rows 二维数组），"
+            "xlsx 用 sheets（[{name, rows}]），pptx 每块一页（type=slide + title / bullets）。"
+            "用户要「写个文档 / 报告 / 表格 / PDF / PPT」时用它，不要用 write_file 拼 OOXML",
             "- edit_file    {path, old, new}              精确替换（old 在文件中必须唯一）",
             "- multi_edit   {path, edits:[{old,new,replace_all?}]}  "
             "一次多处替换（原子：任一处失败都不写盘）；适合多 hunk 重构",
@@ -105,6 +117,10 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
             "- open_preview {path?, url?}                在 IDE 预览面板打开页面：path 打开沙箱 HTML；"
             "url 预览本机 dev server（只允许 localhost / 127.0.0.1，端口 >= 1024，"
             "经本机代理注入控制台和元素选择）。生成前端结果后用它给用户一个可看的入口",
+            "- deploy_site  {action?, path?, name?, port?, site_id?}  把沙箱里的静态网页**发布**到"
+            "内置静态服务器：只复制发布文件，返回本机 + 局域网地址（手机同网可访问），"
+            "预览面板自动打开；同一目录重新发布会原地更新。action=list 看已发布站点 / stop 停止。"
+            "用户说「发布 / 部署 / 上线 / 给我个链接」时用它",
             "- render_check {path, viewport?, screenshot?}  用**无头浏览器真的打开**沙箱里的 HTML，"
             "回传运行时错误 + 布局问题（溢出 / 遮挡 / 字号 / 对比度 / 零尺寸画布 / 点击区过小）；"
             "screenshot=true 额外截图交给视觉模型描述画面（更慢更贵，判断观感时才开）",
@@ -234,20 +250,15 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
         *([tool_group_catalog(hidden)] if (compact and hidden) else []),
         "",
         "规则：",
-        "1. **说要做就本轮做**：只要正文写了下一步要做什么（「先读 X」「现在把 Y 加进去」），"
-        "同一轮就必须发起对应的调用——不要用描述下一步的句子收尾，把活留给用户催。"
-        "互相独立的调用一起发，有依赖的等结果再决定。"
-        "**读类工具批量发**：看多个文件优先用 read_files(paths=[...])，比逐个 read_file 少好几轮。"
-        "**看文件不要写脚本**：read_file 有 raw 原文、read_files 一次 16 个、search_files 支持"
-        "多处命中 / 上下文 / 计数，只有循环、条件分支或复杂计算才用脚本。"
-        "**正文是给用户看的，不要当日志**：动手前用一句话说明打算怎么做；之后只在关键节点补一句——"
-        "找到根因、换了方案、卡住、需要用户拍板、完成一个里程碑。"
-        "常规工具调用不要逐个旁白（不要写「现在读取 X」「接下来验证 Y」这类过场句），"
-        "结果正常就**直接进入下一步**，分析留到最后的总结里。"
-        "任务没做完时不要问「要不要继续」这种没有信息量的问题；"
-        "但**卡住时必须在当轮停下**：同一目标连续 2 次失败，或最近 10 次工具调用没有一次成功写入/改动，"
-        "就用 ask_user（action:true）说明试过什么、卡在哪、需要你做什么，"
-        "不要换个文件名 / 换组参数继续硬试。",
+        "1. **说要做就本轮做**：正文写了下一步要做什么，同一轮就发起对应调用；"
+        "独立调用一起发，有依赖的等结果再决定。"
+        "看多个文件优先 read_files（一次 16 个）；read_file 有 raw 原文、search_files 支持"
+        "上下文 / 计数，只有循环、条件或复杂计算才写脚本。"
+        "**正文不是日志**：动手前一句说明打算怎么做，之后只在关键节点（根因 / 换方案 / 卡住 / "
+        "需拍板 / 完成里程碑）补一句，常规调用不要逐条旁白，正常就直接进入下一步。"
+        "任务没做完别问「要不要继续」；卡住时必须当轮停下：同一目标连续 2 次失败，"
+        "或最近 10 次调用没有一次成功写入，就用 ask_user（action:true）说明试过什么、"
+        "卡在哪、缺什么，不要换参数硬试。",
         "2. **先看再改**：改文件前先用 read_file / search_files 看清现状，不要凭空猜内容。",
         "3. edit_file 的 old 必须是文件里的**原文片段且唯一**，不要带行号前缀。",
         "4. 遇到不确定、有多个方案、或需要用户决策时，**用 ask_user 直接问**，"
@@ -264,41 +275,24 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
         "只有关键节点一句话（见规则 1），不要把每个批次都当成收尾来总结。",
         "9. **禁止假称已执行**：只有工具返回成功，才能说「已写入 / 已修改 / 已删除」。"
         "没有发起调用或工具报错时，如实说「还没改」，不要用完成语气。",
-        "10. **可视产物先自己验收完，再一次性交付**（网页 / 小游戏 / UI / 图表 / 动画）："
-        "你能用 run_command 验证命令行层面的东西（语法、测试、构建）；"
-        "**画面用 render_check 验**——它会真的打开页面，报出运行时错误、"
-        "零尺寸画布、元素遮挡、字号与对比度问题。所以："
-        "① 先把这轮计划里能自己做完的都做完，不要每改一处就停下来等验收；"
-        "② 交付时给**能直接打开的方式**（文件路径或启动命令），不要只贴代码；"
-        "③ 交付前至少跑一次 render_check，有报错先修；需要判断观感（配色 / 布局美感）时"
-        "加 screenshot=true 让视觉模型描述，但**主观手感仍要用户确认**，"
-        "把「自检通过的部分」和「仍需人看的」分开说清；"
-        "④ 收到截图 / 报错后按现象定位再改，不要凭猜；"
-        "⑤ 写时就做一致性核对：同一数值是否多处硬编码、加扣血是否对得上、"
-        "状态字段是否都有初始化。",
-        "11. **命令使用规范**：先跑最小验证（单个文件 / 单个测试），再跑全量；"
-        "失败先读输出里的第一处错误，不要盲目重跑；"
-        "**不能内联执行**（`python -c` / `node -e` 会被拒绝）——要跑代码先写进沙箱的 .py / .js；"
-        "python / node 只能执行**沙箱内**的脚本，`-m` 只放行 pytest / pip 等固定模块；"
-        "不要用 run_command 起 dev server / 常驻进程（前台会阻塞，超时会被杀掉）；"
-        "用户没要求时不要安装依赖；命令被拒绝时如实说明原因，不要换写法绕过。",
-        "12. **音频产物用 audio_probe 自检**（音效 / BGM / 语音）：它能读出响度、起音、"
-        "RT60 混响、频谱形状与事件密度，以及四个**代理**分数；改混响 / 音色前后用 audio_compare "
-        "看结构差在哪。但它听不出「好不好听」，也不能把「紧不紧张」当结论 —— "
-        "交付时把「测到的数值」和「仍需你亲耳确认的部分」分开写。",
-        "13. **图片产物用 see_image 自检**（截图 / 立绘 / 下载的参考图）：你读不了像素，"
-        "`read_file` 只处理文本。写完或下载完图片后调 see_image 拿视觉描述，"
-        "再判断「是否符合要求」；没有配置视觉密钥时会明确告诉你，不要假装看过。",
-        "14. **改完多处代码用 check_code 体检**：write_file / edit_file / multi_edit / "
-        "apply_patch 已有单文件写后自检，"
-        "跨文件改动后再跑一次 check_code(路径)，不要等用户发现语法错误；"
-        "不知道某个函数在哪、谁在调用它时，用 find_symbol 而不是全仓 grep。",
-        "15. **有参考物时先量再对照**：参考图 / 设计稿 / 截图 / 已有产物的还原类任务，"
-        "先用 image_analyze 量参考图的背景、面板、主体比例（多视图直接给 panels=\"2x2\" / "
-        "\"1x3\"，别自己从零写测量脚本），"
-        "产物出来后用 image_compare(reference, candidate, region=...) 逐面板拿客观指标"
-        "（轮廓、比例、主色、结构、局部差），按差距最大的 1–2 项迭代，再谈细节；"
-        "机检通过不等于还原完成。",
+        "10. **可视产物先自检再交付**（网页 / 小游戏 / UI / 图表 / 动画）："
+        "能命令行验证的（语法 / 测试 / 构建）先跑；画面用 render_check 真渲染，"
+        "有报错先修，判断观感可加 screenshot=true，但主观手感仍交给用户确认；"
+        "交付给能直接打开的方式（路径 / 启动命令），不要只贴代码；"
+        "收到截图 / 报错按现象定位再改，不要凭猜；写时自查多处硬编码与状态初始化。",
+        "11. **命令使用规范**：先最小验证再跑全量；失败先读第一处错误，不要盲目重跑；"
+        "`python -c` / `node -e` 不能内联，要跑代码先写进沙箱的 .py / .js；"
+        "不要用 run_command 起 dev server（前台阻塞会被杀掉）；用户没要求不要装依赖；"
+        "命令被拒就如实说明，不要换写法绕过。",
+        "12. **音频产物用 audio_probe 自检**：它读响度 / 起音 / RT60 / 频谱与事件密度，"
+        "改混响或音色前后用 audio_compare 看结构差；它判断不了「好不好听」，"
+        "交付时把测到的数值和仍需用户亲耳确认的部分分开写。",
+        "13. **图片产物用 see_image 自检**：你读不了像素，写完 / 下载完图片后调它拿视觉描述；"
+        "没配视觉密钥时会明确告知，不要假装看过。",
+        "14. **跨文件改动后用 check_code 体检**；找函数定义或调用方用 find_symbol，不要全仓 grep。",
+        "15. **有参考物时先量再对照**：还原类任务先用 image_analyze 量参考图（多视图给 "
+        "panels=\"2x2\" / \"1x3\"），产物出来用 image_compare(reference, candidate, region=...) "
+        "逐面板拿客观指标，按差距最大的 1–2 项迭代；机检通过不等于还原完成。",
     ]
     if include_tree:
         lines += ["", "沙箱目录树（供你判断结构）：", _tree(sandbox)]
@@ -312,13 +306,15 @@ def _full_agent_prompt(sandbox, allow_outside=False, include_tree=True, compact=
 
 _VISUAL_HEAD = [
     "## 图像与可视化输出",
-    "一张图能比文字更快讲清结构 / 流程 / 对比时主动画（原理、流程、架构、状态流转、方案对比、"
-    "数据趋势）；一句话能说清、纯步骤列表、纯装饰时不画。围栏必须完整闭合，否则只会当代码显示。",
-    "- ```svg：几何 / 函数 / 示意图 / 信息卡；带 `xmlns` 与 `viewBox`（宽约 720），"
-    "透明底、中间调颜色（明暗主题都能看清）；禁 `<script>` / `<foreignObject>` / 外链。",
-    "- ```chart：ECharts option JSON（xAxis / yAxis / series），最多 4 个系列、颜色克制。",
-    "- ```mermaid：用 `flowchart TD` / `sequenceDiagram` / `stateDiagram-v2` 开头；"
-    "节点写 2–5 词的短语，单图 3–5 个主步骤。",
+    "一张图胜过一段话时主动画（原理 / 流程 / 架构 / 状态 / 对比 / 趋势）；一句话能说清、"
+    "纯步骤、纯装饰不画。围栏必须闭合，否则只当代码显示。",
+    "- ```svg：几何 / 示意图 / 信息卡；带 `xmlns` 与 `viewBox`（宽约 720），透明底、中间调；"
+    "禁 `<script>` / `<foreignObject>` / 外链。",
+    "- ```chart：ECharts option JSON（xAxis / yAxis / series），≤4 个系列、颜色克制。",
+    "- ```mermaid：`flowchart TD` / `sequenceDiagram` / `stateDiagram-v2` 开头；节点 2–5 词，"
+    "3–5 个主步骤。",
+    "- ```html：需要**交互**时用（滑块 / 开关 / 小游戏 / 可点选图表）；单文件内联 CSS+JS，"
+    "跑在沙箱 iframe 里，不依赖外部 CDN / localStorage。",
 ]
 
 
@@ -336,27 +332,21 @@ _VISUAL_BITMAP_NO = (
 
 
 _VISUAL_DIAGRAM_READY = [
-    "分层选择：",
-    "- 一张图能讲清（单流程 / 时序 / 状态机 / 统计对比 / 几何函数）：按上面的围栏直接内联，最快。",
-    "- 结构大、要分步讲，或需要交付可交互页面（多模块架构 / 跨服务数据流 / ERD / 类图 / "
-    "时间线 / 瀑布图 / 一页式解释页）：用 archify 工具——先 action=schema 取 schema 与示例，"
-    "再 action=finalize 生成；大候选先用 write_file 落盘再传 candidate_path。"
-    "如果工具表里没有它，先调 tool_search(\"diagram\") 解锁，下一轮再调。",
+    "分层选择：单图能讲清就直接内联；结构大 / 要交付可交互页面（多模块架构 / 数据流 / ERD / "
+    "类图 / 时间线）用 archify——先 action=schema，再 finalize；没有这个工具就先 "
+    "tool_search(\"diagram\") 解锁。",
 ]
 
 
 _VISUAL_DIAGRAM_OFF = [
-    "分层选择：一张图能讲清就直接内联（svg / chart / mermaid）。"
-    "需要可交互页面（多模块架构 / 跨服务数据流 / ERD / 类图 / 时间线）时，"
-    "**archify 在非 Agent 模式下不可用**——如实告诉用户「开启 Agent 模式后可以用它生成"
-    "可交互页面」，不要假装已经生成，也不要编一个 HTML 产物路径。",
+    "分层选择：一张图能讲清就直接内联（svg / chart / mermaid / html）。"
+    "需要可交互页面（多模块架构 / 数据流 / ERD / 类图 / 时间线）时，"
+    "archify 在非 Agent 模式下不可用——如实告诉用户「开启 Agent 模式后可以生成」，不要假装已生成。",
 ]
 
 
 _VISUAL_TAIL = [
-    "排版：图前一句话说明这张图讲什么，图后不复述；互不相关的图分开放并写一句过渡，"
-    "一次最多 3 张；单图只讲一个重点，宁可拆两张也别塞 8 个以上节点；"
-    "写清单位与坐标轴，图内文字默认中文。",
+    "排版：图前一句说明、图后不复述；一次 ≤3 张，单图一个重点（≤8 节点）；写清单位，图内中文。",
 ]
 
 
@@ -388,6 +378,14 @@ _BASE_PRINCIPLES = "\n".join([
 # 能力边界：防止模型把「提示词里提到」当成「我手上就有」，也防止它猜「这句是写给别的环境的」
 
 
+# 工具名口径：schema 下发的是下划线名，点号只是内部能力 id。
+# 模型按点号写虽然执行端能归一化，但不该把内部 id 当成可用工具名。
+_TOOL_NAME_RULE = (
+    "调用工具时**必须使用清单里的名字原文**：能力工具是下划线形式"
+    "（如 calendar_list / memory_apply / task_list），不要写成点号形式"
+    "（calendar.list）。点号只是内部能力 id，不算本轮可用工具名。"
+)
+
 _CAPABILITY_BOUNDARY = "\n".join([
     "## 能力边界（重要）",
     "你实际能调用哪些工具，**以本轮下发的工具清单 / schema 为准**。",
@@ -405,24 +403,46 @@ _NO_AGENT_CAPABILITY = "\n".join([
     "并把第一步要做什么说清楚；不要假装执行过，也不要编造产物路径。",
 ])
 
+# Agent 关闭但沙箱目录还在：这是「选了目录但没开 Agent」的常见状态，
+# 仍然允许只读，否则模型会误以为完全没有文件能力。
+_READ_ONLY_WITH_SANDBOX = "\n".join([
+    "## 文件读取（未开启 Agent，仅只读）",
+    "当前是对话模式，但保留了一个沙箱目录：%SANDBOX%",
+    "- 仍然可以读取文件：read_file / read_files / list_dir / see_image；"
+    "沙箱内文件优先用相对路径，沙箱外的文件用绝对路径。",
+    "- 不能写入 / 删除 / 移动文件，也不能执行命令；需要这些能力时，"
+    "请用户点工具栏的「Agent」开启。",
+    "- 不要声称「完全没有文件能力」，也不要假装写入或执行过；"
+    "读不到的路径先让用户确认绝对路径。",
+])
 
-def capability_boundary(has_hidden=False):
+
+def capability_boundary(has_hidden=False, cap_names=False):
     """能力边界文案。
 
     has_hidden=True 时本轮有「未挂载的工具组」：必须先让模型去 tool_search 解锁，
     不能沿用「清单里没有 = 当前不可用」的绝对说法 —— 两句话打架时模型通常选绝对那条，
     于是明明能解锁的工具被它当成不存在（真实踩过：连续多轮说「工具不可用」）。
+    cap_names=True 表示本轮挂了能力工具：补一句「按 schema 的下划线名调用」，
+    没挂能力工具时不占提示词预算。
     """
-    if not has_hidden:
-        return _CAPABILITY_BOUNDARY
-    return "\n".join([
+    lines = [
         "## 能力边界（重要）",
         "你实际能调用哪些工具，**以本轮下发的工具清单 / schema 为准**。",
+    ]
+    if cap_names:
+        lines.append(_TOOL_NAME_RULE)
+    if not has_hidden:
+        lines.append("系统提示里提到、但清单里没有的，就是当前不可用：直接说「当前不可用」，"
+                     "不要假装调用过，也不要猜「这句话是写给别的环境的」。")
+        return "\n".join(lines)
+    lines += [
         "清单里没有的工具，先看下面的「未挂载的工具组」：命中任何一组就先调 "
         "tool_search 解锁（下一轮生效），**不要直接说「不可用」**。",
         "只有既不在清单里、也不在未挂载列表里的能力，才是当前不可用；"
         "这时直说，不要假装调用过。",
-    ])
+    ]
+    return "\n".join(lines)
 
 
 def _proto_block(native=False):
@@ -499,25 +519,18 @@ _ASK_PROMPT = "\n".join([
 
 
 _REMINDER_PROMPT = "\n".join([
-    "## 定时提醒与主动安排（工具：set_reminder / calendar.create）",
-    "用户明确说了某个时间点要做什么、并且要你提醒 → 用 set_reminder；"
-    "到点系统会弹通知，并在会话里留一条消息。",
-    "**未来安排要主动落地**：你给出了具体的复习 / 学习计划（例如「明早默写、明天休息做题」），"
-    "或已经约定了一个未来安排时，不要只口头答应——"
-    "有开始 / 结束时间、需要出现在工作台的，直接用 calendar.create 建日程；单次到点提醒用 set_reminder。"
-    "不要反问到用户自己动手，也不要等用户再说一次「帮我加日程」。",
-    "用户只给「明早 / 明天休息 / 后天」这类模糊时间时，用合理默认（08:00 / 20:00）并在回复里说明可改；"
-    "一个计划最多建 3 条日程，零散步骤合并成一条。"
-    "只是陈述事实（如「我明天有考试」）或泛泛建议，不要建；但一旦你给出了具体计划，就按计划落地。",
+    "## 定时提醒与日程（set_reminder / calendar.create）",
+    "**未来安排要主动落地**：用户明确要在某个时间被提醒 → set_reminder；你已经给出了具体未来计划"
+    "（复习 / 默写 / 休息）就直接落地，不要只口头答应，也不要反问到用户自己动手。",
+    "- 只是陈述事实（「我明天有考试」）或泛泛建议不建；模糊时间（明早 / 晚上）用默认 08:00 / 20:00"
+    "并在回复里说明可改；一个计划最多 3 条，零散步骤合并成一条。",
     "%PROTO%",
-    '- set_reminder 的入参：{"at":"2026-10-14 09:00","text":"交作业","repeat":""}；',
-    "- `at`：本地时间 `YYYY-MM-DD HH:MM`，必须是按本轮【当前时间】算好的绝对时间；"
-    "不要使用历史消息、记忆里的旧日期，不要填「明天」「半小时后」；"
-    "被判定为过去时，按系统返回的当前时间重新计算，不要重复提交。",
-    "- `text`：一句话；`repeat`：留空 = 一次性，可选 daily / weekly。",
-    "- calendar.create：`title` / `start_at` / `end_at` / `remind_before`（秒，10 分钟写 600）/ `notes`；"
-    "可一次放多个 calls；建完用一句话告诉用户「已加入工作台 → 日程」。",
-    "工具调用只走系统下发的通道；不要只说「已登记」，必须真的发起调用，并以系统返回结果为准。",
+    '- set_reminder：`at` 用 `YYYY-MM-DD HH:MM`（按本轮【当前时间】算好的绝对本地时间，'
+    '不要用历史消息里的旧日期，不要写「明天」「半小时后」；被判过去就按当前时间重新计算）；'
+    '`text` 一句话；`repeat` 留空 / daily / weekly。',
+    "- calendar.create：`title` / `start_at` / `end_at` / `remind_before`（秒，10 分钟=600）/ `notes`；"
+    "建完说一句「已加入工作台 → 日程」。",
+    "- 必须真的发起调用，不要只说「已登记」，以系统返回为准。",
 ])
 
 
@@ -528,6 +541,8 @@ _REMINDER_PROMPT = "\n".join([
 _PLAN_PROMPT = "\n".join([
     "## 执行计划（plan）",
     "1. 需要动手（改文件 / 跑命令 / 多步分析）先 plan(action=update)；纯聊天、单次只读不要用。",
+    "1.1 **先探索再列计划**：第一次 plan(action=update) 之前，先用 read / search / fetch_url "
+    "把关键上下文读清楚；没读过就列计划只是空想（无需读文件时先说明理由）。",
     "2. 大型任务：goal + done_when + 2–6 个里程碑（每个 2–6 步、独立可验证、有可演示产物）；"
     "简单任务 1–8 步。每步 = 动词 + 目标 + verify，有依赖写 deps。",
     "3. 先做最小可运行闭环，再逐块加深；未知点排最前，先做 spike。",
@@ -546,9 +561,9 @@ _PLAN_PROMPT = "\n".join([
 
 _META_ALIAS_PROMPT = "\n".join([
     "## 工具名约定",
-    "高频工具按 action 合并：read / edit / run / code / git / plan / agent / web / history；"
-    "旧名仍兼容（read_file→read(file)、write_file→edit(write)、"
-    "update_plan→plan(update)、lsp_*→code、explore→agent、research_note→web）。",
+    "高频工具按 action 合并（read / edit / run / code / git / plan / agent / web / history）；"
+    "旧名仍兼容：read_file→read(file)、write_file→edit(write)、update_plan→plan(update)、"
+    "lsp_*→code、explore→agent、research_note→web。",
 ])
 
 
@@ -557,11 +572,9 @@ _META_ALIAS_PROMPT = "\n".join([
 
 _FINISH_PROMPT = "\n".join([
     "## 收尾（finish）",
-    "用过工具就必须在收尾时调用 `finish`（summary 写清交付了什么）；"
-    "只写正文就停会被判成未完成并把你叫回来继续。",
-    "**summary 面向用户**（交付 / 验证 / 遗留）；沙箱路径等内部细节写 `details`（完成卡折叠）。",
-    "还有步骤没做完、或还要读 / 写 / 跑命令时不要调它；做不了就把后续写进 `incomplete`。"
-    "纯聊天、纯问答不需要 finish。",
+    "用过工具就必须调 `finish`（summary 写清交付了什么），只写正文会被判未完成并叫回来；"
+    "**summary 面向用户**，沙箱路径等内部细节写 `details`。还有步骤没做完就继续干，"
+    "做不了把后续写进 `incomplete`。纯聊天、纯问答不需要 finish。",
 ])
 
 # /plan 规划轮：只读、先研究再出计划。和上面的常驻计划说明一起注入。
@@ -638,7 +651,7 @@ def _capability_prompt(s, compact=False, domains=None, hall=True):
 
     compact=True：原生 function calling 下能力已由 schema 下发，只留约定，不重复列清单。
     domains：本轮真正相关的能力域；None = 全量（文本协议 / 测试）。
-    hall=False：不注入模拟股市 / B 站与大厅相关说明（日历 / 日程始终保留）。
+    hall=False：不注入模拟股市与大厅相关说明（日历 / 日程始终保留）。
     """
     try:
         from app import capabilities, scenes
@@ -656,9 +669,9 @@ def _capability_prompt(s, compact=False, domains=None, hall=True):
     if not hall:
         # 只去掉大厅相关能力行，日历 / 任务 / 记忆等保留
         chat_lines = [x for x in chat_lines
-                      if not str(_line_cid(x) or "").startswith(("stock.", "bili."))]
+                      if not str(_line_cid(x) or "").startswith("stock.")]
         task_lines = [x for x in task_lines
-                      if not str(_line_cid(x) or "").startswith(("stock.", "bili."))]
+                      if not str(_line_cid(x) or "").startswith("stock.")]
     if not chat_lines and not task_lines:
         return ""
 
@@ -689,20 +702,9 @@ def _capability_prompt(s, compact=False, domains=None, hall=True):
         "真的发起调用；没有调用就不要用完成语气，也不要说「已…」。",
     ]
     # 域相关约定：只在真正相关的对话里注入（domains=None 表示全量，保持旧行为）
-    if hall and (domains is None or "bili" in domains):
-        parts += [
-            "5. B 站相关请求：视频链接先用 bili.analyze（信息 + 官方总结/提纲 + 逐字稿节选）；"
-            "要完整原文用 bili.transcript（按返回的 offset 续取）；"
-            "要观众反应用 bili.danmaku（默认看密度峰值，mode=raw + start/end 看某段原文）；"
-            "要完整评论区用 bili.comments（pages 最多 10，按 offset 续取；把返回的 rpid 传给 "
-            "bili.comments 可读楼中楼）；要看结构与高能时刻用 bili.timeline；"
-            "问「某博主有哪些视频」用 bili.up（可用 keyword 过滤标题）。"
-            "**先调用工具再下结论**：不要先说「平台不让读 / 我无法访问」，"
-            "也不要改用联网搜索代替或凭空编造；只有工具返回错误时才按真实原因说明。",
-        ]
     if hall and (domains is None or "stock" in domains):
         parts += [
-            "6. 模拟股市（功能大厅）：问到当前对局、持仓、收益、K 线、买卖点、预测命中率、"
+            "5. 模拟股市（功能大厅）：问到当前对局、持仓、收益、K 线、买卖点、预测命中率、"
             "参考散户时，先用 stock.brief 一次取齐；需要细节再用 stock.state / stock.bars / "
             "stock.analysis / stock.trades / stock.list。这些能力**只读**，"
             "不要承诺替用户下单、撤单或推进交易日；也不要拿真实行情去回答模拟盘问题。",
@@ -711,21 +713,24 @@ def _capability_prompt(s, compact=False, domains=None, hall=True):
 
 
 def _tool_decision_prompt(file_ready=False, search_ready=False, native=False,
-                          hall=True, computer_on=False, read_only=False):
+                          hall=True, computer_on=False, read_only=False,
+                          sandbox=False):
     """决策纪律。
 
     原来是一张 11 行 × 3 列的工具对照表（约 900 字），但每个工具的名字与用途
     已经写在下发的 schema description 里 —— 表格属于每轮重复付费，这里只留判断规则。
     native：本轮是否走原生 function calling（决定第 3 条怎么写）。
     computer_on：本轮是否下发了受控浏览器工具（决定要不要加「操作网页」这一类）。
-    read_only：未选沙箱目录时只保留读取类工具。
+    read_only：只读模式（Agent 开 + 未选目录，或 Agent 关 + 已选目录）。
+    sandbox：只读模式下是否仍有沙箱根目录（决定路径该怎么写）。
     """
-    kinds = ["提醒", "日程", "记忆"] + (["B 站", "模拟股市"] if hall else [])
+    kinds = ["提醒", "日程", "记忆"] + (["模拟股市"] if hall else [])
     if file_ready:
         kinds = ["读", "列", "搜", "写", "改", "删", "跑命令", "看画面（render_check）",
                  "听声音（audio_probe）", "看图（see_image）", "找符号（find_symbol）"] + kinds
     elif read_only:
-        kinds = ["读（绝对路径）", "列", "看图（see_image）"] + kinds
+        _where = "沙箱内相对路径 / 沙箱外绝对路径" if sandbox else "绝对路径"
+        kinds = ["读（%s）" % _where, "列", "看图（see_image）"] + kinds
     if computer_on:
         kinds.insert(0, "操作网页 / 登录 / 点击 / 填表 / 看登录后的页面")
     if search_ready:
@@ -757,50 +762,6 @@ def _tool_decision_prompt(file_ready=False, search_ready=False, native=False,
     # 失败恢复不写进提示词：错误结果自带 `❌ 【工具错误】CODE` + 「恢复」指令，
     # 只有真的失败才付这份 token；固定提示词保持紧凑。
     return "\n".join(lines)
-
-
-def _bili_hint(text):
-    low = text.lower()
-    url = _extract_url(text)
-    explicit = bool(re.search(r"(b站|bilibili|哔哩)", low))
-    if not url and not explicit:
-        return None
-    if re.search(r"(弹幕|danmaku)", low):
-        tool = "bili.danmaku"
-    elif re.search(r"(评论|comment)", low):
-        tool = "bili.comments"
-    elif re.search(r"(字幕|逐字稿|transcript)", low):
-        tool = "bili.transcript"
-    elif re.search(r"(时间轴|高能|timeline)", low):
-        tool = "bili.timeline"
-    elif re.search(r"(up主|博主|投稿|有哪些视频|视频列表)", low) and not url:
-        tool = "bili.up"
-    else:
-        tool = "bili.analyze"
-    if tool == "bili.up":
-        name = ""
-        m = re.search(r'["\']([^"\']{1,30})["\']', text)
-        if m:
-            name = m.group(1).strip()
-        if not name:
-            m = re.search(r'(?:up主|博主|UP主)\s*[：:]?\s*([^\s，。；;,]{1,30})',
-                          text, re.I)
-            name = m.group(1).strip() if m else ""
-        if not name:
-            m = re.search(r'(?:B站|bilibili|哔哩)\s*(?:上|里的|的)?\s*'
-                          r'([^\s，。；;,]{1,30})', text, re.I)
-            if m:
-                name = re.sub(r'(的)?(投稿|视频|主页|账号)$', "",
-                              m.group(1)).strip()
-        if not name:
-            m = re.search(r'(?:搜一下|查一下|看看|找一下)\s*([^\s，。；;,]{1,30})', text)
-            name = m.group(1).strip() if m else ""
-        if not name:
-            return None
-        return {"tool": tool, "args": {"name": name}, "confidence": 0.9}
-    if not url:
-        return None
-    return {"tool": tool, "args": {"url": url}, "confidence": 0.97}
 
 
 def _reminder_hint(text):
@@ -947,7 +908,7 @@ def intent_hint(text, session=None):
     t = str(text or "").strip()
     if not t or len(t) > 4000:
         return None
-    for fn in (_bili_hint, _reminder_hint, _memory_hint, _calendar_hint,
+    for fn in (_reminder_hint, _memory_hint, _calendar_hint,
                _file_hint, _web_hint, _stock_hint):
         try:
             hint = fn(t)
@@ -977,6 +938,8 @@ def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=No
         return ""
     agent_on = bool(s.get("agent_enabled"))
     sandbox = clean_sandbox(s.get("sandbox"))
+    # 只读：Agent 与沙箱恰好有一个（Agent 开 + 未选目录 / Agent 关 + 已选目录）
+    read_only = (agent_on != bool(sandbox))
     # 协议说明只有一处出处：原生 tools 已下发时不再给任何示例 / 标签名
     proto = _proto_block(bool(native_tools))
     # 只有原生 tool schema 才会「隐藏」工具；文本协议下所有工具仍可直接调用，
@@ -997,6 +960,9 @@ def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=No
                     "- 不能写入 / 删除 / 移动文件，也不能执行命令；需要这些能力时，"
                     "请用户点界面上的「📁」选择工作目录。\n"
                     "- 不要声称「完全没有文件能力」；读不到的路径先让用户确认绝对路径。")]
+    elif sandbox:
+        parts = [(_ASK_PROMPT.replace("%PROTO%", proto) + "\n\n"
+                  + _READ_ONLY_WITH_SANDBOX.replace("%SANDBOX%", sandbox))]
     else:
         parts = [_ASK_PROMPT.replace("%PROTO%", proto)]
     # base 层永远排最前：先立通用纪律，再讲这一轮具体有哪些能力
@@ -1025,12 +991,15 @@ def build_agent_prompt(s, search_ready=False, native_tools=False, cap_domains=No
                                     domains=cap_domains, hall=_hall)
     if cap_prompt:
         parts.append(cap_prompt)
-    parts.append(capability_boundary(bool(hidden)))
+    parts.append(capability_boundary(bool(hidden),
+                                     cap_names=(cap_domains is None
+                                                or bool(cap_domains))))
     # 纯对话模式再补一段收尾口径（放在能力边界之后：最后读到的是「怎么开启」，而不是「不可用」）
-    if not agent_on:
+    if not agent_on and not sandbox:
         parts.append(_NO_AGENT_CAPABILITY)
     parts.append(_tool_decision_prompt(file_ready=bool(agent_on and sandbox),
-                                       read_only=bool(agent_on and not sandbox),
+                                       read_only=bool(read_only),
+                                       sandbox=bool(sandbox),
                                        search_ready=bool(search_ready),
                                        native=bool(native_tools), hall=_hall,
                                        computer_on=bool(computer_on)))

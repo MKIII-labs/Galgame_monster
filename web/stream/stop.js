@@ -37,19 +37,27 @@ async function stopStreaming() {
   // 刷新 / 重开窗口后本地没有流对象，但后端还在跑：也要能停。
   const remote = !st && !!(state.streamingSids && state.streamingSids[sidKey]);
   if ((!st && !remote) || (st && st.stopping)) return;
+  const sidToStop = (st && st.sid) || sidKey;
   if (st) st.stopping = true;
+  // 按会话记「正在停止」：切到别的会话时不能继承这里的状态
+  if (!state.stoppingSids) state.stoppingSids = {};
+  if (sidToStop) state.stoppingSids[String(sidToStop)] = true;
   state.stopping = true;
   // 立即给反馈：搜索阶段（规划/检索/抓正文）可能要一两秒才会真正收尾，
   // 不给反馈的话会被误认为「暂停键失灵」
   const b = $('#btn-stop');
-  if (b) { b.disabled = true; b.classList.add('stopping'); b.title = '正在停止…'; }
+  if (b) {
+    b.disabled = true;
+    b.classList.add('stopping');
+    b.title = '正在停止…';
+    b.setAttribute('aria-busy', 'true');
+  }
   // 状态条也立刻改成「正在停止」：搜索 / 工具轮里服务端要过一会儿才真正收尾
   const liveTip = st && st.row ? st.row.querySelector('.live-text') : null;
   if (liveTip) liveTip.textContent = '正在停止…';
   toast('正在停止…');
   // 明确点「停止」= 连排队也一起取消，避免用户以为已经停下却又自动发出去
   if (typeof cancelSendQueue === 'function') cancelSendQueue(true);
-  const sidToStop = (st && st.sid) || sidKey;
   const ack = await withinTimeout(api('/api/stop', { session_id: sidToStop }),
                                   STOP_ACK_TIMEOUT, null);
   if (!ack) {
@@ -72,12 +80,14 @@ async function stopStreaming() {
     // 没有本地流可收 done：等后端确认收尾后刷新状态（手动停止，不发通知）
     const r = await withinTimeout(waitJobThenRefresh(sidToStop), REMOTE_STOP_TIMEOUT, null);
     if (r && r.ok) {
+      if (state.stoppingSids) delete state.stoppingSids[String(sidToStop)];
       state.stopping = false;
       refreshStreamingUI();
       renderMessages();
     } else if (!r) {
       // 后端迟迟不确认：先解除界面上的「生成中」，否则停止键永远点不动。
       if (state.streamingSids) delete state.streamingSids[String(sidToStop)];
+      if (state.stoppingSids) delete state.stoppingSids[String(sidToStop)];
       state.stopping = false;
       refreshStreamingUI();
       renderMessages();

@@ -209,11 +209,3 @@ def _api_doc_save(h):
     if not doc:
         return h._json({"ok": False, "error": "路径为空"}, 400)
     return h._json({"ok": True, "doc": doc})
-
-
-@route("/api/doc/list")
-def _api_doc_list(h):
-    body, sb, err = _guard(h)
-    if err:
-        return err
-    return h._json({"ok": True, "items": anno.list_documents(body.get("q"))})

@@ -233,3 +233,37 @@ def test_script_cannot_read_git_config(tmp_path):
     text, _ = code_mode.run(box, code, timeout=20)
     assert "token@github" not in text
     assert "受保护" in text
+
+
+# ---------------------------------------------------------------- 脚本内写 / 命令审批
+def test_write_inside_script_needs_approval(tmp_path):
+    """打开写权限后，脚本里的写入仍要先过父进程审批：拒绝就不落盘。"""
+    box = _sandbox(tmp_path)
+    asked = []
+
+    def deny(name, args):
+        asked.append(name)
+        return False, "用户拒绝"
+
+    code = ("import gm\n"
+            "try:\n"
+            "    gm.call('write_file', path='out.txt', content='hi')\n"
+            "    print('WROTE')\n"
+            "except gm.ToolError as e:\n"
+            "    print('DENIED', e.code)\n")
+    text, _ = code_mode.run(box, code, timeout=20, allow_write=True,
+                            caps={"approve_tool": deny})
+    assert asked == ["write_file"]
+    assert "DENIED TOOL_DENIED" in text
+    assert not os.path.exists(os.path.join(box, "out.txt"))
+
+
+def test_write_inside_script_after_approval(tmp_path):
+    box = _sandbox(tmp_path)
+    code = ("import gm\n"
+            "gm.call('write_file', path='out.txt', content='hi')\n"
+            "print('WROTE')\n")
+    text, _ = code_mode.run(box, code, timeout=20, allow_write=True,
+                            caps={"approve_tool": lambda n, a: (True, "")})
+    assert "WROTE" in text
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "hi"

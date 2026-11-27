@@ -13,12 +13,28 @@
 
   const charts = new Set();          // { chart, ro }
   const imgCache = new Map();        // "sid|path" -> objectURL
+  const IMG_CACHE_MAX = 24;          // 只缓存最近查看的图片，避免 objectURL 常驻
+
+  function rememberImgUrl(key, url) {
+    const old = imgCache.get(key);
+    if (old) {
+      imgCache.delete(key);
+      try { URL.revokeObjectURL(old); } catch (e) { /* 忽略 */ }
+    }
+    imgCache.set(key, url);
+    while (imgCache.size > IMG_CACHE_MAX) {
+      const k = imgCache.keys().next().value;
+      const u = imgCache.get(k);
+      imgCache.delete(k);
+      try { URL.revokeObjectURL(u); } catch (e) { /* 忽略 */ }
+    }
+  }
   const imgBusy = new Map();         // "sid|path" -> Promise<url>
   const libLoading = new Set();
   let theming = false;
 
   /* 图表 / 流程图跟应用主题走：直接从 tokens.css 的语义变量取值，
-     这样雾光、扁平明暗切换后不用再维护第二份配色。 */
+     这样明暗切换后不用再维护第二份配色。 */
   function cssVar(name, fallback) {
     try {
       const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -186,6 +202,10 @@
         ro.observe(body);
       }
       charts.add({ chart, ro });
+      // 图表从 90px 占位撑到 340px：若仍贴底，补一次对齐，别停在对话中间
+      if (box.closest('#chat') && typeof window.settleChatBottom === 'function') {
+        window.settleChatBottom([0, 160, 500]);
+      }
       const dl = box.querySelector('[data-rich-download]');
       if (dl) {
         dl.onclick = () => {
@@ -208,7 +228,7 @@
         m.initialize({
           startOnLoad: false,
           securityLevel: 'strict',
-          // base 主题 + 应用设计令牌：雾光 / 明暗切换后重画就是同一套配色
+          // base 主题 + 应用设计令牌：明暗切换后重画就是同一套配色
           theme: 'base',
           themeVariables: mermaidVars(),
         });
@@ -220,11 +240,65 @@
           const svg = (out && out.svg) || '';
           if (!svg) throw new Error('没有生成 SVG');
           body.innerHTML = svg;
+          // SVG 高度和 90px 占位不一致：仍贴底时补一次对齐
+          if (box.closest('#chat') && typeof window.settleChatBottom === 'function') {
+            window.settleChatBottom([0, 160, 500]);
+          }
           const dl = box.querySelector('[data-rich-download]');
           if (dl) dl.onclick = () => downloadText(svg, 'diagram.svg', 'image/svg+xml');
         })
         .catch((e) => fallback(body, '流程图渲染失败：' + (e && e.message ? e.message : e), code));
     });
+  }
+
+  // ---------------- 交互页面（html 围栏） ----------------
+  /* 对齐 Trae 的交互可视化：把一段完整 HTML 放进沙箱 iframe 真跑起来。
+     sandbox 只给 allow-scripts、不给 allow-same-origin —— 页面是独立不透明源，
+     读不到本应用的同源存储 / Cookie / 父窗口 DOM，脚本再怎么写也越不出去。
+     高度由页面自己 postMessage 上报，随内容自适应。 */
+  const htmlFrames = new Map();      // id -> iframe
+
+  function installHtmlHeightListener() {
+    if (window.__gmRichHtmlBound) return;
+    window.__gmRichHtmlBound = true;
+    window.addEventListener('message', (e) => {
+      const d = e && e.data;
+      if (!d || typeof d !== 'object' || !d.__gmRichHtml) return;
+      const frame = htmlFrames.get(String(d.__gmRichHtml));
+      if (!frame || !frame.isConnected) return;
+      const h = Number(d.h) || 0;
+      if (h > 0) frame.style.height = Math.max(120, Math.min(1600, Math.round(h))) + 'px';
+    });
+  }
+
+  function renderHtml(box, body, code) {
+    const raw = String(code || '').trim();
+    if (!raw) { fallback(body, '这段 html 是空的', code); return; }
+    installHtmlHeightListener();
+    const id = 'gmh-' + Math.random().toString(36).slice(2);
+    const probe = '<scr' + 'ipt>(function(){' +
+      'function r(){try{var d=document.documentElement,b=document.body;' +
+      'var h=Math.max(d?d.scrollHeight:0,b?b.scrollHeight:0);' +
+      "parent.postMessage({__gmRichHtml:'" + id + "',h:h},'*');}catch(e){}}" +
+      "window.addEventListener('load',r);document.addEventListener('click',r);" +
+      "document.addEventListener('input',r);setTimeout(r,120);setInterval(r,1000);" +
+      '})();</scr' + 'ipt>';
+    const frame = document.createElement('iframe');
+    frame.className = 'rich-html-frame';
+    frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms allow-modals');
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.setAttribute('title', 'AI 生成的交互页面');
+    frame.srcdoc = raw + probe;
+    htmlFrames.set(id, frame);
+    body.className = 'rich-media-body rich-html';
+    body.style.height = '';
+    body.innerHTML = '';
+    body.appendChild(frame);
+    if (box.closest('#chat') && typeof window.settleChatBottom === 'function') {
+      window.settleChatBottom([0, 200, 600]);
+    }
+    const dl = box.querySelector('[data-rich-download]');
+    if (dl) dl.onclick = () => downloadText(raw, 'page.html', 'text/html;charset=utf-8');
   }
 
   // ---------------- 沙箱图片 ----------------
@@ -253,7 +327,7 @@
       }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      imgCache.set(key, url);
+      rememberImgUrl(key, url);
       return url;
     }).finally(() => imgBusy.delete(key));
     imgBusy.set(key, p);
@@ -280,20 +354,101 @@
   }
 
   // ---------------- 入口 ----------------
-  function enhance(root) {
+  /* 视口增强：只处理真正会看到的节点。
+     - 代码块同步高亮十几个会产生上万 span，首屏 Layout 与切会话都被它拖慢；
+     - mermaid / echarts 整窗渲染会让首屏外的消息也去拉 3MB 库（实测启动时白占 145ms）。
+     两者都等进入视口再做：代码高亮只改颜色、不改行数，不会引起位移；
+     富媒体提前 400px 渲染，滚到眼前时已经就绪。 */
+  let codeOb = null;
+  let richOb = null;
+  const hlPending = new Set();
+  let hlTimer = 0;
+  let hlGiveUp = 0;
+
+  function hlRender(el) {
+    if (!el.isConnected || el.dataset.hl !== 'pending') return;
+    const code = el.textContent;
+    const lang = el.getAttribute('data-lang') || '';
+    let html = '';
+    try {
+      html = (lang && window.hljs.getLanguage(lang))
+        ? window.hljs.highlight(code, { language: lang }).value
+        : window.hljs.highlightAuto(code).value;
+    } catch (e) { html = ''; }
+    if (!html) { el.dataset.hl = 'plain'; return; }      // 高亮失败：保留纯文本
+    el.innerHTML = html;
+    el.dataset.hl = 'done';
+  }
+
+  function hlPump() {
+    hlTimer = 0;
+    if (!window.hljs) {
+      if (Date.now() > hlGiveUp) return;                 // 库一直没到：保持纯文本
+      hlTimer = setTimeout(hlPump, 300);
+      return;
+    }
+    const list = Array.from(hlPending);
+    hlPending.clear();
+    list.forEach(hlRender);
+  }
+
+  function hlQueue(el) {
+    if (!el.isConnected || el.dataset.hl !== 'pending') return;
+    if (window.hljs) { hlRender(el); return; }
+    if (!hlPending.size) hlGiveUp = Date.now() + 20000;
+    hlPending.add(el);
+    if (!hlTimer) hlTimer = setTimeout(hlPump, 200);
+  }
+
+  function hlObserve(list) {
+    if (!list.length) return;
+    if (!window.IntersectionObserver) { list.forEach(hlQueue); return; }
+    if (!codeOb) {
+      codeOb = new IntersectionObserver((entries) => {
+        entries.forEach((en) => {
+          if (!en.isIntersecting) return;
+          codeOb.unobserve(en.target);
+          hlQueue(en.target);
+        });
+      }, { rootMargin: '300px 0px' });
+    }
+    list.forEach((el) => codeOb.observe(el));
+  }
+
+  function renderRichBox(box) {
+    if (!box || box.getAttribute('data-rich-done')) return;
+    box.setAttribute('data-rich-done', '1');
+    const kind = box.getAttribute('data-rich');
+    const body = box.querySelector('.rich-media-body');
+    const srcEl = box.querySelector('.rich-media-src');
+    const code = srcEl ? srcEl.textContent : '';
+    if (!body) return;
+    if (kind === 'svg') renderSvg(box, body, code);
+    else if (kind === 'chart') renderChart(box, body, code);
+    else if (kind === 'mermaid') renderMermaid(box, body, code);
+    else if (kind === 'html') renderHtml(box, body, code);
+  }
+
+  function richObserve(list, immediate) {
+    if (!list.length) return;
+    if (immediate || !window.IntersectionObserver) { list.forEach(renderRichBox); return; }
+    if (!richOb) {
+      richOb = new IntersectionObserver((entries) => {
+        entries.forEach((en) => {
+          if (!en.isIntersecting) return;
+          richOb.unobserve(en.target);
+          renderRichBox(en.target);
+        });
+      }, { rootMargin: '400px 0px' });
+    }
+    list.forEach((box) => richOb.observe(box));
+  }
+
+  function enhance(root, immediate) {
     const scope = root || document;
     fillSandboxImages(scope);
-    scope.querySelectorAll('.rich-media[data-rich]:not([data-rich-done])').forEach((box) => {
-      box.setAttribute('data-rich-done', '1');
-      const kind = box.getAttribute('data-rich');
-      const body = box.querySelector('.rich-media-body');
-      const srcEl = box.querySelector('.rich-media-src');
-      const code = srcEl ? srcEl.textContent : '';
-      if (!body) return;
-      if (kind === 'svg') renderSvg(box, body, code);
-      else if (kind === 'chart') renderChart(box, body, code);
-      else if (kind === 'mermaid') renderMermaid(box, body, code);
-    });
+    hlObserve(scope.querySelectorAll('code.hljs[data-hl="pending"]'));
+    richObserve(scope.querySelectorAll('.rich-media[data-rich]:not([data-rich-done])'), immediate);
     scope.querySelectorAll('.rich-media [data-rich-source]').forEach((btn) => {
       if (btn.dataset.bound) return;
       btn.dataset.bound = '1';

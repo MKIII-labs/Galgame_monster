@@ -558,11 +558,13 @@ def _api_session_agent(h):
         s["updated_at"] = time.time()
         with _lock:
             save_sessions(data)
-        # 正在进行的回复也要立刻看到新开关：交给下一轮取走（持久化仍以会话为准）
-        if "agent_enabled" in body or "sandbox" in body:
+        # 正在进行的回复也要立刻看到新开关：交给下一轮 / 下一次工具调用取走
+        # （持久化仍以会话为准）
+        if any(k in body for k in ("agent_enabled", "sandbox", "approval_mode")):
             set_live_flags(s.get("id"), {
                 "agent_enabled": bool(s.get("agent_enabled")),
                 "sandbox": s.get("sandbox") or "",
+                "approval_mode": agent.normalize_approval(s.get("approval_mode")),
             })
         h._ok_sessions(data)
 
@@ -753,17 +755,26 @@ def _api_agent_approve(h):
         ok = bool(body.get("ok"))
         remember = bool(body.get("remember"))
         always = bool(body.get("always")) and ok
+        rec = agent.get_approval(aid)
+        if not rec:
+            return h._json({"ok": False, "error": "这次审批已失效"}, 404)
+        # 归属以审批记录为准：不能用前端当前会话的 sandbox 去写另一条审批的规则
+        rec_sid = str(rec.get("sid") or "")
+        req_sid = str(body.get("session_id") or "")
+        if not rec_sid:
+            return h._json({"ok": False, "error": "审批缺少会话归属"}, 409)
+        if req_sid and req_sid != rec_sid:
+            return h._json({"ok": False, "error": "审批不属于当前会话"}, 409)
         rule_note = ""
         if always:
-            # 先把规则落盘，再放行：写规则失败也不拦这次操作，只把原因回给前端
-            rec = agent.get_approval(aid) or {}
-            s, sb, err = h._sb_guard(body)
-            if err:
+            # 先用「审批所属会话」取沙箱，再写规则；取不到就不写，但仍允许本次操作
+            s, sb = h._sb({"session_id": rec_sid})
+            if not s or not sb:
                 rule_note = "没有会话 / 沙箱，规则未写入"
             else:
                 _ok, rule_note = agent.remember_approval_rule(sb, rec.get("tool"), rec.get("args"))
-        h._json({"ok": bool(agent.resolve_approval(aid, ok, remember or always)),
-                 "rule": rule_note})
+        resolved = agent.resolve_approval(aid, ok, remember or always, sid=rec_sid)
+        h._json({"ok": bool(resolved), "rule": rule_note})
 
 
 def _api_plan_review(h):
@@ -822,6 +833,18 @@ def _explain_args_text(name, args):
         return "写入文件：%s\n内容前 600 字：\n%s%s" % (
             args.get("path") or "", body[:600],
             "\n…（内容共 %d 字，已截断）" % len(body) if len(body) > 600 else "")
+    if name == "download_file":
+        return "下载到沙箱：%s\n来源：%s%s" % (
+            args.get("path") or "", args.get("url") or "",
+            "\n（允许覆盖已有文件）" if args.get("overwrite") else "")
+    if name == "doc_create":
+        blocks = args.get("blocks")
+        sheets = args.get("sheets")
+        return "生成文档：%s\n段落块：%d 个；工作表：%d 个%s" % (
+            args.get("path") or "",
+            len(blocks) if isinstance(blocks, list) else 0,
+            len(sheets) if isinstance(sheets, list) else 0,
+            "\n（允许覆盖已有文件）" if args.get("overwrite") else "")
     if name == "edit_file":
         return "修改文件：%s\n查找：%s\n替换为：%s" % (
             args.get("path") or "", str(args.get("old") or "")[:300],

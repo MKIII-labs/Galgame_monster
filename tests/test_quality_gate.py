@@ -199,6 +199,18 @@ def test_blocked_is_terminal():
     assert merged["verdict"] == "blocked"
 
 
+def test_fail_overrides_pass_wording_in_next_action():
+    """硬伤判未通过时，不能保留验收模型写的「验收通过」下一步文案。"""
+    facts = qg.build_facts(tool_log=[
+        {"tool": "computer_act", "ok": False, "result": "❌ 不支持的按键：enter"}])
+    merged = qg.merge_report(
+        _report(next_action="本轮验收通过，无需返工；如需继续请另起任务"), facts)
+    assert merged["passed"] is False
+    assert "验收通过" not in merged["next_action"]
+    assert "先修复" in merged["next_action"]
+    assert "验收通过" not in qg.review_text(merged)
+
+
 def test_empty_report_cannot_pass():
     """没有验收项的报告不能因为「没有 blocking 失败项」被判过。"""
     merged = qg.merge_report({"verdict": "fail", "criteria": [], "gaps": []},

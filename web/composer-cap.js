@@ -16,6 +16,7 @@
   const ITEMS = [
     ['#btn-think', '深度思考'],
     ['#btn-search', '联网'],
+    ['#btn-plan', '计划'],
     ['#btn-agent', 'Agent'],
   ];
 

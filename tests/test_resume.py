@@ -52,10 +52,9 @@ def test_save_progress_does_not_mark_interrupted(monkeypatch):
         {"role": "user", "content": "做任务"},
         {"role": "assistant", "content": "半截", "_progress": True,
          "interrupted": True, "end_reason": {"kind": "resume"}}]}]}
-    monkeypatch.setattr(chat, "load_sessions", lambda: data)
-    monkeypatch.setattr(chat, "find_session",
-                        lambda d, sid: d["sessions"][0] if sid == "s1" else None)
-    monkeypatch.setattr(chat, "_persist_session", lambda s: None)
+    monkeypatch.setattr(chat, "load_session",
+                        lambda sid: data["sessions"][0] if sid == "s1" else None)
+    monkeypatch.setattr(chat, "_persist_session", lambda s, **k: None)
 
     chat._save_progress("s1", "半截更多", [{"tool": "read_file"}], {"steps": []})
     m = data["sessions"][0]["messages"][-1]
@@ -91,10 +90,9 @@ def test_save_progress_merges_stripped_resume_snapshot(monkeypatch):
         {"role": "user", "content": "做任务"},
         {"role": "assistant", "content": "第一段", "interrupted": True,
          "end_reason": {"kind": "resume", "action": "resume"}}]}]}
-    monkeypatch.setattr(chat, "load_sessions", lambda: data)
-    monkeypatch.setattr(chat, "find_session",
-                        lambda d, sid: d["sessions"][0] if sid == "s1" else None)
-    monkeypatch.setattr(chat, "_persist_session", lambda s: None)
+    monkeypatch.setattr(chat, "load_session",
+                        lambda sid: data["sessions"][0] if sid == "s1" else None)
+    monkeypatch.setattr(chat, "_persist_session", lambda s, **k: None)
 
     chat._save_progress("s1", "第一段第二段", [{"tool": "read_file"}], {"steps": []})
     msgs = data["sessions"][0]["messages"]
@@ -148,10 +146,9 @@ def test_save_progress_inplace_for_continue(monkeypatch):
         {"role": "user", "content": "做任务"},
         {"role": "assistant", "content": "原来写好的内容"},
     ]}]}
-    monkeypatch.setattr(chat, "load_sessions", lambda: data)
-    monkeypatch.setattr(chat, "find_session",
-                        lambda d, sid: d["sessions"][0] if sid == "s1" else None)
-    monkeypatch.setattr(chat, "_persist_session", lambda s: None)
+    monkeypatch.setattr(chat, "load_session",
+                        lambda sid: data["sessions"][0] if sid == "s1" else None)
+    monkeypatch.setattr(chat, "_persist_session", lambda s, **k: None)
 
     chat._save_progress("s1", "新的续写内容", [{"tool": "read_file"}],
                         {"steps": [{"text": "收尾", "status": "doing"}]},
@@ -185,10 +182,9 @@ def test_save_progress_continue_merges_tools(monkeypatch):
         {"role": "assistant", "content": "原文",
          "tools": [{"tool": "read_file"}, {"tool": "edit_file"}]},
     ]}]}
-    monkeypatch.setattr(chat, "load_sessions", lambda: data)
-    monkeypatch.setattr(chat, "find_session",
-                        lambda d, sid: d["sessions"][0] if sid == "s1" else None)
-    monkeypatch.setattr(chat, "_persist_session", lambda s: None)
+    monkeypatch.setattr(chat, "load_session",
+                        lambda sid: data["sessions"][0] if sid == "s1" else None)
+    monkeypatch.setattr(chat, "_persist_session", lambda s, **k: None)
 
     chat._save_progress("s1", "新增一", [{"tool": "run_command"}], None,
                         inplace_base="原文", tools_base=2)
@@ -285,8 +281,6 @@ def test_merge_continuation_carries_state():
     assert out["tools"] == [{"tool": "a"}, {"tool": "b"}]
     assert [(b["kind"], b.get("i")) for b in out["blocks"]] == [
         ("text", None), ("tool", 0), ("text", None)]
-    assert out["blocks"][2].get("ans") is True       # 暂停语义：最后一段正文
-    assert out["blocks"][0].get("ans") is None       # 旧正文不再当答案
     assert out["plan"]["steps"][0]["text"] == "新"
     assert out["usage"] == {"prompt": 30, "completion": 12, "total": 42,
                             "cached": 1, "model": "m2"}
@@ -308,8 +302,8 @@ def test_merge_continuation_without_base_appends():
     assert out["tools"] == [{"tool": "a"}]
 
 
-def test_merge_continuation_strips_reasoning_when_disabled():
-    """关掉落库思考时，新旧 reasoning 块都要剥掉，正文保留。"""
+def test_merge_continuation_keeps_reasoning():
+    """思考不再截断 / 丢弃：续写时新旧 reasoning 块都要保留。"""
     from app.api import chat
 
     last = {"role": "assistant", "content": "原文", "_cont_base": "原文",
@@ -318,9 +312,10 @@ def test_merge_continuation_strips_reasoning_when_disabled():
     tr = chat.TurnResult(
         content="新", blocks=[{"kind": "reasoning", "text": "新思"},
                               {"kind": "text", "text": "新"}],
-        tools_base=0, persist_reason=False)
+        tools_base=0)
     out = chat._merge_continuation(last, tr)
-    assert [b["kind"] for b in out["blocks"]] == ["text", "text"]
+    reasoning = [b["text"] for b in out["blocks"] if b["kind"] == "reasoning"]
+    assert reasoning == ["旧思", "新思"]
 
 
 def test_build_new_assistant_message_carries_fields():
@@ -342,7 +337,6 @@ def test_build_new_assistant_message_carries_fields():
     assert msg["role"] == "assistant"
     assert msg["content"] == "交付" and msg["done_at"] == 9.0
     assert msg["tools"] == [{"tool": "read_file"}]
-    assert msg["blocks"][0]["ans"] is True
     assert msg["timing"]["total_ms"] == 10 and msg["timing"]["rounds"] == 1
     assert msg["ctx_cut"] == 2
     assert msg["end_reason"]["kind"] == "stopped"
@@ -353,21 +347,31 @@ def test_build_new_assistant_message_carries_fields():
 
 
 def test_persist_turn_runs_background_steps(monkeypatch):
-    """落库后按顺序触发：持久化 → 会话记忆 → 自动标题；中断时跳过会话记忆。"""
+    """落库后触发：持久化 → 会话记忆 → 自动标题（标题在后台线程）；中断时跳过会话记忆。"""
+    import time
+
     from app.api import chat
     import app.session_memory as sm
 
+    def _wait(pred, timeout=2.0):
+        end = time.time() + timeout
+        while time.time() < end and not pred():
+            time.sleep(0.01)
+
     calls = []
-    monkeypatch.setattr(chat, "_persist_session", lambda s: calls.append("persist"))
+    monkeypatch.setattr(chat, "_persist_session",
+                        lambda s, **k: calls.append("persist"))
     monkeypatch.setattr(chat, "_auto_title_session", lambda *a: calls.append("title"))
     monkeypatch.setattr(sm, "maybe_update", lambda *a, **k: calls.append("memory"))
 
     s2 = {"id": "s1", "messages": [{"role": "assistant", "content": "x"}]}
     chat._persist_turn(s2, "s1", chat.TurnResult(tools=[{"tool": "a"}]),
                        "k", "u", "m")
+    _wait(lambda: "title" in calls)
     assert calls == ["persist", "memory", "title"]
     assert s2["updated_at"] > 0
 
     calls.clear()
     chat._persist_turn(s2, "s1", chat.TurnResult(interrupted=True), "k", "u", "m")
+    _wait(lambda: "title" in calls)
     assert calls == ["persist", "title"]

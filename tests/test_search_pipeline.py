@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """P0 检索策略：Query Planner / canonical 去重 / 排序 / passage 证据 / 引用审计。"""
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -124,11 +124,14 @@ def test_rank_prefers_authority_and_limits_domain():
 
 
 def test_rank_prefers_fresh_for_news_intent():
+    # 用相对时间：写死日期会随「今天」推移掉出 freshness=day 的窗口（12 天后必挂）
+    fresh_at = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
     items = [
         {"title": "价格 100", "url": "https://a.example/old", "snippet": "价格",
          "published_at": "2024-01-01T00:00:00Z"},
         {"title": "价格 100", "url": "https://b.example/new", "snippet": "价格",
-         "published_at": "2026-11-10T00:00:00Z"},
+         "published_at": fresh_at},
     ]
     out = search_rank.rank_hits(items, ["价格"], intent="fresh", freshness="day")
     assert out[0]["url"].endswith("/new")

@@ -67,16 +67,12 @@ function collectSettings() {
   if ($('#ide-whitespace')) cfg.ide_whitespace = $('#ide-whitespace').value;
   if ($('#ide-autosave')) cfg.ide_autosave = $('#ide-autosave').value || 'off';
   if ($('#ui-process-follow')) cfg.ui_process_follow = !!$('#ui-process-follow').checked;
+  if ($('#avatar-motion')) cfg.avatar_motion = $('#avatar-motion').value || 'calm';
 
   cfg.speech_polish = !!$('#speech-polish').checked;
 
-  cfg.image_enabled = !!($('#image-enabled') || {}).checked;
-  if ($('#image-comfy-url')) {
-    cfg.image_comfy_url = $('#image-comfy-url').value.trim() || 'http://127.0.0.1:8188';
-  }
-  if ($('#image-workflow')) cfg.image_workflow = $('#image-workflow').value.trim();
-
   cfg.trajectory_enabled = !!($('#traj-enabled') || {}).checked;
+  cfg.storage_auto_prune = !!($('#storage-auto-prune') || {}).checked;
   if ($('#mobile-port')) {
     const mnp = parseInt($('#mobile-port').value, 10);
     cfg.mobile_port = Number.isFinite(mnp) && mnp >= 1024 && mnp <= 65535 ? mnp : 57890;
@@ -174,7 +170,7 @@ function rebuildSettingsFromDraft() {
   addRangeCompanions();
   buildSettingsSearchIndex();
   if (typeof applySettingsMeta === 'function') applySettingsMeta();
-  setSettingsTab(settingsCurrentTab || 'model');
+  setSettingsTab(settingsCurrentTab || 'chat');
   updateSettingsDirty();
 }
 
@@ -183,7 +179,7 @@ async function resetCurrentSettingsPage() {
   const spec = pageResetSpec(name);
   if (!spec) { toast('本页没有可恢复的默认项'); return; }
   if (!window.confirm('把「' + settingsPaneName(name) + '」整页恢复为默认值？\n' +
-      'API 密钥、B 站 SESSDATA 与自定义预设会保留；恢复后仍需点「保存」生效。')) return;
+      'API 密钥与自定义预设会保留；恢复后仍需点「保存」生效。')) return;
   let defs;
   try { defs = await ensureSettingsDefaults(); }
   catch (e) { toastErr('读取默认值', e); return; }
@@ -350,7 +346,7 @@ async function resetSettingsCard(card) {
 }
 
 async function resetAllSettings() {
-  if (!window.confirm('把设置页里的可调项恢复为默认值？\nAPI 密钥、B 站 SESSDATA 与自定义预设会保留。恢复后仍需点「保存」生效。')) return;
+  if (!window.confirm('把设置页里的可调项恢复为默认值？\nAPI 密钥与自定义预设会保留。恢复后仍需点「保存」生效。')) return;
   let defs;
   try { defs = await ensureSettingsDefaults(); }
   catch (e) { toastErr('读取默认值', e); return; }

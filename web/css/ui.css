@@ -86,7 +86,7 @@
 :is(.dojo-pill, .iv-chip, .mem-chip) {
   border-radius: var(--radius-pill);
   font-size: var(--fs-xs);
-  line-height: 1.6;
+  line-height: var(--lh);
 }
 
 /* ── 2. 表单控件 ────────────────────────────────────────────
@@ -212,7 +212,7 @@
 /* ── 8. 响应式：统一的三档断点 ──────────────────────────────
    ≥1160 桌面 · 900–1159 窄桌面 / 平板横屏 · <900 单列 · <640 手机
    各页面自己的微调仍可保留，但通用组件只认这三档 */
-@media (max-width: 1160px) {
+@media (max-width: 1200px) {
   :root { --sidebar-w: 240px; }
 }
 
@@ -275,7 +275,7 @@
     border-bottom: 1px solid var(--line);
   }
   :is(.modal-head, .modal-foot) { padding: var(--sp-3); }
-  .toast-stack { bottom: var(--sp-4); width: calc(100vw - var(--sp-8)); }
+  .toast-stack { bottom: var(--toast-bottom, var(--sp-4)); width: calc(100vw - var(--sp-8)); }
   .toast-item { max-width: 100%; }
   .msg { padding: 0 var(--sp-3); margin-bottom: var(--sp-4); }
   .composer { padding: 0 var(--sp-3) var(--sp-3); }
@@ -305,11 +305,11 @@ html.embed #app { height: 100vh; height: 100dvh; }
 html.embed #main { min-width: 0; }
 
 /* ============================================================
-   设置 → 主题：可视化主题卡（浅色 / 雾光 / 深色）
+   设置 → 主题：可视化主题卡（浅色 / 深色）
    ============================================================ */
 .theme-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin: 8px 0 10px;
 }
@@ -317,8 +317,8 @@ html.embed #main { min-width: 0; }
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  padding: 9px;
+  gap: 10px;
+  padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg-elevated);
@@ -345,7 +345,7 @@ html.embed #main { min-width: 0; }
   position: relative;
   display: flex;
   height: 62px;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   border: 1px solid rgba(0, 0, 0, .07);
 }
@@ -354,37 +354,28 @@ html.embed #main { min-width: 0; }
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
   padding: 8px;
 }
-.theme-preview .tp-line { height: 6px; width: 54%; border-radius: 3px; }
-.theme-preview .tp-card { flex: 1; border-radius: 5px; }
+.theme-preview .tp-line { height: 6px; width: 54%; border-radius: var(--radius-xs); }
+.theme-preview .tp-card { flex: 1; border-radius: var(--radius-sm); }
 .theme-preview .tp-card.short { flex: 0 0 13px; width: 66%; }
-.tp-aurora .tp-side { background: linear-gradient(180deg, #e9edff, #eef2ff); }
-.tp-aurora .tp-main {
-  background:
-    radial-gradient(90px 70px at 80% 16%, rgba(139, 92, 246, .26), transparent 70%),
-    linear-gradient(160deg, #ffffff 0%, #f7f8ff 55%, #f4efff 100%);
+/* 浅色：白底 + 冷灰蓝分层 + DeepSeek 蓝强调 */
+.tp-theme-light .tp-side { background: #f9fafb; }
+.tp-theme-light .tp-main { background: #ffffff; }
+.tp-theme-light .tp-line { background: linear-gradient(90deg, #3964fe 0 42%, rgba(0, 0, 0, .10) 42% 100%); }
+.tp-theme-light .tp-card {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, .08);
 }
-.tp-aurora .tp-line { background: #b8c2ef; }
-.tp-aurora .tp-card { background: rgba(255, 255, 255, .92); box-shadow: 0 2px 8px rgba(80, 100, 200, .12); }
-/* 现代扁平化：左浅右深，一张图说明支持两种模式 */
-.tp-flat { position: relative; }
-.tp-flat .tp-side { background: linear-gradient(90deg, #eef0f3 0 49.4%, #e7eaf2 49.4% 50.6%, #24272e 50.6% 100%); }
-.tp-flat .tp-main { background: linear-gradient(90deg, #fff 0 49.4%, #e7eaf2 49.4% 50.6%, #1f2229 50.6% 100%); }
-.tp-flat .tp-line { background: linear-gradient(90deg, #c9ced8 0 49.4%, #3f454e 49.4% 100%); }
-.tp-flat .tp-card { background: linear-gradient(90deg, #eef1f5 0 49.4%, #2b2f37 49.4% 100%); }
-.tp-flat::after {
-  content: "浅 / 深";
-  position: absolute;
-  right: 7px;
-  bottom: 6px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: rgba(16, 20, 32, .46);
-  color: #fff;
-  font-size: 9.5px;
-  letter-spacing: .04em;
+/* 深色：VS Code Dark+ 的画布 / 侧栏层级 + DeepSeek 亮蓝强调 */
+.tp-theme-dark { border-color: rgba(255, 255, 255, .08); }
+.tp-theme-dark .tp-side { background: #252526; }
+.tp-theme-dark .tp-main { background: #1e1e1e; }
+.tp-theme-dark .tp-line { background: linear-gradient(90deg, #5686fe 0 42%, rgba(255, 255, 255, .14) 42% 100%); }
+.tp-theme-dark .tp-card {
+  background: #232324;
+  border: 1px solid rgba(255, 255, 255, .08);
 }
 .theme-card-copy {
   display: flex;
@@ -403,64 +394,16 @@ html.embed #main { min-width: 0; }
   border-radius: 50%;
   background: var(--accent);
   color: var(--on-accent);
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   opacity: 0;
   transform: scale(.7);
   transition: opacity var(--t) var(--ease), transform var(--t-slower) var(--ease-out);
 }
 .theme-card.is-on .theme-card-check { opacity: 1; transform: scale(1); }
-/* 两种界面设计风格：两列铺满，不被旧的 3 列网格挤成 2/3 */
-.theme-grid.style-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-
-/* 现代扁平化的深浅模式选择（只在选中该风格时出现） */
-.theme-mode-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin: 2px 0 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-side);
-}
-.theme-mode-row[hidden] { display: none; }
-.theme-mode-label { font-size: var(--fs-xs); font-weight: var(--fw-medium); }
-.theme-mode-seg {
-  display: inline-flex;
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg);
-}
-.theme-mode-btn {
-  padding: 5px 15px;
-  border: 0;
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: var(--fs-xs);
-  cursor: pointer;
-  transition: background var(--t) var(--ease), color var(--t) var(--ease),
-              box-shadow var(--t) var(--ease);
-}
-.theme-mode-btn:hover { color: var(--text); }
-.theme-mode-btn.is-on {
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: var(--fw-medium);
-  box-shadow: var(--shadow-xs);
-}
-.theme-mode-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.theme-mode-hint { font-size: var(--fs-2xs); color: var(--text-mute); }
 @media (max-width: 640px) {
-  .theme-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .theme-mode-row { align-items: flex-start; }
-  .theme-mode-hint { flex-basis: 100%; }
+  .theme-grid { gap: 8px; }
 }
-@media (max-width: 480px) {
-  /* 手机竖屏：两张风格卡并排会把说明挤成多行，改为单列更好读 */
-  .theme-grid.style-grid { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 640px) {
+  /* 手机竖屏：两张主题卡并排会把说明挤成多行，改为单列更好读 */
+  .theme-grid { grid-template-columns: minmax(0, 1fr); }
 }

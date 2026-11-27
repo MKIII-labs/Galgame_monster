@@ -41,7 +41,7 @@ $text = [System.Security.SecurityElement]::Escape($text)
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
 
 $tpl = @"
-<toast>
+<toast duration="long">
   <visual>
     <binding template="ToastGeneric">
       <text>$title</text>

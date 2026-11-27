@@ -35,7 +35,7 @@ const CMP_COMMANDS = [
   { cmd: '/compress',  desc: '压缩较早的历史对话',      kind: 'local', group: '会话' },
   { cmd: '/kb',        desc: '打开知识库 / 记忆图谱',   kind: 'local', group: '视图' },
   { cmd: '/settings',  desc: '打开设置',                kind: 'local', group: '视图' },
-  { cmd: '/theme',     desc: '切换雾光氛围 / 扁平化明暗', kind: 'local', group: '视图' },
+  { cmd: '/theme',     desc: '切换浅色 / 深色主题', kind: 'local', group: '视图' },
   { cmd: '/plan',      desc: '先出计划（本轮只读，不执行）', kind: 'local', group: 'AI' },
   { cmd: '/polish',    desc: 'AI 润色当前输入',         kind: 'ai', action: 'polish', group: 'AI' },
   { cmd: '/spec',      desc: 'AI 改成规格（目标/范围/边界/验收）', kind: 'ai', action: 'spec', group: 'AI' },

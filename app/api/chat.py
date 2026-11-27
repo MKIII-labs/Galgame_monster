@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """流式聊天主流程（由 P1 重构从 app/httpd.py 抽出）。"""
 import base64
+import collections
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import ssl
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from app.store import (ACTIVE_STREAMS, _lock, consume_stop, peek_live_flags,
                        take_live_flags)
@@ -27,6 +29,7 @@ from app.context import (IMAGE_TOKENS, TOOL_MSG_PREFIX, begin_compress,
                          maybe_compact_working_set, message_chars,
                          microcompact_messages,
                          maybe_precompress, reactive_compact,
+                         normalize_quotes,
                          real_used_tokens, working_set_tokens,
                          recover_overflow, request_budget,
                          save_summary, scale_parts,
@@ -40,18 +43,22 @@ from app.imaging import (build_vision_content, chat_vision_available,
 from app.config import (effective_think_mode, get_api_conf, get_api_kind,
                         light_chat_is_local, light_chat_mode, load_config,
                         model_context_limit, provider_chain, thinking_payload)
-from app.sessions import (DOC_TEXT_COMPAT_MAX, ensure_session_kb_fields, find_session,
-                          flush_sessions, invalidate_compression, load_sessions, save_session,
-                          save_sessions, slim_sessions, trim_compress_marks)
+from app.sessions import (DOC_TEXT_COMPAT_MAX, compress_marks_for, ensure_session_kb_fields,
+                          find_session, invalidate_compression, load_session, load_sessions,
+                          save_session, save_sessions, session_write_lock, slim_sessions,
+                          trim_compress_marks, cache_sessions)
 from app.profile import load_profile, manual_block
 from app.knowledge import anchor_changed, edge_is_valid
 from app.usage import endpoint_of, record_usage, today_total
 from app.uploads import read_message_images, save_upload
 from app.api.chat_attach import reconcile_edit
+# 请求入口解析（参数 + 会话定位）拆到独立模块；这里回导，保持既有调用与测试导入路径不变。
+from app.api.chat_prepare import parse_chat_request, question_policy_of
 # 验收契约 / 计划投影的纯函数拆到独立模块；这里回导，保持既有调用与测试导入路径不变。
 from app.api.chat_accept import (_ACCEPT_SAFE, _ACCEPT_TOOLS, _acceptance_criteria,
                                  _acceptance_expect, _acceptance_metrics,
                                  _acceptance_norm_criterion, _acceptance_nudge_msg,
+                                 _acceptance_scope,
                                  _acceptance_status_text, _acceptance_suggest_msg,
                                  _latest_plan, _norm_tool, _plan_accept_gaps,
                                  _plan_accept_hint, _plan_done_milestones, _plan_fingerprint,
@@ -60,43 +67,13 @@ from app.api.chat_accept import (_ACCEPT_SAFE, _ACCEPT_TOOLS, _acceptance_criter
 # 预算夹紧提示只打印一次（同一组配置），避免每轮刷日志
 _BUDGET_WARNED = set()
 
-# 「添加到对话」引用块：单条 / 合计 / 条数上限，避免一次贴进太多原文撑爆请求
-QUOTE_MAX_ONE = 4000
-QUOTE_MAX_TOTAL = 12000
-QUOTE_MAX_COUNT = 8
-# 单份文档在会话里最多内联多少字：再长模型也用不完，只会把 sessions.json 撑大
+# 最近若干轮的耗时埋点：/api/health 用它给出 p50/p90/p99，不依赖外部日志工具
+_TIMING_RING = collections.deque(maxlen=200)
+
+
+# 单份文档在会话里最多内联多少字：再长模型也用不完，只会把会话存储撑大
 # （曾有一个 MP4 被误当文本解析出 17MB × 3 份，直接到 93MB）
 MAX_INLINE_DOC_CHARS = 2_000_000
-
-
-# 提问策略：auto / smart / ask。缺字段、脏值一律按 ask（默认一律弹卡，等用户回答）。
-_QUESTION_POLICIES = ("auto", "smart", "ask")
-
-
-def question_policy_of(cfg):
-    raw = str((cfg or {}).get("autonomy_question_policy") or "ask").strip().lower()
-    return raw if raw in _QUESTION_POLICIES else "ask"
-
-
-def _quotes_block(quotes):
-    """把前端传来的引用拼成一段提示文本；返回空串表示没有可用引用。"""
-    if not isinstance(quotes, list):
-        return ""
-    lines, total = [], 0
-    for q in quotes[:QUOTE_MAX_COUNT]:
-        t = q.get("text") if isinstance(q, dict) else q
-        t = str(t or "").strip()
-        if not t:
-            continue
-        if len(t) > QUOTE_MAX_ONE:
-            t = t[:QUOTE_MAX_ONE] + "…（已截断）"
-        if total + len(t) > QUOTE_MAX_TOTAL:
-            break
-        total += len(t)
-        lines.append("%d. %s" % (len(lines) + 1, t))
-    if not lines:
-        return ""
-    return "【用户引用的原文】\n" + "\n".join(lines)
 
 
 def _attach_dyn_tail(messages, dyn, clock):
@@ -414,18 +391,6 @@ def _net_alive(api_url, timeout=2.0):
         return False
 
 
-def _reasoning_cap(cfg):
-    """每条消息保留的思考字数；0 / 负数 = 不限；缺键 / 非数字回落 12000。"""
-    raw = (cfg or {}).get("chat_reasoning_keep_chars", 12000)
-    if raw is None:
-        return 12000
-    try:
-        n = int(raw)
-    except (TypeError, ValueError):
-        return 12000
-    return 0 if n <= 0 else n
-
-
 def _append_round_blocks(blocks, rr):
     """把一轮的 reasoning / text 顺序标记追加进块列表。
 
@@ -446,7 +411,7 @@ def _append_round_blocks(blocks, rr):
 def _slim_rounds_detail(rows, limit=120):
     """把逐轮埋点压成可落盘的小对象：只留 token 明细需要的列。
 
-    完整 _rounds_detail 还带 diag / hdr_ms 等排查字段，没必要进 sessions.json；
+    完整 _rounds_detail 还带 diag / hdr_ms 等排查字段，没必要进会话存储；
     这里保留轮次、输入/输出、状态、首包、工具数、请求字符。
     """
     out = []
@@ -468,56 +433,8 @@ def _slim_rounds_detail(rows, limit=120):
     return out
 
 
-def _trim_reasoning_blocks(blocks, cap):
-    """思考总量超限时先整块丢最早的，最后一块仍超限才从头部截断（保留最近）。"""
-    if cap <= 0:
-        return blocks
-    idxs = [i for i, b in enumerate(blocks) if b.get("kind") == "reasoning"]
-    if not idxs:
-        return blocks
-    total = sum(len(blocks[i].get("text") or "") for i in idxs)
-    for i in idxs[:-1]:                            # 只丢「非最后」的整块
-        if total <= cap:
-            break
-        total -= len(blocks[i].get("text") or "")
-        blocks[i] = None
-    last = idxs[-1]
-    text = blocks[last].get("text") or ""
-    if len(text) > cap:
-        blocks[last]["text"] = "…（较早思考已省略）\n" + text[-cap:]
-    return [b for b in blocks if b is not None]
-
-
-def _strip_reasoning_blocks(blocks):
-    """关掉落库思考时：只保留正文 / 工具的顺序信息。"""
-    return [b for b in blocks if b.get("kind") != "reasoning"]
-
-
-# 收尾工具名（与前端 web/chat.js 的 FINISH_TOOL_NAMES 保持一致）。
-# blocks 引用的是 tools[i]["tool"]，通常已被 groups.py 归一化成 finish，
-# 旧数据里可能还是 done / complete 这些别名。
-_FINISH_TOOL_NAMES = frozenset((
-    "finish", "done", "complete", "finished",
-    "task_done", "task_complete", "finish_task"))
-
-
 # 停止 / 中断的结束原因：这些回合没有「正式交付」，正文区按「暂停」语义处理
 _PARTIAL_END_KINDS = frozenset(("stopped", "billing", "budget"))
-# 「实质交付」的最小长度：短于它的正文多半是「先查一下 / 现在运行脚本」这类过程旁白。
-# 实测最后一段正文的中位数约 650 字，旁白基本都在 100 字以内。
-_ANSWER_MIN_CHARS = 120
-
-
-def _is_substantive_answer(text):
-    """这段正文像不像「交付」，而不是过程旁白。
-
-    长文本直接算；短文本里带 Markdown 结构（标题 / 代码块 / 表格）也算——
-    交付常常是「## 结论 + 表格」这种短小但有结构的内容。
-    """
-    t = str(text or "").strip()
-    if len(t) >= _ANSWER_MIN_CHARS:
-        return True
-    return bool(re.search(r"(?m)^[ \t]{0,3}(?:#{1,6}\s|```|\|)", t))
 
 
 def _is_partial_turn(ev, end_reason, msg=None):
@@ -530,71 +447,6 @@ def _is_partial_turn(ev, end_reason, msg=None):
     if isinstance(msg, dict) and msg.get("interrupted"):
         return True
     return str((end_reason or {}).get("kind") or "") in _PARTIAL_END_KINDS
-
-
-# 不算「真实工具」的块：finish 声明的完成、ask_user 的提问。
-# 它们前后的正文属于同一段交付，不能因为中间夹了它们就被折成旁白。
-_ANSWER_SKIP_TOOLS = _FINISH_TOOL_NAMES | {"ask_user"}
-
-
-def _block_tool_name(blocks, tools, i):
-    """块 i 若是工具块，返回工具名；否则空串。"""
-    b = blocks[i] if 0 <= i < len(blocks) else None
-    if not isinstance(b, dict) or b.get("kind") != "tool":
-        return ""
-    try:
-        t = (tools or [])[int(b.get("i"))]
-    except (IndexError, TypeError, ValueError):
-        return ""
-    return str((t or {}).get("tool") or "")
-
-
-def _mark_answer_blocks(blocks, tools, stopped=False):
-    """给「答案区」的正文块打 `ans` 标记（落库与 done 事件共用）。
-
-    按「位置」判定，与流式折叠同一口径：
-      1) 停止 / 中断的回合：只保留最后一段可见正文（暂停时用户正在看的内容），
-         由 `end_note` 标注为未完成。
-      2) 正常回合：只有**最后一次真实工具**（finish 别名不算）之后的正文才算答案；
-         工具之间的正文一律是过程旁白，折进过程区。
-         最后工具之后没有正文时，回退到最后一段实质交付，再退到最后一段正文。
-
-    「实质交付」见 `_is_substantive_answer`：长度 ≥ 120 字，或带 Markdown 结构。
-    """
-    # 先清掉旧标记：续写会把上一轮的块合并进来，旧答案段落已经失效，
-    # 这里按合并后的完整块列表重新算一次。
-    out = []
-    for b in (blocks or []):
-        if isinstance(b, dict):
-            nb = dict(b)
-            nb.pop("ans", None)
-            out.append(nb)
-        else:
-            out.append(b)
-    text_ids = [i for i, b in enumerate(out)
-                if isinstance(b, dict) and b.get("kind") == "text"
-                and str(b.get("text") or "").strip()]
-    if not text_ids:
-        return out
-
-    if stopped:
-        out[text_ids[-1]]["ans"] = True
-        return out
-
-    last_work = -1
-    for i, b in enumerate(out):
-        if not isinstance(b, dict) or b.get("kind") != "tool":
-            continue
-        # 名字缺失时按真实工具处理：宁可折起，也别把过场旁白当成答案
-        if _block_tool_name(out, tools, i) not in _ANSWER_SKIP_TOOLS:
-            last_work = i
-    picked = [i for i in text_ids if i > last_work]
-    if not picked:
-        substantive = [i for i in text_ids if _is_substantive_answer(out[i].get("text"))]
-        picked = [substantive[-1]] if substantive else [text_ids[-1]]
-    for i in picked:
-        out[i]["ans"] = True
-    return out
 
 
 def _merge_tools(old, new, base):
@@ -651,8 +503,6 @@ class TurnResult:
     done_at: float = 0.0
     plan: dict | None = None
     tools_base: int | None = None  # 本次续写开始时目标消息已有的工具数
-    reason_cap: int = 0
-    persist_reason: bool = True
     sources: list = field(default_factory=list)
     rounds_detail: list = field(default_factory=list)
     mem_note: dict | None = None
@@ -688,26 +538,88 @@ def _merge_continuation(last, tr):
         if tr.tools:
             last["tools"] = _merge_tools(last.get("tools"), tr.tools, base_tools)
         last["blocks"] = _merge_blocks(last.get("blocks"), tr.blocks, base_tools)
-        if tr.persist_reason:
-            last["blocks"] = _trim_reasoning_blocks(last["blocks"], tr.reason_cap)
-        else:
-            last["blocks"] = _strip_reasoning_blocks(last["blocks"])
-        # 答案标记在合并 / 裁剪之后重算：旧标记可能已经指错段落。
-        last["blocks"] = _mark_answer_blocks(
-            last["blocks"], last.get("tools") or [], stopped=bool(tr.partial))
     prev_t = last.get("timing") or {}
     last["timing"] = {
         "total_ms": int(prev_t.get("total_ms") or 0) + int(tr.total_ms or 0),
         "rounds": int(prev_t.get("rounds") or 0) + int(tr.rounds or 0),
     }
+    if tr.sources:
+        _merge_search_msg(last, tr.sources)
     return last
+
+
+def _search_persist_payload(sources):
+    """搜索来源落库：去重后的 slim 来源 + 真正抓过正文的页面列表。
+
+    `content` / `evidence` 只存在内存里，slim_items 会丢掉；必须在落库前把
+    「哪些页面被浏览过」取出来，刷新后搜索 trace 才能还原「浏览 N 个页面」。
+    同一轮可能搜多次，`sources` 里会出现重复 URL，按 URL/title 去重后再入库，
+    否则历史里的「搜索到 N 个网页」会偏大。
+    """
+    slim, seen = [], set()
+    for it in slim_items(sources or []):
+        key = str(it.get("url") or it.get("title") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        slim.append(it)
+    pages, pseen = [], set()
+    for it in (sources or []):
+        if not isinstance(it, dict):
+            continue
+        if not (it.get("content") or it.get("evidence")):
+            continue
+        url = str(it.get("url") or "")
+        title = str(it.get("title") or url)
+        key = url or title
+        if not key or key in pseen:
+            continue
+        pseen.add(key)
+        pages.append({"title": title, "url": url})
+    return slim, pages
+
+
+def _merge_search_msg(last, sources):
+    """续写时把新搜索的来源 / 浏览页面合并进已有 assistant 消息。"""
+    def _key(x):
+        if not isinstance(x, dict):
+            return ""
+        return str(x.get("url") or x.get("title") or "")
+
+    slim, pages = _search_persist_payload(sources)
+    old = last.get("sources") or []
+    seen, merged = set(), []
+    for it in list(old) + slim:
+        key = _key(it)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        merged.append(it)
+    last["sources"] = merged
+    prev = last.get("search") or {}
+    ppages = list(prev.get("pages") or [])
+    pseen = {_key(p) for p in ppages}
+    for p in pages:
+        key = _key(p)
+        if key and key not in pseen:
+            ppages.append(p)
+            pseen.add(key)
+    if merged:
+        # 即使这一轮没抓正文（ppages 为空），也要写 hits：
+        # 历史里的「搜索到 N 个网页」直接用它，不再靠 sources.length 兜底。
+        last["search"] = {"hits": len(merged), "pages": ppages}
 
 
 def _build_new_assistant_message(s2, tr):
     """把本轮结果变成一条新的 assistant 消息（纯内存，不落库）。"""
     msg = {"role": "assistant", "content": tr.content, "done_at": tr.done_at}
     if tr.sources:
-        msg["sources"] = slim_items(tr.sources)   # 正文不入库，避免 sessions.json 膨胀
+        _slim, _pages = _search_persist_payload(tr.sources)
+        msg["sources"] = _slim                        # 正文不入库，避免会话存储膨胀
+        # 刷新后重建搜索 trace 用：命中数 + 真正抓过正文的页面（可能为空）
+        msg["search"] = {"hits": len(_slim), "pages": _pages}
     try:
         ref = _refs_public(_last_user_refs(s2))
         if ref:
@@ -722,9 +634,7 @@ def _build_new_assistant_message(s2, tr):
         msg["tools"] = tr.tools                   # Agent 工具时间线（供刷新后回显）
     _carry_plan(msg, tr.plan)                     # 执行计划（供刷新后回显）
     if tr.blocks:
-        # finish 可能被验收驳回 / 自动续跑推翻，答案块要按位置重算一次。
-        msg["blocks"] = _mark_answer_blocks(
-            tr.blocks, msg.get("tools") or tr.tools, stopped=bool(tr.partial))
+        msg["blocks"] = tr.blocks
     msg["timing"] = {"total_ms": tr.total_ms, "rounds": tr.rounds,
                      "rounds_detail": _slim_rounds_detail(tr.rounds_detail)}
     msg["ctx_cut"] = tr.ctx_cut
@@ -755,12 +665,26 @@ def _persist_turn(s2, sid, tr, api_key, api_url, api_model):
             _sm.maybe_update(s2.get("id") or sid, had_tools=bool(tr.tools))
         except Exception as e:                    # noqa: BLE001
             print("[会话记忆] 触发失败：%s" % e)
-    # 首轮回复已落库：用「用户 + 助手」这一轮内容生成摘要标题。
-    # 失败 / 超时都不影响本轮输出，下一轮还会再试（title_source 未标记）。
+    # 首轮回复已落库：标题生成放后台，不再阻塞 done（模型调用最长 6 秒）。
+    # 生成成功会通过常驻事件通道推 session_title，侧栏即时更新。
     try:
-        _auto_title_session(s2, api_key, api_url, api_model)
+        threading.Thread(target=_auto_title_task, args=(s2, api_key, api_url, api_model),
+                         daemon=True, name="auto-title").start()
     except Exception as e:                        # noqa: BLE001
-        print("[标题] 自动命名失败：%s" % e)
+        print("[标题] 自动命名启动失败：%s" % e)
+
+
+def _auto_title_task(s, api_key, api_url, api_model):
+    """后台生成会话标题；成功后推一条事件让前端更新侧栏。"""
+    title = _auto_title_session(s, api_key, api_url, api_model)
+    if not title:
+        return
+    try:
+        from app import events
+        events.publish({"type": "session_title",
+                        "sid": (s or {}).get("id"), "title": title})
+    except Exception:                             # noqa: BLE001  推送失败不影响已落库标题
+        pass
 
 
 def _ensure_old_text_block(last):
@@ -916,6 +840,20 @@ def _needs_finish_nudge(*, agent_mode, finished, nudged, tool_count):
 
 
 _WEB_PAGE_MAX = 4000
+
+
+def _file_watch_new(warned, missing):
+    """文件监控去重：返回 (本轮新丢失, 更新后的已提醒集合)。
+
+    已提醒集合只保留「当前仍然缺失」的路径：文件恢复 / 被主动删除后，
+    下次再丢失会重新提醒。
+    """
+    seen = set(warned or [])
+    now = set(missing or [])
+    new = [p for p in (missing or []) if p not in seen]
+    seen &= now
+    seen.update(new)
+    return new, seen
 
 
 def _web_page_note(url, text, n=0):
@@ -1111,7 +1049,8 @@ def _next_plan_stale(prev, sig, prev_sig, tools_grew):
     return int(prev or 0) + 1
 
 
-def _acceptance_handle(s, args, sandbox, caps, stop_event=None, agent_on=False):
+def _acceptance_handle(s, args, sandbox, caps, stop_event=None, agent_on=False,
+                       scope=None):
     """acceptance 工具：定义 / 修订 / 执行 / 记录 / 查看 / 清空验收项。"""
     args = args if isinstance(args, dict) else {}
     act = str(args.get("action") or "status").strip().lower()
@@ -1142,6 +1081,7 @@ def _acceptance_handle(s, args, sandbox, caps, stop_event=None, agent_on=False):
             out.append(item)
         contract = dict(contract)
         contract["criteria"] = out
+        contract["scope"] = str(scope or "")
         contract["updated_at"] = time.time()
         s["acceptance"] = contract
         task_state.set_acceptance(s, out)
@@ -1471,6 +1411,16 @@ def _wf_exec_node(node, env):
     caps = env.get("caps") or {}
     log = env.get("log_tool")
     log = log or (lambda e: None)
+    # 审批档位实时化：子代理 / 工作流的 env 可能早就建好了，
+    # 每次执行前用 approval_now 取一次最新档位（没有这个回调的老 env 保持原值）。
+    _an = env.get("approval_now")
+    if callable(_an):
+        try:
+            _m = _an()
+            env["approval_mode"] = _m
+            env["unrestricted"] = (_m == "full")
+        except Exception:            # noqa: BLE001  取不到就沿用 env 里的旧档位
+            pass
 
     if typ == "explore":
         from app import explore as explore_mod
@@ -2059,6 +2009,16 @@ STREAM_WATCHDOG_IDLE = 180.0       # 有 job 但 180s 没有任何事件：按�
 STREAM_WATCHDOG_PREPARE = 900.0    # 还没有 job（装配 / 压缩）最多等 15 分钟
 
 
+def claim_active(sid, ev, started=None):
+    """原子认领会话流：已有流则返回 False，避免 check 与 register 之间的竞态。"""
+    with _lock:
+        if sid in ACTIVE_STREAMS:
+            return False
+        ACTIVE_STREAMS[sid] = ev
+        LEASE_STARTED[sid] = float(started or time.time())
+        return True
+
+
 def release_active(sid, ev):
     """只清理自己的登记，避免误删后来者。"""
     with _lock:
@@ -2073,10 +2033,10 @@ def _thread_alive(ident):
 
 def _force_done_event(sid, reason, stopped=True):
     """Watchdog 收尾：给等待中的 attach 补一条 done（没有 writer 也能被重连读到）。"""
-    job = JOBS.get(sid)
-    if not job or job.get("done"):
-        return
     with JOB_LOCK:
+        job = JOBS.get(sid)
+        if not job or job.get("done"):
+            return
         job["seq"] = int(job.get("seq") or 0) + 1
         job["events"].append({
             "type": "done", "stopped": bool(stopped), "error": str(reason or "")[:300],
@@ -2102,15 +2062,19 @@ def _watch_stream(sid, ev, owner, started):
         if ACTIVE_STREAMS.get(sid) is not ev:
             return
         now = time.time()
-        job = JOBS.get(sid)
+        with JOB_LOCK:
+            job = JOBS.get(sid)
+            age = (now - float(job.get("ts") or 0)) if job else 0.0
+            done = bool(job and job.get("done"))
         if job:
-            age = now - float(job.get("ts") or 0)
             if _waiting_user(sid):
                 # 等用户点「允许 / 拒绝」或回答：这段时间本来就没有事件，
                 # 不能按僵尸流收尾（否则前端会收到假 done，卡片却被折叠/丢掉）。
-                job["ts"] = now
+                with JOB_LOCK:
+                    if JOBS.get(sid) is job:
+                        job["ts"] = now
                 continue
-            if job.get("done"):
+            if done:
                 if age > 5.0:
                     release_active(sid, ev)
                     return
@@ -2170,16 +2134,22 @@ def stream_alive(sid, idle=30.0):
     # 即使 SSE 心跳已停（客户端断开了），也不能当成「已结束」。
     if _waiting_user(sid):
         return True
-    job = JOBS.get(sid)
+    with JOB_LOCK:
+        job = JOBS.get(sid)
+        if job:
+            done = bool(job.get("done"))
+            ts = float(job.get("ts") or 0)
+        else:
+            done, ts = False, 0.0
     if not job:
         # ACTIVE_STREAMS 已登记、JOBS 还没建（装配 / 建响应头）：给一个短窗口。
         # 以前这里直接 return True，导致「job 早就没了」的僵尸租约永远算在跑，
         # 前端会一直显示生成中、attach 却又拿不到任何事件。
         return (time.time() - float(LEASE_STARTED.get(sid) or 0)) < 30.0
-    if job.get("done"):
+    if done:
         return False
     try:
-        return (time.time() - float(job.get("ts") or 0)) < float(idle or 30.0)
+        return (time.time() - ts) < float(idle or 30.0)
     except (TypeError, ValueError):
         return True
 
@@ -2189,11 +2159,41 @@ def _dt_ms(a, b):
     return int((b - a) * 1000) if (a is not None and b is not None) else None
 
 
+_TIMING_KEYS = ("body_ms", "parse_ms", "sess_load_ms", "load_ms", "refs_ms",
+                "tool_prompt_ms", "skills_ms", "base_prompt_ms", "hooks_ms",
+                "tail_prompt_ms", "assemble_ms", "doc_ms", "compress_ms",
+                "first_token_ms", "total_ms")
+
+
+def timing_stats():
+    """最近 200 轮的分段耗时分位数（p50/p90/p99/max）。"""
+    rows = list(_TIMING_RING)
+    out = {}
+    for key in _TIMING_KEYS:
+        vals = sorted(float(r[key]) for r in rows
+                      if isinstance(r.get(key), (int, float)))
+        if not vals:
+            out[key] = {"n": 0}
+            continue
+        pick = lambda p: int(vals[min(len(vals) - 1, int(len(vals) * p))])  # noqa: E731
+        out[key] = {"n": len(vals), "p50": pick(.5), "p90": pick(.9),
+                    "p99": pick(.99), "max": int(vals[-1])}
+    return out
+
+
 def _keep_fresh_summary(s, fresh):
     """后台压缩 / 会话工作记忆可能刚推进：不要用请求开始时的旧快照覆盖回去。
 
     只搬这些后台字段；消息正文仍以本请求手里的 s 为准（它含本轮产出）。
+    手动改名 / 置顶 / 提问标记同理：它们在别的请求里改，流式落库不能覆盖回去。
     """
+    if str((fresh or {}).get("title_source") or "") == "manual":
+        s["title"] = fresh.get("title")
+        s["title_source"] = "manual"
+    if "pinned" in (fresh or {}):
+        s["pinned"] = bool(fresh.get("pinned"))
+    if isinstance((fresh or {}).get("qmarks"), list):
+        s["qmarks"] = fresh.get("qmarks")
     try:
         newer_summary = (int(fresh.get("summary_upto") or 0)
                          > int(s.get("summary_upto") or 0))
@@ -2218,36 +2218,47 @@ def _keep_fresh_summary(s, fresh):
     return s
 
 
-def _persist_session(s):
+def _persist_session(s, cache=True):
     """只落盘一个会话：重新读全量 → 替换这一条 → 写回。
 
     为什么不能直接 save_sessions(data)：两个会话同时生成时，各自手里是一份
     请求开始时的全量快照，整份写回会互相覆盖（表现为另一个会话的消息凭空消失）。
-    这里把「读-改-写」缩到单条会话，并放在同一把锁里。
+    这里把「读-改-写」缩到单条会话。
+
+    cache=False 只追加事件、跳过物化缓存重写：生成中的进度快照用它，
+    避免每 15 秒把十几 MB 的会话缓存整份重写一遍、和流式输出抢线程。
     """
     if not isinstance(s, dict) or not s.get("id"):
         return None
-    # 回合中途改过 Agent 开关 / 沙箱：落库时按最新值写，别用旧内存快照覆盖回去
+    # 回合中途改过 Agent 开关 / 沙箱 / 审批档位：落库时按最新值写，别用旧内存快照覆盖回去
     _live = peek_live_flags(s.get("id"))
     if _live:
         if "agent_enabled" in _live:
             s["agent_enabled"] = bool(_live.get("agent_enabled"))
         if "sandbox" in _live:
             s["sandbox"] = str(_live.get("sandbox") or "")
+        if "approval_mode" in _live:
+            s["approval_mode"] = agent.normalize_approval(_live.get("approval_mode"))
     with _lock:
-        fresh = load_sessions()
-        rows = fresh.get("sessions") or []
+        # 只复制会话列表骨架，不深拷贝每条会话（整份 clone 实测约 34ms/次）。
+        agg = load_sessions(copy=False)
+        fresh = {"current": agg.get("current"),
+                 "sessions": list(agg.get("sessions") or [])}
+        rows = fresh["sessions"]
         for i, x in enumerate(rows):
             if x.get("id") == s.get("id"):
                 rows[i] = _keep_fresh_summary(s, x)
                 break
         else:
             rows.insert(0, s)
-        fresh["sessions"] = rows
-        # 热路径：只落盘这一条会话（单会话快照 + 事件流）。整份 sessions.json
-        # 有几十 MB，每 15 秒的进度快照都全量重写会卡住所有请求（实测约 570ms）。
-        # 整份快照由回合收尾的 flush_sessions() 补上。
-        save_session(s)
+        # load_sessions 返回的是副本：把替换后的结果登记回读缓存，
+        # 后续 load_sessions / 断线重连才能立刻看到这次修改。
+        cache_sessions(fresh)
+    # 锁外落盘：序列化 + 写文件可能要几百毫秒，占着全局锁会让别的请求一起排队。
+    # 同一会话用独立写锁串行（事件流按 diff 追加，同一会话不能并发写）；
+    # 不同会话互不阻塞。
+    with session_write_lock(str(s.get("id"))):
+        save_session(s, cache=cache)
     return fresh
 
 
@@ -2367,7 +2378,8 @@ def _save_progress(sid, text, tool_log=None, plan_state=None, inplace_base=None,
     不能直接覆盖成本次请求的 tool_log（否则前几轮的工具全丢，收尾合并还会下标错位）。
     """
     try:
-        s = find_session(load_sessions(), sid)
+        # 只取这一个会话：进度快照每 15 秒一次，没必要把整份会话列表克隆一遍。
+        s = load_session(sid)
         if not s:
             return
         msgs = s.get("messages") or []
@@ -2395,7 +2407,8 @@ def _save_progress(sid, text, tool_log=None, plan_state=None, inplace_base=None,
                 s["messages"] = msgs
             _apply_progress_snapshot(last, text, tool_log, plan_state)
         s["updated_at"] = time.time()
-        _persist_session(s)
+        # 只追加事件、不重写物化缓存：崩溃重启后按事件流重建即可。
+        _persist_session(s, cache=False)
     except Exception as e:
         print("[进度] 落库失败：%s" % e)
 
@@ -2412,7 +2425,8 @@ def _api_chat_attach(h):
         since = int(body.get("since") or 0)
     except (TypeError, ValueError):
         since = 0
-    job = JOBS.get(sid)
+    with JOB_LOCK:
+        job = JOBS.get(sid)
     if not job:
         return h._json({"ok": False, "error": "no job",
                         "message": "没有正在运行或刚结束的任务。"}, 404)
@@ -2616,7 +2630,8 @@ def _past_chat_ref(sid, current_sid):
     if not lines:
         return None
     return {"path": "历史对话：" + (old.get("title") or sid),
-            "virtual": True, "text": "\n\n".join(lines)[:12000]}
+            "type": "chat", "virtual": True,
+            "text": "\n\n".join(lines)[:12000]}
 
 
 def _auto_code_refs(s, query, explicit=None, force=False):
@@ -2709,6 +2724,8 @@ def _refs_public(refs):
             continue
         seen.add(key)
         it = {"path": path}
+        if r.get("type"):
+            it["type"] = str(r.get("type") or "")      # 前端按类型选图标 / 判断能否点开
         if r.get("page"):
             it["page"] = int(r.get("page") or 0)
         if start:
@@ -2733,6 +2750,21 @@ def _last_user_refs(s):
     return []
 
 
+def _continue_basis(s, cont):
+    """「继续输出」的起点：返回 (sources, base_text, tools_count, error)。
+
+    纯读取，不改会话；错误由调用方转成 400（保持原来的提示文案）。
+    """
+    if not cont:
+        return [], None, None, ""
+    msgs = s.get("messages") or []
+    if not msgs or msgs[-1].get("role") != "assistant":
+        return [], None, None, "no assistant message to continue"
+    last = msgs[-1]
+    return (last.get("sources") or [], last.get("content") or "",
+            len(last.get("tools") or []), "")
+
+
 def _api_chat(h):
         _t0 = time.monotonic()     # 请求链路埋点：本轮起点（monotonic，避免系统时钟跳变出现负值）
         _marks = {}
@@ -2741,87 +2773,50 @@ def _api_chat(h):
         sid = str(body.get("session_id") or "").strip()
         if not sid:
             return h._json({"ok": False, "error": "缺少 session_id"}, 400)
-        # 同一会话不允许并发生成：第二个请求会覆盖 ACTIVE_STREAMS（「停止」失效），
-        # 且两个线程各自「读—改—写」sessions.json 会互相覆盖（消息可能丢）。
-        # 前端流式期间已禁用发送，这里兜住多窗口 / 多标签的情况。
-        if sid in ACTIVE_STREAMS:
+        # 同一会话不允许并发生成：原子认领，避免两个请求都通过 check 再互相覆盖。
+        ev = threading.Event()
+        _stream_started = time.time()
+        if not claim_active(sid, ev, _stream_started):
             return h._json({"ok": False, "error": "busy",
                             "message": "该会话正在生成中，请等它结束或先点「停止」。"}, 409)
-        # 压缩期间不接受新请求：压缩用的是开始时的消息快照，期间编辑/追加会让
-        # 摘要与现状错位。前端会把这个请求转成排队，压缩完成后自动重发。
-        if compress_busy(sid):
-            return h._json({"ok": False, "error": "busy", "reason": "compressing",
-                            "message": "该会话正在压缩较早的历史，消息会稍后自动发出。"}, 409)
-        content = (body.get("content") or "").strip()
-        # 提问策略：auto / smart / ask，默认 ask（一律弹卡，等用户回答）。
-        _cfg0 = load_config() or {}
-        question_policy = question_policy_of(_cfg0)
-        # 提问卡不限时：0 = 永不超时，一直等到用户回答 / 点停止 / 让 AI 自己决定
-        _ask_timeout = 0
-        # /plan 规划模式：只读研究 + 产出计划卡，不执行。前端会先剥掉前缀；
-        # 这里再兜一次（旧客户端 / 直接发文本协议的情况）。
-        plan_mode = bool(body.get("plan_mode"))
-        if re.match(r"^/plan(?:\s|$)", content, re.I):
-            plan_mode = True
-            content = re.sub(r"^/plan\s*", "", content, count=1, flags=re.I).strip()
-            if not content:
-                content = "请先规划当前任务：读必要上下文，给出里程碑计划，然后等我确认。"
-        resend = body.get("resend") if isinstance(body.get("resend"), dict) else None
-        resume_req = bool(body.get("resume"))        # 「继续任务」：进程重启后的断点续跑
-        cont_req = bool(body.get("continue")) or resume_req   # 「继续输出」：从断点续写，不新开消息
-        # 图片附件：新前端发 images 列表；旧客户端仍发单张 image
-        raw_imgs = body.get("images")
-        imgs = []
-        if isinstance(raw_imgs, list):
-            for it in raw_imgs[:4]:
-                if isinstance(it, dict) and it.get("data"):
-                    imgs.append({"mime": it.get("mime") or "image/png",
-                                 "data": str(it.get("data") or "")})
-        img = body.get("image") if isinstance(body.get("image"), dict) else None
-        if not imgs and img and img.get("data"):
-            imgs = [{"mime": img.get("mime") or "image/png",
-                     "data": str(img.get("data") or "")}]
-        img_b64 = imgs[0]["data"] if imgs else ""
-        img_mime = imgs[0]["mime"] if imgs else "image/png"
-        has_img = bool(imgs)                        # 「修改消息」也允许换图
-        # 文档附件：新前端发 docs 列表（可多文件）；旧客户端仍发单个 doc
-        docs = []
-        raw_docs = body.get("docs")
-        if isinstance(raw_docs, list):
-            for it in raw_docs[:10]:
-                if not isinstance(it, dict):
-                    continue
-                nm = str(it.get("name") or "").strip()[:200]
-                dt = str(it.get("data") or "")
-                if nm and dt:
-                    docs.append({"name": nm, "mime": it.get("mime") or "", "data": dt})
-        doc = body.get("doc") if isinstance(body.get("doc"), dict) else None
-        if not docs and doc:
-            nm = str(doc.get("name") or "").strip()[:200]
-            dt = str(doc.get("data") or "")
-            if nm and dt:
-                docs = [{"name": nm, "mime": doc.get("mime") or "", "data": dt}]
-        if resend and resend.get("mode") != "edit":
-            docs = []                     # 文档附件只在「发新消息 / 修改消息」时支持
-        has_doc = bool(docs)
-        # 「修改消息」时附件也参与编辑：reuse_* 是「沿用原消息里的哪些附件」（落盘文件名）。
-        # 不传 = 全部沿用（兼容旧客户端）；传空列表 = 全部删掉。
-        _raw_reuse_imgs = body.get("reuse_images")
-        _raw_reuse_docs = body.get("reuse_docs")
-        reuse_imgs = (None if not isinstance(_raw_reuse_imgs, list) else
-                      {str(x) for x in _raw_reuse_imgs if str(x).strip()})
-        reuse_docs = (None if not isinstance(_raw_reuse_docs, list) else
-                      {str(x) for x in _raw_reuse_docs if str(x).strip()})
-        client_imgs = list(imgs)          # 这次新选的图：稍后落盘并挂回这条消息
-        doc_items = []                    # [(原始名, base64, 落盘元信息)]：解析阶段逐个消费
-        if not content and not resend and not has_img and not has_doc and not cont_req:
-            return h._json({"ok": False, "error": "empty"}, 400)
+        h._chat_sid = sid
+        h._chat_ev = ev
 
-        data = load_sessions()
-        _marks["load"] = time.monotonic()
-        s = find_session(data, sid)
-        if not s:
-            return h._json({"ok": False, "error": "no session"}, 404)
+        def _reject(payload, code=400):
+            """本轮还没建立 SSE 的早退：先释放租约，再回 JSON。"""
+            release_active(sid, ev)
+            return h._json(payload, code)
+
+        # 租约从认领起就生效，watchdog 立即启动：压缩 / 附件落盘等长装配阶段也能被停止。
+        threading.Thread(target=_watch_stream,
+                         args=(sid, ev, threading.get_ident(), _stream_started),
+                         daemon=True, name="stream-watchdog").start()
+        # 参数解析 + 会话定位拆到 chat_prepare；任何早退都走 _reject（会释放租约）。
+        req = parse_chat_request(body, sid, _reject,
+                                 question_policy_of(load_config() or {}))
+        if req is None:
+            return
+        _marks["load"] = req.load_at
+        _marks["parse_start"] = req.parse_at or _t0
+        _marks["sess_load_ms"] = req.sess_load_ms
+        content = req.content
+        question_policy = req.question_policy
+        _ask_timeout = req.ask_timeout
+        plan_mode = req.plan_mode
+        resend = req.resend
+        resume_req = req.resume_req
+        cont_req = req.cont_req
+        imgs = req.imgs
+        img_b64 = req.img_b64
+        img_mime = req.img_mime
+        has_img = req.has_img
+        docs = req.docs
+        has_doc = req.has_doc
+        reuse_imgs = req.reuse_imgs
+        reuse_docs = req.reuse_docs
+        client_imgs = req.client_imgs
+        doc_items = req.doc_items
+        s = req.s
         # 修改消息：附件也参与这次编辑 —— 沿用 / 删除 / 新增都落到这条消息上。
         _edit_msg = None
         _imgs_changed = False
@@ -2879,19 +2874,9 @@ def _api_chat(h):
         cont = cont_req
         # 「重新发言 / 继续输出」时复用上一轮已存下的来源，避免重复联网。
         # 注意要在截断历史之前先取出来。
-        reuse_sources = []
-
-        cont_base = None
-        cont_tools_base = None
-        if cont:
-            msgs_c = s.get("messages") or []
-            if not msgs_c or msgs_c[-1].get("role") != "assistant":
-                return h._json({"ok": False, "error": "no assistant message to continue"}, 400)
-            reuse_sources = msgs_c[-1].get("sources") or []
-            # 续写的起点正文：进度落库时用它拼「原文 + 新文本」，不再另起一条消息
-            cont_base = msgs_c[-1].get("content") or ""
-            # 续写起点已有的工具数：进度快照与收尾合并都按它切分旧工具 / 本次工具
-            cont_tools_base = len(msgs_c[-1].get("tools") or [])
+        reuse_sources, cont_base, cont_tools_base, _cont_err = _continue_basis(s, cont)
+        if _cont_err:
+            return _reject({"ok": False, "error": _cont_err}, 400)
         if resume_req and cont:
             # 断点续跑只做一次：标记清掉，下次中断会重新置位
             s.pop("resume_pending", None)
@@ -2909,12 +2894,12 @@ def _api_chat(h):
             try:
                 idx = int(resend.get("index"))
             except (TypeError, ValueError):
-                return h._json({"ok": False, "error": "bad index"}, 400)
+                return _reject({"ok": False, "error": "bad index"}, 400)
             msgs = s["messages"]
             if mode == "edit":
                 # 修改用户消息：新文本作为一个新「版本」记下；界面与 AI 都只使用当前版本
                 if not (0 <= idx < len(msgs)) or msgs[idx].get("role") != "user" or not content:
-                    return h._json({"ok": False, "error": "bad edit target"}, 400)
+                    return _reject({"ok": False, "error": "bad edit target"}, 400)
                 m = msgs[idx]
                 vers = m.get("versions") or [m.get("content") or ""]
                 if vers[-1] != content:
@@ -2926,15 +2911,15 @@ def _api_chat(h):
             elif mode == "version":
                 # 切换该用户消息的历史版本（前端 ‹ n/N › 箭头）→ 用所选版本重新生成
                 if not (0 <= idx < len(msgs)) or msgs[idx].get("role") != "user":
-                    return h._json({"ok": False, "error": "bad version target"}, 400)
+                    return _reject({"ok": False, "error": "bad version target"}, 400)
                 m = msgs[idx]
                 vers = m.get("versions")
                 try:
                     v = int(resend.get("vidx"))
                 except (TypeError, ValueError):
-                    return h._json({"ok": False, "error": "bad vidx"}, 400)
+                    return _reject({"ok": False, "error": "bad vidx"}, 400)
                 if not isinstance(vers, list) or not vers or not (0 <= v < len(vers)):
-                    return h._json({"ok": False, "error": "bad vidx"}, 400)
+                    return _reject({"ok": False, "error": "bad vidx"}, 400)
                 m["vidx"] = v
                 m["content"] = vers[v]
                 content = vers[v]
@@ -2942,14 +2927,14 @@ def _api_chat(h):
             elif mode == "regenerate":
                 # 重新发言：丢弃该条 AI 回复及其后消息，用上一条用户消息重发
                 if not (0 <= idx < len(msgs)) or msgs[idx].get("role") != "assistant":
-                    return h._json({"ok": False, "error": "bad regenerate target"}, 400)
+                    return _reject({"ok": False, "error": "bad regenerate target"}, 400)
                 reuse_sources = msgs[idx].get("sources") or []   # 截断前先取出，稍后复用它注入
                 del msgs[idx:]
                 if idx - 1 < 0 or msgs[idx - 1].get("role") != "user":
-                    return h._json({"ok": False, "error": "no user message before"}, 400)
+                    return _reject({"ok": False, "error": "no user message before"}, 400)
                 content = msgs[idx - 1].get("content") or ""
             else:
-                return h._json({"ok": False, "error": "bad mode"}, 400)
+                return _reject({"ok": False, "error": "bad mode"}, 400)
             # 改动点 = 被改写/被截断的那条消息的位置。压缩点如果越过它，
             # 摘要描述的就是已经被改掉的内容 —— 必须作废，否则模型会基于旧文本回答，
             # 而且这条新内容根本不会进入请求（它落在 summary_upto 之前）。
@@ -2973,6 +2958,13 @@ def _api_chat(h):
                 _doc_label = ""
             stored = content or ("【图片】" if has_img else _doc_label)
             umsg = {"role": "user", "content": stored}
+            # 「添加到对话」引用：随用户消息落库，之后追问 / 重新发言 / 刷新都还在
+            _quote_items = normalize_quotes(body.get("quotes"))
+            if _quote_items:
+                umsg["quotes"] = _quote_items
+                if not umsg.get("content") and not has_img and not has_doc:
+                    umsg["content"] = "【引用 %d 条】" % len(_quote_items)
+                    stored = umsg["content"]
             # 引用分两路：
             # ① `#` 菜单的 chip（body.refs）—— 前端只传定位信息，正文在这里现取；
             # ② 旧式文本引用（`@路径` / `#web` 等）—— 保持兼容。
@@ -3015,6 +3007,7 @@ def _api_chat(h):
                     pass
             _refs = (list(_special or []) + list(_text_refs or [])
                      + list(_chip_refs or []))
+            _marks["refs"] = time.monotonic()   # 埋点：文件引用 / 代码索引召回完成
             if _refs:
                 umsg["refs"] = _refs
                 if not umsg.get("content"):
@@ -3051,6 +3044,7 @@ def _api_chat(h):
             try:
                 _traj_turn = trajectory.new_turn(sid)
                 trajectory.user(sid, _traj_turn, stored, {"kind": "human"})
+                umsg["traj_turn"] = _traj_turn   # 聊天 → 轨迹的定位锚点
             except Exception:            # noqa: BLE001
                 pass
             if not s.get("task_goal"):
@@ -3087,19 +3081,7 @@ def _api_chat(h):
 
         api_key, api_url, api_model = get_api_conf("chat")
 
-        # 流租约：从这里一直持有到本轮真正结束（正常收尾 / 早退 / httpd 异常兜底）。
-        # 放在所有「必失败」的参数校验之后，避免 400/404 早退留下僵尸登记；
-        # 又放在压缩 / 记忆检索之前，长上下文最长的「无首 token」阶段也能被停止。
-        ev = threading.Event()
-        _stream_started = time.time()
-        with _lock:
-            ACTIVE_STREAMS[sid] = ev
-            LEASE_STARTED[sid] = _stream_started
-        h._chat_sid = sid
-        h._chat_ev = ev
-        threading.Thread(target=_watch_stream,
-                         args=(sid, ev, threading.get_ident(), _stream_started),
-                         daemon=True, name="stream-watchdog").start()
+        # 租约已在入口认领并启动 watchdog：这里只处理「用户在上一次流结束后立刻点了停止」
         if consume_stop(sid):
             ev.set()
 
@@ -3208,7 +3190,7 @@ def _api_chat(h):
 
         threading.Thread(target=_heartbeat, daemon=True).start()
 
-        sse({"type": "session", "sessions": slim_sessions(load_sessions())})
+        sse({"type": "session", "sessions": slim_sessions(load_sessions(copy=False))})
 
         # 压缩 / 记忆检索之前先消费一次停止：这是长上下文最长的「无首 token」阶段。
         if consume_stop(sid):
@@ -3216,7 +3198,7 @@ def _api_chat(h):
         if ev.is_set():
             print("[停止] sid=%s 在装配 / 压缩阶段收到停止，直接收尾" % sid)
             sse({"type": "done", "stopped": True, "blocks": [], "tools": [],
-                 "sessions": slim_sessions(load_sessions())})
+                 "sessions": slim_sessions(load_sessions(copy=False))})
             _hb_stop.set()
             release_active(sid, ev)
             return
@@ -3251,6 +3233,7 @@ def _api_chat(h):
             s, include_profile=_profile_on,
             include_kb=_memory_on,
             include_session=_include_session, parts=True, native=_native_mem)
+        _marks["tool_prompt"] = time.monotonic()   # 埋点：记忆检索 / 工具说明
         # Skill 索引（L1）：名称 / 何时用 / 参考文件清单，正文由模型按需调用 skill.read 展开。
         skills_text = ""
         skill_hint = ""
@@ -3262,6 +3245,7 @@ def _api_chat(h):
             skill_hint = skills_lib.trigger_hint(content)
         except Exception as e:
             print("[Skill] 索引生成失败：%s" % e)
+        _marks["skills"] = time.monotonic()        # 埋点：Skill 索引 / 关键词提示
         # 学习观测（observations）只作为「功能大厅 → 学习观测」的面板数据，
         # 不再注入 Solo / IDE 的模型上下文（用户要求：不喂给 AI 看）。
         # 需要时由大厅页面直接读 /api/observe。
@@ -3278,6 +3262,7 @@ def _api_chat(h):
         if _tool_dyn:                       # 记忆条数 / 现有条目：只进尾部，不进 system
             sys_dyn = (sys_dyn + "\n\n" + _tool_dyn) if sys_dyn else _tool_dyn
         system_prompt = "\n\n".join([x for x in (sys_fixed, sys_dyn) if x])
+        _marks["base"] = time.monotonic()          # 埋点：基础系统提示装配完成
         # hook：UserPromptSubmit 可以给本轮追加上下文（外部记忆、审计结论等）
         try:
             from app import hooks as _hooks
@@ -3293,6 +3278,7 @@ def _api_chat(h):
                                    "\n\n".join([x for x in (_sctx, _hctx) if x]))
             except Exception:            # noqa: BLE001
                 pass
+        _marks["hooks"] = time.monotonic()         # 埋点：外部钩子上下文完成
         # 自动派发（suggest）：把团队清单与派活时机固定写进系统提示。
         # 只列启用中的代理，不带逐轮变化的内容，前缀缓存不受影响。
         _auto_route_on = False
@@ -3404,9 +3390,19 @@ def _api_chat(h):
             mode = vision_mode()
             sse({"type": "recognizing", "mode": mode})
             if mode == "vision":
+                def _one_img(item):
+                    i, im = item
+                    try:
+                        note = recognize_image(im["mime"], im["data"], question=content)
+                    except Exception as e:            # noqa: BLE001  单张失败不影响其它图
+                        return i, "", str(e)
+                    return i, note, ""
+
+                # 多图有界并发（最多 4 张）：结果按原顺序回收，不改变提示里的图片编号。
+                with ThreadPoolExecutor(max_workers=min(4, len(imgs))) as _pool:
+                    _img_results = list(_pool.map(_one_img, enumerate(imgs)))
                 notes, fails = [], []
-                for i, im in enumerate(imgs):
-                    note = recognize_image(im["mime"], im["data"], question=content)
+                for i, note, err in _img_results:
                     if note and not note.startswith(("❌", "⏰", "⚠️")):
                         notes.append(("第 %d 张：\n%s" % (i + 1, note))
                                      if len(imgs) > 1 else note)
@@ -3414,6 +3410,8 @@ def _api_chat(h):
                         # 识图失败时 imaging 已经把原因写在返回值里（未配置密钥 /
                         # 上游拒绝 / 结果为空），别把它丢掉只剩一句「识别失败」。
                         fails.append(str(note).strip())
+                    elif err:
+                        fails.append(err)
                 if notes:
                     s["messages"][-1]["vision"] = "\n\n".join(notes)
                     try:
@@ -3468,7 +3466,7 @@ def _api_chat(h):
                      "今天已用 %d token，达到每日上限 %d。可在 config.json 调高 "
                      "usage_daily_tokens（设为 0 关闭）。" % (_used, _budget)})
                 sse({"type": "done", "stopped": False, "context": ctx,
-                     "sessions": slim_sessions(load_sessions())})
+                     "sessions": slim_sessions(load_sessions(copy=False))})
                 _hb_stop.set()
                 release_active(sid, ev)
                 return
@@ -3476,7 +3474,7 @@ def _api_chat(h):
         if not api_key:
             sse({"type": "error", "message": "⚠️ 尚未配置聊天 API 密钥，请在「设置 → 聊天 API」中填写。"})
             sse({"type": "done", "stopped": False, "context": ctx,
-                 "sessions": slim_sessions(load_sessions())})
+                 "sessions": slim_sessions(load_sessions(copy=False))})
             _hb_stop.set()
             release_active(sid, ev)
             return
@@ -3550,7 +3548,7 @@ def _api_chat(h):
         _marks["compress"] = time.monotonic()      # 埋点：超限压缩（可能含一次模型调用）完成
         if ev.is_set():
             sse({"type": "done", "stopped": True, "blocks": [], "tools": [],
-                 "sessions": slim_sessions(load_sessions())})
+                 "sessions": slim_sessions(load_sessions(copy=False))})
             _hb_stop.set()
             release_active(sid, ev)
             return
@@ -3572,17 +3570,8 @@ def _api_chat(h):
         messages = build_context_messages(s, sys_fixed, image_loader=_hist_img_loader,
                                           image_keep=_img_keep)
 
-        # 「添加到对话」：引用块只拼进本轮请求，不写入会话正文（历史保持干净）
-        _quote_text = _quotes_block(body.get("quotes"))
-        if _quote_text:
-            for _m in reversed(messages):
-                if _m.get("role") == "user" and isinstance(_m.get("content"), str):
-                    _m["content"] = (_m.get("content") or "") + "\n\n" + _quote_text
-                    break
-            try:
-                trajectory.context(sid, _traj_turn, "quote", _quote_text, "引用原文")
-            except Exception:            # noqa: BLE001
-                pass
+        # 「添加到对话」的引用已随用户消息落库（见 umsg["quotes"]），
+        # build_context_messages 会通过 _msg_text 统一注入，这里不再重复追加。
 
         # 微压缩（对齐 CC 的 microcompact）：上下文到 60% 预算后，
         # 对单条过大的工具结果做一次轻量摘要；只改本次请求，不写回会话。
@@ -3690,7 +3679,7 @@ def _api_chat(h):
             ev.set()
         if ev.is_set():
             sse({"type": "done", "stopped": True, "blocks": [], "tools": [],
-                 "sessions": slim_sessions(load_sessions())})
+                 "sessions": slim_sessions(load_sessions(copy=False))})
             _hb_stop.set()
             release_active(sid, ev)
             return
@@ -3760,19 +3749,22 @@ def _api_chat(h):
             _vis_emitted[0] += len(vis)
             sse({"type": "delta", "text": vis})
 
-        # ---------- 工具：提问随时可用；文件工具需「Agent + 沙箱」 ----------
+        # ---------- 工具：提问随时可用；文件工具按「Agent / 沙箱」组合决定 ----------
         sandbox = agent.clean_sandbox(s.get("sandbox"))
         # 本地轻量模型没有余量挂工具 schema（8–16k 上下文），按无工具问答运行
-        agent_on = bool(s.get("agent_enabled")) and bool(sandbox) and not light_chat_is_local()
-        # 开了 Agent 但没选目录：只读模式（绝对路径读文件 / 看图），写入与命令仍要求选目录
-        read_on = (bool(s.get("agent_enabled")) and not bool(sandbox)
-                   and not light_chat_is_local())
+        _agent_flag = bool(s.get("agent_enabled"))
+        agent_on = _agent_flag and bool(sandbox) and not light_chat_is_local()
+        # 只读：Agent 与沙箱恰好有一个（Agent 开 + 未选目录，或 Agent 关 + 已选目录）。
+        # 后者是用户「选了目录但没开 Agent」的常见状态：仍然允许读文件，写入与命令仍需开启 Agent。
+        read_on = (not light_chat_is_local()) and (_agent_flag != bool(sandbox))
         # 规则化意图路由：只给「高置信度、参数明确」的提示，降低模型漏调工具的概率。
         intent = None
         if content:
             intent = agent.intent_hint(content, s)
             if intent and intent.get("tool") in agent.FILE_TOOLS and not agent_on:
-                intent = None
+                # 只读模式仍下发读取类工具：别把读文件的意图提示丢掉
+                if not (read_on and intent.get("tool") in agent.SANDBOXLESS_TOOLS):
+                    intent = None
             if intent and intent.get("tool") == "web_search" and not search_ready:
                 intent = None
         # 原生 function calling 可用时，正文里的工具清单可以压缩（参数以 schema 为准）
@@ -3933,8 +3925,6 @@ def _api_chat(h):
         # 生成过程中落库的节流时间：sessions.json 很大，不能每个工具都写
         _progress_at = 0.0
         _progress_sig = None          # 上次落库的内容签名：没变化就不重复写
-        _reason_cap = _reasoning_cap(_cfg)
-        _persist_reason = bool(_cfg.get("chat_persist_reasoning", True))
         # 落库后的完整块 / 时长 / 工具：随 done 事件回给前端，流结束时按同一套块重绘一次
         _final_blocks = []
         _final_timing = {}
@@ -3977,6 +3967,7 @@ def _api_chat(h):
         _unrestricted = (approval_mode == "full")
         approval_granted = False     # 用户点了「本轮都允许」后，本轮剩余写入不再问
         turn_writes = 0              # 本轮已执行的写入次数（用于计划提示 / 自动续跑判断）
+        _turn_wall0 = time.time()    # 本轮开始时间：验收只统计这之后的写操作
         repeat_state = {"sig": "", "n": 0}   # 同一工具 + 同一参数连续调用计数（doom loop 守卫）
         loop_state = {"hist": []}            # 滑动窗口内的调用指纹：抓「交错重复」的死循环
         fail_state = {"key": "", "n": 0}     # 同一目标连续失败计数（失败熔断）
@@ -4047,9 +4038,9 @@ def _api_chat(h):
         accept_hint_seen = ""       # 上次发出的验收联动提示（相同内容不重复刷）
         sync_hint_seen = ""         # 上次发出的「计划回标」提示（相同内容不重复刷）
         reached_round_limit = False  # 工具轮数用完且还在要工具（stop_incomplete）
-        # 0 = 关闭，1–10 = 次数，-1 = 无上限（见 agent.normalize_auto_continue）
+        # 0 = 关闭，-1 = 无上限（只保留这两档；旧配置的 3/5 也按无上限处理）
         auto_continue_limit = agent.normalize_auto_continue(
-            _cfg.get("agent_auto_continue", 3))
+            _cfg.get("agent_auto_continue", -1))
         # 其余 Agent 上限（轮次 / 重复拦截 / 审批阈值 / 命令超时）在这里定一次，
         # 循环里用局部变量，避免用户中途改设置导致同一次请求前后判定不一致
         caps = agent.limits(_cfg)
@@ -4089,6 +4080,15 @@ def _api_chat(h):
         def _plan_tool(name, args):
             nonlocal plan_state, plan_updated_round, plan_dirty
             args = args if isinstance(args, dict) else {}
+            # 规划模式：先探索再列计划（对齐 Trae 的 plan mode）。
+            # 本轮一条上下文都没读过就直接出计划卡，等于空想：先打回让它读。
+            if (name == "update_plan" and plan_mode and not plan_state and sandbox
+                    and not any(str(x.get("tool") or "") not in (
+                        "update_plan", "plan_patch", "ask_user", "finish", "acceptance")
+                        for x in tool_log)):
+                return False, ("【规划模式】先探索再列计划：本轮还没有读过任何上下文。"
+                               "先用 read / search / repo_map / fetch_url 读关键文件与外部事实，"
+                               "再调用 plan(action=update) 产出计划卡。")
             _prev_rev_n = len(((plan_state or {}).get("done_when_rev") or []))
             if name == "plan_patch":
                 plan, perr, summary = agent.apply_plan_patch(plan_state, args)
@@ -4111,6 +4111,12 @@ def _api_chat(h):
                                  % (plan.get("revision") or 1,
                                     _plan_result_text(plan)))
             plan_state = plan
+            # 验收契约跟着任务作用域走：先 set 后建计划时补绑当前目标；
+            # 已有作用域的旧契约不动（计划目标变了就自动失效，不污染新任务）。
+            _acc = s.get("acceptance")
+            if (isinstance(_acc, dict) and "scope" in _acc
+                    and not str(_acc.get("scope") or "")):
+                s["acceptance"] = {**_acc, "scope": _acceptance_scope(plan)}
             plan_updated_round = rounds
             plan_dirty = True
             task_state.set_plan(s, plan)
@@ -4127,7 +4133,7 @@ def _api_chat(h):
             """验收契约：工作流 / 脚本通过 caps 复用主循环的会话状态。"""
             _text, _changed = _acceptance_handle(
                 s, args if isinstance(args, dict) else {}, sandbox, caps, ev,
-                agent_on=bool(agent_on))
+                agent_on=bool(agent_on), scope=_acceptance_scope(plan_state))
             if _changed:
                 s["updated_at"] = time.time()
             return (not str(_text).lstrip().startswith("❌")), _text
@@ -4257,10 +4263,14 @@ def _api_chat(h):
             return True, build_search_context(" ".join(queries or []), _items)
 
         def _wf_make_env():
+            def _approval_now():
+                # 设置面板改档位后，子代理 / 工作流的下一次工具执行也立刻生效
+                _lf = peek_live_flags(sid) or {}
+                return agent.normalize_approval(_lf.get("approval_mode", approval_mode))
             return {
                 "sandbox": sandbox or "", "sid": sid, "sse": sse, "ev": ev,
                 "caps": caps, "approval_mode": approval_mode,
-                "unrestricted": _unrestricted,
+                "unrestricted": _unrestricted, "approval_now": _approval_now,
                 "allow_outside": True,
                 "grant": [approval_granted], "writes": [turn_writes],
                 "api_key": api_key, "api_url": api_url, "model": api_model,
@@ -4415,8 +4425,8 @@ def _api_chat(h):
                     return True, "没有搜到相关结果；请如实说明未查清。"
                 numbered = ledger.add_sources(hits, query=" ".join(queries or []))
                 items = [dict(_it, n=_n) for _n, _it in numbered]
-                sources.extend(hits)
-                sse({"type": "sources", "items": slim_items(hits)})
+                sources.extend(items)
+                sse({"type": "sources", "items": slim_items(items)})
                 return True, build_search_context(" ".join(queries or []), items)
 
             _env = _wf_make_env()
@@ -4595,6 +4605,28 @@ def _api_chat(h):
                 _schema_chars = len(json.dumps(native_tools, ensure_ascii=False))
             except (TypeError, ValueError):
                 _schema_chars = 0
+
+        def _sync_approval_from_flags(_flags):
+            """把实时审批档位落到本轮；变化时重建 tools（full 会增减 git_commit）。"""
+            nonlocal approval_mode, _unrestricted, native_tools
+            nonlocal _tool_unlock_sig, _tools_tokens, _schema_chars
+            if not isinstance(_flags, dict) or "approval_mode" not in _flags:
+                return False
+            _am = agent.normalize_approval(_flags.get("approval_mode"))
+            if _am == approval_mode:
+                return False
+            approval_mode = _am
+            _unrestricted = (approval_mode == "full")
+            s["approval_mode"] = approval_mode
+            native_tools = _build_native_tools()
+            _tool_unlock_sig = frozenset((caps or {}).get("tool_unlock") or ())
+            _tools_tokens = tools_tokens(native_tools) if native_tools else 0
+            try:
+                _schema_chars = (len(json.dumps(native_tools, ensure_ascii=False))
+                                 if native_tools else 0)
+            except (TypeError, ValueError):
+                _schema_chars = 0
+            return True
         # 故障转移链：主配置 + chat_fallback 预设；每轮都从主服务商开始试
         _pchain = provider_chain(_cfg)
         had_error = False          # 本轮是否真的把错误发给用户了（用于收尾不覆盖错误）
@@ -4693,14 +4725,8 @@ def _api_chat(h):
             return bool(_r.get("ok")), str(_r.get("output") or _r.get("error") or "")
 
         def _review_facts():
-            _crit = _acceptance_criteria(s)
+            _crit = _acceptance_criteria(s, scope=_acceptance_scope(plan_state))
             _pending = [c for c in _crit if str(c.get("status") or "") != "passed"]
-            _missing = []
-            if sandbox:
-                try:
-                    _missing = agent.missing_written_files(sid, sandbox)
-                except Exception:              # noqa: BLE001
-                    _missing = []
             _changed = []
             for _e in tool_log:
                 if not isinstance(_e, dict) or not _e.get("write"):
@@ -4708,6 +4734,15 @@ def _api_chat(h):
                 _p = str((_e.get("args") or {}).get("path") or "").strip()
                 if _p and _p not in _changed:
                     _changed.append(_p)
+            # 验收只对本轮写过的文件负责：只读轮次不检查历史缺失文件；
+            # 本轮有写入时也只统计 _turn_wall0 之后的写操作。
+            _missing = []
+            if sandbox and (turn_writes or _changed):
+                try:
+                    _missing = agent.missing_written_files(
+                        sid, sandbox, since=_turn_wall0)
+                except Exception:              # noqa: BLE001
+                    _missing = []
             return quality_gate.build_facts(
                 tool_log=tool_log, plan=plan_state, criteria=_crit,
                 pending_accept=_pending, missing_files=_missing,
@@ -4806,8 +4841,16 @@ def _api_chat(h):
                     _missing = agent.missing_written_files(sid, sandbox)
                 except Exception:            # noqa: BLE001
                     _missing = []
-                if _missing:
-                    _mt = "、".join(_missing[:8])
+                # 历史遗留只提醒一次：已提醒集合只保留当前仍缺失的路径，
+                # 文件恢复 / 主动删除后下次再丢失会重新提醒。
+                _new_missing, _seen_missing = _file_watch_new(
+                    s.get("file_watch_warned"), _missing)
+                if _seen_missing:
+                    s["file_watch_warned"] = sorted(_seen_missing)[:200]
+                else:
+                    s.pop("file_watch_warned", None)
+                if _new_missing:
+                    _mt = "、".join(_new_missing[:8])
                     sse({"type": "warn",
                          "message": "文件监控：检测到写过的文件已不在磁盘：" + _mt})
                     messages.append({
@@ -4961,8 +5004,8 @@ def _api_chat(h):
                 _agent_flag = bool(_live.get("agent_enabled"))
                 _agent_live = (_agent_flag and bool(_sb_live)
                                and not light_chat_is_local())
-                _read_live = (_agent_flag and not bool(_sb_live)
-                              and not light_chat_is_local())
+                _read_live = ((not light_chat_is_local())
+                              and (_agent_flag != bool(_sb_live)))
                 # 用原始开关判断变化：只开了 Agent、还没选目录时也要刷新提示
                 if (_sb_live != sandbox or _agent_flag != bool(s.get("agent_enabled"))
                         or _agent_live != agent_on or _read_live != read_on):
@@ -5005,6 +5048,8 @@ def _api_chat(h):
                     if _ap_live:
                         _sys_core += "\n\n" + _ap_live
                         _sys_core_base += "\n\n" + _ap_live
+                # 审批档位与 Agent 开关可能同批改：等 agent/sandbox 落定后再同步
+                _sync_approval_from_flags(_live)
             # tool_search 解锁了新工具组：本轮后续请求要带上它们的 schema。
             # 放在预算/明细统计之前，保证 _tools_tokens 与 _schema_chars 是最新值。
             _unlock_now = frozenset((caps or {}).get("tool_unlock") or ())
@@ -5535,7 +5580,7 @@ def _api_chat(h):
                                          "content": rr["visible"]})
                     messages.append({"role": "user", "content": _MSG_ASK_BACK})
                     continue
-                _acc_crit = _acceptance_criteria(s)
+                _acc_crit = _acceptance_criteria(s, scope=_acceptance_scope(plan_state))
                 _acc_plan_steps = len((plan_state or {}).get("steps") or [])
                 if not rr["stopped"] and not nudged_acceptance:
                     _pending = [c for c in _acc_crit if c.get("status") != "passed"]
@@ -5895,6 +5940,8 @@ def _api_chat(h):
                     return False
                 return _d == "allow"
 
+            # 模型生成期间用户可能改了审批档位：执行这批工具前再取一次（不消费）
+            _sync_approval_from_flags(peek_live_flags(sid))
             for _ci, call in enumerate(rr["tool_calls"]):
                 # 用户已点停止：这一批剩下的工具不再执行（尤其是慢命令）
                 if ev.is_set():
@@ -6271,13 +6318,51 @@ def _api_chat(h):
                     sse({"type": "tool", "name": name,
                          "args": {"code": _cm_code[:400]}})
                     from app import code_mode
+
+                    def _script_approve(_tn, _ta):
+                        """脚本内写 / 命令的审批：复用主循环的判定与审批卡。"""
+                        nonlocal approval_granted
+                        _dec, _why = agent.judge_tool_rule(sandbox, _tn, _ta)
+                        if not _dec:
+                            _dec = "allow"
+                            if agent.writes_files(_tn, _ta):
+                                _dec, _why = agent.judge_write(
+                                    sandbox, _tn, _ta, approval_mode)
+                                if _dec != "deny" and approval_granted:
+                                    _dec = "allow"
+                            elif _tn in agent.RUN_TOOLS:
+                                _dec, _why = agent.judge_command(
+                                    sandbox, _ta, approval_mode,
+                                    (caps or {}).get("shell_mode") or agent.SHELL_DEFAULT,
+                                    unrestricted=_unrestricted)
+                            elif _tn in agent.SHELL_TOOLS:
+                                _dec, _why = agent.judge_shell(
+                                    approval_mode, unrestricted=_unrestricted,
+                                    sandbox=sandbox, args=_ta,
+                                    autonomy=_cfg.get("agent_shell_autonomy"),
+                                    allow=_cfg.get("agent_shell_allow"),
+                                    deny=_cfg.get("agent_shell_deny"))
+                        if _dec == "deny":
+                            return False, _why
+                        if _dec == "ask":
+                            _aid = agent.new_approval(sid, _tn, _ta, _why)
+                            sse({"type": "approval", "aid": _aid, "name": _tn,
+                                 "args": _ta, "reason": _why})
+                            if agent.wait_approval(_aid, stop_event=ev) is not True:
+                                return False, "用户未允许执行"
+                            if agent.approval_remember(_aid):
+                                approval_granted = True
+                        return True, ""
+
+                    _cm_caps = dict(caps or {})
+                    _cm_caps["approve_tool"] = _script_approve
                     _cm_t0 = time.time()
                     _cm_text, _cm_stat = code_mode.run(
-                        sandbox, _cm_code, caps=caps, stop_event=ev,
+                        sandbox, _cm_code, caps=_cm_caps, stop_event=ev,
                         emit=lambda o: sse(o),
                         timeout=cargs.get("timeout") or 0,
                         # 完全放权，或用户在设置里显式打开 Code Mode 写入/命令。
-                        # 脚本内部无法逐次弹审批，所以这是一个全局开关。
+                        # 脚本内的每次写 / 命令仍由 _script_approve 走同一套审批判定。
                         allow_write=_unrestricted or bool(_cfg.get("code_mode_allow_write")),
                         allow_cmd=_unrestricted or bool(_cfg.get("code_mode_allow_cmd")),
                         allow_outside=bool(caps.get("allow_outside")))
@@ -6301,7 +6386,8 @@ def _api_chat(h):
                     continue
                 if name == "acceptance":      # 通用验收契约：定义 / 执行 / 记录 / 查看
                     _atext, _achanged = _acceptance_handle(
-                        s, cargs, sandbox, caps, ev, agent_on=bool(agent_on))
+                        s, cargs, sandbox, caps, ev, agent_on=bool(agent_on),
+                        scope=_acceptance_scope(plan_state))
                     if _achanged:
                         nudged_acceptance = False     # 验收项变了，允许收尾前再提醒一次
                         s["updated_at"] = time.time()
@@ -6369,8 +6455,8 @@ def _api_chat(h):
                             _d = dict(_it)
                             _d["n"] = _n
                             items.append(_d)
-                        sources.extend(hits)
-                        sse({"type": "sources", "items": slim_items(hits)})
+                        sources.extend(items)
+                        sse({"type": "sources", "items": slim_items(items)})
                         results.append("【web_search】\n"
                                        + build_search_context(qs[0], items or hits))
                     else:
@@ -6466,8 +6552,8 @@ def _api_chat(h):
                             _d = dict(_it)
                             _d["n"] = _n
                             _items.append(_d)
-                        sources.extend(_hits)
-                        sse({"type": "sources", "items": slim_items(_hits)})
+                        sources.extend(_items)
+                        sse({"type": "sources", "items": slim_items(_items)})
                         for _h in _hits:
                             if _h.get("url"):
                                 _web_urls.add(_h["url"])
@@ -7240,7 +7326,9 @@ def _api_chat(h):
             _accept_txt = ""
             if not plan_mode and plan_state:
                 _accept_txt = _plan_accept_hint(
-                    _plan_accept_gaps(plan_state, _acceptance_criteria(s)))
+                    _plan_accept_gaps(plan_state,
+                                      _acceptance_criteria(
+                                          s, scope=_acceptance_scope(plan_state))))
                 if _accept_txt and _accept_txt == accept_hint_seen:
                     _accept_txt = ""
                 elif _accept_txt:
@@ -7376,7 +7464,7 @@ def _api_chat(h):
                      "⚠️ 上下文接近上限，已清理较早的工具结果（模型仍可按需重新读取）。"})
             # 每轮工具后落库（最多 15 秒一次，且内容有变化才写）：
             # 应用崩溃 / 重启后已完成的步骤仍留在会话里，不用从头再来。
-            # sessions.json 已经到十几 MB，整份重写一次很贵，5 秒一次会让
+            # 已经积累了几十 MB 会话数据，每次全量落盘都很贵，5 秒一次会让
             # 写盘和流式输出抢锁；提高间隔并用签名去重可以显著降低停顿（NOTE 43.168）。
             _prog_text = stepctx.join_turns(text_parts)
             _prog_sig = (len(tool_log or []), len(_prog_text), _prog_text[-200:])
@@ -7681,8 +7769,7 @@ def _api_chat(h):
         if mem_note:
             sse({"type": "mem_write", "memory": mem_note})
 
-        # 思考默认落库（chat_persist_reasoning），但受 chat_reasoning_keep_chars 限制：
-        # 超限时丢最早的思考块、保留最近的一块，避免 sessions.json 无限膨胀。
+        # 思考原样落库：不做截断 / 丢弃，刷新后能完整回看本轮思考。
         # blocks 只存顺序与思考文本；正文仍在 content，工具仍引用 tools 的下标。
         # 有 end_reason 也要落库：否则「本轮没产出」时刷新就什么都不剩，
         # 用户只能看到一个空白，连原因都看不到。
@@ -7698,10 +7785,6 @@ def _api_chat(h):
                 _total_ms = int((time.monotonic() - _t0) * 1000)
                 _done_at = time.time()
                 _out_blocks = list(turn_blocks)
-                if _persist_reason:
-                    _out_blocks = _trim_reasoning_blocks(_out_blocks, _reason_cap)
-                else:
-                    _out_blocks = _strip_reasoning_blocks(_out_blocks)
                 # 生成过程中的进度快照：正式消息落库前先删掉，避免同一条回答出现两次。
                 # 续跑改成「原地更新」后，续写目标自己就带 _progress + _cont_base：
                 # 它不能删，收尾时用 _cont_base + 本次新文本重写正文，再清掉标记。
@@ -7719,8 +7802,6 @@ def _api_chat(h):
                     partial=_is_partial_turn(ev, end_reason),
                     done_at=_done_at, plan=plan_state,
                     tools_base=cont_tools_base,
-                    reason_cap=_reason_cap,
-                    persist_reason=_persist_reason,
                     sources=sources or [], rounds_detail=_rounds_detail,
                     mem_note=mem_note, ctx_cut=ctx_cut)
                 if cont and last and last.get("role") == "assistant":
@@ -7760,8 +7841,20 @@ def _api_chat(h):
             _miss_parts = {}
 
         # 请求链路埋点：分段耗时（前端 console 可见；并入 token_usage.jsonl 便于事后分析）
+        # body/parse/sess_load 拆开：以前 load_ms 把请求体读取和全量 clone 混在一起，
+        # p50 显示 0 但实测单次 clone 约 34ms，无法判断慢在哪一段。
+        _refs_at = _marks.get("refs") or _marks.get("load")
         _timing = {
+            "body_ms": _dt_ms(_t0, _marks.get("parse_start")),
+            "parse_ms": _dt_ms(_marks.get("parse_start"), _marks.get("load")),
+            "sess_load_ms": _marks.get("sess_load_ms"),
             "load_ms": _dt_ms(_t0, _marks.get("load")),
+            "refs_ms": _dt_ms(_marks.get("load"), _marks.get("refs")),
+            "tool_prompt_ms": _dt_ms(_refs_at, _marks.get("tool_prompt")),
+            "skills_ms": _dt_ms(_marks.get("tool_prompt"), _marks.get("skills")),
+            "base_prompt_ms": _dt_ms(_marks.get("skills"), _marks.get("base")),
+            "hooks_ms": _dt_ms(_marks.get("base"), _marks.get("hooks")),
+            "tail_prompt_ms": _dt_ms(_marks.get("hooks"), _marks.get("assemble")),
             "assemble_ms": _dt_ms(_marks.get("load"), _marks.get("assemble")),
             "doc_ms": _dt_ms(_marks.get("assemble"), _marks.get("doc")),
             "compress_ms": _dt_ms(_marks.get("doc"), _marks.get("compress")),
@@ -7782,6 +7875,10 @@ def _api_chat(h):
                         budget=_budget_snapshot,
                         miss=_miss_parts),
         }
+        try:
+            _TIMING_RING.append({k: _timing.get(k) for k in _TIMING_KEYS})
+        except Exception:                # noqa: BLE001  健康指标失败不影响本轮
+            pass
         sse({"type": "timing", "timing": _timing})
         try:
             print("[耗时] " + " ".join(
@@ -7823,6 +7920,34 @@ def _api_chat(h):
             _done_msg_idx = (len(_msgs_done) - 1) if _msgs_done else None
         except Exception:                    # noqa: BLE001
             _done_msg_idx = None
+        # 增量会话摘要：前端可以只更新当前会话这一行，不必每轮解析整份 sessions。
+        # 旧字段 sessions 仍然保留，老前端行为不变。
+        _session_patch = None
+        try:
+            _fs = final_s or {}
+            if _fs.get("id"):
+                _session_patch = {
+                    "sid": _fs.get("id"),
+                    "title": _fs.get("title") or "",
+                    "updated_at": _fs.get("updated_at") or 0,
+                    "msg_total": len(_fs.get("messages") or []),
+                    "msg_idx": _done_msg_idx,
+                    "pinned": bool(_fs.get("pinned")),
+                    "compress_marks": compress_marks_for(_fs),
+                }
+        except Exception:                    # noqa: BLE001
+            _session_patch = None
+        # 当前这条 assistant 消息的轻量增量（去掉 blocks/tools，done 里已有）：
+        # 前端消费 session_patch 时用它更新当前会话的 messages，不必再吃整份 sessions。
+        _done_message = None
+        try:
+            if final_s and _done_msg_idx is not None:
+                _dm = (final_s.get("messages") or [])[_done_msg_idx]
+                if isinstance(_dm, dict):
+                    _done_message = {k: v for k, v in _dm.items()
+                                     if k not in ("blocks", "tools")}
+        except Exception:                    # noqa: BLE001
+            _done_message = None
         sse({"type": "done", "stopped": ev.is_set(),
              # 流结束时前端按 blocks 重绘一次：中间正文进过程，最终答案留在下面
              "blocks": _final_blocks, "timing": _final_timing, "tools": _final_tools,
@@ -7830,17 +7955,13 @@ def _api_chat(h):
              "msg_idx": _done_msg_idx,  # 本条回复的消息下标（通知跳转用）
              "references": _refs_public(_last_user_refs(final_s)) if final_s else [],
              "context": session_context(final_s, system_prompt) if final_s else None,
+             "session_patch": _session_patch,
+             "message": _done_message,
              "sessions": slim_sessions(final_data)})
         _hb_stop.set()
         # 落库与 done 都已发出，这时才释放租约：之后的新请求才不会与这一轮并发写
         release_active(sid, ev)
         # Stop hook 不在这里：它已经前移到收尾判定之前（见 `_stop_hook_action`），
         # 否则 decision=block 会被丢弃、且正常收尾时会重复执行两次。
-        # 全量快照收口：热路径只写了单会话快照，这里把 sessions.json 补成最新。
-        # done 事件已经发出（前端读到 done 就断开），这里的序列化不在回复的关键路径上；
-        # 放锁里是为了不和下一轮的流式落库撞车（json.dump 期间对象被改会直接报错）。
-        try:
-            with _lock:
-                flush_sessions()
-        except Exception as e:
-            print(f"[存储] 全量快照失败：{e}")
+        # 这里不再全量 flush：本轮会话已在 _persist_turn → _persist_session 落过事件与缓存，
+        # 索引也没有变化。以前每回合重写全部会话（约 22MB、持全局锁）纯属浪费。

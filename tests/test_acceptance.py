@@ -140,6 +140,26 @@ def test_acceptance_nudge_lists_pending():
     assert "acceptance" in text
 
 
+def test_acceptance_scope_isolates_tasks(tmp_path):
+    """验收契约只在同一任务作用域内生效，换任务后旧项不再参与判定。"""
+    s = {}
+    chat._acceptance_handle(
+        s, {"action": "set", "criteria": [_criterion()]},
+        str(tmp_path), {"sid": "s1"}, agent_on=True, scope="任务 A")
+    assert len(chat._acceptance_criteria(s, scope="任务 A")) == 1
+    assert chat._acceptance_criteria(s, scope="任务 B") == []
+
+
+def test_legacy_acceptance_without_scope_is_ignored():
+    """没有 scope 字段的是旧任务遗留：status 可查看，但不参与新任务验收。"""
+    s = {"acceptance": {"criteria": [{
+        "id": "a1", "text": "旧任务", "status": "failed",
+        "check": {"tool": "read_file", "args": {"path": "a.txt"}},
+        "expect": {"contains": "hello"}}]}}
+    assert len(chat._acceptance_criteria(s)) == 1
+    assert chat._acceptance_criteria(s, scope="") == []
+
+
 def test_acceptance_reads_mesh_metrics():
     import json
 

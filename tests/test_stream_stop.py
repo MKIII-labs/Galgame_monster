@@ -8,6 +8,28 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from app import agent, llm
 
 
+def test_claim_active_is_atomic():
+    """同一会话的流认领必须 check+set 原子完成，第二个请求不能覆盖第一个。"""
+    from app.api import chat
+
+    sid = "s_claim_test"
+    chat.ACTIVE_STREAMS.pop(sid, None)
+    chat.LEASE_STARTED.pop(sid, None)
+    ev1, ev2 = threading.Event(), threading.Event()
+    try:
+        assert chat.claim_active(sid, ev1) is True
+        assert chat.claim_active(sid, ev2) is False
+        assert chat.ACTIVE_STREAMS.get(sid) is ev1
+        chat.release_active(sid, ev1)
+        assert chat.claim_active(sid, ev2) is True
+        assert chat.ACTIVE_STREAMS.get(sid) is ev2
+    finally:
+        chat.release_active(sid, ev1)
+        chat.release_active(sid, ev2)
+        chat.ACTIVE_STREAMS.pop(sid, None)
+        chat.LEASE_STARTED.pop(sid, None)
+
+
 class _Upstream(BaseHTTPRequestHandler):
     """假的上游 SSE 服务：先发一段，静默 quiet 秒，再发一段。"""
     protocol_version = "HTTP/1.1"

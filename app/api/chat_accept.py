@@ -138,11 +138,28 @@ def _acceptance_expect(exp, text):
     return ok, "；".join(notes)
 
 
-def _acceptance_criteria(s):
+def _acceptance_criteria(s, scope=None):
+    """会话里的验收项；给了 scope 就只返回当前任务作用域内的。
+
+    scope=None：不过滤（acceptance status 这类查看场景）。
+    旧契约没有 scope 字段 = 上一个任务遗留，一律不参与本轮验收，
+    否则旧任务的未通过项会变成新任务的永久硬伤。
+    """
     contract = s.get("acceptance") if isinstance(s, dict) else None
     if not isinstance(contract, dict):
         return []
+    if scope is not None:
+        if "scope" not in contract:
+            return []
+        if str(contract.get("scope") or "") != str(scope or ""):
+            return []
     return [c for c in (contract.get("criteria") or []) if isinstance(c, dict)]
+
+
+def _acceptance_scope(plan):
+    """当前任务作用域：有计划的用计划目标，没有计划用空串（同会话内共享）。"""
+    p = plan if isinstance(plan, dict) else {}
+    return str(p.get("goal") or "").strip()[:400]
 
 
 def _acceptance_status_text(s):

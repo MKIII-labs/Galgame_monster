@@ -4,9 +4,10 @@
    对话里的 Skill 卡片
    ------------------------------------------------------------
    模型调用 skill.read（原生名 skill_read）时，后端会推 tool / tool_done
-   事件。这里把这条工具调用渲染成一张独立卡片（和子代理卡一样留在正文外），
-   而不是塞进过程折叠里——用户能直接看到「这一轮用了哪个 Skill」。
-   历史消息由 appendSkillCards() 从落库的 tools 还原，外观与实时一致。
+   事件。这里把这条工具调用渲染成一张卡片，放进过程折叠，按事件顺序
+   对应用户能看出「哪一步用了哪个 Skill」。
+   历史消息由 buildBlocksView() 从落库的 blocks / tools 还原；
+   没有 blocks 的旧消息仍由 appendSkillCards() 回显（保持旧排版）。
    ============================================================ */
 
 const SKILL_TOOL_NAMES = ['skill.read', 'skill_read'];
@@ -116,7 +117,8 @@ function finishSkillCard(card, obj) {
   if (failed) card.classList.add('open');
 }
 
-/* 历史回显：从落库的 tools 里挑出 Skill 调用，拼成常驻卡片 */
+/* 历史回显（仅旧消息）：从落库的 tools 里挑出 Skill 调用，拼成常驻卡片。
+   新消息的 Skill 卡由 buildBlocksView() 放进过程折叠。 */
 function appendSkillCards(wrap, tools) {
   if (!wrap) return;
   (tools || []).forEach((t) => {

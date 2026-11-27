@@ -1,7 +1,7 @@
 'use strict';
 
 /* 设置弹窗 · panes-infra.js
-   MCP / Hooks / 余额 / 视觉开关 / 搜索页 / B 站
+   MCP / Hooks / 余额 / 视觉开关 / 搜索页
    原 web/settings.js 拆分而来：按 index.html 中的顺序加载，共享全局作用域。 */
 
 /* ---------------- MCP / Hooks：设置页辅助 ---------------- */
@@ -237,15 +237,17 @@ function buildSearchPane() {
     checkRowHtml('search-research', '深度检索（默认开启：放宽来源条数 / 正文长度，弱结果自动补搜一次）', '深度 研究 检索 补搜') +
     checkRowHtml('search-cache', '复用检索缓存（同一 provider + 检索式在 TTL 内直接复用）', '缓存 cache 检索') +
     checkRowHtml('search-cite-nli', '引用语义校验（小模型判断结论是否被原文支持；会增加 5–20s）', '引用 语义 nli 校验 小模型') +
-    labelHtml('结果条数（1–20，每个检索式）', '条数 结果 数量 count') +
-    '<input id="search-count" class="field-input" type="number" min="1" max="20">' +
     checkRowHtml('search-fetch', '抓取正文（对命中网页取正文，而不是只有摘要）', '抓取 正文 网页') +
     checkRowHtml('search-fetch-cloud', '抓正文优先用云端浏览器（Firecrawl，可读 JS 渲染页面；URL 会发给 Firecrawl）', '抓取 云端 firecrawl js') +
     labelHtml('抓取正文条数（1–10）', '抓取 条数 count') +
     '<input id="search-fetch-count" class="field-input" type="number" min="1" max="10">' +
     setGroupHtml('信息量上限', '合并 条数 字数 上限') +
-    labelHtml('单次合并条数上限（1–50）', '合并 条数 上限') +
+    labelHtml('每个检索式取多少条（1–20）', '条数 结果 数量 count 检索式') +
+    '<input id="search-count" class="field-input" type="number" min="1" max="20">' +
+    labelHtml('合并后给模型的条数上限（1–50）', '合并 条数 上限 最终') +
     '<input id="search-merged-max" class="field-input" type="number" min="1" max="50">' +
+    hintHtml('多个检索式会先各取 N 条，再去重排序，最终最多保留「合并上限」条给模型；' +
+             '只发一个检索式时通常就是 N 条。', '条数 合并 检索式 上限') +
     labelHtml('每条正文保留字数（500–20000）', '正文 字数 长度') +
     '<input id="search-fetch-chars" class="field-input" type="number" min="500" max="20000">' +
     setGroupHtml('深度检索上限（默认启用）', '深度 研究 复刻 还原 条数 字数') +
@@ -347,51 +349,5 @@ function buildSearchPane() {
     search_research_fetch_chars: Math.max(0, num(q('research-chars').value, 4000)),
     search_balance_url: q('balance-url').value.trim(),
   });
-  return pane;
-}
-
-/* ============================================================
-   B 站数据读取
-   ============================================================ */
-function buildBiliPane(host) {
-  const cfg = settingsDraft();
-  // host 为空 = 单独一页；传进来 = 并入「联网与数据源」页
-  const pane = host || mkPane('bili');
-  const prevCollect = pane._collect;
-  pane.insertAdjacentHTML('beforeend',
-    setGroupHtml('B 站数据（可选）', 'b站 bilibili 视频 评论 字幕 ai总结 sessdata cookie') +
-    hintHtml('让 AI 读取 B 站视频信息、热门评论、字幕与官方 AI 总结。SESSDATA 是本机登录凭证，只保存在本机配置里，不会发送给模型。', 'b站 bilibili 视频 评论 字幕 ai总结 sessdata cookie') +
-    setGroupHtml('登录凭证（可选）', 'sessdata cookie 登录 凭证') +
-    labelHtml('SESSDATA', 'sessdata cookie 登录') +
-    '<input id="bili-sessdata" class="field-input" type="password" autocomplete="off">' +
-    '<label class="check-row"><input type="checkbox" id="bili-show-key"> 显示</label>' +
-    hintHtml('获取：浏览器登录 bilibili.com → F12 → Application / 存储 → Cookies → https://www.bilibili.com → 复制 SESSDATA 的值。不填也能读取视频信息与评论；字幕和 B 站 AI 总结需要它。', '获取 sessdata 教程 cookie') +
-    '<div class="balance-row"><button type="button" class="ghost" id="bili-test">测试登录</button>' +
-    '<span class="hint" id="bili-test-result"></span></div>' +
-    setGroupHtml('评论', '评论 页数 条数') +
-    labelHtml('最多页数（1–10，每页 20 条）', '评论 页数') +
-    '<input id="bili-pages" class="field-input" type="number" min="1" max="10">');
-
-  const q = (s) => qIn(pane, 'bili-' + s);
-  q('sessdata').value = cfg.bili_sessdata || '';
-  q('pages').value = cfg.bili_comment_pages || 3;
-  q('show-key').onchange = (e) => { q('sessdata').type = e.target.checked ? 'text' : 'password'; };
-  q('test').onclick = async () => {
-    const out = q('test-result');
-    out.textContent = '检查中…';
-    try {
-      const r = await api('/api/bili/status', { sessdata: q('sessdata').value.trim() });
-      out.textContent = r.logged_in
-        ? ('已登录：' + (r.uname || '（未返回昵称）'))
-        : '未登录：Cookie 为空或已失效';
-    } catch (e) {
-      out.textContent = '检查失败：' + (e.message || e);
-    }
-  };
-  const collect = () => ({
-    bili_sessdata: q('sessdata').value.trim(),
-    bili_comment_pages: Math.max(1, Math.min(10, parseInt(q('pages').value, 10) || 3)),
-  });
-  pane._collect = () => Object.assign({}, prevCollect ? prevCollect() : {}, collect());
   return pane;
 }

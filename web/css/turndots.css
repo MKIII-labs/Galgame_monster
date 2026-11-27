@@ -15,8 +15,8 @@
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: 6px 3px;
-  border-radius: 10px;
+  padding: 6px 4px;
+  border-radius: var(--radius-md);
 }
 .td-rail:hover { background: var(--bg-hover); }
 /* 视觉圆点 4px，但点击热区 14px：以前两者都是 4px，鼠标要很准、触屏基本点不到 */
@@ -56,7 +56,7 @@
   flex-direction: column;
   background: var(--bg-side);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
@@ -65,17 +65,17 @@
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 .td-count { margin-left: 6px; opacity: .85; }
 .td-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 6px 6px; }
 .td-row {
   display: flex;
-  gap: 7px;
+  gap: 8px;
   padding: 6px 8px;
-  border-radius: 8px;
-  font-size: 12.5px;
-  line-height: 1.45;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
   color: var(--text);
   cursor: pointer;
 }
@@ -86,7 +86,7 @@
   padding-top: 1px;
   text-align: right;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   font-variant-numeric: tabular-nums;
 }
 .td-text {
@@ -100,4 +100,4 @@
 }
 
 /* 跳转后的短暂描边，方便一眼找到落点 */
-.msg.jump-hit { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; }
+.msg.jump-hit { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--radius-md); }

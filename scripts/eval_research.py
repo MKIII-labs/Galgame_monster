@@ -26,7 +26,7 @@ def main():
     ap = argparse.ArgumentParser(description="研究任务评测（机检）")
     ap.add_argument("--validate", action="store_true", help="校验评测集结构")
     ap.add_argument("--list", action="store_true", help="列出任务")
-    ap.add_argument("--session", help="会话 id（读 data/sessions.json）")
+    ap.add_argument("--session", help="会话 id（读本地会话存储）")
     ap.add_argument("--task", help="任务 id；省略时用第一条 replicate 任务")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args()
@@ -56,7 +56,7 @@ def main():
 
     sess = sessions.find_session(sessions.load_sessions(), args.session)
     if not sess:
-        # sessions.json 里没有时，从 events.jsonl 重建（session_store=events 的常态）
+        # 索引 / 缓存里没有时，直接从事件流重建
         sess = session_events.rebuild(args.session)
     if not sess:
         print("找不到会话：%s" % args.session)

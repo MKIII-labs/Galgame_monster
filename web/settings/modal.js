@@ -19,7 +19,15 @@ const MODAL_FOCUS_EXEMPT = '.askkit, .selbar, .selbar-more-menu, .nt-anno-pop';
 function _inExemptLayer(node) {
   return !!(node && node.closest && node.closest(MODAL_FOCUS_EXEMPT));
 }
-function _topModal() { return _modalStack[_modalStack.length - 1] || null; }
+function _topModal() {
+  for (let i = _modalStack.length - 1; i >= 0; i--) {
+    const m = _modalStack[i];
+    // 停靠的笔记是与对话并排的面板，不是模态：不能把焦点从聊天输入框抢回来
+    if (m && m.classList && m.classList.contains('notes-dock')) continue;
+    return m;
+  }
+  return null;
+}
 function _focusablesIn(box) {
   return Array.from(box.querySelectorAll(FOCUSABLE_SEL))
     .filter((n) => n.getClientRects().length && n.getAttribute('aria-hidden') !== 'true');
@@ -74,6 +82,9 @@ document.addEventListener('click', (e) => {
    避免关闭时「啪」地消失 */
 function hideWithAnim(el, done) {
   if (!el || el.classList.contains('hidden')) { if (done) done(); return; }
+  // 停靠笔记不是模态：用户在聊天框里打字时按 Esc 关笔记，不能把焦点抢回工具栏
+  const active = document.activeElement;
+  const keepFocus = !!(active && active !== document.body && !el.contains(active));
   let fired = false;
   const finish = () => {
     if (fired) return;
@@ -82,7 +93,7 @@ function hideWithAnim(el, done) {
     _popModal(el);
     el.classList.remove('closing');
     el.classList.add('hidden');
-    restoreFocusAfterModal();
+    if (!keepFocus) restoreFocusAfterModal();
     if (done) done();
   };
   el.classList.add('closing');
@@ -220,11 +231,10 @@ function buildDynamicPanes() {
     if (old) old.remove();
   });
   const anchor = content.querySelector('[data-pane="profile"]');
-  // 模型接入 = 聊天 + 视觉；联网与数据源 = 搜索 + B 站
+  // 模型接入 = 聊天 + 视觉
   const modelPane = buildApiPane('chat', mkPane('chat'));
   buildApiPane('vision', modelPane);
   const netPane = buildSearchPane();
-  buildBiliPane(netPane);
   const panes = [modelPane, netPane, buildContextPane()].concat(buildAgentPane());
   panes.forEach((p) => content.insertBefore(p, anchor));
   return panes;
@@ -279,10 +289,36 @@ function buildProfileRuleRow(rule) {
         'aria-expanded="false" title="展开 / 收起这条规则的编辑框">展开</button>' +
       '<button type="button" class="rule-del" data-act="rule-del">删除</button>' +
     '</div>' +
+    '<div class="rule-preview" data-act="rule-expand" title="点击展开编辑"></div>' +
     '<textarea class="ta rule-text" rows="3" ' +
       'placeholder="例如：每次先指出我最核心的问题，再给证据和下一步。"></textarea>';
   row.querySelector('.rule-text').value = r.text || '';
+  // 有内容先显示截断预览（窄窗少几行、宽窗多几行）；新加的空规则直接展开编辑。
+  syncProfileRuleOpen(row, !r.text);
   return row;
+}
+
+/* 收起时只显示前几行截断文本，展开时换成完整编辑框。
+   预览行数由 CSS 的 -webkit-line-clamp 按窗口宽度决定（见 polish.css）。 */
+function syncProfileRuleOpen(row, open) {
+  if (!row) return;
+  const ta = row.querySelector('.rule-text');
+  const pv = row.querySelector('.rule-preview');
+  const btn = row.querySelector('[data-act="rule-expand"]');
+  row.classList.toggle('open', !!open);
+  if (ta) ta.classList.toggle('hidden', !open);
+  if (pv) {
+    if (!open) {
+      const text = (ta && ta.value.trim()) || '';
+      pv.textContent = text || '（空规则）';
+      pv.classList.toggle('is-empty', !text);
+    }
+    pv.classList.toggle('hidden', !!open);
+  }
+  if (btn) {
+    btn.textContent = open ? '收起' : '展开';
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
 }
 
 function renderProfileRules(rules) {
@@ -341,24 +377,23 @@ function fillStaticSettings(cfg, profile) {
   const radio = settingsQuery('input[name="theme"][value="' + theme + '"]');
   if (radio) radio.checked = true;
   syncThemeCards(theme);
-  syncAuroraPrefs();
 
   // GAL 演出设置面板已移除（模式入口不再暴露）；这里只保留通用外观项
   if ($('#ide-whitespace')) $('#ide-whitespace').value = c.ide_whitespace || 'all';
   if ($('#ide-autosave')) $('#ide-autosave').value = c.ide_autosave || 'off';
   if ($('#ui-process-follow')) $('#ui-process-follow').checked = c.ui_process_follow !== false;
+  if ($('#avatar-motion')) $('#avatar-motion').value = c.avatar_motion === 'lively' || c.avatar_motion === 'off'
+    ? c.avatar_motion : 'calm';
 
   const sp = $('#speech-polish');
   if (sp) sp.checked = !!c.speech_polish;
   const sd = $('#speech-denoise');
   if (sd) { sd.checked = !!c.speech_denoise; sd.onchange = () => toggleDenoise(sd.checked); }
 
-  const ie = $('#image-enabled'); if (ie) ie.checked = !!c.image_enabled;
-  const iu = $('#image-comfy-url');
-  if (iu) iu.value = c.image_comfy_url || 'http://127.0.0.1:8188';
-  const iw = $('#image-workflow'); if (iw) iw.value = c.image_workflow || '';
   const te2 = $('#traj-enabled');
   if (te2) te2.checked = c.trajectory_enabled !== false;
+  const sap2 = $('#storage-auto-prune');
+  if (sap2) sap2.checked = !!c.storage_auto_prune;
   const mp = $('#mobile-port');
   if (mp) mp.value = String(c.mobile_port != null ? c.mobile_port : 57890);
   const md = $('#mobile-device-days');
@@ -392,28 +427,6 @@ function fillStaticSettings(cfg, profile) {
   if (awt) awt.value = c.agent_worktree_isolation || 'auto';
   const anv = $('#agent-native-vision');
   if (anv) anv.checked = c.agent_native_vision !== false;
-  const it = $('#image-test');
-  if (it) {
-    it.onclick = async () => {
-      const out = $('#image-test-result');
-      if (out) out.textContent = '检测中…';
-      try {
-        const r = await api('/api/image/status', {
-          image_comfy_url: (($('#image-comfy-url') || {}).value || '').trim(),
-          image_workflow: (($('#image-workflow') || {}).value || '').trim(),
-        });
-        if (!r.ok) throw new Error(r.error || '检测失败');
-        const bits = [r.reachable ? 'ComfyUI 已连接' : '连不上 ComfyUI',
-          r.workflow_exists ? '工作流已找到' : '工作流文件不存在'];
-        if (out) {
-          out.textContent = bits.join(' · ') + (r.error ? '（' + r.error + '）' : '');
-          out.style.color = (r.reachable && r.workflow_exists) ? '' : 'var(--danger)';
-        }
-      } catch (e) {
-        if (out) { out.textContent = e.message; out.style.color = 'var(--danger)'; }
-      }
-    };
-  }
 }
 
 /* ============================================================
@@ -421,133 +434,93 @@ function fillStaticSettings(cfg, profile) {
    ============================================================ */
 
 const SETTINGS_CARD_STATE_KEY = 'settings_card_collapsed_v1';
-/* 专家向分区：第一次打开时默认收起（点锚点或标题即可展开），常用分区保持展开 */
+/* 专家向分区：第一次打开时默认收起（点标题或锚点展开）；其余卡片保持展开。
+   级别来自 registry 的卡片规则，这里只维护「按标题额外收紧」的清单。 */
 const SETTINGS_CARD_ADVANCED = {
   chat: ['思考落库'],
   search: ['信息量上限', '研究类任务（复刻 / 还原 / 从零实现）'],
-  agent: [
-    '只读并行与预取', '工具结果预算', '并行探索（子代理）', '子代理 · 嵌套与后台',
-    '研究闸门（复刻 / 还原类任务）', '工作流（多阶段编排）', '变更审阅（撤销快照）',
+  agent: ['只读并行与预取', '工具结果预算'],
+  flow: [
+    '并行探索（子代理）', '子代理 · 嵌套与后台', '研究闸门（复刻 / 还原类任务）',
+    '工作流（多阶段编排）', '变更审阅（撤销快照）',
+  ],
+  ext: [
     '编辑器 · AI Tab 补全', '代码工具（pyright / Git）', '外部工具（MCP）',
     '生命周期钩子（Hooks）',
   ],
 };
 
-const SETTINGS_SECTION_ADV_KEY = 'settings_section_adv_v1';
-
 /* 页内任务分区：把一页里的卡片按任务归组，避免「一长列同等权重的卡片」。
    未列出的 pane 保持原样；match 用卡片标题匹配。 */
 const SETTINGS_PANE_SECTIONS = {
   chat: [
-    { id: 'access', title: '模型接入', match: /聊天接口|视觉接口|使用方式|接入|预设|轻量任务的模型|账户余额/ },
+    { id: 'access', title: '接口与账户', match: /聊天接口|视觉接口|使用方式|接入|预设|轻量任务的模型|本地混合模式|账户余额/ },
     { id: 'behavior', title: '对话行为', match: /推理参数|断流重试|思考落库/ },
   ],
   context: [
-    { id: 'context', title: '上下文与记忆', match: /.+/ },
+    { id: 'context', title: '容量与压缩', match: /.+/ },
   ],
   search: [
     { id: 'provider', title: '搜索服务商', match: /联网搜索|服务商|免注册引擎|接入|账户余额/ },
     { id: 'behavior', title: '检索行为', match: /检索行为|信息量上限|深度检索上限/ },
-    { id: 'bili', title: 'B 站（可选）', match: /B 站|登录凭证|评论/ },
   ],
   agent: [
-    { id: 'exec', title: '执行策略', match: /执行节奏|提问卡|通知|工具与写入/ },
+    { id: 'exec', title: '执行与通知', match: /执行节奏|提问卡|通知|工具与写入/ },
     { id: 'approval', title: '审批与命令', match: /只读并行|工具结果预算|写入审批|命令执行与审计/ },
-    { id: 'flow', title: '子代理与流程', match: /并行探索|子代理 · 嵌套|研究闸门|工作流|变更审阅/ },
-    { id: 'ext', title: '编辑器与外部工具', match: /编辑器 · AI Tab|代码工具|外部工具（MCP）|生命周期钩子|电脑操作/ },
+  ],
+  agents: [
+    { id: 'roster', title: '团队与自动派发', match: /子代理团队|自动派发/ },
+    { id: 'orchestrate', title: '脚本编排与隔离', match: /脚本编排|并行写隔离/ },
+  ],
+  flow: [
+    { id: 'explore', title: '并行探索与嵌套', match: /并行探索|子代理 · 嵌套/ },
+    { id: 'orchestrate', title: '研究闸门与工作流', match: /研究闸门|工作流|变更审阅/ },
+  ],
+  ext: [
+    { id: 'editor', title: '编辑器与代码工具', match: /编辑器 · AI Tab|代码工具/ },
+    { id: 'external', title: '外部工具与钩子', match: /外部工具（MCP）|生命周期钩子/ },
+    { id: 'computer', title: '电脑操作', match: /电脑操作/ },
+  ],
+  skills: [
+    { id: 'skills', title: 'Skill', match: /.+/ },
   ],
   appearance: [
     { id: 'look', title: '外观', match: /界面设计风格|氛围|动效/ },
     { id: 'editor', title: '编辑器与对话过程', match: /对话过程|空白字符|自动保存/ },
   ],
-  profile: [
-    { id: 'profile', title: '用户与学习', match: /.+/ },
-  ],
-  mobile: [
-    { id: 'mobile', title: '移动访问', match: /.+/ },
-  ],
-  data: [
-    { id: 'storage', title: '存储与维护', match: /应用信息|数据|会话存储|轨迹|代码库语义索引|右键菜单/ },
-    { id: 'danger', title: '配置历史与重置', match: /配置历史|重置/, danger: true },
-  ],
-  image: [
-    { id: 'image', title: '图片生成', match: /.+/ },
-  ],
-  skills: [
-    { id: 'skills', title: 'Skill', match: /.+/ },
-  ],
-  agents: [
-    { id: 'agents', title: '子代理团队与编排', match: /.+/ },
-  ],
-  flow: [
-    { id: 'flow', title: '流程', match: /.+/ },
-  ],
-  ext: [
-    { id: 'ext', title: '外部工具', match: /.+/ },
-  ],
   speech: [
     { id: 'speech', title: '语音输入', match: /.+/ },
   ],
-  keys: [
-    { id: 'keys', title: '快捷键', match: /.+/ },
-  ],
   remind: [
-    { id: 'remind', title: '提醒与主动聊天', match: /.+/ },
+    { id: 'remind', title: '定时提醒', match: /.+/ },
+  ],
+  keys: [
+    { id: 'rebind', title: '改键', match: /改键/ },
+    { id: 'manual', title: '完整说明', match: /.+/ },
+  ],
+  profile: [
+    { id: 'profile', title: '规则与学习', match: /.+/ },
+  ],
+  mobile: [
+    { id: 'access', title: '访问与配对', match: /局域网访问|扫码配对/ },
+    { id: 'devices', title: '设备与审计', match: /已配对设备|最近审计/ },
+  ],
+  data: [
+    { id: 'storage', title: '应用与数据', match: /应用信息|数据|会话存储/ },
+    { id: 'runtime', title: '运行与索引', match: /运行状态|轨迹|代码库语义索引|右键菜单/ },
+    { id: 'danger', title: '配置历史与重置', match: /配置历史|重置/, danger: true },
   ],
 };
 
-function readSectionAdv() {
-  try { return JSON.parse(localStorage.getItem(SETTINGS_SECTION_ADV_KEY) || '{}') || {}; }
-  catch (e) { return {}; }
-}
-
-function writeSectionAdv(map) {
-  try { localStorage.setItem(SETTINGS_SECTION_ADV_KEY, JSON.stringify(map)); } catch (e) { /* 忽略 */ }
-}
-
-function sectionAdvancedOn(sec) {
-  const map = readSectionAdv();
-  return !!map[sec.dataset.section || ''];
-}
-
+/* 高级卡片：优先用 registry 的级别规则（expert），再叠加上面的标题清单。
+   「默认折叠」只影响首次打开；用户手动展开/收起会记到 localStorage。 */
 function isAdvancedCard(card) {
   const pane = card.closest('.pane');
   const name = pane ? pane.dataset.pane : '';
   const list = SETTINGS_CARD_ADVANCED[name] || [];
-  // 只收「 curated 高级卡片」，不按 pane 默认级别隐藏：
-  // 否则 context / agent 整页都会被判成高级，打开就是空的。
-  return list.indexOf(card.dataset.card || '') >= 0;
-}
-
-function applySectionAdvanced() {
-  $$('#modal .set-section').forEach((sec) => {
-    const on = sectionAdvancedOn(sec);
-    const cards = Array.from(sec.querySelectorAll('.set-card'));
-    const advCards = cards.filter(isAdvancedCard);
-    sec.classList.toggle('adv-open', on);
-    cards.forEach((card) => {
-      card.classList.toggle('adv-hidden', isAdvancedCard(card) && !on);
-    });
-    const btn = sec.querySelector('[data-act="toggle-section-adv"]');
-    if (btn) {
-      btn.classList.toggle('hidden', !advCards.length);
-      btn.textContent = on ? '隐藏高级项' : ('显示高级项' + (advCards.length ? '（' + advCards.length + '）' : ''));
-      btn.setAttribute('aria-expanded', on ? 'true' : 'false');
-    }
-  });
-}
-
-function setSectionAdvanced(sec, on) {
-  if (!sec || !sec.dataset.section) return;
-  const map = readSectionAdv();
-  map[sec.dataset.section] = on ? 1 : 0;
-  writeSectionAdv(map);
-  applySectionAdvanced();
-}
-
-function toggleSectionAdvanced(sec) {
-  if (!sec) return;
-  setSectionAdvanced(sec, !sectionAdvancedOn(sec));
+  if (list.indexOf(card.dataset.card || '') >= 0) return true;
+  return typeof settingsCardMeta === 'function'
+    && settingsCardMeta(card).level === 'expert';
 }
 
 function groupPaneSections(pane) {
@@ -574,8 +547,7 @@ function groupPaneSections(pane) {
     sec.dataset.sectionTitle = rule.title;
     const head = document.createElement('div');
     head.className = 'set-section-head';
-    head.innerHTML = '<h3 class="set-section-title">' + escapeHtml(rule.title) + '</h3>' +
-      '<button type="button" class="set-section-adv" data-act="toggle-section-adv" aria-expanded="false"></button>';
+    head.innerHTML = '<h3 class="set-section-title">' + escapeHtml(rule.title) + '</h3>';
     sec.appendChild(head);
     const body = document.createElement('div');
     body.className = 'set-section-body';
@@ -589,7 +561,6 @@ function groupPaneSections(pane) {
     const body = sec.querySelector('.set-section-body');
     list.forEach((card) => body.appendChild(card));
   });
-  applySectionAdvanced();
 }
 
 function readCardCollapsed() {
@@ -625,10 +596,10 @@ function setCardCollapsed(card, on, persist, animate) {
 
 function syncCardCollapse(pane) {
   const saved = readCardCollapsed();
-  const advanced = SETTINGS_CARD_ADVANCED[pane.dataset.pane] || [];
   pane.querySelectorAll('.set-card').forEach((card) => {
     const id = cardStateId(card);
-    const on = id in saved ? !!saved[id] : advanced.indexOf(card.dataset.card) >= 0;
+    // 默认：高级 / 专家卡片收起，其它展开；用户手动改过的以记录为准
+    const on = id in saved ? !!saved[id] : isAdvancedCard(card);
     setCardCollapsed(card, on, false, false);
   });
 }
@@ -730,7 +701,7 @@ function renderSettingsAnchors(name) {
   if (!bar) return;
   const toc = $('#settings-toc');
   const items = settingsAnchorItems();
-  if (name === 'help' || items.length < 2) {
+  if (!items.length) {
     bar.classList.add('hidden');
     bar.innerHTML = '';
     if (toc) toc.classList.add('hidden');
@@ -746,7 +717,7 @@ function renderSettingsAnchors(name) {
       const it = items[Number(b.dataset.i)];
       if (!it || !it.el) return;
       if (it.el.classList.contains('set-card')) setCardCollapsed(it.el, false, true);
-      it.el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      it.el.scrollIntoView({ block: 'start', behavior: GM_SMOOTH });
     };
   });
   updateAnchorsActive();

@@ -165,6 +165,26 @@ def judge_write(sandbox, name, args, mode):
             return "allow", ""          # 路径本身会被工具拒绝，不必再问
         if os.path.exists(p):
             return "ask", "会整个覆盖已有文件（原内容被整体替换），确认是否继续"
+    if name == "download_file":
+        # 不带 overwrite 时工具自己会拒绝；只有明确覆盖已有文件才需要点头
+        if not args.get("overwrite"):
+            return "allow", ""
+        try:
+            p = resolve_path(sandbox, args.get("path"))
+        except SandboxError:
+            return "allow", ""
+        if os.path.exists(p):
+            return "ask", "下载会覆盖已有文件（内容被整体替换），确认是否继续"
+    if name == "doc_create":
+        # 同上：不覆盖已有文件时不会破坏任何东西
+        if not args.get("overwrite"):
+            return "allow", ""
+        try:
+            p = resolve_path(sandbox, args.get("path"))
+        except SandboxError:
+            return "allow", ""
+        if os.path.exists(p):
+            return "ask", "生成文档会覆盖已有文件（内容被整体替换），确认是否继续"
     return "allow", ""
 
 
@@ -678,10 +698,13 @@ def pending_approvals(sid=None):
     return rows
 
 
-def resolve_approval(aid, ok, remember=False):
+def resolve_approval(aid, ok, remember=False, sid=None):
     with _approvals_lock:
         item = _APPROVALS.get(aid)
     if not item:
+        return False
+    want = str(sid or "").strip()
+    if want and str(item.get("sid") or "") != want:
         return False
     item["ok"] = bool(ok)
     item["remember"] = bool(remember and ok)

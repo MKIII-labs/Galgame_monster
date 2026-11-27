@@ -69,6 +69,10 @@ def _pdf_page_text(raw, page):
 
 def _read_one(path, page, sandbox):
     """读取并抽取一个引用文件。返回 dict；不像文件路径时返回 None。"""
+    # 没有沙箱根目录时只能引用绝对路径；相对路径保持原文不动
+    if not sandbox and not (os.path.isabs(path)
+                            or (len(path) > 1 and path[1] == ":")):
+        return None
     try:
         p = agent.resolve_path(sandbox, path, for_read=True)
     except Exception as e:               # noqa: BLE001
@@ -104,9 +108,13 @@ def _read_one(path, page, sandbox):
 
 
 def expand(text, sandbox):
-    """按 `@路径` 抽取正文；返回可直接挂到消息上的 refs 列表。"""
+    """按 `@路径` 抽取正文；返回可直接挂到消息上的 refs 列表。
+
+    没有沙箱目录时仍支持绝对路径（与只读模式一致）；相对路径会由
+    resolve_path 拒绝，保持原文不动。
+    """
     refs = []
-    if not text or not sandbox:
+    if not text:
         return refs
     seen = set()
     total = 0
@@ -168,7 +176,7 @@ def folder_refs(sandbox, rel, limit=12, max_chars=20000):
             total += len(body)
             prefix = str(rel or "").replace("\\", "/").strip("/")
             out.append({"path": (prefix + "/" + relpath) if prefix else relpath,
-                        "text": body})
+                        "type": "file", "text": body})
             if len(out) >= limit or total >= max_chars:
                 return out
     return out
@@ -340,6 +348,7 @@ def from_client(refs, sandbox, problems=None, memory_nodes=None):
             one = memory_ref(memory_nodes, r.get("id") or r.get("title"))
         if not one:
             continue
+        one["type"] = kind
         body = one.get("text") or ""
         if body and total + len(body) > MAX_REF_TOTAL:
             keep = max(0, MAX_REF_TOTAL - total)

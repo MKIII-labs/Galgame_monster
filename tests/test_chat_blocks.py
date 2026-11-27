@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""思考 / 工具的展示顺序落库：块顺序、失败轮、裁剪、续写合并。"""
+"""思考 / 工具的展示顺序落库：块顺序、失败轮、续写合并。"""
 from app.api.chat import (_append_round_blocks, _empty_final_text,
                           _ensure_old_text_block,
                           _finish_closing_text,
                           _inject_prev_end_note,
-                          _is_pseudo_final, _mark_answer_blocks, _merge_blocks,
+                          _is_pseudo_final, _merge_blocks,
                           _needs_finish_body_nudge,
                           _needs_finish_nudge,
                           _needs_plan_gate,
                           _web_page_note,
-                          _reasoning_cap, _retry_reasoning_block,
-                          _strip_reasoning_blocks, _trim_reasoning_blocks)
+                          _retry_reasoning_block)
 
 
 def test_empty_final_text_distinguishes_stop_from_failure():
@@ -36,30 +35,13 @@ def test_append_round_blocks_keeps_failed_reasoning():
                       {"kind": "text", "text": "答案"}]
 
 
-def test_trim_reasoning_drops_oldest_and_keeps_order():
-    blocks = [{"kind": "reasoning", "text": "a" * 6}, {"kind": "text"},
-              {"kind": "reasoning", "text": "b" * 6}, {"kind": "tool", "i": 0}]
-    out = _trim_reasoning_blocks(blocks, 8)
-    texts = [b["text"] for b in out if b["kind"] == "reasoning"]
-    assert len(texts) == 1 and texts[0].endswith("b" * 6)
-    assert [b["kind"] for b in out] == ["text", "reasoning", "tool"]
-
-
-def test_trim_reasoning_truncates_a_single_oversized_block():
-    out = _trim_reasoning_blocks([{"kind": "reasoning", "text": "x" * 20}], 8)
-    assert out[0]["text"].endswith("x" * 8)
-    assert out[0]["text"].startswith("…")
-
-
-def test_reasoning_cap_parsing_and_strip():
-    assert _reasoning_cap({}) == 12000
-    assert _reasoning_cap({"chat_reasoning_keep_chars": 0}) == 0
-    assert _reasoning_cap({"chat_reasoning_keep_chars": -1}) == 0
-    assert _reasoning_cap({"chat_reasoning_keep_chars": 123}) == 123
-    assert _reasoning_cap({"chat_reasoning_keep_chars": "abc"}) == 12000
-
-    blocks = [{"kind": "reasoning", "text": "x"}, {"kind": "text"}, {"kind": "tool", "i": 0}]
-    assert _strip_reasoning_blocks(blocks) == [{"kind": "text"}, {"kind": "tool", "i": 0}]
+def test_reasoning_is_persisted_without_truncation():
+    """思考原样落库：多长都不截断，也不丢失「上次尝试」标记。"""
+    long_text = "x" * 50000
+    blocks = [{"kind": "reasoning", "text": long_text, "retry": True},
+              {"kind": "text", "text": "答案"}]
+    assert blocks[0]["text"] == long_text
+    assert blocks[0]["retry"] is True
 
 
 def test_merge_blocks_offsets_tool_indexes():
@@ -75,11 +57,6 @@ def test_retry_reasoning_block_keeps_failed_attempt():
         "kind": "reasoning", "text": "想了一半", "retry": True}
     assert _retry_reasoning_block({"reasoning": ""}) is None
     assert _retry_reasoning_block({}) is None
-
-    # 裁剪只改文本，不能把「上次尝试」标记弄丢
-    out = _trim_reasoning_blocks(
-        [{"kind": "reasoning", "text": "x" * 20, "retry": True}], 8)
-    assert out[0]["retry"] is True
 
 
 def test_api_chat_never_shadows_handler_variable():
@@ -157,6 +134,21 @@ def test_plan_gate_allows_batch_that_already_has_plan():
     assert _needs_plan_gate(calls, agent_on=True) is False
 
 
+def test_file_watch_dedupes_missing_paths():
+    """文件监控：同一批缺失文件只提醒一次，恢复后再丢失会重新提醒。"""
+    from app.api.chat import _file_watch_new
+    new, seen = _file_watch_new([], ["a.txt", "b.txt"])
+    assert new == ["a.txt", "b.txt"] and seen == {"a.txt", "b.txt"}
+    new2, seen2 = _file_watch_new(seen, ["a.txt", "b.txt"])
+    assert new2 == [] and seen2 == {"a.txt", "b.txt"}
+    # b 恢复：从已提醒集合移除；c 是新丢失
+    new3, seen3 = _file_watch_new(seen2, ["a.txt", "c.txt"])
+    assert new3 == ["c.txt"] and seen3 == {"a.txt", "c.txt"}
+    # 全部恢复：集合清空
+    _new4, seen4 = _file_watch_new(seen3, [])
+    assert seen4 == set()
+
+
 # ============================================================
 # 占位文本（「（调用工具）」）与上一轮结束原因
 # ============================================================
@@ -229,137 +221,3 @@ def test_web_page_note_wraps_and_truncates():
     assert len(out) < 5000 and "后略" in out
     # 空正文不产生消息
     assert _web_page_note("https://example.com/c", "   ") == ""
-
-
-# ---------------------------------------------------------------- 答案块标记
-def _answer_ids(blocks, tools, stopped=False):
-    out = _mark_answer_blocks(blocks, tools, stopped=stopped)
-    return [i for i, b in enumerate(out) if b.get("ans")]
-
-
-def _long(tag=""):
-    """≥120 字的交付正文（`_is_substantive_answer` 的下限）。"""
-    return (tag or "交付") + "。" + "这里是完整结论与依据。" * 12
-
-
-def test_answer_marks_text_after_last_real_tool():
-    """位置口径：最后一次真实工具之后的正文都算答案，之前的旁白折叠。"""
-    blocks = [{"kind": "text", "text": _long("过程旁白")},
-              {"kind": "tool", "i": 0},
-              {"kind": "reasoning", "text": "想"},
-              {"kind": "text", "text": _long("交付")},
-              {"kind": "tool", "i": 1},
-              {"kind": "reasoning", "text": "补充"},
-              {"kind": "text", "text": "收尾补充"}]
-    tools = [{"tool": "edit_file"}, {"tool": "finish"}]
-    assert _answer_ids(blocks, tools) == [3, 6]
-
-
-def test_answer_folds_long_process_narration():
-    """旁白再长，只要后面还有工具调用，就折进过程区（截图现场：180 字旁白）。"""
-    blocks = [{"kind": "text", "text": _long("过程旁白")},
-              {"kind": "tool", "i": 0},
-              {"kind": "text", "text": _long("交付")}]
-    assert _answer_ids(blocks, [{"tool": "read_file"}]) == [2]
-
-
-def test_answer_marks_after_finish_when_rework():
-    """验收驳回后返工：finish 后的新交付正文才是答案。"""
-    blocks = [{"kind": "text", "text": "过程"},
-              {"kind": "tool", "i": 0},
-              {"kind": "reasoning", "text": "思考"},
-              {"kind": "tool", "i": 1},
-              {"kind": "reasoning", "text": "验收返工"},
-              {"kind": "text", "text": _long("返工后的交付")},
-              {"kind": "reasoning", "text": "计划下一步"}]
-    tools = [{"tool": "edit_file"}, {"tool": "finish"}]
-    assert _answer_ids(blocks, tools) == [5]
-
-
-def test_answer_marks_after_last_real_tool_without_finish():
-    blocks = [{"kind": "text", "text": "过程"},
-              {"kind": "tool", "i": 0},
-              {"kind": "text", "text": "答案"}]
-    assert _answer_ids(blocks, [{"tool": "read_file"}]) == [2]
-
-
-def test_answer_marks_finish_alias():
-    """finish 别名（done / complete / task_done…）也要认。"""
-    blocks = [{"kind": "text", "text": "交付"}, {"kind": "tool", "i": 0}]
-    assert _answer_ids(blocks, [{"tool": "done"}]) == [0]
-
-
-def test_answer_falls_back_to_last_text():
-    """finish 前后都没有正文、正文全在工具之前时，兜底最后一段。"""
-    blocks = [{"kind": "text", "text": "只有一段"},
-              {"kind": "tool", "i": 0},
-              {"kind": "tool", "i": 1}]
-    assert _answer_ids(blocks, [{"tool": "read_file"}, {"tool": "finish"}]) == [0]
-
-
-def test_answer_marks_recomputed_after_continuation():
-    """续写合并后旧标记要清掉：答案跟着新的交付段走。"""
-    old = [{"kind": "text", "text": "旧交付", "ans": True}, {"kind": "tool", "i": 0}]
-    new = [{"kind": "reasoning", "text": "继续"}, {"kind": "text", "text": "新交付"}]
-    merged = _merge_blocks(old, new, 1)
-    out = _mark_answer_blocks(merged, [{"tool": "read_file"}])
-    assert [b["text"] for b in out if b.get("ans")] == ["新交付"]
-
-
-def test_answer_stopped_keeps_last_visible_text():
-    """停止 = 暂停：只保留最后一段可见正文，中间的长旁白不再回到答案区。
-
-    现场（前端设计风格图谱 #27）：停止回合里「先摸清两件事…」等 180 字旁白
-    位于工具之间，以前按「实质交付」留在正文，成了截图里的噪声。
-    """
-    blocks = [{"kind": "text", "text": _long("完整报告")},
-              {"kind": "tool", "i": 0},
-              {"kind": "reasoning", "text": "继续查"},
-              {"kind": "text", "text": "取证补最后一组：下面按顺序查 8 个模式，结果按"},
-              {"kind": "reasoning", "text": "还没写完"}]
-    assert _answer_ids(blocks, [{"tool": "read_file"}], stopped=True) == [3]
-
-
-def test_answer_marks_text_between_last_tool_and_finish():
-    """finish 不是真实工具：它前面、最后一次真实工具之后的正文就是答案。"""
-    blocks = [{"kind": "tool", "i": 0},
-              {"kind": "text", "text": _long("完整交付")},
-              {"kind": "reasoning", "text": "验收复核"},
-              {"kind": "tool", "i": 1}]
-    tools = [{"tool": "read_file"}, {"tool": "finish"}]
-    assert _answer_ids(blocks, tools) == [1]
-
-
-def test_answer_marks_short_text_after_last_real_tool():
-    """最后工具之后的短句也是终稿，不因长度被折进过程区。"""
-    blocks = [{"kind": "tool", "i": 0},
-              {"kind": "text", "text": _long("完整交付")},
-              {"kind": "reasoning", "text": "再核一项"},
-              {"kind": "text", "text": "已完成，自检通过。"},
-              {"kind": "tool", "i": 1}]
-    tools = [{"tool": "search_files"}, {"tool": "finish"}]
-    assert _answer_ids(blocks, tools) == [1, 3]
-
-
-def test_answer_short_reply_still_marked():
-    """没有任何长篇交付时，短回答（例如「已完成。」）仍要留在答案区。"""
-    blocks = [{"kind": "tool", "i": 0},
-              {"kind": "reasoning", "text": "收尾"},
-              {"kind": "text", "text": "已完成。"},
-              {"kind": "tool", "i": 1}]
-    tools = [{"tool": "read_file"}, {"tool": "finish"}]
-    assert _answer_ids(blocks, tools) == [2]
-
-
-def test_finish_tool_names_match_frontend():
-    """收尾工具名是跨端契约：前后端集合不一致会让答案归属直接分叉。"""
-    import os
-    import re
-    from app.api.chat import _FINISH_TOOL_NAMES
-
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = open(os.path.join(root, "web", "chat.js"), encoding="utf-8").read()
-    m = re.search(r"const FINISH_TOOL_NAMES = new Set\(\[(.*?)\]\);", src, re.S)
-    assert m, "web/chat.js 里找不到 FINISH_TOOL_NAMES"
-    names = set(re.findall(r"['\"]([^'\"]+)['\"]", m.group(1)))
-    assert names == set(_FINISH_TOOL_NAMES)

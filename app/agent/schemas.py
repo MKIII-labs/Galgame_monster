@@ -50,8 +50,8 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
     （calendar.create → calendar_create）；收到调用后 normalize_tool_name
     会再映射回带点号的规范名。
 
-    cap_domains：只挂这些前缀的能力（如 {"bili", "calendar"}）；None = 全挂。
-    B 站 / 股市 / 日程这类低频能力不该每轮都占 schema 预算，由调用方按本轮意图筛。
+    cap_domains：只挂这些前缀的能力（如 {"calendar", "stock"}）；None = 全挂。
+    股市 / 日程这类低频能力不该每轮都占 schema 预算，由调用方按本轮意图筛。
 
     lsp_on：是否挂 LSP 工具（关掉后模型只能用正则版 find_symbol）。
     git_commit_mode：off = 完全不给 git_commit；ask / auto 只是审批策略不同。
@@ -112,6 +112,45 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      "若返回 READ_REQUIRED / STALE_VERSION，按「恢复」提示重读后重试",
                      {"path": {"type": "string"}, "content": {"type": "string"}},
                      ["path", "content"]),
+            _fn_tool("download_file",
+                     "把 URL 指向的文件直接下载到沙箱（内容不经过上下文，适合大文件、"
+                     "二进制、需要逐字节一致的素材）。默认不覆盖已有文件",
+                     {"url": {"type": "string", "description": "公网 http(s) 地址"},
+                      "path": {"type": "string",
+                               "description": "沙箱内目标路径；父目录会自动创建"},
+                      "overwrite": {"type": "boolean",
+                                    "description": "true = 允许覆盖已存在的文件"}},
+                     ["url", "path"]),
+            _fn_tool("doc_create",
+                     "生成 Word / Excel / PDF / PPT 文档并写入沙箱（二进制直接落盘，内容不占上下文）。"
+                     "按 path 扩展名决定格式；docx / pdf 用 blocks，xlsx 用 sheets，"
+                     "pptx 用 blocks（每块一页，type=slide 时读 title/bullets）。"
+                     "默认不覆盖已有文件，必须显式 overwrite=true",
+                     {"path": {"type": "string",
+                               "description": "沙箱内目标文件，扩展名 .docx / .xlsx / .pdf / .pptx"},
+                      "title": {"type": "string", "description": "文档标题（可选）"},
+                      "blocks": {"type": "array", "description":
+                                 "docx / pdf 的内容块，按顺序渲染；pptx 里每块是一页",
+                                 "items": {"type": "object", "properties": {
+                                     "type": {"type": "string",
+                                              "description": "heading1–4 / paragraph / "
+                                                             "bullet / number / table / pagebreak / "
+                                                             "slide（pptx 分页）"},
+                                     "text": {"type": "string"},
+                                     "title": {"type": "string", "description": "slide 的标题"},
+                                     "bullets": {"type": "array", "items": {"type": "string"},
+                                                 "description": "slide 的要点"},
+                                     "rows": {"type": "array",
+                                              "description": "table 的行列数据（二维数组）",
+                                              "items": {"type": "array", "items": {}}}}}},
+                      "sheets": {"type": "array", "description": "xlsx 的工作表",
+                                 "items": {"type": "object", "properties": {
+                                     "name": {"type": "string"},
+                                     "rows": {"type": "array",
+                                              "items": {"type": "array", "items": {}}}}}},
+                      "overwrite": {"type": "boolean",
+                                    "description": "true = 允许覆盖已存在的文件"}},
+                     ["path"]),
             _fn_tool("edit_file",
                      "精确替换文件中的一段文本（old 必须唯一）。"
                      "编辑已有文件前必须先 read_file；old 不唯一时给出更长的片段",
@@ -190,6 +229,17 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                                 "description": "input 后是否补回车，默认 true"},
                       "wait": {"type": "integer", "description": "run 等待输出秒数，默认 8，最大 60"}},
                      ["action"]),
+            _fn_tool("run_script",
+                     "用一段 Python 脚本批量编排多次工具调用（循环 / 条件 / 并发 / 复杂计算）。"
+                     "脚本里 gm.call(\"read_file\", path=...) 拿结果、gm.parallel([...]) 并发、"
+                     "gm.log() 实时日志、gm.tools() / gm.help() 查工具；只有 print 的输出回到对话。"
+                     "默认只读沙箱内文件；设置里打开后可直接写文件 / 执行命令"
+                     "（写入仍限沙箱内，且会先问你）",
+                     {"code": {"type": "string",
+                               "description": "完整 Python 源码；gm 已自动注入，不要自己写 import gm"},
+                      "timeout": {"type": "integer",
+                                  "description": "超时秒数，默认 120，最大 600"}},
+                     ["code"]),
             _fn_tool("open_preview",
                      "在 IDE 预览面板打开页面：path 打开沙箱内 HTML；url 预览本机 dev server"
                      "（只允许 localhost / 127.0.0.1，端口 >= 1024，经本机代理注入控制台和元素选择）。"
@@ -198,6 +248,21 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                                "description": "沙箱内 .html / .htm（与 url 二选一）"},
                       "url": {"type": "string",
                               "description": "本机 dev server，如 http://localhost:5173（与 path 二选一）"}},
+                     []),
+            _fn_tool("deploy_site",
+                     "把沙箱里的静态网页发布到内置静态服务器，返回本机与局域网地址"
+                     "（发布卡片 / 预览面板会自动打开）。只复制发布文件；同一目录重新发布会原地更新。"
+                     "action=list 查看已发布站点，stop 停止某个站点",
+                     {"action": {"type": "string",
+                                 "enum": ["publish", "list", "stop"],
+                                 "description": "默认 publish"},
+                      "path": {"type": "string",
+                               "description": "publish：静态站点根目录（沙箱内相对路径，"
+                                              "里面有 index.html），默认 ."},
+                      "name": {"type": "string", "description": "站点名（可选，默认用目录名）"},
+                      "port": {"type": "integer",
+                               "description": "指定本机端口（可选；默认自动挑 7801 起的空闲端口）"},
+                      "site_id": {"type": "string", "description": "stop 时的站点 id 或名字"}},
                      []),
             _fn_tool("render_check",
                      "用无头浏览器真的打开一个 HTML，回传运行时错误与布局问题"
@@ -640,20 +705,26 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                      []),
             _fn_tool("computer_act",
                      "对编号元素执行动作：click / type / press / scroll / hover；"
-                     "提交、支付、删除等高危按钮会先请用户确认",
+                     "提交、支付、删除等高危按钮会先请用户确认。"
+                     "自绘界面（computer_see 没有控件）改用 x / y 坐标点，无需 ref",
                      {"action": {"type": "string",
                                  "enum": ["click", "type", "press", "scroll", "hover"]},
                       "ref": {"type": "integer", "description": "computer_see 给出的编号"},
                       "target": {"type": "string", "description": "桌面窗口编号，如 w1；省略 = 浏览器"},
+                      "x": {"type": "integer",
+                            "description": "截图坐标横坐标（左上角 0,0，与 computer_shot 的网格一致）"},
+                      "y": {"type": "integer",
+                            "description": "截图坐标纵坐标（左上角 0,0，与 computer_shot 的网格一致）"},
                       "value": {"type": "string",
                                 "description": "type 的文本 / press 的按键名 / scroll 的像素数"},
                       "clear": {"type": "boolean", "description": "type 前先清空输入框"}},
                      ["action"]),
             _fn_tool("computer_read",
-                     "页面报错、要确认当前地址、读取某个输入框的值或回看动作记录时用："
-                     "console（错误/警告）、network（最近请求）、url、value、trace",
+                     "页面报错、要确认当前地址、读取某个输入框的值、查看窗口客观信息"
+                     "（标题 / 进程 / 类名 / UIA 节点数）或回看动作记录时用："
+                     "console、network、url、value、window、trace",
                      {"kind": {"type": "string",
-                               "enum": ["console", "network", "url", "value", "trace"]},
+                               "enum": ["console", "network", "url", "value", "window", "trace"]},
                       "ref": {"type": "integer", "description": "kind=value 时需要"},
                       "target": {"type": "string", "description": "桌面窗口编号，如 w1"}},
                      []),
@@ -888,12 +959,21 @@ def native_tool_schemas(agent_on=False, search_ready=False, cap_domains=None,
                     "description": "revise 时说明为什么原验收标准不再适用"},
          "drop": {"type": "boolean", "description": "revise 时直接删除这条过时的验收项"}},
         ["action"]))
+    # 收尾口径必须和实际催收逻辑一致：只有「Agent 开 + 本轮用过工具」才会催 finish。
+    # 只读 / 对话模式（Agent 关、保留沙箱）下发 schema 时仍带着 finish，
+    # 描述若继续声称「不调就判未完成」，模型会为纯聊天白纠结一轮。
+    _finish_note = (
+        "当前是只读 / 对话模式：没有执行过任务时，直接把内容写在正文里结束即可，"
+        "不会被判成「未完成」；只有确实要显式收尾一次分析任务时才调用它。"
+        if read_only else
+        "只有本轮用过工具时，系统才要求显式收尾；纯聊天、纯问答直接写正文即可，"
+        "不会被判成「未完成」。"
+    )
     out.append(_fn_tool(
         "finish",
         "声明本轮任务已完成并交付（**显式收尾开关**）。只有确实做完、或确实要交给用户"
         "拍板时才调用；调用后本轮立刻结束。还有计划步骤没做完、或还要读 / 写 / 跑命令时"
-        "**不要**调用它，直接继续干活。仅写正文、不调任何工具就停下会被系统判成「未完成」"
-        "并要求你继续，所以收尾时请显式调用它。"
+        "**不要**调用它，直接继续干活。" + _finish_note +
         "如果上一轮验收驳回的 blocking 项在实际环境下确实不该判不通过，"
         "用 challenges 带类型与证据申诉，由验收代理裁决；不要默默放弃或空口豁免。",
         {"summary": {"type": "string",

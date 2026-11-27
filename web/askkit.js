@@ -29,6 +29,7 @@
     threadId: '',
     history: [],             // [{ q, a }]
     busy: false,
+    pinned: false,           // 钉住：点击卡片外部也不关闭
     aborter: null,
     openSeq: 0,
     pending: null,
@@ -93,6 +94,7 @@
         '<span class="askkit-title">划词问答</span>' +
         '<div class="askkit-tabs" role="tablist"></div>' +
         '<button type="button" class="askkit-new" title="在当前选区上新建一个问答">＋</button>' +
+        '<button type="button" class="askkit-pin" title="钉住面板（点击外部不关闭）" aria-label="钉住面板" aria-pressed="false"><svg class="ic"><use href="#i-pin"/></svg></button>' +
         '<button type="button" class="askkit-x" title="关闭（Esc）">✕</button>' +
       '</div>' +
       '<div class="askkit-quote" title="点击展开 / 收起"></div>' +
@@ -107,6 +109,7 @@
       '<div class="askkit-foot">' +
         '<button type="button" class="askkit-link" data-act="copy">复制回答</button>' +
         '<button type="button" class="askkit-link" data-act="quote">引用到对话</button>' +
+        '<button type="button" class="askkit-link" data-act="capture" hidden>记入笔记</button>' +
         '<button type="button" class="askkit-link" data-act="save" hidden>存为批注</button>' +
         '<span class="askkit-hint">Enter 发送 · Shift+Enter 换行</span>' +
       '</div>';
@@ -157,12 +160,14 @@
     var tab = e.target.closest('.askkit-tab');
     if (tab) return switchThread(tab.dataset.tid);
     if (e.target.closest('.askkit-new')) return newThread();
+    if (e.target.closest('.askkit-pin')) return setPinned(!S.pinned);
     if (e.target.closest('.askkit-x')) return close();
     var act = e.target.closest('[data-act]');
     if (act) {
       var id = act.dataset.act;
       if (id === 'copy') return copyAnswer();
       if (id === 'quote') return quoteToChat();
+      if (id === 'capture') return captureToNote();
       if (id === 'save') return saveAsAnno();
     }
     var chip = e.target.closest('.askkit-chip');
@@ -239,6 +244,8 @@
     renderChips();
     var save = $('[data-act="save"]');
     if (save) save.hidden = !opts.persist;
+    var cap = $('[data-act="capture"]');
+    if (cap) cap.hidden = !opts.onCapture;
     var quoteBtn = $('[data-act="quote"]');
     if (quoteBtn) quoteBtn.hidden = !opts.onQuote;
   }
@@ -247,7 +254,8 @@
     var box = $('.askkit-tabs');
     if (!box) return;
     box.innerHTML = '';
-    S.threads.forEach(function (t) {
+    // 服务端按创建顺序返回（旧 → 新）；标签页按「左新右旧」展示，最新的排最左。
+    S.threads.slice().reverse().forEach(function (t) {
       var b = document.createElement('button');
       b.type = 'button';
       b.className = 'askkit-tab' + (t.id === S.threadId ? ' active' : '');
@@ -395,8 +403,12 @@
   function ensureThread() {
     if (S.pending) return S.pending;
     var seq = S.openSeq;
+    var want = String((S.opts && S.opts.threadId) || '');
     S.pending = ensureThreads().then(function () {
-      var hit = S.threads.find(sameAnchor);
+      // 从检查器「旁注」列表点进来时按 id 精确打开，不靠锚点猜
+      var hit = want
+        ? S.threads.find(function (x) { return x.id === want; })
+        : S.threads.find(sameAnchor);
       if (hit) return hit;
       return threadsOp(threadPayload('create')).then(function (j) {
         if (!j || !j.thread) return null;
@@ -586,6 +598,34 @@
     return (last && last.a) || '';
   }
 
+  /* 钉住：点击卡片外部不再关闭（Esc / ✕ 仍可关），方便一边看旁注一边翻笔记、知识库 */
+  function setPinned(on) {
+    S.pinned = !!on;
+    var btn = $('.askkit-pin');
+    if (!btn) return;
+    btn.classList.toggle('on', S.pinned);
+    btn.setAttribute('aria-pressed', S.pinned ? 'true' : 'false');
+    btn.title = S.pinned ? '已钉住（点击外部不关闭）' : '钉住面板（点击外部不关闭）';
+  }
+
+  /* 记入笔记：把「原文 + 全部问答」交给适配器，由它决定落到哪个笔记 */
+  function captureToNote() {
+    if (!S.history.length) return toast('先提问再记入笔记');
+    if (!S.opts || typeof S.opts.onCapture !== 'function') return;
+    var btn = $('[data-act="capture"]');
+    var rect = btn ? btn.getBoundingClientRect() : null;
+    try {
+      Promise.resolve(S.opts.onCapture({
+        quote: (S.opts && S.opts.quote) || '',
+        history: S.history.slice(),
+      }, rect)).catch(function (e) {
+        toast('记入笔记失败：' + ((e && e.message) || e), 'error');
+      });
+    } catch (e) {
+      toast('记入笔记失败：' + ((e && e.message) || e), 'error');
+    }
+  }
+
   function copyAnswer() {
     var text = lastAnswer();
     if (!text) return toast('还没有可复制的回答');
@@ -667,6 +707,7 @@
     S.pending = null;
     var panel = ensurePanel();
     panel.classList.remove('hidden');
+    setPinned(false);
     panel.querySelector('.askkit-thread').innerHTML = '';
     hideTool();
     renderHeader();
@@ -711,6 +752,11 @@
     if (!S.panel || S.panel.classList.contains('hidden')) return;
     if (S.panel.contains(e.target)) return;
     if (e.target.closest && (e.target.closest('.selbar') || e.target.closest('.selbar-more-menu'))) return;
+    // 「记入笔记」浮层挂在 body 上，点它也不能把旁注关掉
+    if (e.target.closest && e.target.closest('#nt-cap-pop')) return;
+    // 浮层开着时，外部点击只关浮层（交互更接近「选择目标」而不是「放弃」）
+    if (document.getElementById('nt-cap-pop')) return;
+    if (S.pinned) return;
     if (S.busy) return;
     close();
   }, true);

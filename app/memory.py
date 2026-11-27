@@ -16,12 +16,12 @@ import time
 import uuid
 
 from app import notes as noteslib
+from app import sessions as _sessions
 from app.capabilities import capability
 from app.db import get_db
 from app.knowledge import (KB_INDEX, apply_memory_ops, get_profile_kb, load_kb,
                            load_kb_index)
 from app.sessions import find_session, load_sessions
-from app.store import SESSION_FILE
 from app.textmatch import tokens as textmatch_tokens
 
 MAX_TEXT = 4000
@@ -56,7 +56,10 @@ def _tokens(query):
 # 索引保鲜
 # ------------------------------------------------------------
 def _signature():
-    """知识库 / 笔记 / 会话文件的 mtime/size 指纹（不读正文，成本很低）"""
+    """知识库 / 笔记 / 会话文件的 mtime/size 指纹（不读正文，成本很低）。
+
+    会话改用新存储后不再有 sessions.json：指纹取索引 + 各会话物化缓存。
+    """
     paths = []
     try:
         if os.path.exists(KB_INDEX):
@@ -64,8 +67,11 @@ def _signature():
         paths.extend(glob.glob(os.path.join(os.path.dirname(KB_INDEX), "*.json")))
         paths.extend(glob.glob(os.path.join(noteslib.NOTES_DIR, "**", "*.md"),
                              recursive=True))
-        if os.path.exists(SESSION_FILE):
-            paths.append(SESSION_FILE)
+        sess_base = os.path.dirname(_sessions.SESSION_FILE)
+        sess_index = os.path.join(sess_base, "sessions", "index.json")
+        if os.path.exists(sess_index):
+            paths.append(sess_index)
+        paths.extend(glob.glob(os.path.join(sess_base, "session_store", "*.json")))
     except OSError:
         pass
     parts = []

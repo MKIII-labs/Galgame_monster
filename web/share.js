@@ -5,6 +5,11 @@
   let _state = { scope: 'one', index: null, reasoning: false, tools: false, redact: true, format: 'html' };
   let _preview = null;
   let _payload = null;
+  let _previewSeq = 0;        // 连续切换选项时只认最后一次预览
+  let _previewing = null;     // 正在跑的预览：导出前先等它结束，避免导到旧内容
+  let _remoteImagesLeft = 0;  // 本轮预览里没能内联的外链图片数
+  // 整段会话导出缓存：sid + 已拉到的最早位置，避免每切一次选项都重新拉全部历史
+  let _histCache = { sid: '', total: 0, full: false, msgs: [] };
 
   function el(tag, cls, text) {
     const n = document.createElement(tag);
@@ -35,13 +40,20 @@
 
   /* 把正文里的图片全部换成 data URL：否则产物在别人机器上是裂图 */
   async function inlineImages(root, sid) {
+    _remoteImagesLeft = 0;
     const imgs = Array.from(root.querySelectorAll('img'));
     for (const img of imgs) {
       const src = img.getAttribute('src') || '';
       if (src.startsWith('data:')) continue;
+      if (img.classList.contains('search-favicon-img')) continue;   // 小图标不值得逐张代理
       let data = '';
       if (src.startsWith('blob:')) data = await fetchAsDataUrl(src);
       else if (src.startsWith('/') || src.startsWith(location.origin)) data = await fetchAsDataUrl(src);
+      else if (/^https?:/i.test(src)) {
+        // 外链图片走本机代理再内联：分享页离线打开也不会裂图，且带 SSRF 校验
+        data = await fetchAsDataUrl('/api/share/image?url=' + encodeURIComponent(src));
+        if (!data) _remoteImagesLeft += 1;
+      }
       if (data) img.setAttribute('src', data);
       else if (!/^https?:/i.test(src)) img.remove();
     }
@@ -77,7 +89,21 @@
       '.files-changed,.md-toc,.queue-ghost,.queue-ghosts,.typing,.live-text,.ctx-ring,#btn-bottom';
     root.querySelectorAll(kill).forEach((n) => n.remove());
     root.querySelectorAll('button').forEach((n) => {
+      // 来源编号在静态分享里没有交互，但文字要保留
+      if (n.classList.contains('cite-ref')) {
+        n.replaceWith(el('span', 'cite-ref', n.textContent || ''));
+        return;
+      }
       if (!n.closest('.tool-card')) n.remove();
+    });
+    // 搜索 trace 的头行只是静态展示：去掉交互语义
+    root.querySelectorAll('.search-trace .think-head').forEach((n) => {
+      n.removeAttribute('tabindex');
+      n.removeAttribute('role');
+      n.removeAttribute('aria-expanded');
+      n.removeAttribute('aria-haspopup');
+      n.removeAttribute('aria-controls');
+      n.style.cursor = 'default';
     });
     root.querySelectorAll('a[href^="javascript:"]').forEach((a) => a.removeAttribute('href'));
     // 图卡（iframe）不内联：改成一句可读说明
@@ -85,6 +111,71 @@
       const t = el('p', 'share-note', '（此处原有一张可交互图卡，静态分享中未包含）');
       n.replaceWith(t);
     });
+  }
+
+  function cloneSearchTrace(row) {
+    const trace = row ? row.querySelector('.search-trace') : null;
+    return trace ? trace.cloneNode(true) : null;
+  }
+
+  /* 整段会话导出：把还没渲染到 DOM 的旧消息也按需拉下来。
+     full=false 时请求精简字段（正文 + 来源），分享默认只要这些。
+     返回 false 表示中途失败，导出当前已加载部分。 */
+  async function loadAllMessages(s, msgs, total, full) {
+    const reuse = _histCache.sid === s.id && _histCache.total <= total
+      && (_histCache.full || !full);
+    if (reuse) {
+      for (let i = 0; i < total; i += 1) {
+        if (!msgs[i] && _histCache.msgs[i]) msgs[i] = _histCache.msgs[i];
+      }
+    } else {
+      _histCache = { sid: s.id, total: total, full: !!full, msgs: [] };
+    }
+    // 缓存可能已经把更早的页面补齐：从「当前最早的一条」继续往前拉，
+    // 而不是固定从 msg_loaded_start 重拉一遍。
+    let before = -1;
+    for (let i = 0; i < total; i += 1) {
+      if (msgs[i]) { before = i; break; }
+    }
+    if (before < 0) before = Number(s.msg_loaded_start) || 0;
+    while (before > 0) {
+      let r;
+      try {
+        r = await api('/api/session/messages', {
+          session_id: s.id, before: before, limit: 200, slim: !full,
+        });
+      } catch (e) {
+        return false;
+      }
+      if (!r || !r.ok || !Array.isArray(r.messages) || !r.messages.length) return false;
+      const start = Number(r.from) || 0;
+      r.messages.forEach((m, i) => {
+        msgs[start + i] = m;
+        _histCache.msgs[start + i] = m;
+      });
+      if (full) _histCache.full = true;
+      _histCache.total = total;
+      if (start >= before) return false;       // 后端没有继续往前，避免死循环
+      before = start;
+      const loaded = msgs.filter(Boolean).length;
+      setStatus('正在读取完整会话… ' + loaded + '/' + total);
+    }
+    return true;
+  }
+
+  function appendAiExtras(sec, row, opts) {
+    if (opts.reasoning || opts.tools) {
+      const wrap = row.querySelector('.content-wrap');
+      if (!wrap) return;
+      const c = wrap.cloneNode(true);
+      c.querySelectorAll('.content').forEach((n) => n.remove());
+      if (!opts.reasoning) c.querySelectorAll('.think:not(.search-trace)').forEach((n) => n.remove());
+      if (!opts.tools) c.querySelectorAll('.process-fold:not(.search-trace),.tool-group,.tool-card').forEach((n) => n.remove());
+      sec.appendChild(c);
+      return;
+    }
+    const trace = cloneSearchTrace(row);
+    if (trace) sec.appendChild(trace);
   }
 
   function collectOne(index, opts) {
@@ -101,52 +192,94 @@
     if (opts.reasoning || opts.tools) {
       const wrap = row.querySelector('.content-wrap');
       const clone = wrap ? wrap.cloneNode(true) : document.createElement('div');
-      if (!opts.reasoning) clone.querySelectorAll('.think').forEach((n) => n.remove());
-      if (!opts.tools) clone.querySelectorAll('.process-fold,.tool-group,.tool-card').forEach((n) => n.remove());
+      if (!opts.reasoning) clone.querySelectorAll('.think:not(.search-trace)').forEach((n) => n.remove());
+      if (!opts.tools) clone.querySelectorAll('.process-fold:not(.search-trace),.tool-group,.tool-card').forEach((n) => n.remove());
       holder.appendChild(clone);
     } else {
-      const box = row.querySelector('.content');
-      holder.appendChild(box ? box.cloneNode(true) : el('div', 'content'));
+      // 一条回答可能被过程组切成多个正文段：全部带上，不能只取第一段
+      const boxes = row.querySelectorAll('.content-wrap > .content');
+      if (boxes.length) {
+        boxes.forEach((n) => holder.appendChild(n.cloneNode(true)));
+      } else {
+        const box = row.querySelector('.content');
+        holder.appendChild(box ? box.cloneNode(true) : el('div', 'content'));
+      }
+      // 搜索来源属于正文的一部分：即使不导出思考 / 工具，也要带上，
+      // 否则正文里的 [n] 会失去对应来源。
+      const trace = cloneSearchTrace(row);
+      if (trace) holder.insertBefore(trace, holder.firstChild);
     }
     stripChrome(holder);
     return { title: (msgs[index] && msgs[index].title) || '', question: question, html: holder.innerHTML };
   }
 
-  function collectSession(opts) {
-    const chat = document.querySelector('#chat');
-    if (!chat) return null;
+  async function collectSession(opts) {
+    const s = (typeof curSession === 'function') ? curSession() : null;
+    if (!s) return null;
+    const total = Number(s.msg_total) || (s.messages || []).length;
+    const msgs = (s.messages || []).slice();
+    const full = !!(opts.reasoning || opts.tools);
+    const complete = await loadAllMessages(s, msgs, total, full);
     const holder = document.createElement('div');
-    const rows = Array.from(chat.querySelectorAll('.msg'));
-    rows.forEach((row) => {
-      const isUser = row.classList.contains('user');
-      const box = isUser ? row.querySelector('.content') : row.querySelector('.content');
-      if (!box) return;
+    for (let idx = 0; idx < total; idx += 1) {
+      const m = msgs[idx];
+      if (!m) continue;
+      const isUser = m.role === 'user';
       const sec = document.createElement('section');
       sec.className = 'share-msg ' + (isUser ? 'share-u' : 'share-a');
-      const label = el('div', 'share-role', isUser ? '我' : 'AI');
-      sec.appendChild(label);
-      const body = box.cloneNode(true);
-      sec.appendChild(body);
-      if (!isUser && (opts.reasoning || opts.tools)) {
-        const wrap = row.querySelector('.content-wrap');
-        if (wrap) {
-          const c = wrap.cloneNode(true);
-          c.querySelectorAll('.content').forEach((n) => n.remove());
-          if (!opts.reasoning) c.querySelectorAll('.think').forEach((n) => n.remove());
-          if (!opts.tools) c.querySelectorAll('.process-fold,.tool-group,.tool-card').forEach((n) => n.remove());
-          sec.appendChild(c);
+      sec.appendChild(el('div', 'share-role', isUser ? '我' : 'AI'));
+
+      const row = document.querySelector('.msg[data-idx="' + idx + '"]');
+      if (row) {
+        if (isUser) {
+          // 用户气泡是 .user-wrap（含图片 / 文档附件），不是 .content
+          const uw = row.querySelector('.user-wrap');
+          if (uw) sec.appendChild(uw.cloneNode(true));
+        } else {
+          const boxes = row.querySelectorAll('.content-wrap > .content');
+          if (boxes.length) {
+            boxes.forEach((n) => sec.appendChild(n.cloneNode(true)));
+          } else {
+            const box = row.querySelector('.content');
+            if (box) sec.appendChild(box.cloneNode(true));
+          }
+          appendAiExtras(sec, row, opts);
+        }
+      } else if (isUser) {
+        const d = el('div', 'content bubble');
+        d.textContent = String(m.content || '');
+        sec.appendChild(d);
+      } else {
+        // 未渲染的旧回答：默认只导正文；勾了思考 / 工具时再完整重建一次。
+        let built = null;
+        if (opts.reasoning || opts.tools) {
+          try { built = rowForMsgSafe(msgs, idx); } catch (e) { built = null; }
+        }
+        if (built) {
+          const box = built.querySelector('.content');
+          if (box) sec.appendChild(box.cloneNode(true));
+          appendAiExtras(sec, built, opts);
+        } else {
+          const d = el('div', 'content');
+          d.innerHTML = (typeof safeRenderMarkdown === 'function')
+            ? safeRenderMarkdown(String(m.content || '')) : '';
+          sec.appendChild(d);
+          const trace = (typeof buildSearchTraceFromMessage === 'function')
+            ? buildSearchTraceFromMessage(m) : null;
+          if (trace) sec.appendChild(trace);
         }
       }
       holder.appendChild(sec);
-    });
+    }
     stripChrome(holder);
-    return { title: '', question: '', html: holder.innerHTML };
+    return { title: '', question: '', html: holder.innerHTML, partial: !complete };
   }
 
   async function buildPayload() {
     const sid = (typeof state !== 'undefined' && state.sessions) ? state.sessions.current : '';
     const opts = { reasoning: _state.reasoning, tools: _state.tools };
-    const got = (_state.scope === 'session') ? collectSession(opts) : collectOne(_state.index, opts);
+    const got = (_state.scope === 'session')
+      ? await collectSession(opts) : collectOne(_state.index, opts);
     if (!got) throw new Error('找不到可分享的内容');
     const holder = document.createElement('div');
     holder.innerHTML = got.html;
@@ -155,7 +288,8 @@
       title: got.title || '分享',
       question: got.question || '',
       answer_html: holder.innerHTML,
-      options: { reasoning: _state.reasoning, tools: _state.tools, scope: _state.scope },
+      options: { reasoning: _state.reasoning, tools: _state.tools, scope: _state.scope,
+                 partial: !!got.partial, remote_images: _remoteImagesLeft },
     };
   }
 
@@ -183,23 +317,38 @@
   }
 
   async function doPreview() {
+    const seq = ++_previewSeq;
+    _payload = null;                 // 当前选项还没有可用产物，避免导出到旧内容
     setStatus('正在生成预览…');
-    try {
-      _payload = await buildPayload();
-      const r = await api('/api/share/preview', Object.assign({}, _payload, { redact: _state.redact }));
-      if (!r || !r.ok) throw new Error((r && r.error) || '预览失败');
-      _preview = r;
-      const frame = _panel.querySelector('.share-preview');
-      if (frame) frame.srcdoc = r.html || '';
-      renderReport(r.report || {});
-      const size = Math.round((r.bytes || 0) / 1024);
-      setStatus('预览就绪 · 约 ' + size + ' KB' + (r.sections ? ' · ' + r.sections + ' 节目录' : ''));
-    } catch (e) {
-      setStatus('预览失败：' + (e && e.message ? e.message : e));
-    }
+    const run = (async () => {
+      try {
+        const payload = await buildPayload();
+        if (seq !== _previewSeq) return;
+        const r = await api('/api/share/preview',
+          Object.assign({}, payload, { redact: _state.redact }));
+        if (seq !== _previewSeq) return;
+        if (!r || !r.ok) throw new Error((r && r.error) || '预览失败');
+        _payload = payload;
+        _preview = r;
+        const frame = _panel.querySelector('.share-preview');
+        if (frame) frame.srcdoc = r.html || '';
+        renderReport(r.report || {});
+        const size = Math.round((r.bytes || 0) / 1024);
+        const partial = !!(payload.options && payload.options.partial);
+        const remote = Number(payload.options && payload.options.remote_images) || 0;
+        setStatus('预览就绪 · 约 ' + size + ' KB' + (r.sections ? ' · ' + r.sections + ' 节目录' : '')
+          + (partial ? ' · 部分历史未加载' : '')
+          + (remote ? ' · ' + remote + ' 张外链图片未内联' : ''));
+      } catch (e) {
+        if (seq === _previewSeq) setStatus('预览失败：' + (e && e.message ? e.message : e));
+      }
+    })();
+    _previewing = run;
+    try { await run; } finally { if (_previewing === run) _previewing = null; }
   }
 
   async function doExport() {
+    if (_previewing) { try { await _previewing; } catch (e) { /* 预览失败由状态栏提示 */ } }
     if (!_payload) { await doPreview(); }
     if (!_payload) return;
     setStatus('请选择保存位置…');
@@ -283,10 +432,14 @@
 
   function close() {
     if (!_panel) return;
-    _panel.remove();
+    const el = _panel;
     _panel = null;
     _payload = null;
     _preview = null;
+    _previewSeq += 1;          // 让还在飞的预览结果作废
+    _previewing = null;
+    if (typeof hideWithAnim === 'function') hideWithAnim(el, () => el.remove());
+    else el.remove();
   }
 
   function row(label, node) {
@@ -327,7 +480,10 @@
   }
 
   function buildPanel() {
-    const mask = el('div', 'modal');
+    const mask = el('div', 'modal hidden');
+    mask.setAttribute('role', 'dialog');
+    mask.setAttribute('aria-modal', 'true');
+    mask.setAttribute('aria-label', '分享');
     mask.onclick = (e) => { if (e.target === mask) close(); };
     const card = el('div', 'modal-card share-card');
     card.onclick = (e) => e.stopPropagation();
@@ -436,6 +592,9 @@
     card.appendChild(body);
     mask.appendChild(card);
     document.body.appendChild(mask);
+    // 接入统一的弹窗焦点栈：Tab 不会跑到背后的聊天区，关闭后焦点回触发按钮
+    if (typeof showWithAnim === 'function') showWithAnim(mask);
+    else mask.classList.remove('hidden');
     return mask;
   }
 
@@ -446,6 +605,14 @@
     _panel = buildPanel();
     await doPreview();
   }
+
+  // 分享是模态面板：Esc 优先关闭它，不再触发背后的笔记 / 搜索快捷键
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !_panel) return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  }, true);
 
   window.openSharePanel = openSharePanel;
 })();

@@ -229,6 +229,7 @@ function workDateTimePicker(initTs, opts) {
 /* ---------------- 生命周期 ---------------- */
 
 function workEnterMode() {
+  if (typeof ensurePanelMounted === 'function') ensurePanelMounted('work-panel');
   if (!WORK.bound) workBind();
   // 工作台里的任务确认 / 完成也要能发系统通知；切换模式是用户手势，适合请求权限 + 预热提示音
   if (typeof ensureNotifyPermission === 'function') ensureNotifyPermission();
@@ -345,6 +346,8 @@ function workEmpty(title, sub) {
 /* ---------------- 弹窗 ---------------- */
 
 function workOpenDialog(title, build, onOk, opts) {
+  // 面板是惰性挂载的：从设置里直接打开备份弹窗时，先确保 DOM 已存在
+  if (typeof ensurePanelMounted === 'function') ensurePanelMounted('work-panel');
   const body = workEl('work-dialog-body');
   if (!body) return;
   // 从设置里打开「备份与恢复」时可能还没进过工作台：先把弹窗的关闭/确认绑定补上，
@@ -417,7 +420,6 @@ function workBind() {
   const bind = (id, fn) => { const el = workEl(id); if (el) el.onclick = fn; };
   bind('work-refresh', () => workLoad(true));
   bind('work-new-event', () => workOpenEventDialog());
-  bind('work-new-image', workOpenImageDialog);
   bind('work-clean-events', workCleanupEvents);
   bind('work-new-task', workOpenTaskDialog);
   bind('work-templates', workOpenTemplatesDialog);
@@ -434,7 +436,7 @@ function workBind() {
       const jump = b.dataset.wjump;
       if (jump === 'today') {
         const col = workEl('work-today');
-        if (col) col.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        if (col) col.scrollIntoView({ behavior: GM_SMOOTH, block: 'nearest' });
         const q = workEl('work-quick');
         if (q) q.focus();
       } else {
@@ -444,7 +446,7 @@ function workBind() {
         else { WORK.taskFilter = ''; if (filter) filter.value = ''; }
         workRenderTasks();
         const col = workEl('work-tasks');
-        if (col) col.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        if (col) col.scrollIntoView({ behavior: GM_SMOOTH, block: 'nearest' });
       }
     };
   });

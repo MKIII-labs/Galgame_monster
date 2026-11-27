@@ -168,6 +168,7 @@ function sessionRowEl(s) {
   }
   el.appendChild(acts);
   el.onclick = () => selectSession(s.id);
+  el.onpointerenter = () => prefetchSessionMessages(s.id);   // 指到就开始拉最后一屏
   el.ondblclick = () => renameSession(s.id);
   // 键盘可达：会话项本身与四个操作键都能 Tab 到、Enter 触发
   makeClickable(el, () => selectSession(s.id), '会话：' + (s.title || '新对话'));
@@ -479,10 +480,49 @@ function bindSessionGroupToggle() {
   };
 }
 
+let _sessionsRenderSig = '';
+
+/* 消费 done 的增量会话摘要：只更新对应会话行与当前消息，避免每轮解析整份 sessions。 */
+function applySessionPatch(p, message) {
+  if (!p || !p.sid) return false;
+  const rows = (state.sessions && state.sessions.sessions) || [];
+  const row = rows.find((x) => x && x.id === p.sid);
+  if (!row) return false;
+  if (p.title) row.title = p.title;
+  if (p.updated_at) row.updated_at = p.updated_at;
+  if (typeof p.msg_total === 'number') row.msg_total = p.msg_total;
+  if (typeof p.pinned === 'boolean') row.pinned = p.pinned;
+  if (Array.isArray(p.compress_marks)) row.compress_marks = p.compress_marks;
+  const idx = Number(p.msg_idx);
+  if (!message || !Number.isFinite(idx)) return true;
+  const put = (list, start) => {
+    if (!Array.isArray(list)) return;
+    const at = idx - (Number(start) || 0);
+    if (at >= 0 && at < list.length) list[at] = message;
+    else if (at === list.length) list.push(message);
+  };
+  put(row.messages, row.msg_loaded_start !== undefined ? row.msg_loaded_start : row.msg_start);
+  const cached = state.msgCache && state.msgCache[p.sid];
+  if (cached) put(cached.messages, cached.msg_loaded_start);
+  return true;
+}
+
 function renderSessions() {
   const box = $('#session-list');
-  box.innerHTML = '';
   const all = state.sessions.sessions || [];
+  // 侧栏被 SSE 的 pending 事件高频触发；数据没变时不要 innerHTML='' 全量重建。
+  const sig = sessionGroupMode() + '|' + (state.sessions.current || '') + '|'
+    + all.map((s) => {
+      const st = sessionStatusOf(s);
+      return [s.id, s.title || '', s.pinned ? 1 : 0, s.updated_at || 0,
+        st.kind, st.label || '', s.sandbox_key || ''].join(':');
+    }).join(';');
+  if (sig === _sessionsRenderSig && box.childElementCount) {
+    updateStatusLine();
+    return;
+  }
+  _sessionsRenderSig = sig;
+  box.innerHTML = '';
   if (sessionGroupMode() === 'flat') {
     all.forEach((s) => box.appendChild(sessionRowEl(s)));
   } else {
@@ -494,8 +534,40 @@ function renderSessions() {
   if (typeof renderKbBadge === 'function') renderKbBadge();   // 侧栏知识库「未绑定」角标
 }
 
+/* ---------------- 会话消息预取 ----------------
+   切会话时要等一次网络往返（实测 30–90ms + 渲染 30ms）。悬停 / 空闲时先把
+   最后一屏拉进 msgCache，点击时走已有的缓存路径：先出内容，网络只做校准。 */
+const _prefetchBusy = new Set();
+
+async function prefetchSessionMessages(id) {
+  if (!id || id === DRAFT_SID) return;
+  if (state.sessions.current === id) return;
+  if (state.msgCache && state.msgCache[id]) return;
+  if (_prefetchBusy.has(id)) return;
+  if (state.streamingSids && state.streamingSids[id]) return;   // 生成中的会话不抢带宽
+  const s = (state.sessions.sessions || []).find((x) => x.id === id);
+  if (!s) return;
+  _prefetchBusy.add(id);
+  try {
+    const r = await api('/api/session/messages',
+                        { session_id: id, before: 999999, limit: 40 });
+    if (!r || !r.ok || !Array.isArray(r.messages) || !r.messages.length) return;
+    if (state.msgCache && state.msgCache[id]) return;           // 期间已经缓存过
+    if (!state.msgCache) state.msgCache = {};
+    state.msgCache[id] = {
+      messages: r.messages,
+      msg_loaded_start: Number(r.from) || 0,
+      msg_total: Number(r.total) || r.messages.length,
+    };
+    if (typeof trimMsgCache === 'function') trimMsgCache();
+  } catch (e) { /* 预取失败静默：点开时还有正常请求兜底 */ }
+  finally {
+    _prefetchBusy.delete(id);
+  }
+}
+
 /* ---------------- 会话搜索浮层 ---------------- */
-const ssState = { open: false, items: [], timer: null, q: '' };
+const ssState = { open: false, items: [], timer: null, q: '', ctrl: null };
 
 function ssOpen() {
   const modal = $('#session-search-modal');
@@ -514,6 +586,7 @@ function ssClose() {
   ssState.open = false;
   ssState.items = [];
   clearTimeout(ssState.timer);
+  if (ssState.ctrl) { try { ssState.ctrl.abort(); } catch (e) { /* 忽略 */ } ssState.ctrl = null; }
   if (modal) modal.classList.add('hidden');
   if (input) input.value = '';
 }
@@ -521,14 +594,21 @@ function ssClose() {
 async function ssFetch(q) {
   const list = $('#ss-results');
   ssState.q = String(q || '');
+  // 新的按键取消上一发请求：长会话下避免旧结果覆盖新结果 / 白白等服务端扫完
+  if (ssState.ctrl) { try { ssState.ctrl.abort(); } catch (e) { /* 忽略 */ } }
+  const ctrl = new AbortController();
+  ssState.ctrl = ctrl;
   if (list) list.innerHTML = '<div class="ss-empty">读取中…</div>';
   try {
-    const r = await api('/api/session/search', { q: q });
-    if (!ssState.open) return;                 // 请求返回前已关闭
+    const r = await api('/api/session/search', { q: q }, { signal: ctrl.signal });
+    if (!ssState.open || ssState.ctrl !== ctrl) return;   // 已关闭 / 已被更新的请求取代
     ssState.items = (r && r.items) || [];
     ssRender(q);
   } catch (e) {
+    if (ssState.ctrl !== ctrl || (e && e.name === 'AbortError')) return;
     if (list) list.innerHTML = '<div class="ss-empty">搜索失败：' + escapeHtml(String(e)) + '</div>';
+  } finally {
+    if (ssState.ctrl === ctrl) ssState.ctrl = null;
   }
 }
 
@@ -577,6 +657,19 @@ async function ssPick(id, msgIndex, q) {
   if (Number.isFinite(msgIndex)) await ssFocusMessage(msgIndex, q);
 }
 
+/* 把一条已经在 DOM 里的消息滚到视口中间，**不重建任何节点**。
+   点通知回来时用这个：后台刚结束、内存里的消息可能还没同步，整窗重建会把
+   正在显示的实时行冲掉（表现就是「AI 输出消失」）。 */
+function chatScrollRow(row) {
+  const chat = $('#chat');
+  if (!chat || !row || !chat.contains(row)) return false;
+  const cr = chat.getBoundingClientRect();
+  const rr = row.getBoundingClientRect();
+  const pad = rr.height <= chat.clientHeight ? (chat.clientHeight - rr.height) / 2 : 24;
+  chat.scrollTop += (rr.top - cr.top) - pad;
+  return true;
+}
+
 /* 跳到某条消息：先把「更早」的分页补到目标之前，再以它上方几行为起点重排。
    重排后 renderMessages 会按「保持视觉位置」重设 scrollTop（展开更早的语义），
    这里必须覆盖它；单条消息可能上万像素，所以优先按命中词的真实位置对齐。
@@ -585,6 +678,15 @@ async function ssFocusMessage(idx, q) {
   const s = curSession();
   const chat = $('#chat');
   if (!s || !chat) return;
+  const total = Math.max(
+    Array.isArray(s.messages) ? s.messages.length : 0,
+    Number(s.msg_total) || 0);
+  // 通知里的 messageIndex 可能比本地已同步的消息还新（后台刚结束、落库还没回传）：
+  // 越界时直接放弃定位，绝不拿它去整窗重建，否则会渲染出一个空窗口
+  if (!Number.isFinite(idx) || idx < 0 || idx >= total) {
+    toast('这条消息已不在当前视图里');
+    return;
+  }
   const start = Math.max(0, idx - 3);
   let guard = 0;
   while ((Number(s.msg_loaded_start) || 0) > start && guard < 30) {
@@ -793,7 +895,7 @@ function findGo(step) {
   findState.idx = ((findState.idx + (step || 1)) % hits.length + hits.length) % hits.length;
   const cur = hits[findState.idx];
   cur.classList.add('cur');
-  try { cur.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { cur.scrollIntoView(); }
+  try { cur.scrollIntoView({ block: 'center', behavior: GM_SMOOTH }); } catch (e) { cur.scrollIntoView(); }
   if (box) box.textContent = (findState.idx + 1) + '/' + hits.length;
 }
 
@@ -1255,7 +1357,7 @@ function loadComposerDraft(sid) {
     }
   }
   if (typeof renderAttach === 'function') renderAttach();
-  if (typeof renderQuotes === 'function') renderQuotes();
+  if (typeof renderQuoteBar === 'function') renderQuoteBar();
   if (typeof renderRefBar === 'function') renderRefBar();
 }
 
@@ -1269,6 +1371,8 @@ function focusComposerAfterSwitch() {
 }
 
 async function selectSession(id) {
+  // 切会话时收起搜索结果侧栏：里面的结果是上一个会话的
+  if (typeof closeSearchPanel === 'function') closeSearchPanel();
   // 点会话就是「要回到对话」：插件页是整屏页面，不退出的话会看不到切换结果
   if (state.uiMode === 'plugins' && typeof setUiMode === 'function') setUiMode('solo');
   // 换会话时取消「修改历史消息」状态，避免下次回来误把它当成正在编辑
@@ -1300,7 +1404,7 @@ async function selectSession(id) {
   if (cached && target && Array.isArray(cached.messages)) {
     target.messages = cached.messages;
     target.msg_loaded_start = Number(cached.msg_loaded_start) || 0;
-    target.msg_total = cached.messages.length;
+    target.msg_total = Number(cached.msg_total) || cached.messages.length;
     renderMessages();
     if (typeof refreshStreamingUI === 'function') refreshStreamingUI();
     if (typeof renderPendingCards === 'function') renderPendingCards();
@@ -1358,6 +1462,29 @@ async function deleteSession(id) {
     if (r) renderContextBar(r.context);
     toast('已删除会话：' + label);
   } catch (e) { toastErr('删除', e); }
+}
+
+/* 带摘要续（对齐 Trae 的 new_context）：把当前会话压成交接摘要，开一个新会话继续。 */
+async function handoffSession() {
+  const sid = state.sessions.current;
+  if (!sid || sid === DRAFT_SID) { toast('当前还没有可交接的会话'); return; }
+  if (typeof isStreaming === 'function' && isStreaming(sid)) {
+    toast('会话正在生成，先点「停止」再交接');
+    return;
+  }
+  if (!(await appConfirm(
+    '把当前会话整理成交接摘要，并在新会话里继续？\n'
+    + '摘要包含：目标、计划进度、最近请求与结论；不会复制历史消息。'))) return;
+  try {
+    const r = await api('/api/session/handoff', { session_id: sid });
+    if (!r || !r.ok) { toast((r && r.error) || '交接失败', 'error'); return; }
+    applySessionsPayload(r.sessions, { keepCurrent: false });
+    if (typeof refreshStreamingUI === 'function') refreshStreamingUI();
+    renderSessions();
+    renderMessages();
+    if (r && typeof renderContextBar === 'function') renderContextBar(r.context);
+    toast('已在新会话里继续（交接摘要放在第一条消息）', 'success');
+  } catch (e) { toastErr('交接失败', e); }
 }
 
 async function newSession() {
@@ -1458,13 +1585,31 @@ function hideEmpty() {
   if (e) e.remove();
 }
 
-// 「回到底部」按钮的定位：按输入区实际高度动态设置 bottom，
-// 避免输入区变高（进度条/附件条/提示换行）时按钮压到输入框上
+// 「回到底部」按钮与 Toast 的定位：按输入区实际高度动态设置 bottom，
+// 避免输入区变高（进度条/附件条/提示换行）时压到输入框上。
+// 大厅 / 工作台把 .composer 整块 display:none（高度 0），Toast 自动回到默认位置。
 function positionToBottomBtn() {
-  const btn = $('#btn-bottom');
   const composer = document.querySelector('.composer');
-  if (!btn || !composer) return;
-  btn.style.bottom = (composer.getBoundingClientRect().height + 10) + 'px';
+  const h = composer ? composer.getBoundingClientRect().height : 0;
+  document.documentElement.style.setProperty('--toast-bottom', (h > 0 ? h + 12 : 40) + 'px');
+  const btn = $('#btn-bottom');
+  if (!btn) return;
+  btn.style.bottom = (h + 10) + 'px';
+}
+
+function openTrajectoryAtMessage(index) {
+  const cs = curSession();
+  const msgs = (cs && cs.messages) || [];
+  let turn = 0;
+  for (let i = Math.min(Number(index) || 0, msgs.length - 1); i >= 0; i -= 1) {
+    const m = msgs[i];
+    if (m && m.role === 'user' && m.traj_turn) {
+      turn = Number(m.traj_turn) || 0;
+      break;
+    }
+  }
+  if (typeof window.openTrajectory !== 'function') return;
+  window.openTrajectory(turn ? { turn: turn } : undefined);
 }
 
 function buildActions(row, getText, index, role) {
@@ -1484,7 +1629,39 @@ function buildActions(row, getText, index, role) {
     list.appendChild(b);
     return b;
   };
-  mk('copy', '复制', () => { navigator.clipboard.writeText(getText()).then(() => toast('已复制', 'success')); });
+  // 复制成功就在按钮上给一下 ✓ 反馈：底部 toast 离光标太远
+  const flashCopied = (btn) => {
+    if (!btn) return;
+    const keep = btn.innerHTML;
+    const tip = btn.dataset.tip || '复制';
+    btn.classList.add('copied');
+    btn.dataset.tip = '已复制';
+    btn.setAttribute('aria-label', '已复制');
+    btn.innerHTML = '<span class="msg-act-check" aria-hidden="true">✓</span>';
+    clearTimeout(btn._copyTimer);
+    btn._copyTimer = setTimeout(() => {
+      btn.classList.remove('copied');
+      btn.dataset.tip = tip;
+      btn.setAttribute('aria-label', tip);
+      btn.innerHTML = keep;
+    }, 1200);
+  };
+  mk('copy', '复制', (e) => {
+    const btn = e && e.currentTarget;
+    navigator.clipboard.writeText(getText())
+      .then(() => flashCopied(btn))
+      .catch(() => toast('复制失败，请手动选择文本', 'error'));
+  });
+  // 显式捕获：把这条消息（或是选中的一段）记进笔记；不复制会话，也不改会话
+  mk('note', '整段记入笔记', (e) => {
+    if (typeof window.notesCapture !== 'function') return toast('笔记面板未加载，请刷新页面', 'error');
+    const cs = curSession();
+    window.notesCapture(getText(), {
+      session_id: cs && cs.id, session_title: cs && cs.title,
+      msg_index: index, role: role,
+      rect: e && e.currentTarget ? e.currentTarget.getBoundingClientRect() : row.getBoundingClientRect(),
+    });
+  });
   if (role === 'user') {
     mk('history', '撤回（含文件改动）', () => withdrawUserMessage(index));
     mk('pencil', '修改', () => editUserMessage(index));
@@ -1498,11 +1675,10 @@ function buildActions(row, getText, index, role) {
     // mousedown 阻止默认：点按钮会先清空选区，那样就拿不到用户划选的文字了
     mk('chat', '添加到对话', () => addSelectionToChat(row))
       .addEventListener('mousedown', (e) => e.preventDefault());
+    if (typeof index === 'number') mk('history', '查看轨迹', () => openTrajectoryAtMessage(index));
     if (typeof index === 'number') mk('branch', '创建分支', () => forkFromMessage(index));
     if (typeof index === 'number') mk('refresh', '重新发言', () => regenerateReply(index));
     if (typeof index === 'number') mk('external', '分享', () => shareMessage(index));
-    // 回退到此：删掉这条及其后的消息，并把其中的文件改动一起还原
-    if (typeof index === 'number') mk('reset', '回退到此（含文件改动）', () => rollbackMessage(index));
     // 「继续输出」：仅当该条是最后一条、被中断过时提供
     const cs = curSession();
     const cms = (cs && typeof index === 'number') ? (cs.messages || [])[index] : null;
@@ -1717,7 +1893,7 @@ function buildMemoryChip(mem, index) {
 }
 
 async function undoMemory(token, index, btn) {
-  if (state.streaming || !token) return;
+  if (isStreaming() || !token) return;
   if (btn) btn.disabled = true;
   try {
     const r = await api('/api/memory/undo', {
@@ -2259,6 +2435,10 @@ function buildUserRow(text, index, msg) {
   const refsBox = buildUserRefs(msg && msg.refs);
   if (refsBox) wrap.appendChild(refsBox);
 
+  // 「添加到对话」的引用：已随消息落库，历史里可展开查看
+  const quotesBox = buildUserQuotes(msg && msg.quotes);
+  if (quotesBox) wrap.appendChild(quotesBox);
+
   const b = document.createElement('div');
   b.className = 'bubble';
   b.textContent = text;
@@ -2321,7 +2501,8 @@ function appendUser(text, index, msg) {
   return row;
 }
 
-function buildThinkBlock(text, open) {
+function buildThinkBlock(text, open, opts) {
+  const noToggle = !!(opts && opts.noToggle);
   const box = document.createElement('div');
   box.className = 'think' + (open ? ' open' : '');
   const head = document.createElement('div');
@@ -2342,10 +2523,14 @@ function buildThinkBlock(text, open) {
   body.textContent = text || '';
   const toggleThink = () => {
     const next = !foldIsOpen(box, 'open', true);
+    head.setAttribute('aria-expanded', next ? 'true' : 'false');
     foldTransition(box, body, next, { cls: 'open', positive: true, ms: 180 });
   };
-  head.onclick = toggleThink;
-  makeClickable(head, toggleThink, '展开 / 收起思考过程');
+  head.onclick = noToggle ? null : toggleThink;
+  if (!noToggle) {
+    makeClickable(head, toggleThink, '展开 / 收起思考过程');
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
   box.appendChild(head);
   box.appendChild(body);
   box._body = body;
@@ -2388,11 +2573,15 @@ function clipText(s, n) {
   return t.length > n ? t.slice(0, Math.max(1, n - 1)) + '…' : t;
 }
 
-// 过程统计：只数真实步骤卡（不数思考块），折叠头上给出「几步 / 几步失败」。
+// 过程统计：数真实步骤卡（工具 / 子代理 / Skill / 提问），不数思考块。
 function processStats(flow) {
-  const cards = flow ? flow.querySelectorAll('.tool-card') : [];
+  const cards = flow
+    ? flow.querySelectorAll('.tool-card, .subagent-card, .explore-batch-card, .skcard, .ask-card')
+    : [];
   let failed = 0;
-  cards.forEach((c) => { if (c.classList.contains('failed')) failed += 1; });
+  cards.forEach((c) => {
+    if (c.classList.contains('failed') || c.classList.contains('timed-out')) failed += 1;
+  });
   return { steps: cards.length, failed: failed };
 }
 
@@ -2408,7 +2597,14 @@ function updateFlowMeta(row) {
   if (!row || !row._flowWrap) return;
   const st = processStats(row._flow);
   if (row._flowMeta) row._flowMeta.textContent = flowMetaText(st);
+  fillProcessChips(row._flowWrap.querySelector('.process-fold-chips'), row._flow);
   row._flowWrap.classList.toggle('has-fail', st.failed > 0);
+  const head = row._flowWrap.querySelector('.process-fold-head');
+  if (head && row._flowLabel) {
+    head.setAttribute('aria-label', '过程：' + row._flowLabel.textContent
+      + (row._flowMeta ? '，' + row._flowMeta.textContent : '')
+      + '，点击展开或收起');
+  }
 }
 
 // 当前步骤高亮：并行的多个工具会同时高亮，完成一个灭一个。
@@ -2427,17 +2623,89 @@ function unmarkProcessStep(card) {
   if (g && !g.querySelector('.tool-card.is-current')) g.classList.remove('current');
 }
 
+// 动作摘要：把这一组工具按 TOOL_SUMMARY 聚合成「读取 2 个文件」这类短标签
+function processChips(flow) {
+  const counts = {};
+  if (flow) {
+    flow.querySelectorAll('.tool-card').forEach((c) => {
+      const n = String(c._toolName || '');
+      if (n) counts[n] = (counts[n] || 0) + 1;
+    });
+  }
+  const keys = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  const max = 3;
+  const out = keys.slice(0, max).map((k) => {
+    const fmt = (typeof TOOL_SUMMARY !== 'undefined') ? TOOL_SUMMARY[k] : null;
+    if (fmt) return fmt(counts[k]);
+    const label = (typeof TOOL_LABELS !== 'undefined')
+      ? (TOOL_LABELS[k] || [null, k])[1] : k;
+    return label + ' ×' + counts[k];
+  });
+  if (keys.length > max) out.push('+' + (keys.length - max));
+  return out;
+}
+
+function fillProcessChips(box, flow) {
+  if (!box) return;
+  const items = processChips(flow);
+  box.textContent = '';
+  items.forEach((t) => {
+    const s = document.createElement('span');
+    s.className = 'process-fold-chip';
+    s.textContent = t;
+    box.appendChild(s);
+  });
+  box.style.display = items.length ? '' : 'none';
+}
+
+// 失败时直接跳到第一个失败步骤；折叠中会先展开
+function jumpToFoldFailure(wrap, body) {
+  if (!wrap || !body) return;
+  if (wrap.classList.contains('collapsed')) {
+    foldTransition(wrap, body, true, { cls: 'collapsed' });
+    const head = wrap.querySelector('.process-fold-head');
+    const caret = wrap.querySelector('.process-fold-caret');
+    if (caret) caret.textContent = '▾';
+    if (head) head.setAttribute('aria-expanded', 'true');
+  }
+  const bad = body.querySelector('.tool-card.failed, .tool-card.timed-out, .tool-group.failed');
+  if (!bad) return;
+  try { bad.scrollIntoView({ block: 'center', behavior: GM_SMOOTH }); }
+  catch (e) { bad.scrollIntoView(); }
+  bad.classList.add('flash-fail');
+  setTimeout(() => bad.classList.remove('flash-fail'), 1200);
+}
+
+/* 展开过程折叠时，把里面仍然收起的步骤组一并打开：
+   否则外层展开了，里面只剩一堆「工具组」折叠头，看起来仍像打不开。 */
+function expandFoldSteps(body) {
+  if (!body) return;
+  body.querySelectorAll('.tool-group.collapsed').forEach((el) => {
+    el.classList.remove('collapsed');
+    const b = el.querySelector('.tool-group-body');
+    if (b) b.style.maxHeight = '';
+    const h = el.querySelector('.tool-group-head');
+    if (h) h.setAttribute('aria-expanded', 'true');
+  });
+}
+
+let _foldSeq = 0;
+
 // 过程折叠：思考 + 工具在上，最终答案在下；默认收起。
-function buildProcessFold(flow, timing, endKind, open, toolCount) {
+// 失败的过程组例外：历史回显时也默认展开，让用户直接看到哪一步失败。
+function buildProcessFold(flow, timing, endKind, open, toolCount, older) {
   const st = processStats(flow);
   const kind = String(endKind || '');
+  const failed = st.failed > 0
+    || kind === 'network' || kind === 'server' || kind === 'error' || kind === 'billing';
+  const shouldOpen = !!open || failed;
   const wrap = document.createElement('div');
-  wrap.className = 'process-fold' + (open ? '' : ' collapsed') + (st.failed ? ' has-fail' : '')
+  wrap.className = 'process-fold' + (shouldOpen ? '' : ' collapsed')
+    + (failed ? ' has-fail' : '')
     + (kind === 'stopped' ? ' stopped' : '')
-    + (kind === 'network' || kind === 'server' || kind === 'error' || kind === 'billing'
-      ? ' has-fail' : '')
     + (!kind || kind === 'done' ? ' done' : '')
-    + (flow.querySelector('.tool-result-media') ? ' has-media' : '');
+    + (flow.querySelector('.tool-result-media') ? ' has-media' : '')
+    + (older ? ' is-older' : '');
   const head = document.createElement('div');
   head.className = 'process-fold-head';
   const dot = document.createElement('span');
@@ -2446,32 +2714,52 @@ function buildProcessFold(flow, timing, endKind, open, toolCount) {
   const title = document.createElement('span');
   title.className = 'process-fold-title';
   title.textContent = processFoldLabel(timing, endKind);
+  const chips = document.createElement('span');
+  chips.className = 'process-fold-chips';
+  fillProcessChips(chips, flow);
   const meta = document.createElement('span');
   meta.className = 'process-fold-meta';
   const toolN = Number(toolCount) || 0;
   const metaText = flowMetaText(st);
   meta.textContent = metaText + (toolN ? (metaText ? ' · ' : '') + toolN + ' 次工具' : '');
+  const failBtn = document.createElement('button');
+  failBtn.type = 'button';
+  failBtn.className = 'process-fold-fail';
+  failBtn.textContent = '查看失败';
   const caret = document.createElement('span');
   caret.className = 'process-fold-caret';
-  caret.textContent = open ? '▾' : '▸';
+  caret.textContent = shouldOpen ? '▾' : '▸';
   head.appendChild(dot);
   head.appendChild(title);
+  head.appendChild(chips);
   head.appendChild(meta);
+  head.appendChild(failBtn);
   head.appendChild(caret);
   const body = document.createElement('div');
   body.className = 'process-fold-body';
+  const bodyId = 'pf-' + (++_foldSeq);
+  body.id = bodyId;
+  head.setAttribute('aria-controls', bodyId);
+  head.setAttribute('aria-label', '过程：' + title.textContent
+    + (meta.textContent ? '，' + meta.textContent : '')
+    + '，点击展开或收起');
   body.appendChild(flow);
   wrap.appendChild(head);
   wrap.appendChild(body);
+  failBtn.onclick = (e) => {
+    e.stopPropagation();
+    jumpToFoldFailure(wrap, body);
+  };
   const toggle = () => {
     const next = !foldIsOpen(wrap, 'collapsed');
     foldTransition(wrap, body, next, { cls: 'collapsed' });
+    if (next) expandFoldSteps(body);
     caret.textContent = next ? '▾' : '▸';
     head.setAttribute('aria-expanded', next ? 'true' : 'false');
   };
   head.onclick = toggle;
   makeClickable(head, toggle, '展开 / 收起过程');
-  head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  head.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
   observeProcessFold(wrap);
   return wrap;
 }
@@ -2588,6 +2876,34 @@ function buildUserRefs(items) {
   return box;
 }
 
+/* 「添加到对话」的引用：随用户消息落库，刷新 / 重新发言后仍在 */
+function buildUserQuotes(items) {
+  const list = (items || []).filter((q) => q && String(q.text || '').trim());
+  if (!list.length) return null;
+  const box = document.createElement('details');
+  box.className = 'msg-quotes';
+  // 短引用直接展开；长引用默认收起，避免一条消息占满屏幕
+  box.open = list.every((q) => String(q.text || '').length <= 240);
+  const sum = document.createElement('summary');
+  sum.textContent = '引用 · ' + list.length;
+  box.appendChild(sum);
+  list.forEach((q) => {
+    const bq = document.createElement('blockquote');
+    if (q.label) {
+      const lab = document.createElement('span');
+      lab.className = 'msg-quote-label';
+      lab.textContent = String(q.label);
+      bq.appendChild(lab);
+    }
+    const t = document.createElement('div');
+    t.className = 'msg-quote-text';
+    t.textContent = String(q.text || '');
+    bq.appendChild(t);
+    box.appendChild(bq);
+  });
+  return box;
+}
+
 /* 用服务端解析后的显式引用替换用户气泡上的临时 chip */
 function setUserRefs(userRow, items) {
   if (!userRow || !userRow._wrap) return;
@@ -2634,46 +2950,565 @@ function spanHtml(tag, cls, text) {
   return el;
 }
 
-/* 联网搜索过程块：上面是步骤列表（边搜边追加），完成后下面接来源列表 */
+/* 联网搜索过程块：一条极简 trace。
+   头行：搜索图标 + 「搜索到 N 个网页」+ 站点 favicon 叠层；
+   体行：「浏览 N 个页面」+ 页面标题外链，检索式 / 警告作为小字。
+   不再单独渲染「参考来源」列表：答案上方本来就有统一的来源块。 */
+function _searchHost(url) {
+  try {
+    return new URL(String(url || '')).hostname.replace(/^www\./i, '');
+  } catch (e) {
+    return '';
+  }
+}
+
+function _searchFavColor(host) {
+  const s = String(host || '');
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+  return 'hsl(' + h + ' 52% 46%)';
+}
+
+function _searchFavInitial(host) {
+  const s = String(host || '').replace(/^www\./i, '');
+  return (s[0] || '?').toUpperCase();
+}
+
+function _searchFaviconUrls(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return [];
+  let u = null;
+  try {
+    u = new URL(raw);
+  } catch (e) {
+    try { u = new URL('https://' + raw); } catch (e2) { return []; }
+  }
+  if (!/^https?:$/.test(u.protocol)) return [];
+  const base = u.origin;
+  // 先试站点根目录的常见图标；全失败再退回字母头像
+  return [base + '/favicon.ico', base + '/favicon.svg', base + '/favicon.png'];
+}
+
+// host → {ok:true, src} / {ok:false, at}：同一站点在多个结果、多条消息里只探测一次。
+// 失败只缓存 10 分钟：临时断网 / 被墙恢复后还能重新拿到图标。
+const _searchFavCache = new Map();
+const _SEARCH_FAV_FAIL_TTL = 10 * 60 * 1000;
+
+function _searchFaviconImg(urls, textEl, host) {
+  if (!urls || !urls.length) return null;
+  const key = String(host || urls[0]);
+  const hit = _searchFavCache.get(key);
+  if (hit && hit.ok === false) {
+    if (Date.now() - (hit.at || 0) < _SEARCH_FAV_FAIL_TTL) return null;  // 已知失败：用字母头像
+    _searchFavCache.delete(key);
+  }
+  const img = document.createElement('img');
+  img.className = 'search-favicon-img';
+  img.alt = '';
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  img.referrerPolicy = 'no-referrer';
+  let i = 0;
+  const setSrc = (idx) => { i = idx; img.src = urls[idx]; };
+  img.onload = () => {
+    // 有些站点根目录返回 1×1 空白图（或代理错误页），按失败处理继续换下一个
+    if (img.naturalWidth <= 1 || img.naturalHeight <= 1) {
+      if (i + 1 >= urls.length) {
+        _searchFavCache.set(key, { ok: false, at: Date.now() });
+        img.remove();
+        return;
+      }
+      setSrc(i + 1);
+      return;
+    }
+    _searchFavCache.set(key, { ok: true, src: img.src });
+    if (textEl) textEl.style.visibility = 'hidden';
+  };
+  img.onerror = () => {
+    if (i + 1 >= urls.length) {
+      _searchFavCache.set(key, { ok: false, at: Date.now() });
+      img.remove();
+      return;
+    }
+    setSrc(i + 1);
+  };
+  const cachedIdx = (hit && hit.ok && hit.src) ? urls.indexOf(hit.src) : -1;
+  setSrc(cachedIdx >= 0 ? cachedIdx : 0);
+  return img;
+}
+
+function _searchFaviconNode(box, host) {
+  const s = document.createElement('span');
+  s.className = 'search-favicon';
+  s.style.setProperty('--fv', _searchFavColor(host));
+  s.title = host;
+  const t = document.createElement('span');
+  t.className = 'search-favicon-text';
+  t.textContent = _searchFavInitial(host);
+  s.appendChild(t);
+  const src = (box._favUrlByHost && box._favUrlByHost[host]) || host;
+  const img = _searchFaviconImg(_searchFaviconUrls(src), t, host);
+  if (img) s.appendChild(img);
+  return s;
+}
+
+function searchAddFavicon(box, url) {
+  const host = _searchHost(url);
+  if (!box || !host || !box._favicons) return;
+  if (!box._favHosts) box._favHosts = [];
+  if (!box._favUrlByHost) box._favUrlByHost = {};
+  if (box._favHosts.indexOf(host) >= 0) return;
+  box._favHosts.push(host);
+  box._favUrlByHost[host] = String(url || '');
+  // 只追加新站点，不重建已有图标（图标加载是异步的，重建会让它们重新闪烁）
+  if (box._favHosts.length <= 4) {
+    const node = _searchFaviconNode(box, host);
+    box._favicons.insertBefore(node, box._favMore || null);
+  }
+  if (box._favHosts.length > 4) {
+    if (!box._favMore) {
+      box._favMore = document.createElement('span');
+      box._favMore.className = 'search-favicon more';
+      box._favicons.appendChild(box._favMore);
+    }
+    box._favMore.textContent = '+' + (box._favHosts.length - 4);
+    box._favMore.title = '共 ' + box._favHosts.length + ' 个站点';
+  }
+}
+
 function buildSearchBox() {
-  const box = buildThinkBlock('', true);
-  box.classList.add('sources');
-  box._label.innerHTML = icon('search') + ' 联网搜索';
+  const box = buildThinkBlock('', true, { noToggle: true });
+  box.classList.add('sources', 'search-trace');
+  const head = box.querySelector('.think-head');
+  const dot = head && head.querySelector('span');
+  if (dot) {
+    dot.className = 'search-trace-ico';
+    dot.innerHTML = icon('search');
+  }
+  box._label.textContent = '联网搜索中…';
+  const caret = head && head.querySelector('.think-caret');
+  if (caret) caret.innerHTML = icon('chevron');
+  box._favicons = document.createElement('span');
+  box._favicons.className = 'search-favicons';
+  if (head && caret) head.insertBefore(box._favicons, caret);
   box._body.textContent = '';
-  const steps = document.createElement('div');
-  steps.className = 'search-steps';
-  box._body.appendChild(steps);
-  box._steps = steps;
-  box._fetchLine = null;
-  box._planLine = null;
+
+  // 点击头行（计数 / favicon / 箭头）展开 / 收起右侧搜索结果侧栏
+  const togglePanel = () => {
+    const panel = $('#search-panel');
+    if (panel && panel.classList.contains('open') && _searchPanelBox === box) {
+      closeSearchPanel(true);
+    } else {
+      openSearchPanel(box);
+    }
+  };
+  if (head) {
+    head.title = '查看全部搜索结果';
+    head.onclick = togglePanel;
+    head.setAttribute('aria-haspopup', 'dialog');
+    head.setAttribute('aria-controls', 'search-panel');
+    head.setAttribute('aria-expanded', 'false');
+    makeClickable(head, togglePanel, '查看全部搜索结果');
+  }
+
+  const pages = document.createElement('div');
+  pages.className = 'search-pages';
+  const pLabel = document.createElement('span');
+  pLabel.className = 'search-pages-label';
+  pLabel.innerHTML = icon('list') + '<span>浏览 0 个页面</span>';
+  const links = document.createElement('div');
+  links.className = 'search-page-links';
+  pages.appendChild(pLabel);
+  pages.appendChild(links);
+  box._body.appendChild(pages);
+
+  const meta = document.createElement('div');
+  meta.className = 'search-meta';
+  box._body.appendChild(meta);
+
+  box._pages = pages;
+  box._pagesLabel = pLabel.lastElementChild;
+  box._pageLinks = links;
+  box._meta = meta;
+  box._favHosts = [];
+  box._favMore = null;
+  box._hits = -1;
+  box._seenPages = {};
+  box._pagesTotal = 0;
+  box._readDone = 0;
+  box._readItems = [];
+  box._allItems = [];
   return box;
 }
 
-function searchStep(box, text, cls) {
+function searchSetHits(box, n) {
+  if (!box) return;
+  // 一轮可能搜多次：单个批次的命中数不能把累计值改小
+  box._hits = Math.max(box._hits || 0, Math.max(0, Number(n) || 0));
+  box._label.textContent = '搜索到 ' + box._hits + ' 个网页';
+  if (_searchPanelBox === box) renderSearchPanel(box);
+}
+
+function searchSetQueries(box, queries) {
+  if (!box || !box._meta) return;
+  const qs = (queries || []).map(String).filter(Boolean);
+  if (qs.length) box._meta.textContent = '检索式：' + qs.join(' / ');
+}
+
+function _searchPageLabel(box) {
+  if (!box || !box._pagesLabel) return;
+  const total = box._pagesTotal || box._readDone || 0;
+  box._pagesLabel.textContent = box._readDone < total
+    ? '浏览 ' + box._readDone + '/' + total + ' 个页面'
+    : '浏览 ' + total + ' 个页面';
+}
+
+function searchSetFetching(box, total) {
+  if (!box || !box._pagesLabel) return;
+  // 一轮可能搜多次：页面总数按次累加，进度用累计 done / 总页面数
+  box._pagesTotal = (box._pagesTotal || 0) + Math.max(0, Number(total) || 0);
+  _searchPageLabel(box);
+}
+
+function buildSearchPageLink(title, url) {
+  const a = document.createElement('a');
+  a.className = 'search-page-link';
+  a.href = url || '#';
+  if (url) { a.target = '_blank'; a.rel = 'noreferrer'; }
+  const t = document.createElement('span');
+  t.className = 'search-page-title';
+  t.textContent = title || url || '页面';
+  a.appendChild(t);
+  const ar = document.createElement('span');
+  ar.className = 'search-page-arrow';
+  ar.setAttribute('aria-hidden', 'true');
+  ar.innerHTML = icon('external');
+  a.appendChild(ar);
+  return a;
+}
+
+function searchAddPage(box, obj) {
+  if (!box) return;
+  const o = obj || {};
+  const url = String(o.url || '');
+  const title = String(o.title || url || '页面');
+  const key = url || title;
+  if (!box._seenPages) box._seenPages = {};
+  if (box._seenPages[key]) {
+    // 同一页面在多次搜索里被重复抓取：后端已经把它算进本次 total，
+    // 这里不再计一次 done，同时把虚高的总数减回去，避免永远停在 3/8。
+    if (box._pagesTotal > box._readDone) box._pagesTotal -= 1;
+    _searchPageLabel(box);
+    return;
+  }
+  box._seenPages[key] = true;
+  box._readDone = (box._readDone || 0) + 1;
+  if (!box._readItems) box._readItems = [];
+  box._readItems.push({ title: title, url: url });
+  searchAddFavicon(box, url);
+  if (o.ok !== false && box._pageLinks) {
+    box._pageLinks.appendChild(buildSearchPageLink(title, url));
+  }
+  if (!box._pagesTotal) box._pagesTotal = box._readDone;
+  _searchPageLabel(box);
+  if (o.ok === false) searchWarn(box, title + '（正文抓取失败，改用摘要）');
+  if (_searchPanelBox === box && !(box._allItems && box._allItems.length)) {
+    renderSearchPanel(box);
+  }
+}
+
+function searchWarn(box, text) {
+  if (!box || !box._body) return;
   const d = document.createElement('div');
-  d.className = 'search-step' + (cls ? ' ' + cls : '');
-  d.textContent = text;
-  box._steps.appendChild(d);
-  scrollToBottom();
-  return d;
+  d.className = 'search-warn';
+  d.textContent = String(text || '');
+  box._body.appendChild(d);
 }
 
-// 把来源列表接到搜索块下面，并把标题改成最终态
-function appendSearchSources(box, items) {
-  const srcWrap = document.createElement('div');
-  srcWrap.className = 'search-src';
-  const div = document.createElement('div');
-  div.className = 'search-step';
-  div.textContent = '─── 参考来源 ───';
-  srcWrap.appendChild(div);
-  srcWrap.appendChild(sourceItemRows(items));
-  box._body.appendChild(srcWrap);
-  // 一轮里可能搜多次：把「步骤」容器挪到来源块之后，第二次及以后的步骤才会排在时间线上
-  // （否则新步骤会插到第一组来源的上方，看起来像顺序错乱）
-  if (box._steps) box._body.appendChild(box._steps);
-  box._label.innerHTML = icon('search') + ' 联网搜索 · ' + (items || []).length + ' 条来源';
+function searchSetAllItems(box, items) {
+  if (!box) return;
+  const list = items || [];
+  box._allItems = list.slice();
+  list.slice(0, 4).forEach((it) => searchAddFavicon(box, it && it.url));
+  if (_searchPanelBox === box) renderSearchPanel(box);
+}
+
+/* 按落库消息重建搜索 trace：历史回显与「整段会话」分享共用。 */
+function buildSearchTraceFromMessage(m) {
+  if (!m || !m.sources || !m.sources.length) return null;
+  const box = buildSearchBox();
+  const pages = (m.search && Array.isArray(m.search.pages)) ? m.search.pages : [];
+  const hits = (m.search && Number(m.search.hits)) || m.sources.length;
+  searchSetHits(box, hits);
+  if (pages.length) {
+    pages.forEach((p) => searchAddPage(box, {
+      ok: true,
+      title: (p && (p.title || p.url)) || '',
+      url: (p && p.url) || '',
+    }));
+  } else if (box._pages) {
+    // 老消息没有「抓取过哪些页面」的元数据：不伪造浏览列表
+    box._pages.style.display = 'none';
+  }
+  searchSetAllItems(box, m.sources);
   return box;
 }
+
+// 兼容旧调用：来源只用来补「浏览页面」列表。
+// 注意 sources 是全部命中（可能几十条），不能整批塞进列表；
+// 已经通过 search_read 拿到浏览页面时直接跳过，只补站点 favicon。
+function appendSearchSources(box, items, opts) {
+  if (!box) return box;
+  const list = items || [];
+  // 一轮可能搜多次：按 URL 去重合并，侧栏里保留全部结果
+  const seen = {};
+  const merged = (box._allItems || []).concat(list).filter((it) => {
+    const k = String((it && (it.url || it.title)) || '');
+    if (!k || seen[k]) return false;
+    seen[k] = true;
+    return true;
+  });
+  box._allItems = merged;
+  // 单个批次的 search_hits 只是增量；来源合并后的去重总数才是最终命中数。
+  // 「复用上一轮来源」保留自己的标题，不做这次回写。
+  if (!(opts && opts.keepHits)) {
+    box._hits = Math.max(0, merged.length);
+    box._label.textContent = '搜索到 ' + box._hits + ' 个网页';
+  }
+  if (box._readDone > 0 || box._pagesTotal > 0) {
+    list.slice(0, 4).forEach((it) => searchAddFavicon(box, it && it.url));
+  } else {
+    const shown = list.slice(0, 5);
+    if (!box._pagesTotal) box._pagesTotal = shown.length;
+    shown.forEach((it) => {
+      searchAddPage(box, { ok: true, title: it && (it.title || it.url), url: it && it.url });
+    });
+  }
+  if (_searchPanelBox === box) renderSearchPanel(box);
+  return box;
+}
+
+/* ---------------- 搜索结果侧栏 ---------------- */
+let _searchPanelBox = null;
+
+function _searchItemsOf(box) {
+  if (!box) return [];
+  if (box._allItems && box._allItems.length) return box._allItems;
+  return box._readItems || [];
+}
+
+function _searchResultFavicon(it) {
+  const host = _searchHost(it && it.url) || String((it && it.site) || '');
+  const s = document.createElement('span');
+  s.className = 'search-result-fav';
+  s.style.setProperty('--fv', _searchFavColor(host));
+  s.title = host;
+  const t = document.createElement('span');
+  t.className = 'search-result-fav-text';
+  t.textContent = _searchFavInitial(host);
+  s.appendChild(t);
+  const img = _searchFaviconImg(_searchFaviconUrls(it && it.url), t, host);
+  if (img) s.appendChild(img);
+  return s;
+}
+
+function _searchResultNode(it, i) {
+  const url = String((it && it.url) || '');
+  const n = Number(it && it.n) || (i + 1);
+  const a = document.createElement('a');
+  a.className = 'search-result';
+  a.href = url || '#';
+  a.dataset.n = String(n);
+  if (url) { a.target = '_blank'; a.rel = 'noreferrer'; }
+
+  const meta = document.createElement('div');
+  meta.className = 'search-result-meta';
+  const idx = document.createElement('span');
+  idx.className = 'search-result-idx';
+  idx.textContent = String(n);
+  meta.appendChild(idx);
+  meta.appendChild(_searchResultFavicon(it));
+  const site = document.createElement('span');
+  site.className = 'search-result-site';
+  const host = _searchHost(url);
+  site.textContent = [
+    String((it && it.site) || '').trim() || host,
+    String((it && it.published_at) || '').trim().slice(0, 10),
+  ].filter(Boolean).join(' · ');
+  meta.appendChild(site);
+
+  const title = document.createElement('div');
+  title.className = 'search-result-title';
+  title.textContent = String((it && it.title) || url || '未命名结果');
+  const snippet = document.createElement('div');
+  snippet.className = 'search-result-snippet';
+  snippet.textContent = String((it && it.snippet) || '');
+
+  a.appendChild(meta);
+  a.appendChild(title);
+  a.appendChild(snippet);
+  return a;
+}
+
+function _searchPanelEmpty(list, box, msg) {
+  list.textContent = '';
+  const d = document.createElement('div');
+  d.className = 'search-panel-empty';
+  d.textContent = msg;
+  list.appendChild(d);
+  list._box = box;
+  list._items = null;
+  list._count = 0;
+  list._emptyMsg = msg;
+}
+
+function _searchFocusTarget(box, n) {
+  const list = $('#search-panel-list');
+  if (!list || !n) return;
+  const hit = list.querySelector('.search-result[data-n="' + Number(n) + '"]');
+  if (!hit) return;                 // 目标还没返回：保留 pending，下一批结果到了再定位
+  box._pendingTarget = 0;
+  hit.classList.add('is-target');
+  try { hit.scrollIntoView({ block: 'center' }); } catch (e) { hit.scrollIntoView(); }
+  setTimeout(() => hit.classList.remove('is-target'), 1600);
+}
+
+function renderSearchPanel(box) {
+  const list = $('#search-panel-list');
+  const count = $('#search-panel-count');
+  if (!list) return;
+  const items = _searchItemsOf(box);
+  if (count) {
+    if (!items.length) {
+      count.textContent = '';
+    } else if (box && box._hits >= 0 && box._hits !== items.length) {
+      count.textContent = '已加载 ' + items.length + ' / 共 ' + box._hits;
+    } else {
+      count.textContent = items.length + ' 条';
+    }
+  }
+  if (!items.length) {
+    const msg = (box && box._hits === 0)
+      ? '没有找到相关结果' : '搜索结果还在返回…';
+    if (list._box !== box || list._emptyMsg !== msg) _searchPanelEmpty(list, box, msg);
+    return;
+  }
+  // 列表只增长：同一批结果里新到的页面直接追加，已渲染的条目不再重建，
+  // 用户正在看结果时不会被重置滚动位置。
+  const same = list._box === box && list._items === items &&
+    !(list._count > items.length);
+  if (!same) {
+    const top = list.scrollTop;
+    list.textContent = '';
+    list._box = box;
+    list._items = items;
+    list._count = 0;
+    list._emptyMsg = '';
+    items.forEach((it, i) => list.appendChild(_searchResultNode(it, i)));
+    list._count = items.length;
+    list.scrollTop = top;
+  } else {
+    while (list._count < items.length) {
+      list.appendChild(_searchResultNode(items[list._count], list._count));
+      list._count += 1;
+    }
+  }
+  if (box && box._pendingTarget) _searchFocusTarget(box, box._pendingTarget);
+}
+
+function openSearchPanel(box, target) {
+  const panel = $('#search-panel');
+  if (!panel) return;
+  // 1280 左右同时开搜索栏（340）+ 检查器（320）会把聊天区挤到 400px 以下
+  if (window.innerWidth < 1400 && window.uiShell
+      && typeof window.uiShell.closeInspector === 'function') {
+    window.uiShell.closeInspector();
+  }
+  const prev = _searchPanelBox;
+  if (prev && prev !== box) {
+    prev.classList.remove('active');
+    const ph = prev.querySelector('.think-head');
+    if (ph) ph.setAttribute('aria-expanded', 'false');
+  }
+  _searchPanelBox = box || null;
+  if (box) box._pendingTarget = Number(target) || 0;
+  renderSearchPanel(box);
+  panel.classList.add('open');
+  panel.setAttribute('aria-hidden', 'false');
+  if (box) {
+    box.classList.add('active');
+    const head = box.querySelector('.think-head');
+    if (head) head.setAttribute('aria-expanded', 'true');
+  }
+  // 焦点放到面板本身（而不是关闭按钮）：键盘用户可直接 Tab 到结果 / 关闭，
+  // 也不会在鼠标点击后在 ✕ 上留一个突兀的焦点环。
+  try { panel.focus({ preventScroll: true }); } catch (e) { panel.focus(); }
+}
+
+function closeSearchPanel(restoreFocus) {
+  const panel = $('#search-panel');
+  if (!panel) return;
+  const prev = _searchPanelBox;
+  if (prev) {
+    prev.classList.remove('active');
+    const head = prev.querySelector('.think-head');
+    if (head) head.setAttribute('aria-expanded', 'false');
+  }
+  panel.classList.remove('open');
+  panel.setAttribute('aria-hidden', 'true');
+  _searchPanelBox = null;
+  if (restoreFocus && prev) {
+    const head = prev.querySelector('.think-head');
+    if (head && head.isConnected) {
+      try { head.focus({ preventScroll: true }); } catch (e) { head.focus(); }
+    }
+  }
+}
+
+/* 正文里的 [n] 变成可点击的来源索引：点击展开该条消息的搜索结果侧栏并定位。
+   只在消息本身带搜索 trace 时才装饰，普通正文里的 [1] 保持原样。 */
+function decorateCitations(root, box) {
+  if (!root || !box) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  const targets = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    const p = node.parentElement;
+    if (!p || p.closest('a, button, pre, code, script, style, .katex, .math, .md-toc')) continue;
+    if (!/\[\d{1,3}\]/.test(node.nodeValue || '')) continue;
+    targets.push(node);
+  }
+  targets.forEach((tn) => {
+    const text = tn.nodeValue || '';
+    const frag = document.createDocumentFragment();
+    const re = /\[(\d{1,3})\]/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'cite-ref';
+      b.dataset.cite = m[1];
+      b.textContent = m[0];
+      b.title = '查看来源 ' + m[1];
+      frag.appendChild(b);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    tn.parentNode.replaceChild(frag, tn);
+  });
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest && e.target.closest('.cite-ref');
+  if (!btn) return;
+  const row = btn.closest('.msg.ai');
+  const box = row && row.querySelector('.search-trace');
+  if (!box) return;
+  e.preventDefault();
+  openSearchPanel(box, Number(btn.dataset.cite) || 0);
+});
 
 // 缓存命中率：命中的 token 本来就是输入的一部分，所以分母用 prompt。
 // 没有命中 / 输入为 0 时返回空串，调用处直接拼在后面。
@@ -2996,6 +3831,42 @@ function onChatPathDblClick(e) {
   e.preventDefault();
   openPathFromText(text);
 }
+
+/* Trae 式文件链接：回答里 `[名](file:///绝对路径#L12)` 单击在 IDE 打开。
+   沙箱内的绝对路径先转成相对路径；沙箱外的文件不打开（IDE 只认沙箱内）。 */
+async function openFileLink(a) {
+  const raw = String((a && a.dataset && a.dataset.file) || '').trim();
+  if (!raw) return;
+  const line = parseInt((a.dataset && a.dataset.line) || '', 10) || 0;
+  const s = curSession();
+  const sb = (s && s.sandbox) || '';
+  let rel = raw.replace(/\\/g, '/');
+  if (sb && /^[A-Za-z]:\//.test(rel)) {
+    const root = sb.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (rel.toLowerCase().indexOf(root.toLowerCase() + '/') === 0) {
+      rel = rel.slice(root.length + 1);
+    } else {
+      toast('这个文件不在当前沙箱内，无法在 IDE 打开');
+      return;
+    }
+  }
+  if (typeof setUiMode !== 'function' || typeof openIdeFile !== 'function') return;
+  try {
+    if (state.uiMode !== 'ide') await setUiMode('ide');
+    await openIdeFile(rel);
+    if (line && typeof ideRevealLine === 'function') ideRevealLine(rel, line);
+  } catch (e) {
+    toast('打开失败：' + (e && e.message ? e.message : e), 'error');
+  }
+}
+
+document.addEventListener('click', (e) => {
+  const a = e.target && e.target.closest ? e.target.closest('a.file-link') : null;
+  if (!a) return;
+  e.preventDefault();
+  e.stopPropagation();
+  openFileLink(a);
+}, true);
 
 document.addEventListener('mouseover', (e) => {
   const el = e.target && e.target.closest && e.target.closest('#chat code.inline');
@@ -3707,7 +4578,7 @@ function planPanelLocate(pid) {
     target = Array.prototype.find.call(
       card.querySelectorAll('.plan-step'), (n) => n.dataset.pid === pid) || card;
   }
-  try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { /* 忽略 */ }
+  try { target.scrollIntoView({ block: 'center', behavior: GM_SMOOTH }); } catch (e) { /* 忽略 */ }
   target.classList.add('insp-flash');
   setTimeout(() => target.classList.remove('insp-flash'), 1200);
 }
@@ -3721,7 +4592,7 @@ function planPanelLocateReview() {
   if (card.classList.contains('collapsed')) {
     foldTransition(card, card.querySelector('.plan-review-body'), true, { cls: 'collapsed' });
   }
-  try { card.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { /* 忽略 */ }
+  try { card.scrollIntoView({ block: 'center', behavior: GM_SMOOTH }); } catch (e) { /* 忽略 */ }
   card.classList.add('insp-flash');
   setTimeout(() => card.classList.remove('insp-flash'), 1200);
 }
@@ -4239,7 +5110,8 @@ function buildApprovalCard(obj) {
   const send = (ok, remember, always) => {
     card.querySelectorAll('button').forEach((b) => { b.disabled = true; });
     api('/api/agent/approve', {
-      session_id: state.sessions.current,
+      // 审批卡可能来自切走前的流：优先用它自己的 sid，避免写到当前会话
+      session_id: obj.sid || state.sessions.current,
       aid: obj.aid, ok: ok, remember: !!remember, always: !!always,
     })
       .then((r) => {
@@ -4326,6 +5198,7 @@ async function renderPendingCards() {
       if (chat.querySelector('[data-pending-approval="' + pendingCssEsc(aid) + '"]')) return;
       const card = buildApprovalCard({
         aid: aid, name: it.name, args: it.args || {}, reason: it.reason || '',
+        sid: it.sid || sid,
       });
       card.dataset.pendingApproval = aid;
       host.appendChild(card);
@@ -4399,10 +5272,12 @@ function buildToolCard(name, args, collapse) {
   const toolToggle = () => {
     if (!card.classList.contains('has-result')) return;
     const next = !foldIsOpen(card, 'open', true);
+    toolHead.setAttribute('aria-expanded', next ? 'true' : 'false');
     foldTransition(card, card.querySelector('.tool-result'), next, {
       cls: 'open', positive: true, ms: 180,
     });
   };
+  toolHead.setAttribute('aria-expanded', 'false');
   toolHead.addEventListener('click', toolToggle);
   makeClickable(toolHead, toolToggle, '展开 / 收起工具结果');
   // 路径可点击：切到 IDE 模式并在应用内打开（stopPropagation 避免触发上面的折叠）
@@ -4532,8 +5407,8 @@ function applyToolResultImage(card, result) {
     media.addEventListener('click', (e) => {
       const img = e.target && e.target.closest ? e.target.closest('img') : null;
       if (!img) return;
-      img.classList.toggle('is-zoomed');
-      img.title = img.classList.contains('is-zoomed') ? '点击还原' : '点击放大';
+      const src = img.currentSrc || img.src || '';
+      if (src) imgZoomOpen(src, img.alt || '实机截图');
     });
   }
   media.innerHTML = '';
@@ -4541,7 +5416,7 @@ function applyToolResultImage(card, result) {
     const img = document.createElement('img');
     img.className = 'tool-shot';
     img.alt = '实机截图';
-    img.title = '点击放大';
+    img.title = '点击查看大图';
     img.loading = 'lazy';
     img.decoding = 'async';
     img.src = src;
@@ -4609,7 +5484,12 @@ function finishToolCard(card, obj) {
 
 /* ---------- 一轮的工具调用归成一个可折叠「步骤组」（Trae 式：一行一步骤） ---------- */
 function toolGroup(row) {
-  if (row._toolGroup) return row._toolGroup;
+  if (row._toolGroup) {
+    // 已有组属于当前这条过程折叠才复用；属于上一条折叠时另起一组，
+    // 否则新步骤会被追加到旧折叠里，打开旧折叠看到的是最后一步。
+    if (!row._flow || row._toolGroup.el.parentNode === row._flow) return row._toolGroup;
+    row._toolGroup = null;
+  }
   const el = document.createElement('div');
   el.className = 'tool-group running';
   el.innerHTML =
@@ -5124,7 +6004,10 @@ function buildAskGroup(qs, qid, meta) {
   input.addEventListener('paste', (e) => {
     const files = askClipboardFiles(e.clipboardData || window.clipboardData);
     if (!files.length) return;
+    // 必须阻断冒泡：document 上还有「粘贴文件 → 主输入框附件」的全局监听，
+    // 不拦的话同一份文件会同时进提问卡和主输入框（提交后主输入框残留待发送附件）。
     e.preventDefault();
+    e.stopPropagation();
     addFiles(files);
   });
   const dragFiles = (e) => {
@@ -5453,10 +6336,11 @@ function buildToolLog(wrap, tools) {
 }
 
 /* 只建工具卡（不含 explore / diagram 附加卡），给「懒展开」复用 */
-function buildToolCards(box, tools) {
+function buildToolCards(box, tools, skipSpecial) {
   const row = { _toolsBox: box };      // 复用「步骤组」的归组逻辑
   tools.forEach((t) => {
     if (t.tool === 'ask_user') {
+      if (skipSpecial) return;         // 新消息的提问卡已经放进过程流
       const asks = Array.isArray(t.asks) ? t.asks
                  : [{ question: t.question, options: t.options, answer: t.answer }];
       box.appendChild(buildAskGroup(asks, null));
@@ -5677,13 +6561,267 @@ function startExplorePoll(batch) {
   EXPLORE_POLLS[batch] = setTimeout(step, 800);
 }
 
+/* ---------- AI 头像：注意力 + 扫视 ----------
+   参考成熟做法（Convai 的 Gaze & Attention 是「先选注视目标，再驱动眼 / 扫视 / 眨眼」两层；
+   Rive 的头像范例是 idle 随机看一圈 + 关键帧眨眼）：
+   ① 注意力层：光标在消息上停住一会儿才算被注意到，快速划过不理会；
+   ② 注视层：人眼是「扫视（几十毫秒跳一次）+ 注视（保持）」，不是逐帧平滑贴住光标；
+   ③ idle：停留时长与幅度都取偏态分布（多为小幅、偶尔侧瞥），以水平为主；
+   ④ 生成中：视线缓慢下滑（像在看自己刚写出的字），写完回中并眨一次。
+   三档由 config.avatar_motion 控制：lively（活泼）/ calm（克制，默认）/ off（关闭）。 */
+const AVA_EYE_R = 3.4;                 // 视点最大偏移（px）：留出眼白才像「瞥」而不是「盯」
+const AVA_MODES = {
+  // saccade：跟随光标时的单步时长；idle：随机张望的过渡区间（ms）。都留足过渡，避免「啪」地跳过去。
+  lively: { dwell: [700, 2400], ampMax: 4.2, vy: .75, attend: 140, relax: 2600, saccade: 200, idle: [260, 480], blink: [2000, 3000] },
+  calm:   { dwell: [1600, 4200], ampMax: 3.4, vy: .62, attend: 320, relax: 3600, saccade: 260, idle: [380, 700], blink: [3000, 5000] },
+};
+let _avaEyeBound = false;
+
+function avaEyeReduced() {
+  return !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+/* 当前档位；系统「减少动态效果」时等同关闭 */
+function avaMode() {
+  if (avaEyeReduced()) return 'off';
+  const m = (state.config || {}).avatar_motion;
+  return m === 'lively' || m === 'off' ? m : 'calm';
+}
+
+function avaEyeLook(av, x, y, ms) {
+  av.style.setProperty('--eye-x', x.toFixed(2) + 'px');
+  av.style.setProperty('--eye-y', y.toFixed(2) + 'px');
+  if (ms) av.style.setProperty('--eye-dur', ms + 'ms');
+}
+
+function avaBlinkNow(av) {
+  if (!av.isConnected || avaMode() === 'off') return;
+  av.classList.add('blink');
+  setTimeout(() => av.classList.remove('blink'), 130);
+}
+
+/* 生成中的「最后一条 AI 消息」：视线落在自己刚写出的文字上（像在思考 / 检查） */
+function avaIsThinking(av) {
+  if (!state.streaming) return false;
+  const row = av.closest ? av.closest('.msg.ai') : null;
+  if (!row || !row.parentNode) return false;
+  const rows = row.parentNode.querySelectorAll('.msg.ai');
+  return rows.length > 0 && rows[rows.length - 1] === row;
+}
+
+function avaEyeIdle(av) {
+  clearTimeout(av._eyeTimer);
+  if (!av.isConnected) return;
+  const mode = avaMode();
+  if (mode === 'off') { avaEyeLook(av, 0, 0, 300); return; }
+  const p = AVA_MODES[mode];
+  const dwell = p.dwell[0] + Math.random() * (p.dwell[1] - p.dwell[0]);
+  av._eyeTimer = setTimeout(() => {
+    if (!av.isConnected) return;
+    if (document.hidden || av._eyeTrack) { avaEyeIdle(av); return; }
+    const thinking = avaIsThinking(av);
+    if (av._avaThinking && !thinking) {     // 刚写完：回中 + 眨一下（有表情一些）
+      av._avaThinking = false;
+      avaEyeLook(av, 0, 0, 340);
+      avaBlinkNow(av);
+      avaEyeIdle(av);
+      return;
+    }
+    if (thinking) {
+      // 看自己写出的字：小幅、缓慢地往右下方漂
+      avaEyeLook(av, 1 + Math.random() * .8, 1.8 + Math.random() * .8, 900 + Math.random() * 500);
+    } else {
+      // 偏态：约 7 成小幅、2.5 成中幅、5% 一次稍大的侧瞥；以水平为主
+      const roll = Math.random();
+      const amp = roll < .7 ? .4 + Math.random() * 1.2
+        : roll < .95 ? 1.6 + Math.random() * 1.2
+          : 2.8 + Math.random() * (p.ampMax - 2.8);
+      const dir = Math.random() < .5 ? -1 : 1;
+      avaEyeLook(av, dir * amp, (Math.random() * 2 - 1) * p.vy * amp,
+        p.idle[0] + Math.random() * (p.idle[1] - p.idle[0]));
+    }
+    av._avaThinking = thinking;
+    avaEyeIdle(av);
+  }, dwell);
+}
+
+function avaEyeBlink(av) {
+  clearTimeout(av._blinkTimer);
+  if (!av.isConnected) return;
+  const mode = avaMode();
+  if (mode === 'off') return;
+  const p = AVA_MODES[mode];
+  av._blinkTimer = setTimeout(() => {
+    if (!av.isConnected) return;
+    if (!document.hidden) {
+      avaBlinkNow(av);
+      if (Math.random() < .2) {        // 偶尔连眨两下
+        setTimeout(() => { if (av.isConnected) avaBlinkNow(av); }, 230);
+      }
+    }
+    avaEyeBlink(av);
+  }, p.blink[0] + Math.random() * p.blink[1]);
+}
+
+/* 鼠标停在某条 AI 消息上：先过「注意力闸门」（停住才看），再用扫视步进跟随；
+   光标久停不动就移开视线。指着头像本身 = 想对视，闸门更短。 */
+function avaEyeBindPointer() {
+  if (_avaEyeBound) return;
+  const chat = document.getElementById('chat');
+  if (!chat) return;
+  _avaEyeBound = true;
+  let raf = 0;
+  let pending = null;       // 最近一次光标位置
+  let tracked = null;       // 正在注视的头像
+  let hoverTimer = 0;       // 注意力闸门
+  let relaxTimer = 0;
+  let anchor = null;        // 光标进入某条消息时的落点
+  let lastMove = 0;         // 光标最后一次明显移动
+  let lastStep = 0;
+  let lastX = 0;
+  let lastY = 0;
+
+  const release = (center) => {
+    clearTimeout(hoverTimer);
+    clearTimeout(relaxTimer);
+    if (!tracked) return;
+    const av = tracked;
+    tracked = null;
+    av._eyeTrack = false;
+    if (center) avaEyeLook(av, 0, 0, 340);
+    avaEyeIdle(av);
+  };
+
+  const stepGaze = () => {
+    if (!tracked || !pending) return;
+    const p = AVA_MODES[avaMode()];
+    if (!p) { release(true); return; }
+    const b = tracked.getBoundingClientRect();
+    const dx = pending.x - (b.left + b.width / 2);
+    const dy = pending.y - (b.top + b.height / 2);
+    const d = Math.hypot(dx, dy) || 1;
+    const r = Math.min(AVA_EYE_R, d * .22);
+    const x = (dx / d) * r;
+    const y = (dy / d) * r;
+    // 扫视：目标变化够大才跳一次（人眼是跳，不是逐帧插值）；间隔略小于过渡时长，
+    // 连续跟随时是「接上」而不是每帧重来。
+    if (Math.hypot(x - lastX, y - lastY) < .55) return;
+    const now = performance.now();
+    if (now - lastStep < 150) return;
+    lastStep = now;
+    lastX = x;
+    lastY = y;
+    avaEyeLook(tracked, x, y, p.saccade);
+  };
+
+  const watchRelax = () => {
+    clearTimeout(relaxTimer);
+    if (!tracked) return;
+    const p = AVA_MODES[avaMode()];
+    if (!p) { release(true); return; }
+    relaxTimer = setTimeout(() => {
+      if (!tracked) return;
+      if (performance.now() - lastMove < p.relax) { watchRelax(); return; }
+      release(false);              // 光标停着不动：看够了，视线移开，交回随机张望
+    }, 600);
+  };
+
+  const engage = (av) => {
+    if (!av || !av.isConnected || tracked === av) return;
+    if (tracked) release(false);
+    tracked = av;
+    av._eyeTrack = true;
+    clearTimeout(av._eyeTimer);
+    lastX = 0;
+    lastY = 0;
+    lastStep = 0;
+    if (pending && !raf) raf = requestAnimationFrame(() => { raf = 0; stepGaze(); });
+    watchRelax();
+  };
+
+  chat.addEventListener('pointermove', (e) => {
+    const mode = avaMode();
+    if (mode === 'off') { if (tracked) { pending = null; release(true); } return; }
+    const row = e.target && e.target.closest ? e.target.closest('.msg.ai') : null;
+    const av = row ? row.querySelector('.avatar') : null;
+    const now = performance.now();
+    if (tracked && tracked !== av) { pending = null; release(false); }
+    if (!av) { anchor = null; return; }
+    const moved = !anchor || anchor.row !== row
+      || Math.hypot(e.clientX - anchor.x, e.clientY - anchor.y) > 10;
+    if (moved) {
+      anchor = { row: row, x: e.clientX, y: e.clientY };
+      lastMove = now;
+      if (tracked !== av) {
+        clearTimeout(hoverTimer);
+        // 直接指着头像 = 想对视，闸门更短；指着消息其它地方要停住才看
+        const delay = e.target.closest('.avatar') ? 120 : AVA_MODES[mode].attend;
+        hoverTimer = setTimeout(() => engage(av), delay);
+      }
+    }
+    pending = { x: e.clientX, y: e.clientY };
+    if (tracked && !raf) raf = requestAnimationFrame(() => { raf = 0; stepGaze(); });
+  }, { passive: true });
+  chat.addEventListener('pointerleave', () => {
+    pending = null;
+    anchor = null;
+    release(false);
+  }, { passive: true });
+  // 系统在运行中切到「减少动态效果」：立刻松开光标，把眼睛放回中间
+  if (window.matchMedia) {
+    const mq = matchMedia('(prefers-reduced-motion: reduce)');
+    if (mq.addEventListener) {
+      mq.addEventListener('change', () => {
+        if (!mq.matches) return;
+        pending = null;
+        release(true);
+      });
+    }
+  }
+}
+
+/* 设置里切换档位：立刻让现有头像按新档位重来（off = 归位并停掉计时器） */
+function avaMotionSync() {
+  const mode = avaMode();
+  document.documentElement.dataset.avatarMotion = mode;
+  document.querySelectorAll('#chat .avatar').forEach((av) => {
+    clearTimeout(av._eyeTimer);
+    clearTimeout(av._blinkTimer);
+    av._eyeTrack = false;
+    av._avaThinking = false;
+    av.classList.remove('blink');
+    avaEyeLook(av, 0, 0, 0);
+    if (mode !== 'off') { avaEyeIdle(av); avaEyeBlink(av); }
+  });
+  avaEyeBindPointer();
+}
+window.gmAvatarMotionSync = avaMotionSync;
+
+function avaEyeStart(av) {
+  avaEyeLook(av, 0, 0, 0);
+  document.documentElement.dataset.avatarMotion = avaMode();
+  if (avaMode() !== 'off') {
+    avaEyeIdle(av);
+    avaEyeBlink(av);
+  }
+  avaEyeBindPointer();
+}
+
+/* AI 头像：外观全部由 CSS 画（.avatar 眼白 + ::before 虹膜星 + ::after 高光），
+   这里只给空壳并启动眼动。 */
+function aiAvatar() {
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  av.setAttribute('aria-hidden', 'true');
+  avaEyeStart(av);
+  return av;
+}
+
 function buildAiRow(contentHtml, rawText, index, reasoning, sources, usage, memory, tools, plan) {
   const row = document.createElement('div');
   row.className = 'msg ai';
   if (typeof index === 'number') row.dataset.idx = index;
-  const av = document.createElement('div');
-  av.className = 'avatar';
-  av.textContent = '✦';
+  const av = aiAvatar();
   const wrap = document.createElement('div');
   wrap.className = 'content-wrap';
   if (sources && sources.length) wrap.appendChild(buildSourcesBlock(sources, false));
@@ -5720,83 +6858,65 @@ function buildAiRow(contentHtml, rawText, index, reasoning, sources, usage, memo
   return row;
 }
 
-/* 收尾工具：模型写完最终答案后用它声明完成。判断「正文是不是过场旁白」时必须跳过，
-   否则答案会被折进过程区。别名与后端 groups.py 的归一化保持一致。 */
+/* 收尾工具：模型写完最终答案后用它声明完成。它本身不产生过程卡；
+   别名与后端 groups.py 的归一化保持一致。 */
 const FINISH_TOOL_NAMES = new Set(['finish', 'done', 'complete', 'finished',
-                                   'task_done', 'task_complete', 'finish_task']);
+                                   'task_done', 'task_complete', 'finish_task',
+                                   'agent_finish']);
 
-/* 收尾工具不算「真实工具」：finish 前后的正文属于同一次交付。
-   别名与后端 app/api/chat.py 的 _FINISH_TOOL_NAMES 保持一致。 */
 function isFinishTool(name) {
-  const n = String(name || '');
-  return n === 'agent_finish' || FINISH_TOOL_NAMES.has(n);
+  return FINISH_TOOL_NAMES.has(String(name || ''));
 }
 
-/* 「实质交付」判定（与后端 app/api/chat.py::_is_substantive_answer 同一口径）：
-   长度 ≥ 120 字，或带 Markdown 结构（标题 / 代码块 / 表格）。
-   用来区分「最终交付」和「先查一下 / 现在运行脚本」这类过程旁白 —— 只按
-   「谁在后面」判定会把最后一句旁白当成答案（实测 670 条消息里有 128 条）。 */
-const ANSWER_MIN_CHARS = 120;
-function isSubstantiveAnswer(text) {
-  const t = String(text || '').trim();
-  if (t.length >= ANSWER_MIN_CHARS) return true;
-  return /(^|\n)[ \t]{0,3}(#{1,6}\s|```|\|)/.test(t);
-}
-
-/* 把 blocks 还原成一条消息的结构：
-   - 折叠区（process-fold）：思考 + 工具组，以及**夹在工具之间的过场旁白**；
-   - 正文段（content）：按落库的 `ans` 标记（旧消息走同一套「实质交付」启发式）；
-   - 提问卡：落在它被问出来的位置，而不是一律堆到消息末尾。
-   返回 { fold, parts }，parts 是可以直接追加进 .content-wrap 的节点序列。 */
+/* 把 blocks 还原成一条消息的结构（参考 DeepSeek Harness / Trae 的 part 流）：
+   - 所有 `text` 块都是正文，按出现顺序内联显示；不做字数 / 词表语义判定；
+   - 连续的过程块（思考 / 工具 / Skill / 子代理）合并成一个过程折叠组；
+   - 提问卡直接进正文流，收尾折叠后也能看到。
+   返回 { segments, parts, asks, flows, lastFlow }。 */
 function buildBlocksView(blocks, timing, endKind, opts) {
   const options = opts || {};
   const list = blocks || [];
-  const flow = document.createElement('div');
-  flow.className = 'chat-flow';
-  const ctx = { _flow: flow, _toolGroup: null };
   const allTools = options.tools || [];
   // 工具特别多的历史消息：先只给入口，展开再建卡（单条消息能从数千节点降到几十）
   const lazyTools = allTools.length > LAZY_TOOLS;
+
+  const segments = [];       // {type:'flow', body, toolCount} | {type:'node', node}
+  const parts = [];          // 正文段 + 提问卡，按顺序
+  const asks = [];
+  let flowBody = null;
+  let flowToolCount = 0;
+  const ctx = { _flow: null, _toolGroup: null };
   const finalizeGroup = () => {
     if (!ctx._toolGroup) return;
     toolGroupTitle(ctx._toolGroup);
     autoCollapseToolGroup(ctx._toolGroup);
     ctx._toolGroup = null;
   };
-  // 答案区按「位置」判定（与后端 _mark_answer_blocks 同一口径）：
-  // 只有最后一次真实工具（finish 别名不算）之后的正文才算答案；工具之间的
-  // 正文一律当过程旁白折进过程区。停止 / 中断的回合只保留最后一段可见正文。
-  const partialEnd = endKind === 'stopped' || endKind === 'billing' || endKind === 'budget';
-  const answerIds = new Set();
-  const textIds = [];
-  list.forEach((b, i) => {
-    if (b && b.kind === 'text' && String(b.text || '').trim()) textIds.push(i);
-  });
-  if (partialEnd) {
-    if (textIds.length) answerIds.add(textIds[textIds.length - 1]);
-  } else {
-    let lastWork = -1;
-    list.forEach((b, i) => {
-      if (!b || b.kind !== 'tool') return;
-      const t = allTools[b.i];
-      const name = t && t.tool;
-      // finish / ask_user 前后的正文属于同一段交付，不算工作边界
-      if (!isFinishTool(name) && name !== 'ask_user') lastWork = i;
-    });
-    textIds.forEach((i) => {
-      if (i > lastWork) answerIds.add(i);
-    });
-    if (!answerIds.size && textIds.length) {
-      // 最后工具之后没有正文：回退到最后一段实质交付，再退到最后一段
-      let pick = -1;
-      textIds.forEach((i) => {
-        if (isSubstantiveAnswer(list[i].text)) pick = i;
-      });
-      answerIds.add(pick >= 0 ? pick : textIds[textIds.length - 1]);
+  const ensureFlow = () => {
+    if (flowBody) return flowBody;
+    flowBody = document.createElement('div');
+    flowBody.className = 'chat-flow';
+    flowToolCount = 0;
+    ctx._flow = flowBody;
+    return flowBody;
+  };
+  const closeFlow = () => {
+    finalizeGroup();
+    if (flowBody && flowBody.childNodes.length) {
+      segments.push({ type: 'flow', body: flowBody, toolCount: flowToolCount });
     }
-  }
-  const parts = [];
-  list.forEach((b, bi) => {
+    flowBody = null;
+    ctx._flow = null;
+    flowToolCount = 0;
+  };
+  const pushNode = (node, isAsk) => {
+    closeFlow();
+    segments.push({ type: 'node', node: node });
+    parts.push(node);
+    if (isAsk) asks.push(node);
+  };
+
+  list.forEach((b) => {
     if (!b || typeof b !== 'object') return;
     if (b.kind === 'reasoning' && b.text) {
       finalizeGroup();
@@ -5805,20 +6925,42 @@ function buildBlocksView(blocks, timing, endKind, opts) {
       // 失败尝试的思考也保留：标成「上次尝试」而不是普通思考
       box._label.textContent = (b.retry ? '上次尝试（上游中断）' : '思考')
         + (head ? ' · ' + head : '');
-      flow.appendChild(box);
+      ensureFlow().appendChild(box);
       return;
     }
     if (b.kind === 'tool') {
-      if (lazyTools) { finalizeGroup(); return; }   // 懒展开：先不建卡
-      const t = (options.tools || [])[b.i];
+      const t = allTools[b.i];
       if (!t) return;
+      // finish 只是完成声明，不产生过程卡
+      if (isFinishTool(t.tool)) return;
+      // 提问卡是正文流的一部分，不再藏进过程折叠
       if (t.tool === 'ask_user') {
-        finalizeGroup();                       // 提问前后各成一组，卡片夹在中间
-        if (t.asks && t.asks.length) parts.push(buildAskGroup(t.asks, t.qid || null));
+        finalizeGroup();
+        const asksArr = t.asks && t.asks.length
+          ? t.asks : [{ question: t.question, options: t.options, answer: t.answer }];
+        pushNode(buildAskGroup(asksArr, t.qid || null), true);
         return;
       }
-      if (isBgExploreTool(t)) return;          // 后台批次不放进过程折叠，稍后单独成卡
-      if (isSkillTool(t.tool)) return;         // Skill 用独立常驻卡（appendSkillCards）
+      if (isSkillTool(t.tool)) {
+        finalizeGroup();
+        if (typeof buildSkillCard === 'function') {
+          const sk = buildSkillCard(t.tool, t.args);
+          finishSkillCard(sk, { result: t.result, ok: t.ok, ms: t.ms });
+          ensureFlow().appendChild(sk);
+        }
+        return;
+      }
+      if (isBgExploreTool(t)) {
+        finalizeGroup();
+        const batch = String((t.args && t.args.batch) || '');
+        const body = ensureFlow();
+        if (batch && !body.querySelector('.explore-batch-card[data-batch="' + batch + '"]')) {
+          body.appendChild(buildExploreBatchCard(batch, t.args));
+        }
+        return;
+      }
+      if (lazyTools) { finalizeGroup(); return; }   // 懒展开：先不建卡
+      ensureFlow();
       const g = toolGroup(ctx);
       const card = buildToolCard(t.tool, t.args);
       finishToolCard(card, { name: t.tool, args: t.args, result: t.result, undo: t.undo,
@@ -5828,23 +6970,17 @@ function buildBlocksView(blocks, timing, endKind, opts) {
       g.ms += parseInt(t.ms, 10) || 0;
       g.kinds[t.tool] = (g.kinds[t.tool] || 0) + 1;
       if (t.ok === false) g.failed++;
+      flowToolCount += 1;
       return;
     }
     if (b.kind === 'text') {
-      finalizeGroup();                        // 正文分界：下一批工具另起一组
       const text = typeof b.text === 'string' ? b.text : '';
       if (!text.trim()) return;
       const d = document.createElement('div');
-      d.className = 'content';                // 与最终答案同一套排版
+      d.className = 'content';
       d.innerHTML = safeRenderMarkdown(text);
-      enhanceToc(d);
-      // 答案块按 `ans` 标记 / 顺序启发式判定；其余正文收进过程折叠当旁白。
-      if (answerIds.has(bi)) {
-        parts.push(d);
-      } else {
-        d.classList.add('narration');
-        flow.appendChild(d);
-      }
+      // 所有助手文本都是正文；过程折叠只收思考 / 工具，不靠语义猜。
+      pushNode(d, false);
     }
   });
   finalizeGroup();
@@ -5856,15 +6992,56 @@ function buildBlocksView(blocks, timing, endKind, opts) {
     chip.onclick = () => {
       const holder = document.createElement('div');
       holder.className = 'tool-list';
-      buildToolCards(holder, allTools);
+      buildToolCards(holder, allTools, true);   // 特殊卡已经在过程流里，别再重复
       chip.replaceWith(holder);
     };
-    flow.appendChild(chip);
+    ensureFlow().appendChild(chip);
   }
-  const fold = flow.childNodes.length
-    ? buildProcessFold(flow, timing, endKind, options.open === true, allTools.length)
-    : null;
-  return { fold: fold, flow: flow, parts: parts };
+  closeFlow();
+
+  // 过程组按顺序物化；只有最后一组带整轮耗时 / 结束原因，中间组显示「过程 · 已完成」。
+  const nodes = [];
+  const flows = [];
+  let lastFlowIdx = -1;
+  segments.forEach((s, i) => { if (s.type === 'flow') lastFlowIdx = i; });
+  const flowCount = segments.reduce((n, s) => n + (s.type === 'flow' ? 1 : 0), 0);
+  // 只有开合状态数量与重建后的过程组完全对得上才按索引沿用，避免错位。
+  const openMap = (Array.isArray(options.openMap) && options.openMap.length === flowCount)
+    ? options.openMap : null;
+  let flowIdx = 0;
+  segments.forEach((s, i) => {
+    if (s.type === 'node') { nodes.push(s.node); return; }
+    const isLast = i === lastFlowIdx;
+    // 收尾重排时沿用流式期间用户实际的开合状态；没有 openMap 就按旧规则只开最后一组。
+    const wanted = openMap
+      ? (flowIdx < openMap.length ? !!openMap[flowIdx] : false)
+      : (options.open === true && isLast);
+    const wrap = buildProcessFold(
+      s.body,
+      isLast ? timing : null,
+      isLast ? (endKind || 'done') : 'done',
+      wanted,
+      s.toolCount,
+      !isLast);
+    nodes.push(wrap);
+    flows.push({ wrap: wrap, body: s.body, toolCount: s.toolCount });
+    flowIdx += 1;
+  });
+
+  // 目录只插一次：多个正文段各自有 ≥3 个标题时不重复生成。
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (!p.classList.contains('content')) continue;
+    enhanceToc(p);
+    if (p.querySelector('.md-toc')) break;
+  }
+
+  return {
+    segments: nodes, parts: parts, asks: asks, flows: flows,
+    lastFlow: flows.length ? flows[flows.length - 1].body : null,
+    fold: flows.length ? flows[0].wrap : null,
+    flow: flows.length ? flows[flows.length - 1].body : null,
+  };
 }
 
 /* 历史回显（新消息）：按落库的 blocks 还原「过程折叠 + 正文分段 + 提问卡原位」。
@@ -5873,12 +7050,16 @@ function buildAiRowFromBlocks(m, index) {
   const row = document.createElement('div');
   row.className = 'msg ai';
   if (typeof index === 'number') row.dataset.idx = index;
-  const av = document.createElement('div');
-  av.className = 'avatar';
-  av.textContent = '✦';
+  const av = aiAvatar();
   const wrap = document.createElement('div');
   wrap.className = 'content-wrap';
-  if (m.sources && m.sources.length) wrap.appendChild(buildSourcesBlock(m.sources, false));
+  let searchBox = null;
+  const trace = buildSearchTraceFromMessage(m);
+  if (trace) {
+    // 刷新 / 重进窗口：按落库的 sources 重建搜索 trace，而不是只留一个「参考来源」块
+    searchBox = trace;
+    wrap.appendChild(trace);
+  }
   let planCard = null;
   if (m.plan && m.plan.steps && m.plan.steps.length) {
     planCard = buildPlanCard(m.plan, planAllDone(m.plan));
@@ -5887,14 +7068,11 @@ function buildAiRowFromBlocks(m, index) {
 
   const view = buildBlocksView(m.blocks, m.timing, m.end_reason && m.end_reason.kind,
                                { tools: m.tools, open: false });
-  if (view.fold) {
-    wrap.appendChild(view.fold);
-    if (window.enhanceRichMedia) window.enhanceRichMedia(view.fold);
-  }
+  // 过程组与正文段按时间顺序内联，不再统一把过程堆在消息顶部
+  view.segments.forEach((n) => wrap.appendChild(n));
   const secs = [];
   const asks = [];
   view.parts.forEach((p) => {
-    wrap.appendChild(p);
     if (p.classList.contains('ask-card')) asks.push(p);
     else secs.push(p);
   });
@@ -5912,9 +7090,14 @@ function buildAiRowFromBlocks(m, index) {
     wrap.appendChild(d);
     secs.push(d);
   }
-  appendExploreBatchCards(wrap, m.tools);   // 后台探索批次：常驻卡，不进折叠
+  appendExploreBatchCards(view.lastFlow || wrap, m.tools);   // 后台探索批次：在过程流里
   appendDiagramCards(wrap, m.tools);        // archify 图卡：内嵌可交互 HTML
-  appendSkillCards(wrap, m.tools);          // Skill 使用记录：常驻卡，不进折叠
+  if (window.enhanceRichMedia) window.enhanceRichMedia(wrap);
+  if (searchBox) {
+    secs.forEach((p) => {
+      if (p.classList.contains('content')) decorateCitations(p, searchBox);
+    });
+  }
   const c = secs[secs.length - 1];
 
   row.appendChild(av);
@@ -5927,6 +7110,16 @@ function buildAiRowFromBlocks(m, index) {
   row._planCard = planCard;
   row._plan = planCard ? m.plan : null;
   row._planSteps = planCard ? m.plan.steps : [];
+  row._flows = view.flows || [];
+  const lastFlow = view.flows && view.flows.length
+    ? view.flows[view.flows.length - 1] : null;
+  row._flowWrap = lastFlow ? lastFlow.wrap : null;
+  row._flow = lastFlow ? lastFlow.body : null;
+  row._flowHead = lastFlow ? lastFlow.wrap.querySelector('.process-fold-head') : null;
+  row._flowLabel = lastFlow ? lastFlow.wrap.querySelector('.process-fold-title') : null;
+  row._flowMeta = lastFlow ? lastFlow.wrap.querySelector('.process-fold-meta') : null;
+  row._flowTime = null;
+  row._flowCaret = lastFlow ? lastFlow.wrap.querySelector('.process-fold-caret') : null;
   if (m.memory) wrap.appendChild(buildMemoryChip(m.memory, index));
   // 空内容也建操作条：中断 / 报错的轮次没有正文，但「继续输出 / 重新发言 /
   // 上下文压缩」仍要能操作（圆环只挂在 .msg-actions 上）。
@@ -5948,9 +7141,7 @@ function buildAiRowFromBlocks(m, index) {
 function buildLiveRow(sid, live) {
   const row = document.createElement('div');
   row.className = 'msg ai stream-live';
-  const av = document.createElement('div');
-  av.className = 'avatar';
-  av.textContent = '✦';
+  const av = aiAvatar();
   const wrap = document.createElement('div');
   wrap.className = 'content-wrap';
   let planCard = null;
@@ -5960,18 +7151,14 @@ function buildLiveRow(sid, live) {
   }
   const view = buildBlocksView(live.blocks, live.timing, '',
                                { tools: live.tools || [], open: true });
-  if (view.fold) {
-    wrap.appendChild(view.fold);
-    if (window.enhanceRichMedia) window.enhanceRichMedia(view.fold);
-  }
+  view.segments.forEach((n) => wrap.appendChild(n));
   const secs = [];
   const asks = [];
   view.parts.forEach((p) => {
-    wrap.appendChild(p);
     if (p.classList.contains('ask-card')) asks.push(p);
     else secs.push(p);
   });
-  appendSkillCards(wrap, live.tools);        // Skill 使用记录：常驻卡（实时重建也要保留）
+  if (window.enhanceRichMedia) window.enhanceRichMedia(wrap);
   row.appendChild(av);
   row.appendChild(wrap);
   row._content = secs[secs.length - 1] || null;
@@ -5982,6 +7169,16 @@ function buildLiveRow(sid, live) {
   row._planCard = planCard;
   row._plan = live.plan || null;
   row._planSteps = planCard ? live.plan.steps : [];
+  row._flows = view.flows || [];
+  const lastFlow = view.flows && view.flows.length
+    ? view.flows[view.flows.length - 1] : null;
+  row._flowWrap = lastFlow ? lastFlow.wrap : null;
+  row._flow = lastFlow ? lastFlow.body : null;
+  row._flowHead = lastFlow ? lastFlow.wrap.querySelector('.process-fold-head') : null;
+  row._flowLabel = lastFlow ? lastFlow.wrap.querySelector('.process-fold-title') : null;
+  row._flowMeta = lastFlow ? lastFlow.wrap.querySelector('.process-fold-meta') : null;
+  row._flowTime = null;
+  row._flowCaret = lastFlow ? lastFlow.wrap.querySelector('.process-fold-caret') : null;
   return row;
 }
 
@@ -5995,7 +7192,8 @@ function appendAi(contentHtml, rawText, index, reasoning, sources, usage, memory
   return row;
 }
 
-const RENDER_PAGE = 30;   // 首屏只渲染最近 N 条；再往上翻由「滚到顶自动补载」续
+const RENDER_PAGE = 30;   // 每次「展开更早」续载多少条
+const FIRST_PAGE = 12;    // 会话首次上屏只画最近多少条（往上翻由「滚到顶自动补载」续）
 
 /* 旧版「本轮完成」把摘要、遗留、验收拼成一大段；这里拆成结构化字段再渲染。 */
 function splitLegacyDone(text) {
@@ -6302,7 +7500,14 @@ function syncCompressMarks(ctx) {
     return;
   }
   let el = chat.querySelector('.compress-divider[data-key="' + key + '"]');
+  const wasPending = !!(pending && !el);
   if (!el && pending) el = pending;          // 升级「正在压缩」为已完成
+  if (wasPending) {
+    // 压缩完成：清掉按会话记的 pending 标记与超时兜底
+    const sid = String(state.sessions.current || '');
+    if (state.compressingSids) delete state.compressingSids[sid];
+    if (_compressTimers[sid]) { clearTimeout(_compressTimers[sid]); delete _compressTimers[sid]; }
+  }
   if (!el) {
     el = compressDividerEl(latest);
     compressPlaceAtMark(chat, el, latest);
@@ -6326,37 +7531,73 @@ function compressFlushQueue() {
   setTimeout(flushSendQueue, 180);
 }
 
-function compressPending() {
+// 每个会话的压缩超时兜底：状态按 sid 存在 state.compressingSids，
+// 不能再只靠 #chat 里的 DOM 节点（切会话 / 重绘就丢）。
+const _compressTimers = {};
+
+function compressPending(sid) {
+  const key = String(sid || state.sessions.current || '');
+  if (!key) return null;
+  if (!state.compressingSids) state.compressingSids = {};
+  state.compressingSids[key] = true;
+  if (_compressTimers[key]) clearTimeout(_compressTimers[key]);
+  _compressTimers[key] = setTimeout(() => {
+    delete _compressTimers[key];
+    compressPendingClear(key);                           // 压缩失败时别留下假的「进行中」
+  }, 120000);
+  if (key !== String(state.sessions.current || '')) return null;
+  return compressSyncPending();
+}
+
+/* 按当前会话的标记补齐 / 移除「正在压缩」分隔线。
+   切会话、renderMessages 重绘、refreshStreamingUI 都会调用它。 */
+function compressSyncPending() {
   const chat = $('#chat');
   if (!chat) return null;
+  const key = String(state.sessions.current || '');
+  const on = !!(key && state.compressingSids && state.compressingSids[key]);
   let el = chat.querySelector('.compress-divider.pending');
+  if (!on) {
+    if (el) { clearTimeout(el._timer); el.remove(); }
+    return null;
+  }
   if (el) return el;
   el = compressDividerEl(null, { pending: true });
   el.dataset.started = String(Math.floor(Date.now() / 1000));
   compressPlaceAtEnd(chat, el);
   el.scrollIntoView({ block: 'nearest' });
-  el._timer = setTimeout(() => {
-    if (el.classList.contains('pending')) el.remove();   // 压缩失败时别留下假的「进行中」
-    compressFlushQueue();                                // 别让排队消息一直等
-  }, 120000);
   return el;
 }
 
-function compressPendingClear() {
-  const chat = $('#chat');
-  if (!chat) return;
-  const el = chat.querySelector('.compress-divider.pending');
-  if (el) { clearTimeout(el._timer); el.remove(); }
+function compressPendingClear(sid) {
+  const key = String(sid || state.sessions.current || '');
+  if (key && state.compressingSids) delete state.compressingSids[key];
+  if (key && _compressTimers[key]) {
+    clearTimeout(_compressTimers[key]);
+    delete _compressTimers[key];
+  }
+  if (key === String(state.sessions.current || '')) {
+    const chat = $('#chat');
+    const el = chat && chat.querySelector('.compress-divider.pending');
+    if (el) { clearTimeout(el._timer); el.remove(); }
+  }
   compressFlushQueue();        // 压缩失败 / 取消：排队消息不能一直等
 }
 
 /* 该会话是否正在压缩较早历史（发送 / 修改要先排队） */
 function compressIsPending() {
+  const key = String(state.sessions.current || '');
+  if (key && state.compressingSids && state.compressingSids[key]) return true;
   const chat = $('#chat');
   return !!(chat && chat.querySelector('.compress-divider.pending'));
 }
 
 function compressClearAll() {
+  if (state.compressingSids) state.compressingSids = {};
+  Object.keys(_compressTimers).forEach((k) => {
+    clearTimeout(_compressTimers[k]);
+    delete _compressTimers[k];
+  });
   const chat = $('#chat');
   if (!chat) return;
   chat.querySelectorAll('.compress-divider').forEach((el) => {
@@ -6492,7 +7733,7 @@ function enhanceToc(root) {
     a.appendChild(txt);
     a.onclick = (e) => {
       e.preventDefault();
-      try { h.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (err) { h.scrollIntoView(); }
+      try { h.scrollIntoView({ block: 'start', behavior: GM_SMOOTH }); } catch (err) { h.scrollIntoView(); }
       setTocOpen(box, false);
     };
     inner.appendChild(a);
@@ -6546,6 +7787,9 @@ function renderMessages(fromIndex, forceWindow, opts) {
     findState.hits = [];                       // 整块重排后，之前的高亮节点已经不存在了
     findState.idx = -1;
     chat.dataset.start = '';
+    chat._rowSigs = null;                      // 空会话没有可复用的单行签名
+    chat._rowKey = '';
+    chat._msgSid = '';                         // 空会话不再沿用窗口起点
     chat.innerHTML = EMPTY_HTML;
     chat.scrollTop = 0;                        // 新会话首屏从顶部开始（手机上内容会超出视口）
     const bottomBtn = $('#btn-bottom');
@@ -6554,6 +7798,7 @@ function renderMessages(fromIndex, forceWindow, opts) {
     placeCtxRing();
     if (typeof turnDotsSync === 'function') turnDotsSync();
     if (typeof ideReviewTipRefresh === 'function') ideReviewTipRefresh();
+    if (typeof compressSyncPending === 'function') compressSyncPending();
     if (!keepScroll && typeof replayEnter === 'function') replayEnter(chat, 'chat-fade');
     return;
   }
@@ -6616,11 +7861,22 @@ function renderMessages(fromIndex, forceWindow, opts) {
     return;
   }
 
-  const start = expanding ? Math.max(loadedFrom, fromIndex) : Math.max(loadedFrom, total - RENDER_PAGE);
+  const _sid = String(state.sessions.current || '');
+  // 窗口起点：展开更早 = 指定位置；同一会话的后续重绘沿用当前起点（刷新时窗口不收缩，
+  // 避免用户眼前的内容突然被抽走）；会话首次上屏只画最近 FIRST_PAGE 条。
+  const _prevStart = chat.dataset.start === '' ? NaN : Number(chat.dataset.start);
+  let start;
+  if (expanding) {
+    // 越界的 fromIndex 会渲染出空窗口（整段对话消失）；钳到最后一页兜底
+    start = Math.max(loadedFrom, Math.min(fromIndex, Math.max(0, total - 1)));
+  } else if (chat._msgSid === _sid && Number.isFinite(_prevStart) && chat.querySelector('.msg')) {
+    start = Math.max(loadedFrom, Math.min(_prevStart, Math.max(0, total - 1)));
+  } else {
+    start = Math.max(loadedFrom, total - FIRST_PAGE);
+  }
   // 正在生成的这一条由实时数据承担：历史只画到它之前，末尾再挂 live 投影。
   // 这是「一条回答只有一条投影」的唯一判定点——切会话、刷新、重连都走这里，
   // 不再需要在每条路径上单独删除「进度快照行」。
-  const _sid = String(state.sessions.current || '');
   const _st = (typeof streamOf === 'function') ? streamOf(_sid) : null;
   const _live = (typeof liveOf === 'function') ? liveOf(_sid, true) : null;
   const _liveData = !!(_live && _live.blocks && _live.blocks.length);
@@ -6640,14 +7896,69 @@ function renderMessages(fromIndex, forceWindow, opts) {
   // 窗口与内容都没变（例如后台事件只改了别的字段）：保留现有 DOM 与滚动位置
   const _sig = (window.GM_RENDER && GM_RENDER.messagesSignature)
     ? GM_RENDER.messagesSignature(msgs, start, total) : '';
+  const _sigOf = (window.GM_RENDER && window.GM_RENDER.messageSig)
+    ? window.GM_RENDER.messageSig : null;
+  // 定向替换的窗口指纹：会话、区间、消息总数、被实时行承担的那条、压缩点。
+  // 任一项变化都说明 DOM 与数据不再一一对应，必须整窗重建。
+  const _rowKey = [_sid, start, total, _skipIdx,
+    latestMark ? compressMarkKey(latestMark) : ''].join('#');
   if (!expanding && !forceWindow && _sig && chat._renderSig === _sig
       && !(_liveData && !_liveRow) && chat.querySelector('.msg')) {
     return;
+  }
+  // 定向替换：窗口没变、只有个别消息的内容变了（后台回填 / 记忆撤销等），
+  // 只重建这几条行并只增强它们，避免整窗重建把历史里的图表全部销毁重画。
+  if (!expanding && !forceWindow && !_liveData && !_liveRow && !(_st && _st.host)
+      && _sigOf && chat._rowSigs && chat._rowKey === _rowKey
+      && !findState.hits.length && !_searchPanelBox) {
+    const changed = [];
+    let tooMany = false;
+    for (let idx = start; idx < total; idx++) {
+      if (!msgs[idx] || idx === _skipIdx) continue;
+      if (chat._rowSigs[idx] === _sigOf(msgs[idx])) continue;
+      changed.push(idx);
+      if (changed.length > 4) { tooMany = true; break; }   // 变太多就不值得逐条换
+    }
+    // 先确认每条旧行都在、且行内没有图表实例：disposeRichMedia 是全局的，
+    // 单独摘掉一条行里的图表实例会泄漏，这种情况退回整窗重建。
+    const ok = !tooMany && changed.length > 0 && changed.every((idx) => {
+      const old = chat.querySelector('.msg[data-idx="' + idx + '"]');
+      return !!old && !old.querySelector(
+        '.rich-media[data-rich="chart"], .rich-media[data-rich="mermaid"]');
+    });
+    if (ok) {
+      const chatTop = chat.getBoundingClientRect().top;
+      const atBottom = typeof nearBottom === 'function' && nearBottom();
+      let aboveDelta = 0;
+      changed.forEach((idx) => {
+        const old = chat.querySelector('.msg[data-idx="' + idx + '"]');
+        const before = old.getBoundingClientRect();
+        const above = before.bottom <= chatTop + 1;   // 变化在视野上方：保持阅读位置
+        const next = rowForMsgSafe(msgs, idx);
+        old.replaceWith(next);
+        if (above) aboveDelta += next.getBoundingClientRect().height - before.height;
+        if (window.enhanceRichMedia) window.enhanceRichMedia(next);
+      });
+      changed.forEach((idx) => { chat._rowSigs[idx] = _sigOf(msgs[idx]); });
+      chat._renderSig = _sig;
+      if (typeof planSweepHistory === 'function') planSweepHistory(true);
+      if (aboveDelta) chat.scrollTop += aboveDelta;
+      else if (atBottom) chat.scrollTop = chat.scrollHeight;
+      requestAnimationFrame(() => {
+        placeCtxRing();
+        if (typeof turnDotsSync === 'function') turnDotsSync();
+        if (typeof ideReviewTipRefresh === 'function') ideReviewTipRefresh();
+      });
+      if (typeof window.notesScheduleCaptures === 'function') window.notesScheduleCaptures();
+      return;
+    }
   }
   // 实时 host 先摘下来再放回：innerHTML 会连它一起清掉，重挂时内容会闪一下
   const _keepHost = (_st && _st.host) || null;
   if (_keepHost && _keepHost.parentNode) _keepHost.parentNode.removeChild(_keepHost);
   if (window.disposeRichMedia) window.disposeRichMedia();   // 清掉旧图表实例，避免内存泄漏
+  // 整块重排会把搜索结果 trace 一起换掉：侧栏继续指着旧节点只会显示过期结果
+  if (_searchPanelBox) closeSearchPanel();
   chat.innerHTML = '';
   findState.hits = [];
   findState.idx = -1;
@@ -6655,8 +7966,10 @@ function renderMessages(fromIndex, forceWindow, opts) {
   // 先在一个 fragment 里建好，再一次性插入 —— 只触发一次布局
   const frag = document.createDocumentFragment();
   if (start > 0) frag.appendChild(makeMoreBtn(start));
+  const _sigs = {};
   for (let idx = start; idx < total; idx++) {
     if (!msgs[idx] || idx === _skipIdx) continue;   // 还没加载的旧消息 / 由实时行承担的那条
+    if (_sigOf) _sigs[idx] = _sigOf(msgs[idx]);
     addMarks(frag, idx);
     frag.appendChild(rowForMsgSafe(msgs, idx));
   }
@@ -6668,6 +7981,10 @@ function renderMessages(fromIndex, forceWindow, opts) {
     chat.appendChild(buildLiveRow(_sid, _live));   // 只有数据没有 DOM：按数据重建
   }
   chat.dataset.start = String(start);
+  chat._msgSid = _sid;                // 下次同一会话重绘时沿用这个窗口起点
+  // 记下这次整窗渲染的指纹与每行签名：下次只有个别消息变化时可定向替换
+  chat._rowKey = _rowKey;
+  chat._rowSigs = _sigs;
   // 压缩点落在本次渲染窗口之前（那段还没加载 / 已被折叠）时上面不会画到：
   // 兜底补一条，位置仍按真实压缩点算，不能因为没命中就丢掉或贴到底部。
   if (latestMark && typeof latestMark === 'object'
@@ -6696,6 +8013,15 @@ function renderMessages(fromIndex, forceWindow, opts) {
   }
   // 重排会把「排队中」的幽灵气泡冲掉：重建一次，保证它们始终在对话末尾
   if (typeof renderQueueGhosts === 'function') renderQueueGhosts();
+  // 整块重绘会清掉「正在压缩」分隔线：按当前 sid 的标记补回来
+  if (typeof compressSyncPending === 'function') compressSyncPending();
+  // 只有真的重排了消息 DOM 才需要重新捕获笔记锚点；放在签名跳过之后，
+  // 避免后台事件反复触发时每次都排一次 300ms 后的扫描。
+  if (typeof window.notesScheduleCaptures === 'function') window.notesScheduleCaptures();
+  // 切会话 / 重排之后，字体与富媒体还会迟到改高度；仍贴底就补几拍对齐
+  if (!expanding && typeof window.settleChatBottom === 'function') {
+    window.settleChatBottom([0, 160, 500, 1200, 2600]);
+  }
   chat._renderSig = _sig;
 }
 

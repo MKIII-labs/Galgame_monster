@@ -63,7 +63,6 @@ from app.api import workflow as workflow_api  # noqa: F401
 from app.api import memory as memory_api      # noqa: F401
 from app.api import backup as backup_api  # noqa: F401
 from app.api import storage as storage_api  # noqa: F401  本地存储维护（压缩会话正文）
-from app.api import bili as bili_api  # noqa: F401
 from app.api import hall_stock as hall_stock_api  # noqa: F401
 from app.api import hall_interview as hall_interview_api  # noqa: F401
 from app.api import dojo as dojo_api  # noqa: F401
@@ -72,7 +71,6 @@ from app.api import settings_center as settings_api  # noqa: F401  设置中心�
 from app.api import market as market_api  # noqa: F401  插件市场：DSH 生态只读索引
 from app.api import plugins as plugins_api  # noqa: F401  插件：工具插件 / MCP / 内置发现源
 from app.api import explore as explore_api  # noqa: F401  后台探索批次：前端轮询进度
-from app.api import image as image_api  # noqa: F401  自注册 /api/image/* 路由（本地 ComfyUI 出图）
 from app.api import agents as agents_api  # noqa: F401  自注册 /api/agents 路由（子代理定义）
 from app.api import aside as aside_api  # noqa: F401  自注册 /api/aside/stream 路由（Solo 旁注提问）
 from app.api import share as share_api  # noqa: F401  自注册 /api/share/save 路由（分享页落盘）
@@ -171,6 +169,9 @@ def _load_static_cached(path, mtime, size):
 _gzip_cache = {}
 _gzip_lock = threading.Lock()
 _GZIP_MIN_BYTES = 1024
+# API 的 JSON 也压缩：/api/state 实测 276–361KB，压完约 30–50KB。
+# 阈值放大到 8KB，避免几个字段的小响应也走压缩（压一次也要几毫秒 CPU）。
+_JSON_GZIP_MIN = 8192
 _GZIP_EXTS = (".js", ".css", ".html", ".json", ".svg", ".md", ".txt", ".map", ".xml", ".webmanifest")
 
 
@@ -184,6 +185,16 @@ def accepts_gzip(header):
             continue
         return True
     return False
+
+
+def gzip_json_body(body, accept_header):
+    """大 JSON 响应压缩：返回 (bytes, 额外响应头或 None)。小响应保持明文，省 CPU。"""
+    if isinstance(body, str):
+        body = body.encode("utf-8")
+    if len(body) >= _JSON_GZIP_MIN and accepts_gzip(accept_header):
+        return _gzip.compress(body, 5), {"Content-Encoding": "gzip",
+                                        "Vary": "Accept-Encoding"}
+    return body, None
 
 
 def _gzip_cached(path, mtime, size):
@@ -234,7 +245,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, obj, code=200):
-        self._send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
+        body, extra = gzip_json_body(json.dumps(obj, ensure_ascii=False),
+                                     self.headers.get("Accept-Encoding"))
+        self._send(code, body, "application/json; charset=utf-8",
+                   cache="no-store", extra_headers=extra)
 
     def _body(self):
         try:
@@ -411,7 +425,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, "not found", "text/plain; charset=utf-8")
 
     def _api_events(self):
-        """常驻 SSE：服务端主动推送（定时提醒 / AI 主动消息）。
+        """常驻 SSE：服务端主动推送（定时提醒等）。
 
         与 /api/chat 不同，这个连接**不随请求结束而关闭** —— 它是「没人提问时也能推」
         的唯一通道。15 秒无事件就发一次心跳注释，防止空闲连接被中间设备掐断。
@@ -578,6 +592,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/notes/anno/list": notes._api_notes_anno_list,
             "/api/notes/anno/save": notes._api_notes_anno_save,
             "/api/notes/anno/delete": notes._api_notes_anno_delete,
+            "/api/notes/capture": notes._api_notes_capture,
+            "/api/notes/captures": notes._api_notes_captures,
             # 功能大厅（新玩法按 /api/hall/<功能id>/… 分组挂在这里）
             "/api/hall/geo/new": hall._api_hall_geo_new,
             "/api/hall/geo/guess": hall._api_hall_geo_guess,
@@ -754,7 +770,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- IDE / 工作区（沙箱内文件操作） ----------
 
     def _sb(self, body):
-        s = find_session(load_sessions(), body.get("session_id"))
+        s = find_session(load_sessions(copy=False), body.get("session_id"))
         return (s, agent.clean_sandbox(s.get("sandbox"))) if s else (None, None)
 
     def _sb_guard(self, body):
@@ -781,7 +797,7 @@ class _QuietHTTPServer(ThreadingHTTPServer):
 def create_server(host="127.0.0.1", port=0):
     # 兜底：服务进程派生的控制台子进程默认不弹窗（重复调用无副作用）
     winproc.install_default()
-    # 新域数据库：任务 / 日程 / 产物。建表幂等；旧数据（sessions.json）不动。
+    # 新域数据库：任务 / 日程 / 产物。建表幂等；旧会话数据不迁移。
     try:
         db.init_db()
         task_engine.recover()          # 上次没跑完的任务统一转 paused，不自动重跑
@@ -863,6 +879,11 @@ def create_server(host="127.0.0.1", port=0):
             sweep_uploads(min_age=SWEEP_MIN_AGE)
         except Exception as e:          # noqa: BLE001
             print(f"[附件清理] 失败：{e}")
+        try:
+            from app.api import storage as _storage
+            _storage.auto_prune_if_needed()
+        except Exception as e:          # noqa: BLE001
+            print(f"[存储] 自动压缩失败：{e}")
 
     threading.Thread(target=_startup_maintenance, daemon=True,
                      name="startup-maintenance").start()
@@ -874,7 +895,7 @@ def create_server(host="127.0.0.1", port=0):
         open_request.start()
     except Exception as e:
         print(f"[右键菜单] 投递线程启动失败：{e}")
-    # 定时提醒 / AI 主动聊天的调度线程
+    # 定时提醒的调度线程
     try:
         scheduler.start()
     except Exception as e:

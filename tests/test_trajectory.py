@@ -14,6 +14,7 @@ def _isolate(tmp_path, monkeypatch):
     trajectory._HEADER_LAST.clear()
     trajectory._EV_CACHE.clear()
     trajectory._PROJ_CACHE.clear()
+    trajectory._SEARCH_CACHE.clear()
     trajectory._CFG_CACHE.update({"at": 0.0, "enabled": True,
                                   "cap": trajectory.DEFAULT_FIELD_CAP})
     return tmp_path
@@ -246,6 +247,8 @@ def test_api_routes_registered_and_respond(monkeypatch):
     from app.api import trajectory as api_mod
 
     assert get("POST", "/api/trajectory") is api_mod._api_trajectory
+    assert get("POST", "/api/trajectory/turns") is api_mod._api_trajectory_turns
+    assert get("POST", "/api/trajectory/search") is api_mod._api_trajectory_search
     assert get("POST", "/api/trajectory/cell") is api_mod._api_trajectory_cell
     assert get("POST", "/api/trajectory/rev") is api_mod._api_trajectory_rev
     assert get("POST", "/api/trajectory/tool") is api_mod._api_trajectory_tool
@@ -269,4 +272,69 @@ def test_api_routes_registered_and_respond(monkeypatch):
     assert h.obj["ok"] is True
     assert h.obj["view"]["turns"][0]["groups"][0]["cells"][0]["kind"] == "user"
     assert h.obj["rev"]["cur"][0] > 0
+
+
+def test_turn_index_and_search_scan_all_turns():
+    """P1：轮次索引覆盖全部轮次；搜索扫全量事件，不受已加载轮次限制。"""
+    sid = "s10"
+    t1 = trajectory.new_turn(sid)
+    trajectory.user(sid, t1, "第一个任务", {"kind": "human"})
+    trajectory.tool(sid, t1, 1, {
+        "tool": "read_file", "args": {"path": "a.py"}, "result": "alpha",
+        "ok": True, "ms": 1, "call_id": "call_a"})
+    trajectory.turn_end(sid, t1, "completed")
+
+    t2 = trajectory.new_turn(sid)
+    trajectory.user(sid, t2, "第二个任务", {"kind": "human"})
+    trajectory.tool(sid, t2, 1, {
+        "tool": "run_command", "args": {"argv": ["pytest"]},
+        "result": "alpha beta", "ok": False, "ms": 2, "call_id": "call_b"})
+    trajectory.turn_end(sid, t2, "error")
+
+    idx = trajectory.turn_index(sid)
+    assert idx["total"] == 2
+    assert [x["turn"] for x in idx["turns"]] == [1, 2]
+    assert idx["turns"][1]["reason"] == "error"
+    assert idx["turns"][1]["stats"]["errors"] >= 1
+    assert idx["turns"][1]["flags"]["errors"] is True
+    assert idx["turns"][0]["title"] == "第一个任务"
+
+    hits = trajectory.search(sid, "alpha")
+    assert hits["total"] >= 2
+    assert {h["turn"] for h in hits["hits"]} == {1, 2}
+    only_err = trajectory.search(sid, "alpha", errors=True)
+    assert only_err["hits"] and all(h["turn"] == 2 for h in only_err["hits"])
+    only_tool = trajectory.search(sid, "alpha", tool="read_file")
+    assert only_tool["hits"] and all(h["tool"] == "read_file"
+                                     for h in only_tool["hits"])
+    assert any(h["recordId"] for h in hits["hits"])
+
+
+def test_api_trajectory_turns_and_search(monkeypatch):
+    from app.api import trajectory as api_mod
+
+    sid = "s11"
+    turn = trajectory.new_turn(sid)
+    trajectory.user(sid, turn, "搜我", {"kind": "human"})
+
+    class H:
+        def __init__(self, body):
+            self._b = body
+
+        def _body(self):
+            return self._b
+
+        def _json(self, obj, code=200):
+            self.obj = obj
+            self.code = code
+            return obj
+
+    h1 = H({"session_id": sid})
+    api_mod._api_trajectory_turns(h1)
+    assert h1.obj["ok"] and h1.obj["total"] == 1
+
+    h2 = H({"session_id": sid, "q": "搜我"})
+    api_mod._api_trajectory_search(h2)
+    assert h2.obj["ok"] and h2.obj["total"] == 1
+    assert h2.obj["hits"][0]["turn"] == turn
 

@@ -1183,7 +1183,7 @@ function mathRenderHints(q) {
     sync();
     // 新提示插在按钮上方，小屏上可能正好在视口外；滚到可见位置
     if (typeof item.scrollIntoView === 'function') {
-      try { item.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (e) { /* 忽略 */ }
+      try { item.scrollIntoView({ block: 'nearest', behavior: GM_SMOOTH }); } catch (e) { /* 忽略 */ }
     }
   };
   sync();
@@ -1257,7 +1257,7 @@ function mathRevealIntoView() {
   if (!head) return;
   const r = head.getBoundingClientRect();
   if (r.top < 0 || r.bottom > window.innerHeight) {
-    try { head.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (e) { /* 忽略 */ }
+    try { head.scrollIntoView({ block: 'nearest', behavior: GM_SMOOTH }); } catch (e) { /* 忽略 */ }
   }
 }
 
@@ -1754,7 +1754,7 @@ function mathScrollCardIntoView() {
   const card = math.el.card;
   if (!card || card.classList.contains('hidden')) return;
   if (card.getBoundingClientRect().top < 0) {
-    try { card.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (e) { /* 忽略 */ }
+    try { card.scrollIntoView({ block: 'start', behavior: GM_SMOOTH }); } catch (e) { /* 忽略 */ }
   }
 }
 

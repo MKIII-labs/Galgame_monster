@@ -28,7 +28,6 @@ from app import content_caps  # noqa: F401  注册笔记 / 搜索 / 文档能力
 from app import stock_caps  # noqa: F401  注册模拟股市只读能力（对话助手可见）
 from app import observe_caps  # noqa: F401  注册通用观测能力（observe.record / query）
 from app import skill_caps    # noqa: F401  注册 Skill 读取能力（skill.read）
-from app import bilibili  # noqa: F401  注册 B 站读取能力（bili.info / transcript / comments）
 from app import llm_caps   # noqa: F401  注册 llm.generate（任务专用）
 from app.capabilities import capability
 from app.db import get_db

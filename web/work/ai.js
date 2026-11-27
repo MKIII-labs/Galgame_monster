@@ -51,9 +51,8 @@ function workAiBtn(text, cls, fn) {
 
 function workAiSkeleton(text) {
   const d = document.createElement('div');
-  d.className = 'work-ai-loading';
-  d.innerHTML = '<span class="work-ai-spin"></span><span>' + workAiEsc(text) + '</span>';
-  return d;
+  d.innerHTML = gmLoadingHtml(text, 'work-ai-loading');
+  return d.firstChild;
 }
 
 function workAiSection(title, extra) {

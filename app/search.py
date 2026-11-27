@@ -14,6 +14,7 @@ import requests
 from app.config import load_config
 from app import search_rank
 from app import search_cache
+from app import page_cache
 from app.search_evidence import extract_evidence
 
 # 联网搜索服务商（可在「设置 → 联网搜索」里改地址/密钥）
@@ -212,7 +213,8 @@ def search_multi(queries, provider, url, key, count, should_stop=None, merged_ma
     queries = [q for q in (queries or []) if str(q).strip()][:MAX_QUERIES]
     if not queries or (should_stop and should_stop()):
         return []
-    per = max(3, count)
+    # 每个检索式按设置的条数请求；以前强制至少 3 条，会让设置 1/2 被静默放大。
+    per = max(1, int(count or 1))
     results, seen, errors = [], set(), []
     try:
         _cfg = load_config()
@@ -403,11 +405,12 @@ def public_url_error(url):
     return ""
 
 
-def _public_get(url, timeout=20, headers=None, max_redirects=3):
+def _public_get(url, timeout=20, headers=None, max_redirects=3, stream=False):
     """不自动跟随重定向的 GET：每一跳都重新做公网校验。
 
     requests 默认会自动跟 30x，公网页只要 302 到 http://127.0.0.1:端口
     就能把抓正文变成打本机服务（SSRF）。这里手动跟，最多 3 跳。
+    stream=True 给分享图片代理用：调用方按块读取并自己限制大小。
     """
     cur = str(url or "").strip()
     for _ in range(max_redirects + 1):
@@ -415,13 +418,18 @@ def _public_get(url, timeout=20, headers=None, max_redirects=3):
             return None
         try:
             r = requests.get(cur, timeout=timeout, allow_redirects=False,
-                             headers=headers or {})
+                             headers=headers or {}, stream=stream)
         except Exception:                        # noqa: BLE001
             return None
         if r is None:
             return None
         if r.status_code in (301, 302, 303, 307, 308):
             loc = r.headers.get("Location") or ""
+            if stream:
+                try:
+                    r.close()
+                except Exception:                # noqa: BLE001
+                    pass
             if not loc:
                 return None
             cur = urljoin(cur, loc)
@@ -521,6 +529,26 @@ def _fetch_github(owner, repo, timeout, query, chars):
 
 
 def _fetch_doc(url, reader="jina", timeout=20, query="", chars=FETCH_CHARS, cloud=None):
+    """抓单个网页正文（带短 TTL 缓存），返回 (content, evidence)。
+
+    同一 URL + 检索式 + 抓取档位在缓存期内直接复用，避免跨轮搜索 /
+    补搜 / 研究子代理重复抓同一页面。
+    """
+    url = (url or "").strip()
+    if not url.lower().startswith("http"):
+        return "", []
+    ck = page_cache.key(url, reader, query, chars)
+    hit = page_cache.get(ck)
+    if hit is not None:
+        return hit
+    got = _fetch_doc_uncached(url, reader=reader, timeout=timeout,
+                              query=query, chars=chars, cloud=cloud)
+    if got and got[0]:
+        page_cache.put(ck, got[0], got[1])
+    return got
+
+
+def _fetch_doc_uncached(url, reader="jina", timeout=20, query="", chars=FETCH_CHARS, cloud=None):
     """抓单个网页，返回 (content, evidence)。失败返回 ("", [])。
 
     顺序：PDF / GitHub 仓库直读 → 云端浏览器（Firecrawl，能渲染 JS 页面）
@@ -575,6 +603,98 @@ def fetch_text(url, timeout=20, query="", chars=FETCH_CHARS):
     return _fetch_doc(url, reader="jina", timeout=timeout, query=query, chars=chars)[0]
 
 
+# 原文直读：这些 URL 就是文件本体，不能再走「挑 3 段证据」的摘要逻辑
+_FULL_TEXT_EXTS = (".md", ".markdown", ".txt", ".json", ".jsonl", ".yml", ".yaml",
+                   ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css",
+                   ".html", ".htm", ".csv", ".tsv", ".xml", ".toml", ".ini",
+                   ".sh", ".ps1", ".bat", ".c", ".h", ".cpp", ".java", ".go", ".rs")
+
+
+def _looks_raw_text(url):
+    """判断这个 URL 是否指向「文件原文」而不是需要抽正文的网页。"""
+    u = str(url or "").lower().split("?")[0].split("#")[0]
+    if u.startswith("https://raw.githubusercontent.com/") or "/raw/" in u:
+        return True
+    return u.endswith(_FULL_TEXT_EXTS)
+
+
+def fetch_text_full(url, timeout=20, chars=FETCH_CHARS):
+    """抓单个 URL 的完整正文（供 fetch_url 工具用）。
+
+    与 fetch_text 的区别：**不做「按查询挑段落」**。搜索结果需要摘录，
+    但「把 GitHub 上的文件抓下来」需要原文，摘录会让 15KB 的文件只剩 1KB。
+    文件类 URL 直连取原文；网页类退回 reader / 去标签。
+    """
+    url = str(url or "").strip()
+    if not url.lower().startswith("http"):
+        return ""
+    try:
+        chars = max(400, int(chars or FETCH_CHARS))
+    except (TypeError, ValueError):
+        chars = FETCH_CHARS
+    ck = page_cache.key(url, "full", "", chars)
+    hit = page_cache.get(ck)
+    if hit is not None:
+        return hit
+    body = _fetch_full_uncached(url, timeout=timeout)
+    if body:
+        page_cache.put(ck, body, [])
+    return (body or "")[:chars]
+
+
+def _fetch_full_uncached(url, timeout=20, cloud=None):
+    """完整正文抓取（不截段）。失败返回空串。"""
+    url = (url or "").strip()
+    if not url.lower().startswith("http"):
+        return ""
+    if _is_pdf_url(url):
+        got = _fetch_pdf(url, timeout, "", FETCH_URL_FULL_CHARS)
+        if got[0]:
+            return got[0]
+    gh = _github_repo(url)
+    if gh:
+        got = _fetch_github(gh[0], gh[1], timeout, "", FETCH_URL_FULL_CHARS)
+        if got[0]:
+            return got[0]
+    # 文件原文优先直连：reader 会加标题 / 改空白，字节就不再忠实
+    if _looks_raw_text(url):
+        got = _fetch_raw_text(url, timeout, cloud=cloud)
+        if got:
+            return got
+    if cloud is None:
+        cloud = bool(load_config().get("search_fetch_cloud", True))
+    if cloud and not public_url_error(url):
+        from app import search_engines
+        md = search_engines.cloud_fetch(url, timeout=max(SCRAPE_TIMEOUT, timeout))
+        if md:
+            return _tidy(md)
+    r = _public_get("https://r.jina.ai/" + url, timeout=timeout,
+                    headers={"Accept": "text/plain", "User-Agent": UA})
+    if r is not None and r.status_code == 200 and r.text.strip():
+        return _tidy(r.text)
+    return _fetch_raw_text(url, timeout, cloud=False) or ""
+
+
+def _fetch_raw_text(url, timeout=20, cloud=False):
+    """直连取正文：非 HTML 按原文返回，HTML 去标签。"""
+    r = _public_get(url, timeout=timeout, headers=BROWSER_HEADERS)
+    if r is None:
+        return ""
+    try:
+        r.raise_for_status()
+    except Exception:                        # noqa: BLE001
+        return ""
+    ctype = str((getattr(r, "headers", {}) or {}).get("content-type") or "").lower()
+    text = r.text or ""
+    if ctype and "html" not in ctype and "xml" not in ctype:
+        return text
+    return _tidy(_strip_html(text))
+
+
+FETCH_URL_FULL_CHARS = 40000          # 原文直读的上限：与 agent 侧 FETCH_URL_MAX_CHARS 对齐
+
+
+
 def fetch_pages(items, limit=4, reader="jina", on_item=None, should_stop=None,
                 query="", chars=FETCH_CHARS):
     """为前 limit 条结果并行抓正文，写入 it['content']；失败则保持原样（用 snippet）。
@@ -627,9 +747,24 @@ def fetch_pages(items, limit=4, reader="jina", on_item=None, should_stop=None,
 
 
 def slim_items(items):
-    """只保留可入库/可展示的字段（正文体积大，不入库）"""
+    """只保留可入库/可展示的字段（正文体积大，不入库）。
+
+    `n` 是研究台账的全局编号：正文里的 [n] 靠它才能和来源列表对上，
+    所以有就一起带上（老数据没有这个字段，前端会退回按顺序编号）。
+    """
     keys = ("title", "url", "site", "snippet", "published_at")
-    return [{k: (it.get(k) or "") for k in keys} for it in (items or [])]
+    out = []
+    for it in (items or []):
+        d = {k: (it.get(k) or "") for k in keys}
+        try:
+            n = int(it.get("n") or 0)
+        except (TypeError, ValueError, AttributeError):
+            n = 0
+        if n:
+            d["n"] = n
+        out.append(d)
+    return out
+
 
 def build_search_context(query, items, start=1):
     """把搜索结果拼成给模型看的参考资料（优先逐字引句 + 行号，否则正文 / 摘要）。

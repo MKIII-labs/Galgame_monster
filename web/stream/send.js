@@ -56,6 +56,15 @@ function syncSearchPill() {
   pill.classList.toggle('disabled', !ok);
 }
 
+// 规划模式（对齐 Trae 的 Plan mode）：常驻开关，开启后本轮只读探索 + 出计划卡。
+function syncPlanPill() {
+  const pill = $('#btn-plan');
+  if (!pill) return;
+  const on = !!state.planMode;
+  pill.classList.toggle('active', on);
+  pill.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
 // 发送受理反馈：点下发送 → 按钮进入转圈态，后端接收请求（拿到响应头）后复原。
 // 只覆盖「点击 → 受理」这段空窗；之后的进度由消息内的 .live-bar 表达。
 let _sendBusyTimer = 0;
@@ -90,12 +99,16 @@ async function sendMessage(payload) {
     const realSid = await materializeDraft();
     if (!realSid) return;
   }
+  // 这次发送归属的会话：下面任何 await / 切会话都不能改变它，
+  // 否则用户气泡和 /api/chat 请求可能落到两个不同的会话。
+  const targetSid = String(state.sessions.current || '');
+  if (!targetSid) return;
   // payload：字符串 / 队列对象（带 __q: true 标记）。注意 onclick 会把事件对象传进来，
   // 所以不能用「是不是对象」判断，必须认标记。
   const replay = !!payload && typeof payload === 'object' && payload.__q === true;
   const fromQueue = typeof payload === 'string' || replay;
   // /plan 规划模式：剥掉前缀，本轮只读研究 + 产出计划卡，不执行
-  let planMode = !!replay && !!(payload && payload.plan);
+  let planMode = !!state.planMode || (!!replay && !!(payload && payload.plan));
   if (!fromQueue) {
     const raw = String(input.value || '');
     if (/^\/plan(?:\s|$)/i.test(raw.trim())) {
@@ -117,7 +130,8 @@ async function sendMessage(payload) {
                    imgs: payload.__edit.imgs || [],
                    docs: payload.__edit.docs || [],
                    reuseImages: payload.__edit.reuseImages || [],
-                   reuseDocs: payload.__edit.reuseDocs || [] });
+                   reuseDocs: payload.__edit.reuseDocs || [],
+                   sid: targetSid });
     return;
   }
   let text = String(
@@ -172,8 +186,8 @@ async function sendMessage(payload) {
   // 正在修改历史消息：文本已经在输入框里，发送时走原有 edit 语义
   // （丢弃该条之后的回复并重新生成，保留版本链），不发成一条新消息
   if (editTarget && !fromQueue
-      && editTarget.sid === String(state.sessions.current || '')) {
-    if (typeof isStreaming === 'function' ? isStreaming() : state.streaming) {
+      && editTarget.sid === targetSid) {
+    if (typeof isStreaming === 'function' ? isStreaming(targetSid) : state.streaming) {
       toast('正在生成回复，稍后再发送这次修改', 'error');
       return;
     }
@@ -207,6 +221,12 @@ async function sendMessage(payload) {
         pv),
     });
     if (!rb.ok) return;
+    // 确认框期间用户可能切了会话：此时不能再动「当前会话」的消息，
+    // 输入框里的编辑内容原样保留，提示用户重新发送。
+    if (String(state.sessions.current || '') !== targetSid) {
+      toast('会话已切换，这次修改未发送；内容还在输入框', 'error');
+      return;
+    }
     cancelEditTarget(false);
     input.value = '';
     autoGrow();
@@ -218,7 +238,7 @@ async function sendMessage(payload) {
       sendQueue.push({
         __q: true,
         text: text,
-        sid: state.sessions.current,
+        sid: targetSid,
         __edit: { index: idx, content: text, imgs: editImgs, docs: editDocs,
                   reuseImages: reuseImages, reuseDocs: reuseDocs },
       });
@@ -228,25 +248,26 @@ async function sendMessage(payload) {
     }
     await resend({ mode: 'edit', index: idx, content: text,
                    imgs: editImgs, docs: editDocs,
-                   reuseImages: reuseImages, reuseDocs: reuseDocs });
+                   reuseImages: reuseImages, reuseDocs: reuseDocs,
+                   sid: targetSid });
     return;
   }
   // 生成中 / 压缩中：不再丢弃 —— 文本 / 图片 / 文档 / 引用全部进队列，空闲后自动发送
   // 用实时状态：切到新会话后缓存的 state.streaming 仍是上一个会话的 true，会误排队
-  const _busy = (typeof isStreaming === 'function') ? isStreaming() : state.streaming;
+  const _busy = (typeof isStreaming === 'function') ? isStreaming(targetSid) : state.streaming;
   if (_busy || compressBusyNow()) {
     if (!text && !imgs.length && !docs.length && !quotes.length && !refs.length && !planMode) return;
     sendQueue.push({
       __q: true,
       text: text,
-      sid: state.sessions.current,
+      sid: targetSid,
       plan: planMode,
       // 只存引用，不复制 base64 内容；结构对齐 pendingImages，回放时可直接复用
       imgs: imgs.map((it) => ({ mime: it.mime, b64: it.b64, url: it.url, seq: it.seq })),
       docs: docs.map((d) => ({
         name: d.name, mime: d.mime, b64: d.b64, size: d.size, seq: d.seq,
       })),
-      quotes: quotes.map((q) => ({ text: q.text })),
+      quotes: quotes.map((q) => ({ text: q.text, label: q.label || '' })),
       refs: refs.map((r) => Object.assign({}, r)),
     });
     input.value = '';
@@ -278,7 +299,7 @@ async function sendMessage(payload) {
     focusComposer(input);
   }
   // 发新消息前，把还处于「预览」的用户消息恢复为当前版本
-  if (verPreview && verPreview.sid === state.sessions.current) refreshUserRow(verPreview.index);
+  if (verPreview && verPreview.sid === targetSid) refreshUserRow(verPreview.index);
   verPreview = null;
   const extra = { content: sendText };
   if (webForce) {
@@ -291,16 +312,21 @@ async function sendMessage(payload) {
     : (docs.length ? ('【附件 ' + docs.length + ' 个】') : '');
   const imgLabel = imgs.length > 1 ? ('【' + imgs.length + ' 张图片】') : '【图片】';
   const refLabel = refs.length ? ('【引用 ' + refs.length + ' 项】') : '';
+  const quoteLabel = quotes.length ? ('【引用 ' + quotes.length + ' 条】') : '';
   if (imgs.length) extra.images = imgs.map((it) => ({ mime: it.mime, data: it.b64 }));
   if (img) extra.image = { mime: img.mime, data: img.b64 };   // 兼容只认 image 的旧客户端
   if (docs.length) extra.docs = docs.map((d) => ({ name: d.name, mime: d.mime, data: d.b64 }));
-  if (quotes.length) extra.quotes = quotes.map((q) => ({ text: q.text }));
+  if (quotes.length) extra.quotes = quotes.map((q) => ({ text: q.text, label: q.label || '' }));
   if (refs.length) extra.refs = refs;
   const echo = {};
   if (imgs.length) {
     echo.images = imgs.map((it) => ({ url: it.url, size: Math.round(it.b64.length * 3 / 4) }));
   }
   if (docs.length) echo.docs = docs.map((d) => ({ name: d.name, size: d.size, mime: d.mime }));
+  // 引用也先放一份到气泡上：发送后引用条会清掉，用户仍能看到这条消息引用了什么
+  if (quotes.length) {
+    echo.quotes = quotes.map((q) => ({ text: q.text, label: q.label || '' }));
+  }
   // 用户气泡上的引用 chip：先放一份临时数据，done 事件再用服务端解析结果校正。
   // workspace 只是检索开关，不进 chip（服务端也不会为它生成引用）。
   const echoRefs = refs
@@ -313,15 +339,16 @@ async function sendMessage(payload) {
   // 刚发出的附件还没有落盘名，先记在内存里，点开预览不必等会话重载
   if (docs.length && typeof rememberSentDoc === 'function') docs.forEach((d) => rememberSentDoc(d));
   if (!fromQueue) setSendBusy(true);          // 点击即反馈：按钮转圈，请求受理后复原
-  appendUser(text || (planMode ? '（规划当前任务）' : (docLabel || imgLabel || refLabel)),
+  appendUser(text || (planMode ? '（规划当前任务）'
+             : (docLabel || imgLabel || refLabel || quoteLabel)),
              curSession() ? curSession().messages.length : undefined,
-             (imgs.length || docs.length || echoRefs.length) ? echo : undefined);
+             (imgs.length || docs.length || echoRefs.length || quotes.length) ? echo : undefined);
   if (!fromQueue) {
     clearAttach();
     clearQuotes();
     if (typeof clearCtxRefs === 'function') clearCtxRefs();
   }
-  await streamChat(extra);
+  await streamChat(extra, null, null, { sid: targetSid });
 }
 
 /* 当前界面上下文：只上报白名单字段，让助手知道用户正在看哪个模块。

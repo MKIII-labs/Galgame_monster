@@ -61,7 +61,8 @@ REVIEW_SYSTEM = "\n".join([
     "用户要求不可删、不可降级、不可申诉。",
     "   - source=plan：任务书「计划里写明的验收条件」，逐字照抄。severity 必须是 blocking，"
     "但主模型可以申诉。",
-    "   - source=reviewer：你自己补充的检查（1–4 条）。severity 默认 advisory —— "
+    "   - source=reviewer：你自己根据任务书与上文理解，视情况补充的检查（有几条写几条，"
+    "不必凑数；没有补充就不写）。severity 默认 advisory —— "
     "它只作为改进建议，**不会**否决交付；只有确实属于交付缺陷时才标 blocking。",
     "   计划步骤里的 verify 只是核对方式参考，不要把它逐条变成独立验收项。",
     "3. 逐条判 passed；**每条 passed 必须带证据**"
@@ -106,6 +107,16 @@ def _clip(text, n):
     if len(t) <= n:
         return t
     return t[:max(0, n - 1)].rstrip() + "…"
+
+
+_PASS_CLAIM = re.compile(r"验收通过|无需返工|已通过|全部通过|\bpass\b", re.I)
+
+
+def _claims_pass(text):
+    """验收模型有时在硬伤仍存在时写「验收通过」：以系统判定为准。"""
+    t = str(text or "")
+    t = t.replace("未通过", "").replace("不通过", "")
+    return bool(_PASS_CLAIM.search(t))
 
 
 def _source(value, default="plan"):
@@ -513,12 +524,18 @@ def merge_report(report, facts):
     # 通过之后不再输出「建议补做」：模型会把它当成未完成的差距反复返工
     if passed:
         suggestions = list(rep.get("gaps") or []) + suggestions
+    next_action = "" if passed else str(rep.get("next_action") or "").strip()
+    if not passed and _claims_pass(next_action):
+        # 系统硬伤（未修复的工具失败 / 磁盘缺文件 / 计划未完成）与模型自述冲突时，
+        # 统一采用系统判定，避免同一张卡「头部未通过、下一步却写验收通过」。
+        next_action = ("先修复：" + "；".join(str(g) for g in gaps[:3]) + "（修完后重新验收）"
+                       if gaps else "按差距清单修复后重新验收。")
     rep.update({"verdict": verdict, "gaps": gaps[:6],
                 "suggestions": suggestions[:5],
                 # blocked = 环境无法验证；arbitrate = 申诉僵持，重试都不会变好
                 "terminal": verdict == "blocked" or arbitrate,
                 "arbitrate": arbitrate,
-                "next_action": "" if passed else rep.get("next_action"),
+                "next_action": next_action,
                 "facts": facts, "passed": passed})
     return rep
 

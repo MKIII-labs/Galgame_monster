@@ -1,6 +1,20 @@
 /* ---- 模式切换 ---- */
-/* 顶层切换走 page-transition.js：能快照就用 View Transitions（只动 #main），
-   否则退回单块淡入。IDE 首次进入先给编辑器骨架，避免等 Monaco 时白屏。 */
+/* 顶层切换只做轻量淡入（不再快照 #main）；IDE 首次进入先给编辑器骨架，
+   避免等 Monaco 时白屏。 */
+/* 非首屏面板的惰性挂载：HTML 里先放在 <template id="tpl-xxx">，首次进入再 clone。
+   这样首屏少解析一批隐藏 DOM；挂载时机在模式切换前，绑定逻辑（workBind 等）照常执行。 */
+function ensurePanelMounted(id) {
+  const panel = document.getElementById(id);
+  const tpl = document.getElementById('tpl-' + id);
+  if (!panel || !tpl || panel.dataset.mounted) return false;
+  panel.appendChild(tpl.content.cloneNode(true));
+  panel.dataset.mounted = '1';
+  try {
+    panel.dispatchEvent(new CustomEvent('gm:panel-mounted', { bubbles: true, detail: { id: id } }));
+  } catch (e) { /* 老浏览器忽略 */ }
+  return true;
+}
+
 function applyUiMode(mode) {
   const m = (mode === 'ide' || mode === 'hall' || mode === 'work'
     || mode === 'plugins') ? mode : 'solo';
@@ -10,10 +24,12 @@ function applyUiMode(mode) {
     : m === 'work' ? $('#work-panel')
     : m === 'plugins' ? $('#plugins-panel')
     : document.querySelector('.chat-col');
-  if (prev && prev !== m && typeof gmPageTransition === 'function') {
-    gmPageTransition(() => applyUiModeNow(m), fb);
-  } else {
-    applyUiModeNow(m);
+  // 顶层模式切换不再用 View Transition：快照 #main 实测 300–440ms
+  // （1440×900，Edge/Chromium；IDE 面板更重），直接切换 + 淡入约 22ms。
+  // gmPageTransition 仍留给大厅 / 工作台的内部页面切换。
+  applyUiModeNow(m);
+  if (prev && prev !== m) {
+    if (typeof gmPageIn === 'function') gmPageIn(fb);
   }
   // 首次进 IDE：Monaco 还没就绪时先铺骨架（ideInitOnce 里加载完再清）
   if (m === 'ide' && !state.ideMonaco && typeof gmSkeleton === 'function') {
@@ -23,6 +39,9 @@ function applyUiMode(mode) {
 }
 
 function applyUiModeNow(m) {
+  // IDE / 工作台面板是惰性挂载的：先 clone 再查节点 / 切换显隐
+  if (m === 'ide') ensurePanelMounted('ide-panel');
+  if (m === 'work') ensurePanelMounted('work-panel');
   // 切模式时收起全屏看图浮层，否则它会盖在别的模式上
   if (typeof imgZoomClose === 'function') imgZoomClose();
   state.uiMode = m;
@@ -53,7 +72,7 @@ function applyUiModeNow(m) {
   const pb = $('#btn-plugins');
   if (pb) pb.classList.toggle('active', m === 'plugins');
   if (m === 'ide') {
-    const startIde = () => { ideInitOnce(); loadIdeTree(); ideWatchStart(); };
+    const startIde = () => { ideInitOnce(); ideAutoCollapseOnEnter(); loadIdeTree(); ideWatchStart(); };
     // xterm 内核按需加载：必须在 Monaco 的 AMD loader 之前执行，
     // 否则 xterm / addon-fit 的 UMD 会被当成 AMD 模块注册，拿不到 window.Terminal。
     if (typeof window.Terminal !== 'function' && typeof window.gmLoadGroup === 'function') {
@@ -93,6 +112,8 @@ function applyUiModeNow(m) {
   if (typeof renderSessions === 'function' && state.sessions && state.sessions.sessions) {
     renderSessions();
   }
+  // 模式切换会显示 / 隐藏输入区：同步「回到底部」与 Toast 的避让高度
+  if (typeof positionToBottomBtn === 'function') positionToBottomBtn();
 }
 
 // IDE 首次进入时初始化：装载本地 Monaco，并做一次性绑定
@@ -189,6 +210,7 @@ function ideInitOnce() {
   state.ideSide = 'explorer';
   state.ideSideHidden = !!(state.config && state.config.ide_side_collapsed);   // 恢复上次的收起状态
   ideSyncSideUI();
+  ideBindAutoCollapse();              // 窄屏自动收起资源管理器（窗口宽度监听）
   ideBindWorkspace();
   ideDragBindGlobal();                // 原生拖出后没有 dragend：兜底清理拖拽源
   ideCtxBind();                       // 文件树右键菜单（容器只绑定一次）
@@ -539,6 +561,8 @@ function ideEnsureEditor(monaco) {
   if (d.wordWrap) opt.wordWrap = d.wordWrap;
   if (typeof d.mouseWheelZoom === 'boolean') opt.mouseWheelZoom = d.mouseWheelZoom;
   state.ideEditor = monaco.editor.create(host, opt);
+  // 编辑器字号缩放（与聊天框独立）：配置里的 ide_editor_zoom 在创建后立即生效
+  if (typeof window.gmApplyEditorZoom === 'function') window.gmApplyEditorZoom();
   state.ideEditor.onDidChangeModelContent(() => {
     if (state.ideOpen) ideSetDirty(state.ideOpen, true);
     // 开始编辑 = 这个标签被固定，之后打开别的文件不再顶掉它
@@ -718,6 +742,10 @@ function ideAiInit(editor, monaco) {
 function ideSyncMonacoTheme() {
   const m = state.ideMonaco;
   if (m) m.editor.setTheme(ideMonacoThemeName());
+  // 笔记源码模式也用同一份 Monaco：一并切主题（由 notes.js 暴露）
+  if (typeof window.notesSourceSyncTheme === 'function') {
+    try { window.notesSourceSyncTheme(); } catch (e) { /* 忽略 */ }
+  }
 }
 
 /* ============================================================
@@ -859,8 +887,16 @@ async function loadIdeTree() {
   syncIdeRoot();
   const s = curSession();
   if (!s || !s.sandbox) {
+    state.ideTree = null;
+    state.ideTreeSid = '';
+    state.ideTreeSig = '';
     box.innerHTML = '<div class="ide-empty">尚未设置沙箱目录。<br>请先点输入框上方的「Agent」并选择目录。</div>';
     return;
+  }
+  const sid = state.sessions.current;
+  // 换了会话：旧树先撤掉，避免在新结果回来前显示上一个会话的结构
+  if (state.ideTreeSid && state.ideTreeSid !== sid) {
+    box.innerHTML = '<div class="ide-empty">正在读取目录…</div>';
   }
   let r;
   try { r = await api('/api/sandbox/tree', { session_id: state.sessions.current }); }
@@ -869,9 +905,16 @@ async function loadIdeTree() {
     box.innerHTML = '<div class="ide-empty">' + escapeHtml((r && r.error) || '读取失败') + '</div>';
     return;
   }
-  state.ideTree = r.tree;
-  renderIdeTree(r.tree);
-  ideWatchSig = JSON.stringify(r.tree);      // 监听基线：下一次不一致才重绘
+  const sig = JSON.stringify(r.tree);
+  const hasDom = !!box.querySelector('.ide-row');
+  // 同一会话、内容没变：保留已经渲染好的 DOM，不重绘
+  if (state.ideTreeSid !== sid || sig !== state.ideTreeSig || !hasDom) {
+    state.ideTree = r.tree;
+    state.ideTreeSid = sid;
+    state.ideTreeSig = sig;
+    renderIdeTree(r.tree);
+  }
+  ideWatchSig = sig;                         // 监听基线：下一次不一致才重绘
   ideRefreshGitMarks();                      // git 装饰与目录树并行拉取，不阻塞首屏
 }
 
@@ -1316,6 +1359,8 @@ async function ideWatchTick() {
   const sig = JSON.stringify(r.tree);
   if (ideWatchSig && sig !== ideWatchSig) {
     state.ideTree = r.tree;
+    state.ideTreeSid = state.sessions.current;
+    state.ideTreeSig = sig;
     renderIdeTree(r.tree);
     ideSyncTreeActive();
   }
@@ -4365,7 +4410,7 @@ function ideReviewKeydown(e) {
    收起时活动栏不再高亮 —— 否则会「看着是选中态，右边却空着」。
    收起 / 展开动的是 #ide-sides 的宽度（.collapsed），过渡期间冻结 Monaco 布局；
    各视图之间仍然用 .hidden 瞬间切换，不参与动画。 */
-const IDE_SIDE_LABEL = { explorer: '资源管理器', search: '沙箱内搜索', git: '源代码管理', debug: '运行和调试', annos: '批注', docs: '文献库' };
+const IDE_SIDE_LABEL = { explorer: '资源管理器', search: '沙箱内搜索', git: '源代码管理', debug: '运行和调试', annos: '批注' };
 
 /* 侧栏做宽度过渡时冻结 Monaco 的 automaticLayout：
    否则过渡的每一帧都会触发一次全量 layout（收起/展开会明显卡一下）。
@@ -4391,7 +4436,7 @@ function ideSyncSideUI(animate) {
   const hid = !!state.ideSideHidden;
   const map = {
     explorer: '#ide-side-explorer', search: '#ide-side-search', git: '#ide-side-git',
-    debug: '#ide-side-debug', annos: '#ide-side-annos', docs: '#ide-side-docs',
+    debug: '#ide-side-debug', annos: '#ide-side-annos',
   };
   Object.keys(map).forEach((k) => {
     const el = $(map[k]);
@@ -4424,6 +4469,7 @@ function idePersistSideHidden() {
 // 只控制显隐（Ctrl+B / 收起按钮走这里）
 function ideSetSideHidden(hidden) {
   state.ideSideHidden = !!hidden;
+  _ideAutoCollapsed = false;           // 手动操作后不再被自动收起覆盖
   ideSyncSideUI(true);                 // 收起 / 展开都走宽度过渡
   idePersistSideHidden();
 }
@@ -4435,13 +4481,54 @@ function ideToggleSidebar() { ideSetSideHidden(!state.ideSideHidden); }
 function ideSwitchSide(which) {
   state.ideSide = which;
   state.ideSideHidden = false;
+  _ideAutoCollapsed = false;           // 手动展开后不再被自动收起覆盖
   ideSyncSideUI(true);                 // 从收起态切图标时也是展开动画
   if (which === 'search') { const i = $('#ide-search-input'); if (i) i.focus(); }
   if (which === 'git' && typeof gitRefresh === 'function') gitRefresh();   // 每次切进来都拉一次最新状态
   if (which === 'debug') debugRenderBreakpoints();
   if (which === 'annos') ideAnnoLoad(state.ideOpen);
-  if (which === 'docs') ideDocsLoad($('#ide-doc-q') ? $('#ide-doc-q').value : '');
   idePersistSideHidden();
+}
+
+/* 窄屏自动收起：窗口 <1200px 时进入 IDE 自动收起资源管理器，把宽度让给编辑区。
+   手动展开 / 收起后不再自动覆盖；只有再次跨越 1200 阈值时才重新判断。 */
+const IDE_AUTO_COLLAPSE_W = 1200;
+let _ideAutoCollapsed = false;
+let _ideLastNarrow = false;
+let _ideResizeTimer = 0;
+
+function ideAutoCollapseOnEnter() {
+  const narrow = window.innerWidth < IDE_AUTO_COLLAPSE_W;
+  _ideLastNarrow = narrow;
+  if (narrow && !state.ideSideHidden) {
+    state.ideSideHidden = true;
+    _ideAutoCollapsed = true;
+    ideSyncSideUI(false);
+  }
+}
+
+function ideAutoCollapseOnResize() {
+  if (state.uiMode !== 'ide') return;
+  const narrow = window.innerWidth < IDE_AUTO_COLLAPSE_W;
+  if (narrow === _ideLastNarrow) return;
+  _ideLastNarrow = narrow;
+  if (narrow && !state.ideSideHidden) {
+    state.ideSideHidden = true;
+    _ideAutoCollapsed = true;
+    ideSyncSideUI(true);
+  } else if (!narrow && _ideAutoCollapsed && state.ideSideHidden) {
+    state.ideSideHidden = false;
+    _ideAutoCollapsed = false;
+    ideSyncSideUI(true);
+  }
+}
+
+function ideBindAutoCollapse() {
+  window.addEventListener('resize', () => {
+    if (state.uiMode !== 'ide') return;
+    clearTimeout(_ideResizeTimer);
+    _ideResizeTimer = setTimeout(ideAutoCollapseOnResize, 120);
+  });
 }
 
 // 点活动栏图标：点「当前已激活」的那个 = 收起
@@ -5136,7 +5223,9 @@ async function debugEvaluate() {
 
 function debugBindControls() {
   const start = $('#debug-start');
-  if (start) start.onclick = debugStart;
+  if (!start || start.dataset.bound === '1') return;   // 面板未挂载 / 已绑定
+  start.dataset.bound = '1';
+  start.onclick = debugStart;
   const stop = $('#debug-stop');
   if (stop) stop.onclick = debugStop;
   const refresh = $('#debug-refresh');
@@ -5182,6 +5271,10 @@ if (document.readyState === 'loading') {
 } else {
   debugBindControls();
 }
+// IDE 面板惰性挂载：挂载完成后再绑一次调试控件（未挂载时上面那次是空操作）
+document.addEventListener('gm:panel-mounted', (e) => {
+  if (e.detail && e.detail.id === 'ide-panel') debugBindControls();
+});
 
 
 /* 全局替换：先 dry_run 出方案（改几个文件、改哪几处），确认后才写盘。
@@ -5240,7 +5333,6 @@ const IDE_COMMANDS = [
   { title: '在沙箱内搜索', run: () => ideSwitchSide('search') },
   { title: '添加批注（选中行）', key: 'Ctrl+Alt+M', run: () => ideAnnoAdd() },
   { title: '显示批注面板', run: () => ideSwitchSide('annos') },
-  { title: '显示文献库', run: () => ideSwitchSide('docs') },
   { title: '全仓语义搜索', run: () => {
     ideSwitchSide('search');
     const c = $('#ide-search-semantic'); if (c) c.checked = true;
@@ -5596,38 +5688,4 @@ async function ideAnnoAdd() {
   ideSwitchSide('annos');
   ideAnnoLoad(rel);
   toast('已添加批注');
-}
-
-/* ---------------- 文献库（沙箱内自动生成的文献条目） ---------------- */
-state.ideDocs = [];
-
-async function ideDocsLoad(q) {
-  try {
-    const r = await api('/api/doc/list', { session_id: state.sessions.current, q: q || '' });
-    state.ideDocs = (r && r.ok && r.items) || [];
-  } catch (e) { state.ideDocs = []; }
-  ideDocsRender();
-}
-
-function ideDocsRender() {
-  const box = $('#ide-doc-list');
-  if (!box) return;
-  const list = state.ideDocs || [];
-  if (!list.length) {
-    box.innerHTML = '<div class="ide-empty">还没有文献。打开 PDF 后会自动生成条目。</div>';
-    return;
-  }
-  box.innerHTML = list.map((d) => {
-    const authors = (d.authors || []).join(', ');
-    const meta = [authors, d.year || '', d.venue || ''].filter(Boolean).join(' · ');
-    const tags = (d.tags || []).map((t) => '#' + t).join(' ');
-    return '<div class="ide-doc-item" data-path="' + escapeHtml(d.doc_key) + '">'
-      + '<div class="ide-doc-title">' + escapeHtml(d.title || d.doc_key) + '</div>'
-      + (meta ? '<div class="ide-doc-meta">' + escapeHtml(meta) + '</div>' : '')
-      + (tags ? '<div class="ide-doc-tags">' + escapeHtml(tags) + '</div>' : '')
-      + '</div>';
-  }).join('');
-  $$('#ide-doc-list .ide-doc-item').forEach((row) => {
-    row.onclick = () => openIdeFile(row.dataset.path);
-  });
 }

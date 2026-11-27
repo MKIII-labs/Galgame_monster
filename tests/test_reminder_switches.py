@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
-"""提醒开关：总开关关掉全部；细分开关分别控制应用内 / 系统通知 / 日程 / 主动聊天。"""
+"""提醒开关：总开关关掉全部；细分开关分别控制应用内 / 系统通知 / 日程。"""
 import app.config as config_mod
 from app import calendar, scheduler
 
 
 def _cfg(monkeypatch, **kw):
     cfg = {"reminders_enabled": True, "reminder_inapp_enabled": True,
-           "reminder_system_enabled": True, "reminder_calendar_enabled": True,
-           "auto_chat_enabled": True}
+           "reminder_system_enabled": True, "reminder_calendar_enabled": True}
     cfg.update(kw)
     monkeypatch.setattr(config_mod, "load_config", lambda: cfg)
     return cfg
@@ -34,7 +33,6 @@ def test_master_off_stops_everything(monkeypatch):
     monkeypatch.setattr(scheduler, "list_tasks", lambda: [_task("reminder"), _task("auto_chat")])
     called = []
     monkeypatch.setattr(scheduler, "_fire_reminder", lambda *a, **k: called.append("r"))
-    monkeypatch.setattr(scheduler, "_fire_auto", lambda *a, **k: called.append("a"))
     assert scheduler.tick(now=1000) == []
     assert called == []
 
@@ -52,11 +50,11 @@ def test_inapp_off_still_advances_without_message(monkeypatch):
     assert seen["deliver"] is False
 
 
-def test_auto_chat_off_skips(monkeypatch):
-    _cfg(monkeypatch, auto_chat_enabled=False)
+def test_legacy_auto_chat_tasks_are_ignored(monkeypatch):
+    _cfg(monkeypatch)
     monkeypatch.setattr(scheduler, "list_tasks", lambda: [_task("auto_chat")])
     called = []
-    monkeypatch.setattr(scheduler, "_fire_auto", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(scheduler, "_fire_reminder", lambda *a, **k: called.append(1))
     assert scheduler.tick(now=1000) == []
     assert called == []
 

@@ -137,15 +137,6 @@ function buildApiPane(provider, host) {
                      '就中止本轮并重试（默认 45 秒，0 = 关）。' +
                      '完全没有任何 data 仍按 chat_stream_idle_timeout（默认 90 秒）处理。',
                      '空心跳 卡住 思考 正文 静默');
-
-    html += setGroupHtml('思考落库', '思考 reasoning 落库 历史 回看 体积 隐私');
-    html += checkRowHtml('chat-persist-reasoning',
-      '把思考存进会话（刷新后仍可回看）', '思考 落库 历史 回看');
-    html += labelHtml('每条消息保留的思考上限（字，0 = 不限）', '思考 上限 字数 体积');
-    html += '<input id="chat-reasoning-keep" class="field-input" type="number" min="0" step="1000">';
-    html += hintHtml('思考只存本地 sessions.json，不会上传。默认每条 12,000 字；' +
-                     '超出时丢掉最早的思考、保留最近的。关掉后刷新就看不到本次思考，' +
-                     '正文与工具记录不受影响。', '思考 上限 体积 隐私');
   }
   html += setGroupHtml('账户余额', '余额 balance 查询 充值 赠金') +
     '<div class="balance-row"><span class="balance-text" id="' + provider + '-balance">未查询</span>' +
@@ -193,10 +184,6 @@ function buildApiPane(provider, host) {
     if (ur) ur.value = cfg.chat_upload_retries != null ? cfg.chat_upload_retries : 4;
     const st = pane.querySelector('#chat-stream-stall');
     if (st) st.value = cfg.chat_stream_stall_timeout != null ? cfg.chat_stream_stall_timeout : 45;
-    const pr = pane.querySelector('#chat-persist-reasoning');
-    if (pr) pr.checked = cfg.chat_persist_reasoning !== false;
-    const rk = pane.querySelector('#chat-reasoning-keep');
-    if (rk) rk.value = cfg.chat_reasoning_keep_chars != null ? cfg.chat_reasoning_keep_chars : 12000;
   }
   q('balance-url').value = cfg[provider + '_balance_url'] || '';
   q('balance-refresh').onclick = () => refreshBalance(provider, pane);
@@ -306,10 +293,6 @@ function buildApiPane(provider, host) {
       out.chat_upload_retries = ur ? Math.max(0, parseInt(ur.value, 10) || 0) : 4;
       const st = pane.querySelector('#chat-stream-stall');
       out.chat_stream_stall_timeout = st ? Math.max(0, parseInt(st.value, 10) || 0) : 45;
-      const pr = pane.querySelector('#chat-persist-reasoning');
-      out.chat_persist_reasoning = !pr || pr.checked;
-      const rk = pane.querySelector('#chat-reasoning-keep');
-      out.chat_reasoning_keep_chars = rk ? Math.max(0, parseInt(rk.value, 10) || 0) : 12000;
     }
     return out;
   };

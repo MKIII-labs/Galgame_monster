@@ -239,7 +239,7 @@ function editQueueItem(i) {
     renderAttach();
   }
   if (item.quotes && item.quotes.length) {
-    state.pendingQuotes = item.quotes.map((q) => ({ text: q.text }));
+    state.pendingQuotes = item.quotes.map((q) => ({ text: q.text, label: q.label || '' }));
     renderQuoteBar();
   }
   toast('已退回输入框，改完再发');

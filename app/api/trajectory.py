@@ -28,10 +28,49 @@ def _api_trajectory(h):
     sid = _sid(body)
     if not sid:
         return h._json({"ok": False, "error": "缺少会话 id"}, 400)
+    turn = _int(body, "turn", 0)
+    before = (turn + 1) if turn > 0 else (body.get("before") or None)
     view = trajectory.build(
-        sid, before=body.get("before") or None,
+        sid, before=before,
         limit_turns=max(0, min(_int(body, "limit", 8), 200)))
+    if turn > 0:
+        view["focus_turn"] = turn
     return h._json({"ok": True, "view": view, "rev": trajectory.revision(sid)})
+
+
+@route("/api/trajectory/turns")
+def _api_trajectory_turns(h):
+    """全量轮次摘要：左侧导航不再依赖已加载的 8 轮。"""
+    body = h._body()
+    sid = _sid(body)
+    if not sid:
+        return h._json({"ok": False, "error": "缺少会话 id"}, 400)
+    res = trajectory.turn_index(
+        sid, before=body.get("before") or None,
+        limit=max(1, min(_int(body, "limit", 500), 2000)))
+    res["ok"] = True
+    res["rev"] = trajectory.revision(sid)
+    return h._json(res)
+
+
+@route("/api/trajectory/search")
+def _api_trajectory_search(h):
+    """全量轨迹搜索：扫事件账本，不再只搜已加载的 cells。"""
+    body = h._body()
+    sid = _sid(body)
+    if not sid:
+        return h._json({"ok": False, "error": "缺少会话 id"}, 400)
+    res = trajectory.search(
+        sid, q=str(body.get("q") or ""),
+        kinds=body.get("kinds") or None,
+        tool=str(body.get("tool") or ""),
+        errors=bool(body.get("errors")),
+        writes=bool(body.get("writes")),
+        subagent=bool(body.get("subagent")),
+        limit=max(1, min(_int(body, "limit", 50), 200)),
+        offset=max(0, _int(body, "offset", 0)))
+    res["rev"] = trajectory.revision(sid)
+    return h._json(res)
 
 
 @route("/api/trajectory/cell")
@@ -81,4 +120,7 @@ def _api_trajectory_export(h):
     sid = _sid(body)
     if not sid:
         return h._json({"ok": False, "error": "缺少会话 id"}, 400)
+    fmt = str(body.get("format") or "json").lower()
+    if fmt == "html":
+        return h._json({"ok": True, "html": trajectory.export_html(sid)})
     return h._json({"ok": True, "data": trajectory.export(sid)})

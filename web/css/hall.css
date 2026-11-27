@@ -18,26 +18,26 @@
 }
 .hall-back {
   flex: none; display: inline-flex; align-items: center; gap: 4px;
-  padding: 5px 11px; border: 1px solid var(--border); border-radius: 8px;
-  background: transparent; color: var(--text-dim); font-size: 12.5px; cursor: pointer;
+  padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: transparent; color: var(--text-dim); font-size: var(--fs-sm); cursor: pointer;
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .hall-back:hover { background: var(--bg-hover); color: var(--text); }
 /* min-width:0 是关键：flex 子项默认按内容撑开，窄视口下会被压成一字一行 */
 .hall-titles { flex: 1 1 auto; min-width: 0; }
 .hall-title {
-  font-size: 15px; font-weight: 600;
+  font-size: var(--fs); font-weight: var(--fw-bold);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .hall-sub {
-  margin-top: 2px; font-size: 12px; color: var(--text-dim);
+  margin-top: 2px; font-size: var(--fs-xs); color: var(--text-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .hall-head-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .hall-badge {
-  padding: 3px 9px; border-radius: 999px;
+  padding: 4px 10px; border-radius: 999px;
   background: var(--accent-soft); color: var(--accent);
-  font-size: 11.5px; white-space: nowrap;
+  font-size: var(--fs-xs); white-space: nowrap;
 }
 
 .hall-body { flex: 1; min-height: 0; overflow: auto; padding: 22px; }
@@ -66,28 +66,28 @@
 }
 .hall-card:active { transform: translateY(0); }
 .hall-card-ico {
-  width: 38px; height: 38px; border-radius: 11px;
+  width: 38px; height: 38px; border-radius: var(--radius-md);
   display: grid; place-items: center;
   background: var(--accent-soft); color: var(--accent);
 }
 .hall-card-ico .ic { width: 21px; height: 21px; }
-.hall-card-name { font-size: 14.5px; font-weight: 600; }
-.hall-card-desc { font-size: 12.5px; line-height: 1.65; color: var(--text-dim); }
+.hall-card-name { font-size: 14.5px; font-weight: var(--fw-bold); }
+.hall-card-desc { font-size: var(--fs-sm); line-height: var(--lh); color: var(--text-dim); }
 .hall-card-foot {
   margin-top: auto; padding-top: 6px;
   display: flex; align-items: center; gap: 8px;
-  font-size: 11.5px; color: var(--text-dim);
+  font-size: var(--fs-xs); color: var(--text-dim);
 }
 .hall-card-go {
   margin-left: auto; padding: 0; border: 0; background: transparent;
-  color: var(--accent); font: inherit; font-weight: 600; cursor: pointer;
+  color: var(--accent); font: inherit; font-weight: var(--fw-bold); cursor: pointer;
 }
 .hall-card-go:hover { text-decoration: underline; }
 .hall-card-tag {
   position: absolute; top: 14px; right: 14px;
   padding: 2px 8px; border-radius: 999px;
   border: 1px solid var(--border); background: var(--bg-side);
-  font-size: 11px; color: var(--text-dim);
+  font-size: var(--fs-2xs); color: var(--text-dim);
 }
 .hall-card.soon { opacity: .62; cursor: default; }
 .hall-card.soon:hover { transform: none; box-shadow: none; border-color: var(--border); }
@@ -98,7 +98,7 @@
   padding: 2px 8px 2px 4px;
   border: 1px solid var(--border); border-radius: 999px;
   background: var(--bg); color: var(--text-dim);
-  font: inherit; font-size: 11.5px; cursor: pointer; white-space: nowrap;
+  font: inherit; font-size: var(--fs-xs); cursor: pointer; white-space: nowrap;
 }
 .hall-ai-switch:hover { border-color: var(--border-strong); }
 .hall-ai-switch.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
@@ -122,7 +122,7 @@
 .hall-ai-switch-label { line-height: 1; }
 .hall-empty {
   padding: 40px 0; text-align: center;
-  font-size: 13px; color: var(--text-dim);
+  font-size: var(--fs-sm); color: var(--text-dim);
 }
 
 /* ============================================================
@@ -139,18 +139,18 @@
 
 .geo-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; position: relative; }
 .geo-pill {
-  padding: 3px 10px; border-radius: 999px;
+  padding: 4px 10px; border-radius: 999px;
   background: var(--bg-side); border: 1px solid var(--border);
-  font-size: 11.5px; color: var(--text-dim); white-space: nowrap;
+  font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap;
 }
 .geo-pill.accent { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
 .geo-bar-spacer { flex: 1; }
 
 /* AI 选手选择：一个按钮 + 展开面板（面板里每位选手带一句风格介绍） */
 .geo-ai-pick {
-  margin-left: 4px; padding: 1px 7px;
+  margin-left: 4px; padding: 1px 8px;
   border: 1px solid var(--border); border-radius: 999px;
-  background: var(--bg); color: var(--text); font: inherit; font-size: 11px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: var(--fs-2xs);
   cursor: pointer;
 }
 .geo-ai-pick:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
@@ -162,11 +162,11 @@
   background: var(--bg); box-shadow: 0 12px 32px var(--scrim-soft);
 }
 .geo-ai-head {
-  margin-bottom: 4px; font-size: 11px; color: var(--text-dim);
+  margin-bottom: 4px; font-size: var(--fs-2xs); color: var(--text-dim);
 }
 .geo-ai-row {
   display: flex; align-items: flex-start; gap: 8px;
-  padding: 6px 4px; border-radius: 8px; cursor: pointer;
+  padding: 6px 4px; border-radius: var(--radius-md); cursor: pointer;
 }
 .geo-ai-row:hover { background: var(--bg-hover); }
 .geo-ai-row input {
@@ -175,13 +175,13 @@
 .geo-ai-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .geo-ai-name {
   display: flex; align-items: center; gap: 6px;
-  font-size: 12.5px; color: var(--text);
+  font-size: var(--fs-sm); color: var(--text);
 }
-.geo-ai-desc { font-size: 11px; line-height: 1.55; color: var(--text-dim); }
+.geo-ai-desc { font-size: var(--fs-2xs); line-height: var(--lh-snug); color: var(--text-dim); }
 .geo-ai-foot {
   margin-top: 6px; padding-top: 6px;
   border-top: 1px dashed var(--border);
-  font-size: 10.5px; color: var(--text-dim);
+  font-size: var(--fs-2xs); color: var(--text-dim);
 }
 
 /* 高度交给图片自身的宽高比决定（img height:auto）：
@@ -200,36 +200,36 @@
 .geo-photo-msg {
   min-height: 200px; display: grid; place-items: center;
   padding: 20px; text-align: center;
-  font-size: 13px; line-height: 1.7; color: var(--lightbox-fg);
+  font-size: var(--fs-sm); line-height: var(--lh); color: var(--lightbox-fg);
 }
 .geo-photo-msg .geo-retry {
-  margin-top: 10px; padding: 5px 12px;
-  border: 1px solid var(--lightbox-line-strong); border-radius: 8px;
-  background: transparent; color: var(--lightbox-fg); font-size: 12.5px; cursor: pointer;
+  margin-top: 10px; padding: 6px 12px;
+  border: 1px solid var(--lightbox-line-strong); border-radius: var(--radius-md);
+  background: transparent; color: var(--lightbox-fg); font-size: var(--fs-sm); cursor: pointer;
 }
 .geo-photo-msg .geo-retry:hover { background: var(--lightbox-hover); }
-.geo-credit { font-size: 11px; color: var(--text-dim); }
+.geo-credit { font-size: var(--fs-2xs); color: var(--text-dim); }
 
 /* 识图辅助：玩家点按钮才请求，只列画面特征，不给地点结论 */
 .geo-assist-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.geo-assist-note { font-size: 11px; color: var(--text-dim); }
+.geo-assist-note { font-size: var(--fs-2xs); color: var(--text-dim); }
 .geo-assist-result {
-  padding: 9px 11px;
+  padding: 10px 12px;
   border: 1px solid var(--border); border-radius: var(--radius-lg);
   background: var(--bg-side);
 }
-.geo-assist-title { margin-bottom: 5px; font-size: 11.5px; color: var(--text-dim); }
-.geo-assist-list { margin: 0; padding-left: 16px; font-size: 12.5px; line-height: 1.65; }
+.geo-assist-title { margin-bottom: 6px; font-size: var(--fs-xs); color: var(--text-dim); }
+.geo-assist-list { margin: 0; padding-left: 16px; font-size: var(--fs-sm); line-height: var(--lh); }
 .geo-assist-list li { margin: 2px 0; }
-.geo-assist-loading { font-size: 12.5px; line-height: 1.6; color: var(--text-dim); }
-.geo-assist-err { font-size: 12.5px; line-height: 1.6; color: var(--danger); }
+.geo-assist-loading { font-size: var(--fs-sm); line-height: var(--lh); color: var(--text-dim); }
+.geo-assist-err { font-size: var(--fs-sm); line-height: var(--lh); color: var(--danger); }
 
 /* ---------- 题面放大：点照片开全屏大图 ---------- */
 .geo-photo-box.can-zoom { cursor: zoom-in; }
 .geo-zoom-btn {
   position: absolute; right: 8px; top: 8px; z-index: 2;
   width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
-  border: 1px solid var(--lightbox-line-strong); border-radius: 8px;
+  border: 1px solid var(--lightbox-line-strong); border-radius: var(--radius-md);
   background: var(--scrim); color: var(--on-accent); cursor: zoom-in;
   transition: background var(--t-fast) var(--ease);
 }
@@ -244,14 +244,14 @@
 }
 .geo-zoom-bar {
   flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 10px 14px; font-size: 12.5px; color: var(--lightbox-fg);
+  padding: 10px 14px; font-size: var(--fs-sm); color: var(--lightbox-fg);
 }
 .geo-zoom-pct {
   min-width: 54px; color: var(--lightbox-fg-dim); font-variant-numeric: tabular-nums;
 }
 .geo-zoom-bar button {
-  padding: 5px 11px; border: 1px solid var(--lightbox-line); border-radius: 8px;
-  background: transparent; color: var(--lightbox-fg); font-size: 12.5px; cursor: pointer;
+  padding: 6px 12px; border: 1px solid var(--lightbox-line); border-radius: var(--radius-md);
+  background: transparent; color: var(--lightbox-fg); font-size: var(--fs-sm); cursor: pointer;
   transition: background var(--t-fast) var(--ease);
 }
 .geo-zoom-bar button:hover { background: var(--lightbox-hover); }
@@ -273,7 +273,7 @@
 }
 .geo-zoom-hint {
   flex: none; padding: 8px 14px 12px; text-align: center;
-  font-size: 11.5px; color: var(--lightbox-fg-weak);
+  font-size: var(--fs-xs); color: var(--lightbox-fg-weak);
 }
 
 /* ---------- 参与者 ---------- */
@@ -287,8 +287,8 @@
 .geo-pblock { display: flex; flex-direction: column; gap: 2px; }
 .geo-player {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 8px 11px; border: 1px solid var(--border); border-radius: var(--radius-md);
-  background: var(--bg); font-size: 12.5px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg); font-size: var(--fs-sm);
   transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .geo-player.done { border-color: var(--ok-line); }
@@ -299,32 +299,32 @@
 }
 .geo-pname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .geo-pstate { flex: none; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.geo-player.win .geo-pstate { color: var(--accent); font-weight: 600; }
+.geo-player.win .geo-pstate { color: var(--accent); font-weight: var(--fw-bold); }
 .geo-ptag {
   flex: none; padding: 1px 6px; border-radius: 999px;
-  border: 1px solid var(--border); font-size: 10.5px; color: var(--text-dim);
+  border: 1px solid var(--border); font-size: var(--fs-2xs); color: var(--text-dim);
 }
 .geo-follow {
   flex: none; padding: 1px 8px; border-radius: 999px;
   border: 1px solid var(--border); background: transparent;
-  color: var(--text-dim); font: inherit; font-size: 10.5px; cursor: pointer;
+  color: var(--text-dim); font: inherit; font-size: var(--fs-2xs); cursor: pointer;
   transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
               background var(--t-fast) var(--ease);
 }
 .geo-follow:hover { border-color: var(--accent); color: var(--accent); }
 .geo-pnote {
-  margin: -2px 0 2px 29px; font-size: 11.5px; line-height: 1.5; color: var(--text-dim);
+  margin: -2px 0 2px 29px; font-size: var(--fs-xs); line-height: var(--lh-snug); color: var(--text-dim);
 }
 .geo-preason {
-  margin: 0 0 4px 29px; font-size: 11.5px; color: var(--text-dim);
+  margin: 0 0 4px 29px; font-size: var(--fs-xs); color: var(--text-dim);
 }
 .geo-preason summary {
-  cursor: pointer; font-size: 11px; color: var(--text-dim); list-style: none;
+  cursor: pointer; font-size: var(--fs-2xs); color: var(--text-dim); list-style: none;
 }
 .geo-preason summary::-webkit-details-marker { display: none; }
 .geo-preason summary::before { content: '▸ '; }
 .geo-preason[open] summary::before { content: '▾ '; }
-.geo-preason ul { margin: 3px 0 0; padding-left: 16px; line-height: 1.65; }
+.geo-preason ul { margin: 4px 0 0; padding-left: 16px; line-height: var(--lh); }
 .geo-preason li { margin: 1px 0; }
 
 /* ---------- 地图 ---------- */
@@ -342,11 +342,11 @@
 .geo-map .leaflet-container { background: var(--bg-side); font-family: var(--font); }
 .geo-map-hint {
   padding: 6px 10px; border-radius: var(--radius-md);
-  background: var(--bg-side); font-size: 11.5px; color: var(--text-dim);
+  background: var(--bg-side); font-size: var(--fs-xs); color: var(--text-dim);
 }
 .geo-loading-map {
   height: 100%; display: grid; place-items: center;
-  font-size: 12.5px; color: var(--text-dim); text-align: center; padding: 16px;
+  font-size: var(--fs-sm); color: var(--text-dim); text-align: center; padding: 16px;
 }
 
 /* 标点：一律用 divIcon（不依赖 Leaflet 自带 PNG，避免图片 404 就成了空白方块）。
@@ -376,10 +376,10 @@
 .geo-pin-label {
   position: absolute; left: 50%; bottom: 100%; margin-bottom: 4px;
   transform: translateX(-50%);
-  padding: 2px 7px; border-radius: 999px;
+  padding: 2px 8px; border-radius: 999px;
   background: var(--overlay-strong); color: var(--on-accent);
   border: 1px solid var(--c, var(--accent));
-  font-size: 11px; line-height: 1.5; white-space: nowrap;
+  font-size: var(--fs-2xs); line-height: var(--lh-snug); white-space: nowrap;
   font-variant-numeric: tabular-nums;
   box-shadow: 0 1px 4px var(--scrim-soft);
   pointer-events: none;                 /* 别挡住地图拖拽 / 点选 */
@@ -393,20 +393,20 @@
 /* ---------- 操作区 ---------- */
 .geo-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .geo-btn {
-  padding: 7px 14px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--bg); color: var(--text); font-size: 12.5px; cursor: pointer;
+  padding: 8px 14px; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg); color: var(--text); font-size: var(--fs-sm); cursor: pointer;
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
               color var(--t-fast) var(--ease);
 }
 .geo-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
 .geo-btn:disabled { opacity: .45; cursor: default; }
 .geo-btn.primary {
-  background: var(--accent); border-color: transparent; color: var(--on-accent); font-weight: 600;
+  background: var(--accent); border-color: transparent; color: var(--on-accent); font-weight: var(--fw-bold);
 }
 .geo-btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
 .geo-btn.ghost { border-color: transparent; color: var(--text-dim); }
 .geo-btn.ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
-.geo-msg { min-height: 18px; font-size: 12.5px; line-height: 1.6; color: var(--text-dim); }
+.geo-msg { min-height: 18px; font-size: var(--fs-sm); line-height: var(--lh); color: var(--text-dim); }
 .geo-msg.err { color: var(--danger); }
 .geo-msg.ok { color: var(--ok); }
 
@@ -414,13 +414,13 @@
 .geo-result {
   border: 1px solid var(--accent); border-radius: var(--radius-md);
   background: var(--accent-soft); padding: 10px 12px;
-  font-size: 12.5px; line-height: 1.65;
+  font-size: var(--fs-sm); line-height: var(--lh);
 }
 .geo-result b { color: var(--accent); }
 .geo-result .geo-truth { color: var(--text-dim); font-variant-numeric: tabular-nums; }
 
 /* 视口窄于 1160 时（侧栏占 268，剩下的宽度撑不起两栏）改为上下堆叠，整页滚动 */
-@media (max-width: 1160px) {
+@media (max-width: 1200px) {
   .geo-root { flex-direction: column; }
   .geo-photo-col, .geo-side-col { flex: 0 0 auto; }
   .geo-players { flex: 0 1 auto; max-height: 46vh; }
@@ -436,18 +436,18 @@
   box-sizing: border-box; padding: 20px 22px;
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-lg);
 }
-.gal-hall-title { margin-bottom: 8px; font-size: 20px; font-weight: 600; }
-.gal-hall-hero p { margin: 0; color: var(--text-dim); font-size: 12.5px; line-height: 1.7; }
-.gal-hall-label { font-size: 12.5px; color: var(--text-dim); letter-spacing: .04em; }
+.gal-hall-title { margin-bottom: 8px; font-size: var(--fs-xl); font-weight: var(--fw-bold); }
+.gal-hall-hero p { margin: 0; color: var(--text-dim); font-size: var(--fs-sm); line-height: var(--lh); }
+.gal-hall-label { font-size: var(--fs-sm); color: var(--text-dim); letter-spacing: .04em; }
 .gal-hall-list { display: flex; flex-direction: column; gap: 8px; }
 .gal-hall-session {
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
-  padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md);
   background: var(--bg-side); color: var(--text); cursor: pointer; text-align: left;
 }
 .gal-hall-session:hover { border-color: var(--border-strong); background: var(--bg-hover); }
 .gal-hall-session.active { border-color: var(--accent); background: var(--accent-soft); }
-.gal-hall-session-name { font-size: 13.5px; font-weight: 600; }
-.gal-hall-session-meta { font-size: 12px; color: var(--text-dim); }
+.gal-hall-session-name { font-size: var(--fs-md); font-weight: var(--fw-bold); }
+.gal-hall-session-meta { font-size: var(--fs-xs); color: var(--text-dim); }
 .gal-hall-opts { display: flex; flex-direction: column; gap: 2px; }
 .gal-hall-actions { display: flex; gap: 10px; flex-wrap: wrap; }

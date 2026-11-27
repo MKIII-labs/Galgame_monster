@@ -8,9 +8,11 @@
   3. 起一次服务端（不监听）做冒烟 + 跑几条关键不变量断言
 
 用于「改完代码先自查」，比手工起服务快。"""
+import json
 import os
 import py_compile
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -37,6 +39,23 @@ def bad(msg):
 
 def step(title):
     print("\n== " + title + " ==")
+
+
+def _app_running():
+    """应用正在跑时拒绝自检：create_server 会读写真实 data/，并发迁移会丢数据。"""
+    try:
+        with open(os.path.join(ROOT, "data", "server.json"), encoding="utf-8") as f:
+            port = int((json.load(f) or {}).get("port") or 0)
+    except (OSError, ValueError, TypeError):
+        return False
+    if not port:
+        return False
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+        s.close()
+        return True
+    except OSError:
+        return False
 
 
 def check_compile():
@@ -227,6 +246,9 @@ def main():
     print("=" * 56)
     print("  项目自检（dev_check）")
     print("=" * 56)
+    if _app_running():
+        print("  [FAIL] 应用正在运行：自检会读写真实 data/，请先关闭应用再跑。")
+        return 1
     check_compile()
     check_imports()
     check_invariants()

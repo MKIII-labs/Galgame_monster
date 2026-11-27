@@ -37,7 +37,6 @@ _RULES = {
     "chat_max_tokens": {"type": "int", "min": 0},
     "chat_round_retries": {"type": "int", "min": 0, "max": 20},
     "chat_upload_retries": {"type": "int", "min": 0, "max": 20},
-    "chat_reasoning_keep_chars": {"type": "int", "min": 0},
     "chat_retry_max_minutes": {"type": "num", "min": 0},
     "agent_auto_continue": {"type": "int", "min": -1, "max": 10},
     "hybrid_keep_ratio": {"type": "num", "min": 0, "max": 1},

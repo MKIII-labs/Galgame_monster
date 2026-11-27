@@ -1,177 +1,227 @@
 # -*- coding: utf-8 -*-
-"""事件流为真相源：启动对账、删除不复活、json 模式回退。
+"""会话存储：每会话 append-only JSONL 是事实源，JSON 缓存可删可重建。
 
-会话**列表**仍以 sessions.json 为准（删除不会从事件流复活）；
-每个会话的**内容**取「JSON 与事件流里 updated_at 较新的那份」。
+- `data/sessions/<id>/events.jsonl`：唯一事实源，只追加、永久保留；
+- `data/session_store/<id>.json`：物化读缓存，丢了能从事件流重建；
+- `data/sessions/index.json`：会话顺序与 current，丢了能按缓存扫描重建；
+- 旧 `data/sessions.json`：首次加载时迁移并删除。
 """
 import json
-
-import pytest
+import os
 
 from app import session_events as se
 from app import sessions
-from app.store import drop_cache
 
 
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    monkeypatch.setattr(sessions, "SESSION_FILE", str(tmp_path / "sessions.json"))
-    monkeypatch.setattr(se, "DATA_DIR", str(tmp_path))
-    sessions.reset_merge_flag()
-    se._LAST.clear()
-    yield tmp_path
-    sessions.reset_merge_flag()
-    se._LAST.clear()
-
-
-def _write(path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-
-
-def _sess(sid, title, ts, msgs=None):
+def _sess(sid, title="会话", ts=1.0, msgs=None):
     return {"id": sid, "title": title, "updated_at": ts,
             "messages": msgs if msgs is not None else []}
 
 
-def test_events_win_when_json_behind(env, monkeypatch):
-    sid = "s1"
-    old = _sess(sid, "旧", 1.0, [{"role": "user", "content": "旧内容"}])
-    _write(env / "sessions.json", {"current": sid, "sessions": [old]})
-    new = _sess(sid, "新", 2.0, [{"role": "user", "content": "旧内容"},
-                                 {"role": "assistant", "content": "新回答"}])
-    se.record(old, str(env))            # 基线
-    se.record(new, str(env))            # 变化
-
-    monkeypatch.setattr(sessions, "_store_mode", lambda: "events")
-    data = sessions.load_sessions()
-    s = data["sessions"][0]
-    assert s["updated_at"] == 2.0
-    assert s["messages"][-1]["content"] == "新回答"
-    # 对账后 JSON 也被回写成最新，避免下次重启重复比较
-    on_disk = json.loads((env / "sessions.json").read_text(encoding="utf-8"))
-    assert on_disk["sessions"][0]["updated_at"] == 2.0
+def _read_index():
+    with open(sessions._index_path(), encoding="utf-8") as f:
+        return json.load(f)
 
 
-def test_json_newer_wins(env, monkeypatch):
-    sid = "s2"
-    old = _sess(sid, "旧", 1.0, [{"role": "user", "content": "a"}])
-    se.record(old, str(env))
-    newer = _sess(sid, "JSON 更新", 3.0, [{"role": "user", "content": "b"}])
-    _write(env / "sessions.json", {"current": sid, "sessions": [newer]})
-
-    monkeypatch.setattr(sessions, "_store_mode", lambda: "events")
-    data = sessions.load_sessions()
-    assert data["sessions"][0]["title"] == "JSON 更新"
-    assert data["sessions"][0]["messages"][0]["content"] == "b"
-
-
-def test_deleted_session_does_not_revive(env, monkeypatch):
-    dead = _sess("s_dead", "该删", 1.0, [])
-    se.record(dead, str(env))           # 事件流里有它
-    other = _sess("s_keep", "保留", 1.0, [])
-    _write(env / "sessions.json", {"current": "s_keep", "sessions": [other]})
-
-    monkeypatch.setattr(sessions, "_store_mode", lambda: "events")
-    data = sessions.load_sessions()
-    assert [s["id"] for s in data["sessions"]] == ["s_keep"]
-
-
-def test_json_mode_skips_merge(env, monkeypatch):
-    sid = "s3"
-    old = _sess(sid, "旧", 1.0, [{"role": "user", "content": "old"}])
-    _write(env / "sessions.json", {"current": sid, "sessions": [old]})
-    new = _sess(sid, "新", 2.0, [{"role": "user", "content": "new"}])
-    se.record(old, str(env))
-    se.record(new, str(env))
-
-    monkeypatch.setattr(sessions, "_store_mode", lambda: "json")
-    data = sessions.load_sessions()
-    assert data["sessions"][0]["updated_at"] == 1.0
-    assert data["sessions"][0]["messages"][0]["content"] == "old"
-
-
-def test_merge_failure_does_not_latch(env, monkeypatch):
-    """对账抛异常时必须回滚 _MERGED：否则一次瞬时 IO 失败会让本进程永久跳过对账。"""
-    sid = "s4"
-    _write(env / "sessions.json", {"current": sid, "sessions": [_sess(sid, "t", 1.0)]})
-    monkeypatch.setattr(sessions, "_store_mode", lambda: "events")
-
-    def boom(_data, skip=None):
-        raise OSError("事件流读盘失败")
-
-    monkeypatch.setattr(sessions, "_merge_events_once", boom)
-    with pytest.raises(OSError):
-        sessions.load_sessions()
-    assert sessions._MERGED is False          # 失败不置位
-
-    monkeypatch.setattr(sessions, "_merge_events_once", lambda _data, skip=None: None)
-    sessions.load_sessions()                  # 第二次会重试
-    assert sessions._MERGED is True
-
-
-# ---------------------------------------------------------------------------
-# 单会话快照（热路径落库）
-# ---------------------------------------------------------------------------
-
-def test_hot_save_writes_only_that_session(env, monkeypatch):
-    """热落库只写 session_store/ 里的单会话快照，不重写整份 sessions.json。"""
-    sid, other_id = "s5", "s6"
-    s = _sess(sid, "热", 1.0, [{"role": "user", "content": "a"}])
-    other = _sess(other_id, "别的", 1.0, [{"role": "user", "content": "x"}])
-    _write(env / "sessions.json",
-           {"current": sid, "sessions": [s, other], "saved_at": 1.0})
-    monkeypatch.setattr(sessions, "_store_mode", lambda: "json")
-
-    data = sessions.load_sessions()
-    target = sessions.find_session(data, sid)
-    target["messages"].append({"role": "assistant", "content": "新回答"})
-    target["updated_at"] = 2.0
-
-    before = (env / "sessions.json").stat().st_mtime_ns
-    sessions.save_session(target)
-    assert (env / "sessions.json").stat().st_mtime_ns == before     # 整份没动
-    snap = env / "session_store" / (sid + ".json")
-    assert snap.is_file()
-
-    # 模拟进程重启：整份还是旧的，单会话快照要能把这一条恢复回来
-    drop_cache(str(env / "sessions.json"))
-    sessions.reset_merge_flag()
+def _restart():
+    """模拟进程重启：丢掉内存副本与事件 diff 基线。"""
+    sessions.reset_cache()
     se._LAST.clear()
-    data2 = sessions.load_sessions()
-    got = sessions.find_session(data2, sid)
-    assert got["messages"][-1]["content"] == "新回答"
-    assert sessions.find_session(data2, other_id)["messages"][0]["content"] == "x"
 
 
-def test_stale_store_snapshot_is_discarded(env, monkeypatch):
-    """比 sessions.json 旧的单会话快照不能覆盖它，而且要顺手清掉。"""
-    sid = "s7"
-    _write(env / "sessions.json",
-           {"current": sid, "sessions": [_sess(sid, "整份最新", 3.0, [])], "saved_at": 3.0})
-    monkeypatch.setattr(sessions, "_store_mode", lambda: "json")
-    d = env / "session_store"
-    d.mkdir()
-    stale = d / (sid + ".json")
-    stale.write_text(json.dumps({"saved_at": 1.0,
-                                 "session": _sess(sid, "旧快照", 1.0, [])},
-                                ensure_ascii=False), encoding="utf-8")
+def test_legacy_json_is_migrated_and_removed():
+    sid = "s_old"
+    data = {"current": sid, "saved_at": 10.0,
+            "sessions": [_sess(sid, "旧会话", 10.0, [{"role": "user", "content": "hi"}])]}
+    with open(sessions.SESSION_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
 
-    drop_cache(str(env / "sessions.json"))
-    sessions.reset_merge_flag()
-    se._LAST.clear()
-    data = sessions.load_sessions()
-    assert data["sessions"][0]["title"] == "整份最新"
-    assert not stale.exists()                 # 过期快照被清理
+    got = sessions.load_sessions()
+    assert [s["id"] for s in got["sessions"]] == [sid]
+    assert not os.path.exists(sessions.SESSION_FILE)      # 迁移后删除
+    assert os.path.isfile(sessions._store_path(sid))      # 物化缓存
+    assert _read_index()["order"] == [sid]                # 索引
+    assert se.rebuild(sid)["messages"][0]["content"] == "hi"   # 事件流基线
 
 
-def test_full_save_stamps_saved_at(env):
-    """整份落盘要带 saved_at：启动时用它判断单会话快照是否更新。"""
-    sid = "s8"
-    _write(env / "sessions.json", {"current": sid, "sessions": [_sess(sid, "t", 1.0, [])]})
-    data = sessions.load_sessions()
-    assert not data.get("saved_at")
-    sessions.save_sessions(data)
-    on_disk = json.loads((env / "sessions.json").read_text(encoding="utf-8"))
-    assert on_disk["saved_at"] == data["saved_at"] > 0
-    # 先记事件、后写快照：事件时间戳不会晚于 saved_at，启动时不会重复重放
-    assert se.latest_ts(sid, str(env)) <= on_disk["saved_at"]
+def test_hot_save_only_touches_that_session():
+    a = _sess("s_a", "A", 1.0, [{"role": "user", "content": "a"}])
+    b = _sess("s_b", "B", 1.0, [{"role": "user", "content": "b"}])
+    sessions.save_sessions({"current": "s_a", "sessions": [a, b]})
+    with open(sessions._store_path("s_b"), "rb") as f:
+        before = f.read()
+
+    a["messages"].append({"role": "assistant", "content": "答案"})
+    a["updated_at"] = 2.0
+    sessions.save_session(a)
+
+    with open(sessions._store_path("s_b"), "rb") as f:
+        assert f.read() == before                          # 另一条没被重写
+    _restart()
+    got = sessions.load_sessions()
+    assert sessions.find_session(got, "s_a")["messages"][-1]["content"] == "答案"
+    assert sessions.find_session(got, "s_b")["messages"][0]["content"] == "b"
+
+
+def test_progress_save_skips_cache_and_rebuilds_from_events():
+    """进度快照只追加事件：物化缓存保持旧内容，重启后按事件流恢复最新进度。"""
+    s = _sess("s_a", "A", 1.0, [{"role": "user", "content": "任务"}])
+    sessions.save_sessions({"current": "s_a", "sessions": [s]})
+    with open(sessions._store_path("s_a"), "rb") as f:
+        before = f.read()
+
+    s["messages"].append({"role": "assistant", "content": "半截", "_progress": True})
+    s["updated_at"] = 2.0
+    sessions.save_session(s, cache=False)
+
+    with open(sessions._store_path("s_a"), "rb") as f:
+        assert f.read() == before                       # 没有重写物化缓存
+    _restart()
+    got = sessions.load_sessions()
+    assert sessions.find_session(got, "s_a")["messages"][-1]["content"] == "半截"
+
+
+def test_deleted_session_does_not_revive():
+    sessions.save_sessions({"current": "s_a",
+                            "sessions": [_sess("s_a"), _sess("s_b")]})
+    sessions.drop_session_files("s_b")
+    _restart()
+    got = sessions.load_sessions()
+    assert [s["id"] for s in got["sessions"]] == ["s_a"]
+    assert _read_index()["order"] == ["s_a"]
+
+
+def test_cache_missing_rebuilds_from_events():
+    s = _sess("s_a", "A", 1.0, [{"role": "user", "content": "存档"}])
+    sessions.save_sessions({"current": "s_a", "sessions": [s]})
+    os.remove(sessions._store_path("s_a"))                 # 缓存丢了
+    _restart()
+    got = sessions.load_sessions()
+    assert sessions.find_session(got, "s_a")["messages"][0]["content"] == "存档"
+
+
+def test_events_newer_than_cache_win():
+    """事件写完、缓存没来得及写就退出：启动时应以事件流为准。"""
+    s = _sess("s_a", "旧", 1.0, [{"role": "user", "content": "旧"}])
+    sessions.save_sessions({"current": "s_a", "sessions": [s]})
+    newer = _sess("s_a", "新", 2.0, [{"role": "user", "content": "新"}])
+    se.append_baseline(newer)                              # 事件流更新
+    _restart()
+    got = sessions.load_sessions()
+    assert sessions.find_session(got, "s_a")["title"] == "新"
+
+
+def test_index_missing_rebuilds_order_from_cache():
+    sessions.save_sessions({"current": "s_a",
+                            "sessions": [_sess("s_a", "A", 2.0), _sess("s_b", "B", 1.0)]})
+    os.remove(sessions._index_path())
+    _restart()
+    got = sessions.load_sessions()
+    assert [s["id"] for s in got["sessions"]] == ["s_a", "s_b"]   # 按 updated_at 倒序
+    assert os.path.isfile(sessions._index_path())
+
+
+def test_stray_cache_is_merged_back():
+    """索引被误覆盖成 1 条时，磁盘上还有的缓存必须自动并回来（防数据「消失」）。"""
+    sessions.save_sessions({"current": "s_a",
+                            "sessions": [_sess("s_a", "A", 2.0), _sess("s_b", "B", 1.0)]})
+    sessions._write_index({"current": "s_a", "sessions": [_sess("s_a", "A", 2.0)]})
+    _restart()
+    got = sessions.load_sessions()
+    assert [s["id"] for s in got["sessions"]] == ["s_a", "s_b"]
+    assert _read_index()["order"] == ["s_a", "s_b"]
+
+
+def test_tombstoned_session_is_not_revived():
+    """删除会话会写墓碑：即使缓存没删干净，也不能被「残留扫描」复活。"""
+    sessions.save_sessions({"current": "s_a", "sessions": [_sess("s_a"), _sess("s_b")]})
+    sessions.drop_session_files("s_b")
+    sessions._write_cache(_sess("s_b", "B", 1.0))        # 模拟残留缓存
+    _restart()
+    got = sessions.load_sessions()
+    assert [s["id"] for s in got["sessions"]] == ["s_a"]
+
+
+def test_load_sessions_returns_isolated_copy():
+    sessions.save_sessions({"current": "s_a", "sessions": [_sess("s_a", "原标题")]})
+    d = sessions.load_sessions()
+    d["sessions"][0]["title"] = "改过"
+    d["sessions"][0]["messages"].append({"role": "user", "content": "未保存"})
+    again = sessions.load_sessions()
+    assert again["sessions"][0]["title"] == "原标题"
+    assert again["sessions"][0]["messages"] == []
+
+
+def test_cache_sessions_is_memory_only():
+    sessions.save_sessions({"current": "s_a", "sessions": [_sess("s_a", "A")]})
+    d = sessions.load_sessions()
+    d["sessions"][0]["title"] = "立刻可见"
+    sessions.cache_sessions(d)
+    assert sessions.load_sessions()["sessions"][0]["title"] == "立刻可见"
+    _restart()
+    assert sessions.load_sessions()["sessions"][0]["title"] == "A"   # 没落盘
+
+
+def test_save_sessions_returns_bool():
+    assert sessions.save_sessions({"current": "s_x", "sessions": [_sess("s_x")]}) is True
+    assert sessions.save_sessions(None) is False
+
+
+def test_storage_stats_counts_cache_and_orphans():
+    sessions.save_sessions({"current": "s_a",
+                            "sessions": [_sess("s_a", "A", 1.0), _sess("s_b", "B", 1.0)]})
+    # 模拟一个已删除会话留下的孤儿事件目录
+    ghost = os.path.join(str(sessions._sessions_root()), "s_ghost")
+    os.makedirs(ghost, exist_ok=True)
+    with open(os.path.join(ghost, "events.jsonl"), "w", encoding="utf-8") as f:
+        f.write("{}\n")
+    sessions.reset_cache()
+    st = sessions.storage_stats(ttl=0)
+    assert st["sessions"] == 2
+    assert st["cache_bytes"] > 0
+    assert st["event_bytes"] >= 2
+    assert st["largest_event_bytes"] >= 2
+    assert st["event_warn"] is False
+    assert st["orphan_dirs"] >= 1
+
+
+def test_slim_message_normalizes_sources_without_mutating_original():
+    srcs = [
+        {"title": "A", "url": "https://a.example"},
+        {"title": "A again", "url": "https://a.example"},
+    ]
+    m = {"role": "assistant", "content": "见 [1]",
+         "sources": srcs, "search": {"hits": 9, "pages": []}}
+    out = sessions.slim_message_for_client(m)
+    assert [s["url"] for s in out["sources"]] == ["https://a.example"]
+    assert out["sources"][0]["n"] == 1
+    assert out["search"]["hits"] == 1
+    # 原对象与来源字典都不能被改（读缓存共享）
+    assert len(m["sources"]) == 2
+    assert "n" not in srcs[0]
+    assert m["search"]["hits"] == 9
+
+
+def test_normalize_session_search_skips_out_of_range_citations():
+    in_range = {"role": "assistant", "content": "见 [2]",
+                "sources": [{"title": "A", "url": "a"}, {"title": "B", "url": "b"}]}
+    out_range = {"role": "assistant", "content": "见 [9]",
+                 "sources": [{"title": "C", "url": "c"}]}
+    data = {"sessions": [{"id": "s", "messages": [in_range, out_range]}]}
+    assert sessions.normalize_session_search(data) is True
+    assert [s["n"] for s in in_range["sources"]] == [1, 2]
+    assert "n" not in out_range["sources"][0]
+
+
+def test_slim_message_for_share_drops_heavy_fields():
+    m = {"role": "assistant", "content": "正文", "blocks": [{"kind": "text"}],
+         "tools": [{"tool": "x"}], "timing": {"total_ms": 1}, "plan": {"steps": []},
+         "usage": {"prompt": 1}, "memory": {"ops": []}, "reasoning": "think",
+         "end_reason": {"kind": "done"},
+         "sources": [{"title": "A", "url": "https://a.example"}]}
+    out = sessions.slim_message_for_client(m, slim=True)
+    for key in ("blocks", "tools", "timing", "plan", "usage", "memory",
+                "reasoning", "end_reason"):
+        assert key not in out
+    assert out["content"] == "正文"
+    assert out["sources"][0]["url"] == "https://a.example"

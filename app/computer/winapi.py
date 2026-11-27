@@ -10,6 +10,7 @@
 import ctypes
 import ctypes.wintypes as wt
 import threading
+import time
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -75,6 +76,189 @@ def set_foreground(hwnd):
     try:
         user32.ShowWindow(wt.HWND(int(hwnd)), SW_RESTORE)
         return bool(user32.SetForegroundWindow(wt.HWND(int(hwnd))))
+    except Exception:
+        return False
+
+
+def force_foreground(hwnd):
+    """更强势地把窗口带到前台（坐标动作前用）。
+
+    SetForegroundWindow 在后台进程里经常被系统拒绝；附加输入线程 + SetFocus
+    是常见的可行做法。返回最终前台是否就是目标窗口。
+    """
+    hwnd = int(hwnd or 0)
+    if not hwnd:
+        return False
+    if foreground_hwnd() == hwnd:
+        return True
+    raise_window(hwnd)
+    try:
+        user32.SwitchToThisWindow(wt.HWND(hwnd), True)
+    except Exception:
+        pass
+    tries = []
+    try:
+        tid_target = user32.GetWindowThreadProcessId(wt.HWND(hwnd), None)
+        tid_self = kernel32.GetCurrentThreadId()
+        tries.append(tid_self)
+        tries.append(tid_target)
+        fg = foreground_hwnd()
+        if fg:
+            tries.append(user32.GetWindowThreadProcessId(wt.HWND(fg), None))
+        attached = []
+        for tid in tries:
+            if tid and tid != tid_self:
+                if user32.AttachThreadInput(tid_self, tid, True):
+                    attached.append(tid)
+        try:
+            user32.BringWindowToTop(wt.HWND(hwnd))
+            user32.SetForegroundWindow(wt.HWND(hwnd))
+            user32.SetFocus(wt.HWND(hwnd))
+        finally:
+            for tid in attached:
+                user32.AttachThreadInput(tid_self, tid, False)
+    except Exception:
+        pass
+    return foreground_hwnd() == hwnd
+
+
+def raise_window(hwnd):
+    """把窗口提到最前（不要求前台权限）：用于坐标动作前保证点击落在目标上。"""
+    hwnd = int(hwnd or 0)
+    if not hwnd:
+        return False
+    SWP_NOSIZE, SWP_NOMOVE, SWP_SHOWWINDOW = 0x0001, 0x0002, 0x0040
+    try:
+        user32.ShowWindow(wt.HWND(hwnd), SW_RESTORE)
+        user32.SetWindowPos(wt.HWND(hwnd), wt.HWND(-1), 0, 0, 0, 0,
+                            SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW)   # HWND_TOPMOST
+        user32.SetWindowPos(wt.HWND(hwnd), wt.HWND(-2), 0, 0, 0, 0,
+                            SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW)   # HWND_NOTOPMOST
+        return True
+    except Exception:
+        return False
+
+
+def window_at(x, y):
+    """坐标点上的窗口句柄（用于校验坐标动作不会点到别的窗口）。"""
+    try:
+        user32.WindowFromPoint.argtypes = [wt.POINT]
+        user32.WindowFromPoint.restype = wt.HWND
+        pt = wt.POINT(int(x), int(y))
+        return int(user32.WindowFromPoint(pt) or 0)
+    except Exception:
+        return 0
+
+
+def window_rect(hwnd):
+    """窗口矩形 (left, top, right, bottom)，屏幕物理像素；拿不到返回 None。"""
+    try:
+        r = wt.RECT()
+        if not user32.GetWindowRect(wt.HWND(int(hwnd)), ctypes.byref(r)):
+            return None
+        return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+    except Exception:
+        return None
+
+
+def client_size(hwnd):
+    """客户区尺寸 (w, h)；拿不到返回 None。"""
+    try:
+        r = wt.RECT()
+        if not user32.GetClientRect(wt.HWND(int(hwnd)), ctypes.byref(r)):
+            return None
+        return (int(r.right), int(r.bottom))
+    except Exception:
+        return None
+
+
+def client_origin(hwnd):
+    """客户区左上角在屏幕上的位置（截图若为客户区，用它换算坐标）。"""
+    try:
+        pt = wt.POINT(0, 0)
+        if not user32.ClientToScreen(wt.HWND(int(hwnd)), ctypes.byref(pt)):
+            return None
+        return (int(pt.x), int(pt.y))
+    except Exception:
+        return None
+
+
+def root_window(hwnd):
+    """取顶层窗口（坐标命中子控件时归一）。"""
+    try:
+        GA_ROOT = 2
+        return int(user32.GetAncestor(wt.HWND(int(hwnd)), GA_ROOT) or 0)
+    except Exception:
+        return 0
+
+
+def foreground_hwnd():
+    """当前前台窗口句柄（0 = 拿不到）。"""
+    try:
+        return int(user32.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
+def class_name(hwnd):
+    """窗口类名（自绘界面常见 Qt5QWindowIcon / MMUIRenderSubWindowHW 之类）。"""
+    try:
+        buf = ctypes.create_unicode_buffer(256)
+        n = user32.GetClassNameW(wt.HWND(int(hwnd)), buf, 256)
+        return buf.value if n else ""
+    except Exception:
+        return ""
+
+
+def set_clipboard_text(text):
+    """把文本放进剪贴板（Unicode 安全，中文输入用它 + Ctrl+V）。
+
+    返回 True 表示写入成功；失败时调用方回退 uiautomation.SendKeys。
+    """
+    data = str(text or "")
+    if not data:
+        return False
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+
+    def _open():
+        return user32.OpenClipboard(wt.HWND(0))
+
+    try:
+        # 64 位下必须声明返回/参数类型，否则 GlobalAlloc 的句柄会被截断成 32 位，
+        # GlobalLock 拿不到指针（表现为「剪贴板写入失败」）。
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        user32.SetClipboardData.restype = ctypes.c_void_p
+        user32.SetClipboardData.argtypes = [wt.UINT, ctypes.c_void_p]
+        user32.OpenClipboard.argtypes = [wt.HWND]
+        for _ in range(5):
+            if _open():
+                break
+            time.sleep(0.05)
+        else:
+            return False
+        try:
+            user32.EmptyClipboard()
+            size = (len(data) + 1) * ctypes.sizeof(ctypes.c_wchar)
+            h = kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
+            if not h:
+                return False
+            p = kernel32.GlobalLock(h)
+            if not p:
+                return False
+            try:
+                ctypes.memmove(p, ctypes.create_unicode_buffer(data), size)
+            finally:
+                kernel32.GlobalUnlock(h)
+            if not user32.SetClipboardData(CF_UNICODETEXT, h):
+                return False
+            return True
+        finally:
+            user32.CloseClipboard()
     except Exception:
         return False
 

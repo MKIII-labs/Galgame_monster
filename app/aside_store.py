@@ -6,7 +6,7 @@
 - `doc:<doc_key>`：笔记 / PDF 的划词问答，跟着文档走（换会话也能接着问）。
 
 每个作用域可以有多个线程（前端显示为标签页）。线程只保存「选中的片段 + 问答对」，
-不写 sessions.json / memory / trajectory。
+不写会话存储 / memory / trajectory。
 
 兼容：旧调用传裸 sid（如 `create_thread("s1", ...)`）会按 `session:s1` 处理；
 旧的 `by_session` 结构在首次读取时自动迁移到 `by_scope`。

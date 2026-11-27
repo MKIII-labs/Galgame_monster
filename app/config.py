@@ -3,7 +3,7 @@
 import copy
 import re
 
-from app.store import CONFIG_FILE, read_json, write_json
+from app.store import CONFIG_FILE, read_json_copy, write_json
 
 API_PROVIDERS = {
     "chat": {
@@ -64,6 +64,9 @@ DEFAULT_CONFIG = {
     # 回到底部 / 点「回到底部」后恢复。关闭后只更新折叠头统计，不再自动滚动
     #（当前步骤高亮与自动展开 / 收起仍然生效）。
     "ui_process_follow": True,
+    # AI 头像动效（设置 → 外观与对话）：lively（活泼）/ calm（克制，默认）/ off（关闭）。
+    # 只影响聊天里的 AI 头像，不改内容；系统「减少动态效果」开启时自动按 off 处理。
+    "avatar_motion": "calm",
     # 设置页的可见级别：basic（基础）/ advanced（进阶）/ expert（专家）。
     # 只影响设置页显示与编辑入口，不改已保存配置；危险项在低级别下隐藏。
     "settings_level": "advanced",
@@ -190,11 +193,6 @@ DEFAULT_CONFIG = {
     # subprocess 一律拒绝；打开后写入仍只能落在沙箱内。只在可信任务里开。
     "code_mode_allow_write": False,
     "code_mode_allow_cmd": False,
-    # 思考是否落库：开着时刷新会话仍能回看思考；关掉只存正文 / 工具的顺序。
-    # 思考只写本地 sessions.json，不会上传。
-    "chat_persist_reasoning": True,
-    # 每条消息保留的思考字数上限；0 = 不限。超限时丢最早的思考块、保留最近的。
-    "chat_reasoning_keep_chars": 12000,
     "chat_balance_url": "",
     "vision_api_key": "", "vision_url": "", "vision_model": "", "vision_protocol": "", "vision_presets": {},
     "vision_use_chat": False, "vision_balance_url": "",
@@ -211,8 +209,6 @@ DEFAULT_CONFIG = {
     # 默认：聊天模型自带搜索（目前是 DeepSeek Search API，复用聊天密钥）优先；
     # 勾选此项则始终使用下面配置的服务商（博查 / 豆包 / Tavily）
     "search_prefer_api": False,
-    # B 站数据读取：SESSDATA 是本机登录凭证，只用于请求 B 站，不进入模型上下文
-    "bili_sessdata": "", "bili_comment_pages": 3,
     # 注：检索式改写已取消——改由主模型在调用 web_search 时自己给关键词
     "search_fetch": True,            # 抓取命中网页的正文（仅注入提示，不入库）
     "search_fetch_count": 4,         # 抓正文的条数（1–10）
@@ -258,12 +254,15 @@ DEFAULT_CONFIG = {
     "reminder_inapp_enabled": True,    # 到点后在会话里留消息 + 应用内提示
     "reminder_system_enabled": True,   # 同时弹 Windows 系统通知（程序关闭也能弹）
     "reminder_calendar_enabled": True, # 日程到点提醒
-    "auto_chat_enabled": True,         # 允许 AI 主动聊天（每个会话仍需单独开启）
     "ide_whitespace": "all",         # 空白字符可视化：none | selection | trailing | boundary | all
     # ---- 界面：可收起的区域（输入框 / 侧栏 / IDE 文件管理区）----
     "composer_collapsed": False,      # 输入框是否收起
     "sidebar_collapsed": False,       # 左侧会话栏是否收起
     "ide_side_collapsed": False,      # IDE 文件管理区（活动栏右侧视图）是否收起
+    # ---- 缩放：编辑器与主聊天框各自独立（0.8–2.0）----
+    "ide_editor_zoom": 1.0,           # Monaco 编辑器字号缩放
+    "chat_zoom": 0.9,                 # 主聊天框内容缩放（当前窗口的默认值）
+    "ui_zoom_level": -0.5,            # Electron 窗口整体缩放（约 91%，首次启动时应用）
     # ---- 功能大厅（AI 互动玩法，见 app/hall.py 与 web/hall.js）----
     # 大厅模块内部的 AI 开关（id -> bool）；默认开启，可在模块里关掉独自游玩
     "hall_ai_enabled": {},
@@ -274,9 +273,9 @@ DEFAULT_CONFIG = {
     "ide_ai_complete_delay_ms": 350,  # 光标停顿多久后请求
     "ide_ai_complete_max_lines": 8,   # 一次最多补几行
     # ---- Agent 执行上限（设置 → Agent；缺省值等于 agent.py 里的常量，不配置时行为不变）----
-    # 下面五项都能填 0 = 不限：上限由你自己取舍，代码只守最小值（负数视为填错，回落默认）。
+    # 多数项填 0 = 不限；自动续跑例外：0 = 关闭，-1 = 无上限（只保留这两档）。
     "agent_max_rounds": 0,           # 单轮对话最多循环几次「调工具 → 再问模型」；0 = 不限
-    "agent_auto_continue": 3,        # 任务没做完时自动续跑几次；0 = 关闭，-1 = 无上限（1–10）
+    "agent_auto_continue": -1,       # 任务没做完时自动续跑：0 = 关闭，-1 = 无上限（只保留这两档）
     "agent_repeat_limit": 5,         # 同工具同参数连续几次就拦截；0 = 不拦截
     "agent_cmd_timeout": 60,         # 命令默认超时（秒）；0 = 不限，直到命令自己结束或你点停止
     # 只读工具并发预取：一轮里的多个读取一起跑（写之后的同文件读、命令之后的读除外）。
@@ -321,7 +320,7 @@ DEFAULT_CONFIG = {
     "agent_file_watch": True,
     # 沙箱里已有 Git 仓库且工作树不干净时，每个会话提示一次。
     "agent_sandbox_warn": True,
-    # 是否把「功能大厅（模拟股市 / B 站）」的说明与界面数据注入系统提示。
+    # 是否把「功能大厅（模拟股市）」的说明与界面数据注入系统提示。
     # 日历 / 日程始终注入，不受这个开关影响。
     "agent_hall_prompt": True,
     # 工具结果超过这个字符数就落盘：只回头部 + 关键行 + 尾部 + locator，
@@ -428,6 +427,8 @@ DEFAULT_CONFIG = {
     # 「查看变更 / 撤销」靠撤销快照：每个会话保留多少条**往期**写入（本轮写入的不受此限）。
     # 0 = 不限（一直留到进程退出）；调大更占内存，但能回看更早的改动。
     "agent_max_undo": 60,
+    # 启动时自动压缩事件日志（>256MB）并清理已删除会话的残留目录；写回前自动备份。
+    "storage_auto_prune": False,
     # Shell 自由度：strict（默认，禁管道/重定向，与从前一致）
     #              standard（允许 | 与沙箱内重定向，每段仍过白名单）
     #              trusted（额外允许 ; && || 串联，仅建议手动会话使用）
@@ -440,6 +441,11 @@ DEFAULT_CONFIG = {
     "agent_shell_autonomy": "whitelist",
     "agent_shell_allow": [],
     "agent_shell_deny": [],
+    # 网络域名白名单（对齐 Trae 的 sandbox network 策略）：
+    #   [] = 不限制；非空时只有命中名单的主机允许 fetch_url / download_file 访问。
+    #   写 github.com 会同时放行 api.github.com 等子域名；raw.githubusercontent.com
+    #   是另一个域，需要单独写（或写 githubusercontent.com）。
+    "agent_net_allow": [],
     # OS 级命令沙箱（Windows AppContainer）：开启后命令只能读写沙箱目录与已授权的
     # 工具链目录，越界由内核拒绝。
     "agent_os_sandbox": True,
@@ -496,13 +502,11 @@ DEFAULT_CONFIG = {
     # ---- 响应速度相关（默认值都取「更快」，需要精度时再手动打开）----
     # 用轻量模型从候选里挑记忆：更准，但发生在首字节之前（实测 p90 1.9s / 最坏 7s）
     "memory_llm_pick": False,
-    # 会话内容的真相源：events = 启动时以事件流为准（sessions.json 只作快照与列表）；
-    # json = 旧行为（只读 sessions.json）。事件流始终会写，切换只影响读取。
-    "session_store": "events",
+    # 会话内容的真相源固定为每会话 append-only 事件日志，不再提供切换开关
     # 「是否读取用户画像」已改为会话级开关（session.use_profile，默认开），
     # 在「知识库 → 本会话使用的知识库」里按会话管理，不再有全局配置项。
     # 「AI 自动记录画像」是另一件事，由 profile.auto_learn_enabled 单独控制。
-    # 能力工具下发方式：auto = 按本轮意图只挂相关域（bili / calendar / stock / memory / observe）
+    # 能力工具下发方式：auto = 按本轮意图只挂相关域（calendar / stock / memory / observe）
     #                  always = 全部常驻（旧行为，schema 更大、首 token 更慢）
     "agent_cap_tools": "auto",
     # ---- Computer Use（受控浏览器）----
@@ -537,17 +541,6 @@ DEFAULT_CONFIG = {
     "mobile_enabled": False,
     "mobile_port": 57890,
     "mobile_device_days": 180,      # 设备授权有效期（天），到期需重新配对
-    # ---- 图片生成（本地 ComfyUI）----
-    # 默认关闭：需要单独安装 ComfyUI、下载 FLUX 3 Image Klein 权重与工作流；
-    # 不开启时接口直接报错，不占资源，也不影响其他功能。
-    "image_enabled": False,
-    "image_comfy_url": "http://127.0.0.1:8188",
-    # ComfyUI「另存为 API 格式」导出的工作流；留空 = data/image_workflow.json
-    "image_workflow": "",
-    # 单张图的整体等待上限（秒）：首次加载模型会慢，别设太小
-    "image_timeout": 180,
-    # 输出目录；留空 = data/generated
-    "image_dir": "",
 }
 
 
@@ -557,7 +550,9 @@ def default_config():
 
 
 def load_config():
-    data = read_json(CONFIG_FILE)
+    # 复制一份再补默认键 / 改旧键名：直接改 read_json 的返回值会污染读缓存，
+    # 让「没保存过的改动」对其它线程可见。
+    data = read_json_copy(CONFIG_FILE)
     if not isinstance(data, dict):
         data = {}
     # 兼容旧版 deepseek_* / dashscope_* 键名
@@ -580,6 +575,10 @@ _OBSOLETE_KEYS = {
     "hall_ai_count",             # 大厅改用 hall_ai_enabled（按人开关）
     "gal_auto_script_replan",    # 从未被读取
     "chat_protocol",             # 聊天侧协议由地址自动判断，不再单独配置
+    # 思考始终原样落库（不截断、不开关）：旧配置保存时清掉
+    "chat_persist_reasoning", "chat_reasoning_keep_chars",
+    # 会话存储已固定为事件流，不再有二选一开关
+    "session_store",
     # GAL 演出模式已下线（2026-11-15）：整组配置保存时清掉
     "gal_emotion_multi", "gal_theme", "gal_typewriter", "gal_cps", "gal_seg_mode",
     "gal_auto", "gal_min_show", "gal_fx", "gal_ui_sfx", "gal_nudge",
@@ -589,6 +588,12 @@ _OBSOLETE_KEYS = {
     # GAL 台词朗读（TTS）已下线：旧配置保存时清掉
     "tts_enabled", "tts_provider", "tts_url", "tts_api_key", "tts_model",
     "tts_voice", "tts_speed", "tts_max_len", "gal_tts_priority",
+    # 图片生成（本地 ComfyUI）已下线（2026-11-25）：整组配置保存时清掉
+    "image_enabled", "image_comfy_url", "image_workflow", "image_timeout", "image_dir",
+    # B 站数据读取已下线（2026-11-25）：旧配置保存时清掉
+    "bili_sessdata", "bili_comment_pages",
+    # AI 主动聊天已下线（2026-11-25）：旧配置保存时清掉
+    "auto_chat_enabled",
 }
 
 
@@ -619,7 +624,10 @@ def save_config(config):
         for key in _LIST_KEYS:
             if key in config:
                 config[key] = _list_value(config[key])
-    write_json(CONFIG_FILE, config)
+    if write_json(CONFIG_FILE, config) is False:
+        # 以前写失败只打一行日志，设置页仍显示「已保存」；调用方按 OSError 处理
+        #（settings_center.save_patch / rollback 已捕获并回传错误）。
+        raise OSError("写入配置失败")
 
 
 def resolve_endpoint(url):

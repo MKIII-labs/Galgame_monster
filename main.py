@@ -29,7 +29,7 @@ LOG_MAX_BYTES = 8 * 1024 * 1024        # 启动时超过这个大小就把旧日
 _LOG_FH = None
 _OUT_FH = None
 _CODE_FILES = ("main.py", "app/httpd.py", "app/api/chat.py", "app/llm.py",
-               "app/bilibili.py", "app/agent.py", "app/stock.py", "app/config.py",
+               "app/agent.py", "app/stock.py", "app/config.py",
                "app/api/hall_stock.py", "web/hall.js", "web/hall-stock.js",
                "web/markdown.js", "web/chat.js", "web/stream/stream-core.js")
 _APP_AUMID = ""                        # 传给 Electron 壳的 AppUserModelID（任务栏图标靠它）
@@ -376,6 +376,12 @@ def _ensure_app_shortcut():
         if not aumid:
             aumid = (win_shortcut.read(win_shortcut.start_menu_lnk()) or {}).get("aumid") or ""
         _log("start menu shortcut: %s (ok=%s); aumid=%s" % (note, ok, aumid))
+        # 未打包的 Electron 只设 AUMID 时通知仍可能显示 Electron：
+        # 再把这个 AUMID 注册到 HKCU，通知中心才会用我们的名字和图标。
+        ok_id, note_id = win_shortcut.ensure_app_identity(
+            aumid or win_shortcut.AUMID, "Galgame_monster",
+            os.path.join(ROOT, "app.ico"))
+        _log("app identity: %s (ok=%s)" % (note_id, ok_id))
         return aumid or win_shortcut.AUMID
     except Exception as e:
         _log("start menu shortcut failed: %s" % e)
@@ -446,7 +452,7 @@ def main():
         _log("stale state pid=%s; removing" % st.get("pid"))
         _clear_state(force=True)
 
-    for rel in ("app/api/chat.py", "app/llm.py", "app/bilibili.py", "app/agent.py"):
+    for rel in ("app/api/chat.py", "app/llm.py", "app/agent.py"):
         p = os.path.join(ROOT, rel)
         try:
             _log("module %s mtime=%s size=%s"
@@ -469,7 +475,7 @@ def main():
     print("=" * 56)
     print("  Galgame_monster 已启动")
     print(f"  地址：{url}")
-    print("  关闭应用窗口即可退出（或在控制台按 Ctrl+C）")
+    print("  关闭应用窗口即可退出（Electron 壳下会最小化到托盘，从托盘菜单退出；控制台 Ctrl+C 亦可）")
     print("=" * 56)
 
     proc, used_shell = open_app_window(url)
@@ -511,7 +517,8 @@ def main():
             except KeyboardInterrupt:
                 pass
 
-    # 窗口关闭 = 立即停止：不再等生成中的任务，也不再留 5 秒重连窗口。
+    # 窗口真正退出（托盘「退出」/ 无托盘时关窗）= 立即停止：
+    # 不再等生成中的任务，也不再留 5 秒重连窗口。
     # 后台保活曾在关窗后继续跑最多 10 分钟（或无限等），带来一堆「关不掉 /
     # 后台运行中 / 重开连不上」的问题；现在窗口一关就退出进程。
     _log("browser window exited (code=%s); shutting down now"

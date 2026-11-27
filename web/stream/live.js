@@ -127,42 +127,44 @@ function compressBusyNow() {
 }
 
 function refreshStreamingUI() {
+  const sid = String(state.sessions.current || '');
   const on = isStreaming();
   const st = streamOf();
   state.streaming = on;
-  // 远端任务（刷新后没有本地流）点过停止时，保留「正在停止」直到 /api/state 确认收尾
-  state.stopping = on && (state.stopping || !!(st && st.stopping));
-  if (!on) state.stopping = false;
+  // 停止状态按会话记：A 正在停止时切到 B，B 的停止键必须立刻可用，
+  // 不能因为全局 state.stopping 还停在 A 就一直禁用。
+  const stopping = on && !!(st ? st.stopping
+    : (state.stoppingSids && state.stoppingSids[sid]));
+  state.stopping = stopping;
   syncSendBtn();
   // 生成中：附件按钮不隐藏（可以边生成边加附件，进排队），停止按钮并排出现
-  $('#btn-stop').classList.toggle('off', !on);
-  if (!on) resetStopBtn();
+  const stopBtn = $('#btn-stop');
+  if (stopBtn) stopBtn.classList.toggle('off', !on);
+  if (on && stopping) {
+    if (stopBtn) {
+      stopBtn.disabled = true;
+      stopBtn.classList.add('stopping');
+      stopBtn.title = '正在停止…';
+      stopBtn.setAttribute('aria-busy', 'true');
+    }
+  } else {
+    resetStopBtn();
+  }
   const slot = document.querySelector('.swap-slot');
   if (slot) slot.classList.toggle('live', !!on);
   const attachBtn = $('#btn-attach');
   if (attachBtn) attachBtn.classList.remove('off');
   // 提示行跟着切换：生成中 Enter 是「排队」而不是「发送」
   if (typeof cmpUpdateHint === 'function') { try { cmpUpdateHint(); } catch (e) { /* 忽略 */ } }
+  // 压缩状态只存在 DOM 里会在切会话 / 重绘后丢失；按当前 sid 的标记补回来
+  if (typeof compressSyncPending === 'function') {
+    try { compressSyncPending(); } catch (e) { /* 忽略 */ }
+  }
   // 本轮收尾后再发排队项：等一拍，让渲染与落库先完成
   if (!on) {
     clearTimeout(_queueFlushTimer);
     _queueFlushTimer = setTimeout(flushSendQueue, 150);
   }
-  // 「回到实时输出」提示条：服务端在跑、但本地没有流（刷新 / 重开 / 断线）时出现
-  refreshResumeBar();
-}
-
-/* 后台任务提示条显隐：只有在「当前会话仍被服务端标记为运行中」且「本地没有流对象」
-   时才显示。本地流接管成功后 streamOf() 为真，提示条自动消失。 */
-function refreshResumeBar() {
-  const bar = $('#resume-bar');
-  if (!bar) return;
-  const sid = String(state.sessions.current || '');
-  const st = streamOf(sid);
-  // 纯文本回放（replay）不算「已接管」：用户仍该看到「回到实时输出」切到完整流
-  const show = !!sid && (!st || st.replay)
-    && !!(state.streamingSids && state.streamingSids[sid]);
-  bar.classList.toggle('hidden', !show);
 }
 
 function registerStream(sid, host, row) {
@@ -171,7 +173,7 @@ function registerStream(sid, host, row) {
                          abort: null, hardStop: false };
   if (!state.streamingSids) state.streamingSids = {};
   state.streamingSids[key] = true;
-  state.stopping = false;
+  if (state.stoppingSids) delete state.stoppingSids[key];
   delete state.unread[key];
   renderSessions();
   refreshStreamingUI();
@@ -197,6 +199,7 @@ function unregisterStream(sid, keepHost) {
   // 本轮结束：实时数据作废，之后一律按落库消息渲染，避免与正式消息重复
   liveDrop(key);
   if (state.streamingSids) delete state.streamingSids[key];
+  if (state.stoppingSids) delete state.stoppingSids[key];
   renderSessions();
   refreshStreamingUI();
 }
@@ -217,6 +220,7 @@ function resetStopBtn() {
   b.disabled = false;
   b.classList.remove('stopping');
   b.title = '停止生成';
+  b.removeAttribute('aria-busy');
 }
 
 // 输入为空且没有待发图片时，发送按钮置灰；流式期间、录音 / 识别 / 矫正期间同样禁用

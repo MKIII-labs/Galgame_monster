@@ -39,6 +39,9 @@ def _computer_text(name, args):
         act = args.get("action") or "?"
         ref = args.get("ref")
         val = args.get("value")
+        pos = ""
+        if args.get("x") is not None and args.get("y") is not None:
+            pos = " (%s,%s)" % (args.get("x"), args.get("y"))
         tail = ""
         if act == "type":
             tail = " 输入 %d 字" % len(str(val or ""))
@@ -46,7 +49,7 @@ def _computer_text(name, args):
             tail = " 按键 %s" % (val or "Enter")
         elif act == "scroll":
             tail = " %s 像素" % (val or 600)
-        return "操作页面：%s%s%s" % (act, (" [%s]" % ref) if ref else "", tail)
+        return "操作页面：%s%s%s%s" % (act, (" [%s]" % ref) if ref else "", pos, tail)
     if name == "computer_read":
         return "读取页面：%s" % (args.get("kind") or "console")
     if name == "computer_shot":

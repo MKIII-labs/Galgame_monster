@@ -218,8 +218,6 @@ function workOpenTaskDialog(tpl) {
   });
 }
 
-/* ---------- 图片生成 ---------- */
-
 async function workOpenTask(id) {
   try {
     const r = await api('/api/work/tasks', { op: 'get', id });

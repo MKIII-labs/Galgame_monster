@@ -8,6 +8,7 @@
   关键词检索，并在结果里注明，工具不会因此报错。
 - 索引按「沙箱根 + 文件签名」持久化到 `data/codeindex/`；文件改动后签名变化会自动重建。
 """
+import collections
 import fnmatch
 import hashlib
 import json
@@ -29,12 +30,20 @@ INDEX_VERSION = 2
 CHUNK_LINES = 80           # 每块多少行（符号边界会进一步切开）
 CHUNK_OVERLAP = 10         # 相邻块重叠行数
 MAX_FILE_BYTES = 512 * 1024
-MAX_FILES = 0              # 0 = 不限；可在设置里用 codeindex_max_files 覆盖
+# 安全上限：0 = 不限。真正降低重复扫描成本的是 _SCAN_CACHE；这里只防止十万级文件把内存打爆。
+MAX_FILES = 20000
 MAX_CHUNKS = 0             # 0 = 不限
 MAX_TOTAL_BYTES = 0
 TOP_K = 6
 MIN_SCORE = 0.34
 RESULT_CHARS = 7000
+# 目录遍历缓存：同一轮对话里 search 会被调用多次，以前每次都 os.walk 全仓（本仓实测 1.3s）。
+# 只缓存「路径清单」，每次仍会 stat 每个文件，所以文件内容的修改能立刻被发现。
+SCAN_TTL = 8.0
+_WALK_CACHE = {}           # root -> {"at": ts, "stamp": (mtime_ns, size), "files": [(full, rel)]}
+# 查询向量缓存：同一条问题在检索 / 重试里会重复 embedding，键只是短查询串。
+QUERY_CACHE_MAX = 128
+_QUERY_CACHE = collections.OrderedDict()
 
 # 依赖目录 / 构建产物不参与索引；项目自己的 .gitignore 也会被读取
 IGNORE_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
@@ -155,12 +164,24 @@ def _embedder():
 
 
 def _embed_texts(texts, batch=32):
+    single = None
+    if len(texts) == 1 and isinstance(texts[0], str) and len(texts[0]) <= 200:
+        single = texts[0]
+        hit = _QUERY_CACHE.get(single)
+        if hit is not None:
+            _QUERY_CACHE.move_to_end(single)
+            return np.asarray([hit], dtype=np.float32)
     m = _embedder()
     out = []
     for i in range(0, len(texts), batch):
         part = list(m.embed(texts[i:i + batch]))
         out.extend(part)
-    return np.asarray(out, dtype=np.float32)
+    arr = np.asarray(out, dtype=np.float32)
+    if single is not None and len(arr) == 1:
+        _QUERY_CACHE[single] = arr[0]
+        while len(_QUERY_CACHE) > QUERY_CACHE_MAX:
+            _QUERY_CACHE.popitem(last=False)
+    return arr
 
 
 def embed_texts(texts):
@@ -241,11 +262,21 @@ def _ignored(rel, patterns):
     return False
 
 
-def _scan(root):
-    """扫描沙箱：返回 [(abs, rel, size, mtime_ns)]，遵守 .gitignore 与依赖目录。"""
-    lim = _limits()
-    if not lim["enabled"]:
-        return []
+def _walk_files(root, force=False):
+    """遍历沙箱，返回 [(abs, rel)]；遵守 .gitignore 与依赖目录。
+
+    只缓存路径清单（TTL 内且根目录 mtime 未变时复用），文件大小 / mtime 由调用方
+    重新 stat —— 这样编辑文件后不需要等缓存过期。
+    """
+    now = time.time()
+    try:
+        st = os.stat(root)
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    ent = _WALK_CACHE.get(root)
+    if not force and ent and now - ent["at"] < SCAN_TTL and ent["stamp"] == stamp:
+        return ent["files"]
     pats = _gitignore_patterns(root)
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -261,13 +292,25 @@ def _scan(root):
             rel = os.path.relpath(full, root).replace("\\", "/")
             if _ignored(rel, pats):
                 continue
-            try:
-                st = os.stat(full)
-            except OSError:
-                continue
-            if st.st_size <= 0 or st.st_size > lim["max_file_bytes"]:
-                continue
-            out.append((full, rel, st.st_size, st.st_mtime_ns))
+            out.append((full, rel))
+    _WALK_CACHE[root] = {"at": now, "stamp": stamp, "files": out}
+    return out
+
+
+def _scan(root, force=False):
+    """扫描沙箱：返回 [(abs, rel, size, mtime_ns)]。"""
+    lim = _limits()
+    if not lim["enabled"]:
+        return []
+    out = []
+    for full, rel in _walk_files(root, force=force):
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        if st.st_size <= 0 or st.st_size > lim["max_file_bytes"]:
+            continue
+        out.append((full, rel, st.st_size, st.st_mtime_ns))
     out.sort(key=lambda x: x[2])
     if lim["max_files"] > 0:
         out = out[:lim["max_files"]]
@@ -445,7 +488,7 @@ def _incremental(root, files, sig, old, progress=None):
 
 def get_index(root, force=False, progress=None):
     """取（必要时增量构建）索引。返回 (idx, files_total, files_indexed)。"""
-    files = _scan(root)
+    files = _scan(root, force=force)
     sig = _signature(files)
     cached = _CACHE.get(root)
     if not force and cached and cached["sig"] == sig:

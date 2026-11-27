@@ -231,11 +231,9 @@ def _network_text():
 def shot(sandbox=None):
     try:
         browser.ensure()
-        res = browser.conn().send("Page.captureScreenshot", {"format": "png"}, timeout=30)
+        b64 = browser.capture_png()
     except Exception as e:
         return "❌ 截图失败：%s" % e
-    import base64
-    b64 = (res or {}).get("data") or ""
     if not b64:
         return "❌ 截图失败：浏览器没有返回图像"
     try:
@@ -264,29 +262,40 @@ def dispatch(name, args=None, sandbox=None):
     win = target.startswith("w")          # w1 / w2 …：桌面窗口编号
     # 桌面能力有独立开关，先按 surface 路由，再判断浏览器开关
     if name == "computer_windows":
-        return desktop.list_windows()
+        try:
+            return desktop.list_windows()
+        except Exception as e:
+            return "❌ 列出桌面窗口失败：%s" % e
     if win:
         if name == "computer_see":
             text = desktop.snapshot(target, args.get("start"), args.get("limit"))
+            data = desktop.last_snapshot(target)
+            # 快照本身失败（窗口不存在 / 缺依赖）时不再补截图，否则同一句错误会重复两遍
+            if not data or text.startswith(("❌", "⚠️")):
+                return text
             return text + maybe_auto_shot(
-                target, poor_desktop_structure(desktop.last_snapshot(target)),
+                target, poor_desktop_structure(data),
                 lambda: desktop.shot(target, sandbox))
         if name == "computer_act":
             before = desktop.window_title(target)
             text = desktop.act(target, args.get("action"), args.get("ref"),
-                               args.get("value", ""), bool(args.get("clear")))
+                               args.get("value", ""), bool(args.get("clear")),
+                               args.get("x"), args.get("y"))
             trace.add("computer_act",
                       {"target": target, "action": args.get("action"),
-                       "ref": args.get("ref"), "value": args.get("value")},
+                       "ref": args.get("ref"), "x": args.get("x"), "y": args.get("y"),
+                       "value": args.get("value")},
                       text, before, desktop.window_title(target))
             return text
         if name == "computer_read":
             kind = str(args.get("kind") or "console").lower()
+            if kind == "window":
+                return desktop.read_window(target)
             if kind == "value":
                 return desktop.read_value(target, args.get("ref"))
             if kind == "trace":
                 return trace.recent(12)
-            return "❌ 桌面窗口只支持 kind=value / trace（当前：%s）" % kind
+            return "❌ 桌面窗口只支持 kind=window / value / trace（当前：%s）" % kind
         if name == "computer_shot":
             return desktop.shot(target, sandbox)
         return "❌ 桌面窗口不支持这个工具：%s" % name

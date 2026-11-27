@@ -16,15 +16,19 @@ function mathHtml(tex, display) {
       });
     } catch (e) { /* 落到下面 */ }
   }
+  // 公式出现时才拉 katex（271KB）：真正渲染由 upgradeMath 在库就绪后补齐
+  try {
+    if (typeof window.loadLazyLib === 'function') window.loadLazyLib('katex');
+  } catch (e) { /* 忽略 */ }
   return '<code class="inline math-pending" data-tex="' + escapeHtml(tex) +
     '" data-display="' + (display ? '1' : '0') + '">' + escapeHtml(tex) + '</code>';
 }
 
-/* ---------- AI 可视内容：svg / chart(echarts) / mermaid ----------
+/* ---------- AI 可视内容：svg / chart(echarts) / mermaid / html ----------
    只在围栏**闭合后**才转成富媒体块；流式过程中未闭合的围栏仍按普通代码块渲染，
    否则每个 token 都会重建一次图表（又闪又卡）。真正的渲染在 web/rich-media.js。 */
-const RICH_LANGS = { svg: 'svg', chart: 'chart', echarts: 'chart', mermaid: 'mermaid' };
-const RICH_TITLES = { svg: '图形', chart: '图表', mermaid: '流程图' };
+const RICH_LANGS = { svg: 'svg', chart: 'chart', echarts: 'chart', mermaid: 'mermaid', html: 'html' };
+const RICH_TITLES = { svg: '图形', chart: '图表', mermaid: '流程图', html: '交互页面' };
 
 function richBlockHtml(kind, code) {
   return '<div class="rich-media" data-rich="' + kind + '">' +
@@ -42,21 +46,15 @@ function codeBlockHtml(lang, code, closed) {
   const l = String(lang || '').trim().toLowerCase();
   const kind = RICH_LANGS[l];
   if (closed !== false && typeof kind === 'string') return richBlockHtml(kind, code);
-  let body;
-  if (window.hljs && lang && hljs.getLanguage(lang)) {
-    try { body = hljs.highlight(code, { language: lang }).value; } catch (e) { body = escapeHtml(code); }
-  } else if (window.hljs) {
-    try { body = hljs.highlightAuto(code).value; } catch (e) { body = escapeHtml(code); }
-  } else {
-    body = escapeHtml(code);
-  }
   const lines = String(code).split('\n').length;
   const fold = lines > 28;   // 超长代码块默认折叠，避免刷屏
+  // 这里只输出纯文本（data-hl="pending"），上色交给 rich-media.js 的视口增强器：
+  // 同步高亮整窗代码块会生成上万个 span，首屏 Layout 与切会话都被它拖慢。
   return '<div class="code-block' + (fold ? ' folded' : '') + '"><div class="code-head"><span>' +
     escapeHtml(lang || 'text') + '</span><span class="code-tools">' +
     (fold ? '<button class="copy" data-fold data-total="' + lines + '">展开全部（' + lines + ' 行）</button>' : '') +
     '<button class="copy" data-copy>复制</button></span></div><pre><code class="hljs" data-lang="' +
-    escapeHtml(lang || '') + '">' + body + '</code></pre></div>';
+    escapeHtml(lang || '') + '" data-hl="pending">' + escapeHtml(code) + '</code></pre></div>';
 }
 
 function safeHref(href) {
@@ -66,6 +64,24 @@ function safeHref(href) {
   if (/^(https?:|mailto:)/i.test(s)) return s;
   if (/^(#|\/|\.\/|\.\.\/)/.test(s)) return s;
   return '#';                       // javascript: / data: 等一律降级
+}
+
+/* Trae 式文件链接：`[名](file:///D:/proj/a.py#L10-L20)`。
+   Windows 绝对路径与「沙箱根相对路径」都接受；行号放在 #L 里。 */
+function parseFileHref(href) {
+  const m = /^file:\/\/([^#]*?)(?:#L(\d+)(?:-L?(\d+))?)?$/i.exec(String(href || '').trim());
+  if (!m) return null;
+  let p = m[1] || '';
+  try { p = decodeURIComponent(p); } catch (e) { /* 非法转义就按原文用 */ }
+  p = p.replace(/\\/g, '/');
+  if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1);            // /D:/x → D:/x
+  else if (!/^[A-Za-z]:\//.test(p)) p = p.replace(/^\/+/, '');  // 相对沙箱根
+  if (!p) return null;
+  return {
+    path: p,
+    line: m[2] ? (parseInt(m[2], 10) || 0) : 0,
+    end: m[3] ? (parseInt(m[3], 10) || 0) : 0,
+  };
 }
 
 function inlineFmt(s) {
@@ -96,9 +112,17 @@ function inlineFmt(s) {
     return '<span class="md-img md-img-sandbox" data-src="' + src +
       '" data-alt="' + alt + '">图片加载中…</span>';
   });
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
-    (m, label, href) => '<a href="' + safeHref(href)
-      + '" target="_blank" rel="noreferrer">' + label + '</a>');
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, href) => {
+    // 文件链接：不跳浏览器，交给我们自己的点击处理（IDE 打开 + 定位行）
+    const file = parseFileHref(href);
+    if (file) {
+      return '<a class="file-link" href="#" data-file="' + escapeHtml(file.path)
+        + '" data-line="' + (file.line || '') + '" data-end="' + (file.end || '')
+        + '" title="点击在 IDE 中打开">' + label + '</a>';
+    }
+    return '<a href="' + safeHref(href)
+      + '" target="_blank" rel="noreferrer">' + label + '</a>';
+  });
   // 裸 URL 自动链接：先把已生成的 a / img 保护起来，避免二次匹配
   const _keep = [];
   s = s.replace(/<a\b[\s\S]*?<\/a>|<img\b[^>]*>/g, (m) => {

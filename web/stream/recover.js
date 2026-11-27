@@ -10,7 +10,23 @@
    tries 默认 120 次（约 10 分钟）；手动停止只给 24 次（约 2 分钟），
    到点仍不结束就解除界面上的「生成中」，不能让用户一直看到假运行。
    以前只试一次，attach 一失败就没人再管，界面永远停在半截回答上。 */
+/* 同一会话只跑一条恢复循环：init 自动恢复、断流收尾、手动停止可能同时触发，
+   以前会各自挂一条 attach 并往同一个消息区写 DOM。 */
+const _recoverLoops = new Map();
+
 async function keepRecovering(sid, err, tries, stopped) {
+  const key = String(sid || '');
+  if (!key) return;
+  const running = _recoverLoops.get(key);
+  if (running) return running;
+  const p = _keepRecovering(key, err, tries, stopped).finally(() => {
+    if (_recoverLoops.get(key) === p) _recoverLoops.delete(key);
+  });
+  _recoverLoops.set(key, p);
+  return p;
+}
+
+async function _keepRecovering(sid, err, tries, stopped) {
   const limit = Math.max(1, Number(tries) || 120);
   // 恢复期间继续显示「生成中 + 停止键」：任务可能真的还在后台跑，
   // 用户必须还能再点一次停止（否则又变成「无内容、无停止按钮」的假死）。
@@ -130,6 +146,8 @@ function startJobReplay(sid) {
   if (String(state.sessions.current || '') !== String(sid)) return null;
   const curStream = state.streams && state.streams[String(sid)];
   if (curStream && !curStream.replay) return null;   // 主链路还活着，别重复插行
+  // 已经有一条回放行：直接复用它的句柄，不能再建第二个（否则两套逻辑写同一消息区）
+  if (curStream && curStream.replay) return curStream.replayHandle || null;
   const chat = $('#chat');
   const s = (typeof curSession === 'function') ? curSession() : null;
   if (!chat || !s) return null;
@@ -163,8 +181,8 @@ function startJobReplay(sid) {
   content.style.whiteSpace = 'pre-wrap';
   const bar = document.createElement('span');
   bar.className = 'live-bar';
-  bar.innerHTML = '<span class="live-text">已重新连接，正在同步…</span>'
-                + '<span class="live-sec"></span>';
+  bar.innerHTML = '<span class="live-text" role="status" aria-live="polite">已重新连接，正在同步…</span>'
+                + '<span class="live-sec" aria-hidden="true"></span>';
   row._wrap.appendChild(bar);
   // 注意：这里不能叫 liveText —— 会遮蔽全局的实时数据函数 liveText(L, t)，
   // 回放 delta 时调用的就变成这个 DOM 元素，抛 TypeError 把整条回放打断。
@@ -192,7 +210,7 @@ function startJobReplay(sid) {
     liveTip.textContent = msg;
     liveSec.textContent = sec || '';
   };
-  return {
+  const handle = {
     event(obj) {
       if (!obj || ended) return;
       const t = obj.type;
@@ -244,18 +262,42 @@ function startJobReplay(sid) {
       liveDrop(sid);                  // 回放结束：结果已落库，实时数据作废
     },
   };
+  const stNow = state.streams && state.streams[String(sid)];
+  if (stNow) stNow.replayHandle = handle;
+  return handle;
 }
 
 /* 进行中的 attach 回放（按 sid）：手动「回到实时输出」时用它把旧回放停掉，
    避免纯文本回放与完整流式渲染两套逻辑同时往消息区写。 */
 const _replays = new Map();
+// 同一会话只允许一条 attach 等待：stop / init / 断流收尾重复调用时复用同一个 Promise，
+// 否则多个 reader 会同时回放同一批事件、重复写 DOM。
+const _jobWaits = new Map();
 
 /* 断线后任务仍在后台跑：挂 attach，边回放边渲染，结束后再拉一次状态对齐。
    返回 { ok, reason }：ok 只代表「任务确实结束了」；reason 是 attach 回放里的
    end_reason（断流期间服务端算好的结束原因，用于补一条带原因的通知）。 */
-async function waitJobThenRefresh(sid) {
+function waitJobThenRefresh(sid) {
   const key = String(sid || '');
+  if (!key) return Promise.resolve({ ok: false, reason: '' });
+  const running = _jobWaits.get(key);
+  if (running) return running;
+  const p = _waitJobThenRefresh(key).finally(() => {
+    if (_jobWaits.get(key) === p) _jobWaits.delete(key);
+  });
+  _jobWaits.set(key, p);
+  return p;
+}
+
+async function _waitJobThenRefresh(key) {
+  const sid = key;
   const h = { takenOver: false, stop: null };   // 被完整接管时会置 takenOver
+  // 覆盖旧句柄前先取消：否则旧回放还会继续往同一个消息区写
+  const prev = _replays.get(key);
+  if (prev && prev !== h) {
+    prev.takenOver = true;
+    try { if (prev.stop) prev.stop(); } catch (e) { /* 已关闭 */ }
+  }
   _replays.set(key, h);
   const pullState = async () => {
     const st = await fetch('/api/state', { headers: { 'X-Auth-Token': TOKEN } });

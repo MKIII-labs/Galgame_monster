@@ -19,6 +19,7 @@
 """
 import difflib
 import hashlib
+import html
 import json
 import os
 import re
@@ -1230,6 +1231,57 @@ class _Proj:
         }
 
 
+    def turn_index(self, before=None, limit=500):
+        """全量轮次摘要：给左侧轮次导航用，不带 cells。"""
+        turns = self.turns
+        total = len(turns)
+        if before:
+            try:
+                b = int(before)
+                turns = [t for t in turns if int(t.get("turn") or 0) < b]
+            except (TypeError, ValueError):
+                pass
+        has_more = False
+        try:
+            lim = max(0, int(limit or 0))
+        except (TypeError, ValueError):
+            lim = 500
+        if lim and len(turns) > lim:
+            has_more = True
+            turns = turns[-lim:]
+        out = []
+        for t in turns:
+            st = dict(t.get("stats") or {})
+            writes = subagents = reviews = 0
+            title = ""
+            for g in t.get("groups") or []:
+                for c in g.get("cells") or []:
+                    if c.get("write"):
+                        writes += 1
+                    if c.get("kind") == "subtool":
+                        subagents += 1
+                    if c.get("kind") == "review":
+                        reviews += 1
+                    if not title and c.get("kind") == "user":
+                        title = str(c.get("text") or "")[:80]
+            start, end = int(t.get("start") or 0), t.get("end")
+            if start and end and end > start:
+                dur = int(end - start)
+            else:
+                dur = int(round((st.get("secs") or 0) * 1000))
+            st.update({"writes": writes, "subagents": subagents, "reviews": reviews})
+            out.append({
+                "turn": int(t.get("turn") or 0), "start": start, "end": end,
+                "durMs": dur, "reason": str(t.get("reason") or ""),
+                "title": title or ("Turn %d" % int(t.get("turn") or 0)),
+                "stats": st,
+                "flags": {"errors": bool(st.get("errors")), "writes": bool(writes),
+                          "subagent": bool(subagents), "review": bool(reviews)},
+            })
+        return {"sid": self.sid, "turns": out, "total": total,
+                "has_more": has_more}
+
+
 def _proj_for(sid):
     events = _iter_events(sid)
     if not events:
@@ -1255,6 +1307,157 @@ def build(sid, before=None, limit_turns=30):
     if p is None:
         return _build_from_session(sid, before=before, limit_turns=limit_turns)
     return p.render(before=before, limit_turns=limit_turns)
+
+
+def turn_index(sid, before=None, limit=500):
+    """全量轮次摘要：只读导航，不返回 cells。"""
+    p = _proj_for(sid)
+    if p is None:
+        return {"sid": sid, "turns": [], "total": 0, "has_more": False}
+    return p.turn_index(before=before, limit=limit)
+
+
+_SEARCH_CACHE = {}
+_SEARCH_LOCK = threading.Lock()
+
+
+def _snippet(text, ql, width=100):
+    i = text.lower().find(ql)
+    if i < 0:
+        return text[:width].replace("\n", " ")
+    a = max(0, i - 40)
+    b = min(len(text), i + len(ql) + 70)
+    return (("…" if a else "") + text[a:b].replace("\n", " ")
+            + ("…" if b < len(text) else ""))
+
+
+def _search_scan(sid, q, kinds=None, tool="", errors=False, writes=False,
+                 subagent=False):
+    ql = q.lower()
+    events = _iter_events(sid)
+    p = _proj_for(sid)
+    seq_cells = {}
+    if p is not None:
+        for t in p.turns:
+            for g in t.get("groups") or []:
+                for c in g.get("cells") or []:
+                    for v in (c.get("refs") or {}).values():
+                        try:
+                            seq_cells.setdefault(int(v), []).append(c)
+                        except (TypeError, ValueError):
+                            pass
+    kinds = set(kinds or [])
+    hits = []
+    for ev in events:
+        typ = ev.get("type")
+        data = ev.get("data") or {}
+        try:
+            turn = int(data.get("turn") or 0)
+        except (TypeError, ValueError):
+            continue
+        if turn <= 0:
+            continue
+        try:
+            step = int(data.get("step") or 0)
+        except (TypeError, ValueError):
+            step = 0
+        try:
+            seq = int(ev.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        name = ""
+        items = []                       # (kind, text, ok)
+        if typ == "user/message":
+            src = data.get("source") if isinstance(data.get("source"), dict) else {}
+            kind = "user" if str(src.get("kind") or "") == "human" else "context"
+            items.append((kind, str(data.get("content") or ""), True))
+        elif typ == "assistant/message":
+            items.append(("message", str(data.get("content") or ""), True))
+            items.append(("reasoning", str(data.get("reasoning") or ""), True))
+        elif typ == "tool/call":
+            name = str(data.get("name") or "")
+            items.append(("tool", name + "\n" + str(data.get("arguments") or ""), True))
+        elif typ == "tool/result":
+            name = str(data.get("name") or "")
+            items.append(("tool", name + "\n" + str(data.get("result") or ""),
+                          bool(data.get("ok", True))))
+        elif typ == "review":
+            rep = data.get("report") if isinstance(data.get("report"), dict) else {}
+            verdict = str(rep.get("verdict") or "")
+            items.append(("review", json.dumps(rep, ensure_ascii=False, default=str),
+                          verdict not in ("fail", "failed", "reject")))
+        elif typ == "todo/write":
+            items.append(("context", json.dumps(data.get("plan") or {},
+                                                ensure_ascii=False, default=str), True))
+        elif typ == "compact":
+            items.append(("compacted", "压缩历史：%s → %s 条，摘要 %s 字" % (
+                data.get("before") or 0, data.get("after") or 0,
+                data.get("chars") or 0), True))
+        else:
+            continue
+        if writes and typ != "tool/result":
+            continue
+        if subagent and not (typ == "tool/result" and name in _SUBAGENT_TOOLS):
+            continue
+        for kind, text, ok in items:
+            if not text:
+                continue
+            if kinds and kind not in kinds:
+                continue
+            if tool and tool.lower() not in name.lower():
+                continue
+            if errors and ok:
+                continue
+            if typ == "tool/result" and writes and not data.get("write"):
+                continue
+            if ql not in text.lower():
+                continue
+            rid = ""
+            for c in seq_cells.get(seq, []):
+                if c.get("kind") == kind:
+                    rid = str(c.get("recordId") or "")
+                    break
+            hits.append({"turn": turn, "step": step, "seq": seq, "kind": kind,
+                         "tool": name, "recordId": rid,
+                         "snippet": _snippet(text, ql)})
+    # 新记录优先，并按 (turn, seq, kind) 去重
+    seen = set()
+    out = []
+    for h in reversed(hits):
+        key = (h["turn"], h["seq"], h["kind"], h["tool"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out
+
+
+def search(sid, q="", kinds=None, tool="", errors=False, writes=False,
+           subagent=False, limit=50, offset=0):
+    """全量轨迹搜索：扫事件账本，返回可跳转的命中。"""
+    q = str(q or "").strip()
+    if not q:
+        return {"ok": True, "hits": [], "total": 0, "has_more": False}
+    rev = revision(sid)
+    key = (sid, json.dumps(rev, sort_keys=True, ensure_ascii=False),
+           q.lower(), tuple(sorted(kinds or [])), str(tool or ""),
+           bool(errors), bool(writes), bool(subagent))
+    with _SEARCH_LOCK:
+        cached = _SEARCH_CACHE.get(key)
+    if cached is None:
+        cached = _search_scan(sid, q, kinds, tool, errors, writes, subagent)
+        with _SEARCH_LOCK:
+            _SEARCH_CACHE[key] = cached
+            while len(_SEARCH_CACHE) > 8:
+                _SEARCH_CACHE.pop(next(iter(_SEARCH_CACHE)))
+    try:
+        off = max(0, int(offset or 0))
+        lim = max(1, min(int(limit or 50), 200))
+    except (TypeError, ValueError):
+        off, lim = 0, 50
+    total = len(cached)
+    return {"ok": True, "hits": cached[off:off + lim], "total": total,
+            "has_more": off + lim < total, "rev": rev}
 
 
 def _build_from_session(sid, before=None, limit_turns=30):
@@ -1532,3 +1735,189 @@ def export(sid):
     events = _iter_events(sid)
     view = build(sid, limit_turns=0)
     return {"sid": sid, "version": 1, "events": events, "view": view}
+
+
+_KIND_HTML = {
+    "user": "输入", "context": "上下文", "system": "系统", "reasoning": "思考",
+    "message": "正文", "tool": "工具", "subtool": "子代理",
+    "compacted": "压缩", "review": "验收",
+}
+
+
+def _human_num(n):
+    try:
+        v = float(n or 0)
+    except (TypeError, ValueError):
+        v = 0.0
+    a = abs(v)
+    if a >= 1e8:
+        return "%.2f亿" % (v / 1e8)
+    if a >= 1e6:
+        return "%.2fM" % (v / 1e6)
+    if a >= 1e4:
+        return "%.1fK" % (v / 1e3)
+    return "%d" % v
+
+
+def _human_dur(ms):
+    try:
+        n = float(ms or 0)
+    except (TypeError, ValueError):
+        n = 0.0
+    if n >= 60000:
+        return "%.1fm" % (n / 60000)
+    if n >= 1000:
+        return "%.1fs" % (n / 1000)
+    return "%dms" % n
+
+
+def _esc(v):
+    return html.escape("" if v is None else str(v))
+
+
+def export_html(sid):
+    """自包含只读 HTML：轮次 / 步骤 / 记录摘要，正文收在 details 里。"""
+    view = build(sid, limit_turns=0)
+    turns = view.get("turns") or []
+    st = view.get("stats") or {}
+    tk = st.get("tokens") or {}
+    esc = _esc
+
+    head = (
+        '<!DOCTYPE html>\n<html lang="zh-CN"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>轨迹 · %s</title><style>%s</style></head><body>" % (
+            esc(sid), _HTML_CSS))
+    stats = ("%d 轮 · %d 步 · %d 条记录 · %d 次工具 · %d 失败 · 输出 %s token" % (
+        st.get("turns") or 0, st.get("steps") or 0, st.get("cells") or 0,
+        st.get("tools") or 0, st.get("errors") or 0,
+        _human_num(tk.get("completion"))))
+    out = [head, '<header><h1>轨迹</h1><p class="sub">%s</p><p class="sub mono">%s</p></header><main>' % (
+        esc(stats), esc(sid))]
+
+    for idx, t in enumerate(turns):
+        tno = int(t.get("turn") or 0)
+        tst = t.get("stats") or {}
+        title = "Turn %d" % tno
+        bits = []
+        for g in t.get("groups") or []:
+            for c in g.get("cells") or []:
+                if c.get("kind") == "user":
+                    title = str(c.get("text") or "")[:100] or title
+                    break
+            if title != "Turn %d" % tno:
+                break
+        if tst.get("steps"):
+            bits.append("%d 步" % tst["steps"])
+        bits.append("%d 条" % (tst.get("cells") or 0))
+        if tst.get("tools"):
+            bits.append("%d 工具" % tst["tools"])
+        if tst.get("errors"):
+            bits.append("%d 失败" % tst["errors"])
+        if tst.get("durMs"):
+            bits.append(_human_dur(tst.get("durMs")))
+        if t.get("reason"):
+            bits.append(str(t.get("reason")))
+        is_open = " open" if idx >= len(turns) - 3 else ""
+        out.append('<section class="turn"><details%s><summary>'
+                   '<span class="tno">T%d</span><span class="ttitle">%s</span>'
+                   '<span class="tmeta">%s</span></summary><div class="steps">' % (
+                       is_open, tno, esc(title), esc(" · ".join(bits))))
+        for g in t.get("groups") or []:
+            cells = g.get("cells") or []
+            if not cells:
+                continue
+            gbits = []
+            gpeak = gout = 0
+            gtools = gerr = 0
+            gsecs = 0.0
+            for c in cells:
+                if c.get("kind") in ("tool", "subtool"):
+                    gtools += 1
+                if c.get("isError"):
+                    gerr += 1
+                gpeak = max(gpeak, int(c.get("input") or 0))
+                gout += int(c.get("output") or 0)
+                gsecs += float(c.get("timeSeconds") or 0)
+            if gtools:
+                gbits.append("%d 工具" % gtools)
+            if gpeak or gout:
+                gbits.append("%s → %s" % (_human_num(gpeak), _human_num(gout)))
+            if gsecs:
+                gbits.append(_human_dur(gsecs * 1000))
+            if gerr:
+                gbits.append("%d 失败" % gerr)
+            out.append('<section class="step"><h3><span>%s</span>'
+                       '<span class="smeta">%s · %d 条</span></h3>' % (
+                           esc(g.get("title") or ""), esc(" · ".join(gbits)), len(cells)))
+            for c in cells:
+                kind = str(c.get("kind") or "")
+                meta = []
+                if c.get("timeSeconds"):
+                    meta.append(_human_dur(float(c.get("timeSeconds") or 0) * 1000))
+                if c.get("input") or c.get("output"):
+                    meta.append("%s → %s" % (
+                        _human_num(c.get("input")), _human_num(c.get("output"))))
+                if c.get("toolName"):
+                    meta.append(str(c.get("toolName")))
+                if c.get("resultChars"):
+                    meta.append("%s 字" % _human_num(c.get("resultChars")))
+                elif (c.get("sizes") or {}).get("output"):
+                    meta.append("%s 字" % _human_num((c.get("sizes") or {}).get("output")))
+                body = str(c.get("text") or "")
+                if c.get("errorText"):
+                    body += ("\n\n[错误] " + str(c.get("errorText"))) if body else (
+                        "[错误] " + str(c.get("errorText")))
+                out.append('<details class="cell k-%s%s"><summary>'
+                           '<span class="kind">%s</span><span class="ctitle">%s</span>'
+                           '<span class="cmeta">%s</span></summary><pre>%s</pre></details>' % (
+                               esc(kind), " err" if c.get("isError") else "",
+                               esc(_KIND_HTML.get(kind, kind or "?")),
+                               esc(c.get("text") or "（空）"),
+                               esc(" · ".join(meta)), esc(body or "（无正文）")))
+            out.append("</section>")
+        out.append("</div></details></section>")
+
+    if not turns:
+        out.append('<p class="empty">这个会话还没有轨迹记录。</p>')
+    out.append("</main></body></html>")
+    return "\n".join(out)
+
+
+_HTML_CSS = """
+:root{color-scheme:light dark;--bg:#fbfbfd;--fg:#1c1e21;--dim:#6b7280;--line:#e5e7eb;
+--card:#fff;--accent:#4f46e5;--err:#dc2626}
+@media (prefers-color-scheme:dark){:root{--bg:#16171a;--fg:#e6e7ea;--dim:#9aa0a8;
+--line:#2b2d31;--card:#1d1f23;--accent:#8b8cf0;--err:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;padding:24px;background:var(--bg);color:var(--fg);
+font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+header{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:16px}
+h1{margin:0 0 4px;font-size:20px}
+.sub{margin:0;color:var(--dim);font-size:12px}
+.mono{font-family:ui-monospace,Consolas,monospace}
+main{max-width:1100px;margin:0 auto}
+.turn{border:1px solid var(--line);border-radius:8px;background:var(--card);margin:0 0 12px}
+.turn>details{overflow:hidden;border-radius:8px}
+summary{cursor:pointer;padding:8px 12px;display:flex;gap:10px;align-items:baseline;
+background:rgba(127,127,127,.05);border-bottom:1px solid var(--line)}
+.turn>details[open]>summary{border-bottom:1px solid var(--line)}
+.tno{font:600 12px ui-monospace,Consolas,monospace;color:var(--dim)}
+.ttitle{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tmeta{margin-left:auto;color:var(--dim);font-size:12px;white-space:nowrap}
+.steps{padding:8px 12px 12px}
+.step{border-left:2px solid var(--line);padding-left:10px;margin:10px 0}
+.step h3{margin:0 0 6px;display:flex;gap:10px;font-size:11px;font-weight:600;
+letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.smeta{font-weight:400;letter-spacing:0;text-transform:none}
+.cell{border:1px solid var(--line);border-radius:6px;margin:4px 0}
+.cell>summary{padding:5px 8px;border-bottom:0;background:transparent;gap:8px;font-size:12px}
+.cell[open]>summary{border-bottom:1px solid var(--line)}
+.kind{flex:0 0 auto;min-width:38px;color:var(--dim)}
+.ctitle{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmeta{color:var(--dim);font-size:11px;white-space:nowrap}
+.cell.err .kind,.cell.err .ctitle{color:var(--err)}
+pre{margin:0;padding:10px 12px;white-space:pre-wrap;word-break:break-word;
+font:12px/1.65 ui-monospace,Consolas,monospace}
+.empty{color:var(--dim)}
+"""

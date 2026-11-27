@@ -7,6 +7,7 @@ load_sessions / save_sessions / set_current / 附件与存档清理全部替换�
 import pytest
 
 from app.api import sessions as api
+from app import sessions as sessions_mod
 from app.sessions import slim_sessions
 
 
@@ -55,27 +56,29 @@ class FakeHandler:
 
 @pytest.fixture()
 def store(monkeypatch):
-    data = {
-        "current": "s_a",
-        "sessions": [
-            {"id": "s_a", "title": "会话 A", "updated_at": 200, "messages": [
-                {"role": "user", "content": "你好"},
-                {"role": "assistant", "content": "在的"},
-            ]},
-            {"id": "s_b", "title": "会话 B", "updated_at": 100, "messages": []},
-        ],
-    }
-    saved = []
-    monkeypatch.setattr(api, "load_sessions", lambda: data)
-    monkeypatch.setattr(api, "save_sessions", lambda d: saved.append(d))
-    monkeypatch.setattr(api, "set_current", lambda sid: data.update({"current": sid}))
+    rows = [
+        {"id": "s_a", "title": "会话 A", "updated_at": 200, "messages": [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "在的"},
+        ]},
+        {"id": "s_b", "title": "会话 B", "updated_at": 100, "messages": []},
+    ]
+    # 用真实（已被 conftest 隔离到 tmp 的）会话存储，验证单会话落盘行为；
+    # 不再 monkeypatch load_sessions/save_sessions，否则测不到新的持久化路径。
+    sessions_mod.save_sessions({"current": "s_a", "sessions": rows})
+    sessions_mod.reset_cache()
+    data = sessions_mod.load_sessions(copy=False)
     monkeypatch.setattr(api, "new_id", lambda: "s_new")
     monkeypatch.setattr(api, "delete_session_uploads", lambda sid: None)
     monkeypatch.setattr(api.branch_lib, "drop_legacy_saves", lambda sid: None)
     # 新建会话会跑 SessionStart 钩子：测试里关掉，避免碰真实 data/
     import app.hooks as hooks
     monkeypatch.setattr(hooks, "session_start", lambda *a, **k: "")
-    return data, saved
+    return data, []
+
+
+def _live():
+    return sessions_mod.load_sessions(copy=False)
 
 
 def test_slim_payload_shape():
@@ -97,40 +100,37 @@ def test_slim_payload_shape():
 
 
 def test_new_session_becomes_current(store):
-    data, saved = store
+    data, _saved = store
     h = FakeHandler({})
     api._api_session_new(h)
     code, obj = h.last
     assert code == 200 and obj["ok"] is True
     assert obj["sessions"]["current"] == "s_new"
-    assert saved and saved[-1]["sessions"][0]["id"] == "s_new"
+    assert _live()["sessions"][0]["id"] == "s_new"
 
 
 def test_rename_and_pin(store):
-    data, _ = store
     h = FakeHandler({"id": "s_b", "title": "改名后"})
     api._api_session_rename(h)
-    assert data["sessions"][1]["title"] == "改名后"
+    assert sessions_mod.find_session(_live(), "s_b")["title"] == "改名后"
 
     h2 = FakeHandler({"id": "s_b", "pinned": True})
     api._api_session_pin(h2)
-    assert data["sessions"][1]["pinned"] is True
+    assert sessions_mod.find_session(_live(), "s_b")["pinned"] is True
     assert h2.last[1]["sessions"]["sessions"][0]["id"] == "s_b"   # 置顶后排到最前
 
 
 def test_select_changes_current(store):
-    data, _ = store
     h = FakeHandler({"id": "s_b"})
     api._api_session_select(h)
-    assert data["current"] == "s_b"
+    assert _live()["current"] == "s_b"
     assert h.last[1]["sessions"]["current"] == "s_b"
 
 
 def test_delete_refuses_last_session(store):
-    data, _ = store
     h = FakeHandler({"id": "s_b"})
     api._api_session_delete(h)
-    assert [s["id"] for s in data["sessions"]] == ["s_a"]
+    assert [s["id"] for s in _live()["sessions"]] == ["s_a"]
     assert h.last[1]["sessions"]["current"] == "s_a"
 
     h2 = FakeHandler({"id": "s_a"})
@@ -138,12 +138,12 @@ def test_delete_refuses_last_session(store):
     code, obj = h2.last
     # 只剩一个会话时拒绝删除：ok=False，且不能把整库原样塞回给前端
     assert obj["ok"] is False
-    assert len(data["sessions"]) == 1
+    assert len(_live()["sessions"]) == 1
 
 
 def test_messages_pagination(store):
-    data, _ = store
-    data["sessions"][0]["messages"] = [{"role": "user", "content": str(i)} for i in range(30)]
+    s_a = sessions_mod.find_session(_live(), "s_a")
+    s_a["messages"] = [{"role": "user", "content": str(i)} for i in range(30)]
     h = FakeHandler({"session_id": "s_a", "limit": 10})
     api._api_session_messages(h)
     obj = h.last[1]

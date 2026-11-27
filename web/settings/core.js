@@ -36,30 +36,45 @@ function settingsList(value) {
 const SETTINGS_LAST_TAB_KEY = 'settings_last_tab';
 const SETTINGS_SCROLL_KEY = 'settings_scroll_v1';
 
-/* 设置页结构：一页 = 一个任务，可以包含多个 pane（pane 仍是配置分组的物理单元）。
-   这样不必搬动字段，就能把相关配置合到同一页。 */
+/* 设置页结构：一页 = 一个主题（pane 仍是配置分组的物理单元，可能被多页复用）。
+   导航只保留一层：左侧按「常用 / Agent / 体验 / 系统」分组，每页内部再按任务分区。 */
 const SETTINGS_PAGES = [
-  { id: 'model', group: '常用', title: '模型与对话',
-    desc: '聊天 / 视觉接口、推理参数、上下文预算与压缩',
-    panes: ['chat', 'context'] },
+  { id: 'chat', group: '常用', title: '模型接入',
+    desc: '聊天 / 视觉接口、预设与账户余额',
+    panes: ['chat'] },
+  { id: 'context', group: '常用', title: '上下文与记忆',
+    desc: '上下文预算、省费模式、压缩与记忆检索',
+    panes: ['context'] },
   { id: 'search', group: '常用', title: '联网与检索',
-    desc: '搜索服务商、抓取策略与 B 站读取',
+    desc: '搜索服务商、抓取策略与信息量上限',
     panes: ['search'] },
-  { id: 'tools', group: '能力', title: '能力与工具',
-    desc: 'Agent 执行、子代理、技能与外部工具、图像',
-    panes: ['agent', 'flow', 'agents', 'ext', 'skills', 'image'],
-    subnav: [
-      { id: 'exec', title: '执行策略', panes: ['agent'] },
-      { id: 'flow', title: '子代理与流程', panes: ['flow', 'agents'] },
-      { id: 'ext', title: '技能与外部工具', panes: ['ext', 'skills'] },
-      { id: 'image', title: '图像', panes: ['image'] },
-    ] },
-  { id: 'ui', group: '偏好', title: '界面与提醒',
-    desc: '主题外观、快捷键、语音与提醒',
-    panes: ['appearance', 'speech', 'keys', 'remind'] },
-  { id: 'data', group: '系统', title: '数据与用户',
-    desc: '用户规则、移动访问、存储维护与重置',
-    panes: ['profile', 'mobile', 'data'] },
+  { id: 'agent', group: 'Agent', title: '执行与审批',
+    desc: '执行节奏、通知、写入审批与命令审计',
+    panes: ['agent'] },
+  { id: 'flow', group: 'Agent', title: '子代理与流程',
+    desc: '子代理团队、自动派发、并行探索与工作流',
+    panes: ['agents', 'flow'] },
+  { id: 'ext', group: 'Agent', title: '工具与扩展',
+    desc: '编辑器补全、代码工具、MCP / Hooks、电脑操作与 Skill',
+    panes: ['ext', 'skills'] },
+  { id: 'appearance', group: '体验', title: '外观与对话',
+    desc: '主题、氛围、对话过程与编辑器',
+    panes: ['appearance'] },
+  { id: 'speech', group: '体验', title: '语音与提醒',
+    desc: '语音输入、朗读与定时提醒',
+    panes: ['speech', 'remind'] },
+  { id: 'keys', group: '体验', title: '快捷键',
+    desc: '查看与修改快捷键',
+    panes: ['keys'] },
+  { id: 'profile', group: '系统', title: '用户规则',
+    desc: '全局规则、自动记录与学习指令',
+    panes: ['profile'] },
+  { id: 'mobile', group: '系统', title: '手机访问',
+    desc: '局域网网关、扫码配对与设备管理',
+    panes: ['mobile'] },
+  { id: 'data', group: '系统', title: '系统维护',
+    desc: '应用信息、会话存储、运行状态与重置',
+    panes: ['data'] },
   { id: 'help', group: '系统', title: '帮助',
     desc: '各项功能的实际作用与差异',
     panes: ['help'] },
@@ -67,13 +82,11 @@ const SETTINGS_PAGES = [
 
 /* 旧入口 / 深链 / localStorage 里的页 id → 新页 id */
 const SETTINGS_TAB_ALIAS = {
-  chat: 'model', context: 'model',
-  search: 'search',
-  agent: 'tools', flow: 'tools', ext: 'tools', agents: 'tools',
-  skills: 'tools', image: 'tools',
-  ui: 'ui', appearance: 'ui', speech: 'ui', keys: 'ui', remind: 'ui',
-  profile: 'data', mobile: 'data', data: 'data', system: 'data',
-  help: 'help',
+  model: 'chat',                  // 原「模型与对话」拆成 模型接入 / 上下文与记忆
+  tools: 'agent',                 // 原「能力与工具」拆成 执行 / 子代理 / 工具
+  ui: 'appearance',               // 原「界面与提醒」拆成 外观 / 语音 / 快捷键
+  system: 'data',
+  agents: 'flow', skills: 'ext', remind: 'speech',
 };
 
 const SETTINGS_PAGE_META = {};
@@ -100,24 +113,15 @@ function settingsPageOfPane(pane) {
   return hit ? hit.id : pane;
 }
 
-function settingsSubOfPane(page, pane) {
-  const conf = settingsPageConf(page);
-  for (const sub of (conf && conf.subnav) || []) {
-    if (sub.panes.indexOf(pane) >= 0) return sub;
-  }
-  return null;
-}
-
 
 /* 静态页的「恢复本页默认」作用范围；动态页由 _collect() 的键推导。
    密钥与自定义预设不在重置范围内。 */
 const STATIC_RESET_KEYS = {
   profile: { profile: ['manual', 'rules', 'auto_learn_enabled', 'learning_prompt_custom'] },
-  appearance: { config: ['theme', 'ide_whitespace', 'ide_autosave', 'ui_process_follow'] },
+  appearance: { config: ['theme', 'ide_whitespace', 'ide_autosave', 'ui_process_follow', 'avatar_motion'] },
   speech: { config: ['speech_polish', 'speech_denoise'] },
-  image: { config: ['image_enabled', 'image_comfy_url', 'image_workflow'] },
   mobile: { config: ['mobile_port', 'mobile_device_days'] },
-  data: { config: ['trajectory_enabled', 'trajectory_max_field',
+  data: { config: ['trajectory_enabled', 'trajectory_max_field', 'storage_auto_prune',
                    'codeindex_enabled', 'codeindex_max_files',
                    'codeindex_max_chunks', 'codeindex_max_file_kb'] },
   agents: { config: [

@@ -49,8 +49,15 @@ _MIME_BY_EXT.update({
 })
 
 
+def _safe_sid(sid):
+    """会话 id 只允许安全字符；`.` / `..` 不能当目录名。"""
+    s = re.sub(r"[^A-Za-z0-9_.-]", "_", str(sid or ""))
+    s = s.strip(".")
+    return s or "_"
+
+
 def _upload_dir(sid):
-    return os.path.join(UPLOAD_DIR, re.sub(r"[^A-Za-z0-9_.-]", "_", str(sid or "_")))
+    return os.path.join(UPLOAD_DIR, _safe_sid(sid))
 
 
 def _safe_ext(name):
@@ -132,10 +139,23 @@ def read_message_images(sid, msg, limit=4):
 
 
 def _upload_path(sid, name):
-    name = os.path.basename(str(name or ""))       # 防目录穿越
-    if not name:
+    """只允许当前会话目录下的单层文件名；拒绝目录穿越与符号链接逃逸。"""
+    raw = str(name or "")
+    if (not raw or raw in (".", "..") or "\x00" in raw
+            or "/" in raw or "\\" in raw):
         return None
-    p = os.path.join(_upload_dir(sid), name)
+    name = os.path.basename(raw)
+    d = os.path.abspath(_upload_dir(sid))
+    p = os.path.abspath(os.path.join(d, name))
+    base = os.path.abspath(UPLOAD_DIR)
+    try:
+        if os.path.commonpath([base, p]) != base:
+            return None
+        real, real_base = os.path.realpath(p), os.path.realpath(base)
+        if os.path.commonpath([real_base, real]) != real_base:
+            return None
+    except ValueError:
+        return None
     return p if os.path.isfile(p) else None
 
 
@@ -180,7 +200,9 @@ def delete_session_uploads(sid):
 
 
 QUARANTINE_DIR = ".orphan"
-QUARANTINE_KEEP = 3          # 保留最近几批隔离目录，超出再清掉
+# 保留最近几批隔离目录，超出再清掉。附件属于用户数据，宁可多留几批：
+# 2026-11-23 就是先隔离后被下一轮启动当「旧批次」清掉的隐患形态。
+QUARANTINE_KEEP = 10
 
 
 def _quarantine_dir(dpath):
@@ -270,8 +292,19 @@ def sweep_uploads(min_age=0):
                 continue
             keep.update(_referenced_files(m))
         alive[os.path.basename(_upload_dir(s.get("id")))] = keep
+    dirs = [n for n in os.listdir(UPLOAD_DIR)
+            if not n.startswith(".") and os.path.isdir(os.path.join(UPLOAD_DIR, n))]
+    # 防误清（2026-11-23 附件失效事故）：只加载到 1 个空会话时，多半是会话存储没
+    # 读完整（索引被覆盖 / 迁移中），此时把其它会话目录当孤儿隔离会直接弄丢附件。
+    if len(rows) == 1 and not (rows[0].get("messages") or []) and dirs:
+        print("[附件清理] 只加载到 1 个空会话，疑似会话存储不完整，跳过清理")
+        return
+    unknown = [n for n in dirs if n not in alive]
+    if len(unknown) >= 3 and len(unknown) > len(alive):
+        print("[附件清理] 多数附件目录不属于当前会话列表，疑似会话数据不完整，跳过清理")
+        return
     removed_files = quarantined = 0
-    for dname in os.listdir(UPLOAD_DIR):
+    for dname in dirs:
         if dname.startswith("."):                   # .orphan 等内部目录
             continue
         dpath = os.path.join(UPLOAD_DIR, dname)

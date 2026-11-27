@@ -11,15 +11,6 @@ from app import agent
 
 # 明确指令：每条都应命中预期工具；None 表示不应该硬塞工具。
 INTENT_CASES = [
-    # ---- B 站 ----
-    ("帮我看看这个视频 https://www.bilibili.com/video/BV1xx411c7mD", "bili.analyze"),
-    ("BV1xx411c7mD 讲了什么", "bili.analyze"),
-    ("这个视频的弹幕 https://www.bilibili.com/video/BV1xx411c7mD", "bili.danmaku"),
-    ("把评论区读完 https://www.bilibili.com/video/BV1xx411c7mD", "bili.comments"),
-    ("要完整字幕 https://www.bilibili.com/video/BV1xx411c7mD", "bili.transcript"),
-    ("做个时间轴 https://www.bilibili.com/video/BV1xx411c7mD", "bili.timeline"),
-    ("B站 UP主 可可味 有哪些投稿", "bili.up"),
-    ("查一下 bilibili 上 老番茄 的投稿", "bili.up"),
     # ---- 联网 ----
     ("帮我查一下今天的天气", "web_search"),
     ("搜一下 OpenAI 最新模型", "web_search"),
@@ -127,10 +118,6 @@ def test_intent_args_extraction():
     assert h["tool"] == "move_file"
     assert h["args"] == {"from": "a.txt", "to": "b.txt"}
 
-    h = agent.intent_hint("查一下 bilibili 上 老番茄 的投稿")
-    assert h["tool"] == "bili.up"
-    assert h["args"]["name"] == "老番茄"
-
 
 # ------------------------------------------------------------
 # 工具名 / 参数格式收敛
@@ -188,8 +175,6 @@ def test_parse_calls_delete_disambiguation():
 
 
 def test_parse_calls_keeps_tool_specific_arg_names():
-    assert agent.parse_calls(
-        '{"tool":"bili.up","args":{"keyword":"攻略"}}')[0]["args"] == {"keyword": "攻略"}
     assert agent.parse_calls(
         '{"tool":"memory.search","args":{"query":"偏好"}}')[0]["args"] == {"query": "偏好"}
 

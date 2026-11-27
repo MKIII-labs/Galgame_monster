@@ -35,7 +35,9 @@ MAX_BACKUP_ENTRIES = 20000      # 防止海量小文件拖死预检
 
 _FILE_NAMES = ("sessions.json", "tasks.json", "user_profile.json",
                "chat_history.txt", "token_usage.jsonl")
-_DIR_NAMES = ("knowledge", "notes", "uploads", "saves")
+# session_store / sessions 是新版会话存储：物化缓存 + append-only 事件流。
+# sessions.json 只保留在列表里，用于恢复老版本备份（恢复后首次加载会自动迁移）。
+_DIR_NAMES = ("knowledge", "notes", "uploads", "saves", "session_store", "sessions")
 
 
 def _root(data_dir=None):
@@ -83,8 +85,24 @@ def _kb_count(root):
                 if os.path.basename(p) != "index.json"])
 
 
+def _session_count(root):
+    """会话条数：老版本读 sessions.json；新版优先读索引，缺失时数物化缓存。"""
+    legacy = os.path.join(root, "sessions.json")
+    if os.path.isfile(legacy):
+        return _json_count(legacy, "sessions")
+    try:
+        with open(os.path.join(root, "sessions", "index.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        order = data.get("order")
+        if isinstance(order, list):
+            return len(order)
+    except Exception:
+        pass
+    return len(glob.glob(os.path.join(root, "session_store", "*.json")))
+
+
 def _counts(root):
-    sessions = _json_count(os.path.join(root, "sessions.json"), "sessions")
+    sessions = _session_count(root)
     tasks = _json_count(os.path.join(root, "tasks.json"), "items")
     return {
         "sessions": sessions,
@@ -159,8 +177,8 @@ def backup_name():
 def _write_zip(sink, data_dir=None, db_file=None):
     """把备份内容写进 sink 驱动的 zip；返回 manifest 里的文件清单。"""
     root = _root(data_dir)
-    # 热路径只在 session_store/ 里写单会话快照，sessions.json 可能落后一个回合；
-    # 备份前补一次全量快照，保证备份里是「点备份这一刻」的完整数据。
+    # 热路径只写单会话物化缓存，事件流可能还差最后一段；备份前补一次全量落盘，
+    # 保证备份里是「点备份这一刻」的完整数据。
     try:
         if root == os.path.abspath(store.DATA_DIR):
             from app.sessions import flush_sessions
@@ -464,9 +482,18 @@ def _clear_caches(root):
             knowledge.drop_cache(path)
         except Exception:
             pass
-    # 恢复后，恢复前留下的单会话快照可能比备份里的 sessions.json 还新，
-    # 下次启动会把旧数据「恢复」回来 —— 直接清掉，以备份为准。
-    shutil.rmtree(os.path.join(root, "session_store"), ignore_errors=True)
+    # 恢复后内存里的会话读模型与事件 diff 基线都必须丢弃，重新从磁盘装载
+    try:
+        from app import session_events, sessions
+        sessions.reset_cache()
+        session_events._LAST.clear()
+        session_events._SEQ.clear()
+    except Exception:
+        pass
+    # 老备份（只有 sessions.json）没有新格式目录：删掉旧缓存，首次加载会重新迁移
+    if os.path.isfile(os.path.join(root, "sessions.json")):
+        shutil.rmtree(os.path.join(root, "session_store"), ignore_errors=True)
+        shutil.rmtree(os.path.join(root, "sessions"), ignore_errors=True)
 
 
 def restore_backup(data, data_dir=None, db_file=None, make_safety=True):

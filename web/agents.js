@@ -66,6 +66,9 @@
       const sw = document.createElement('label');
       sw.className = 'ui-switch';
       sw.title = '启用 / 停用';
+      // 点开关轨道时点击会冒泡到整行，触发行点击「打开编辑器」；
+      // 在 label 上拦住，默认的 label→checkbox 切换仍然生效。
+      sw.onclick = (e) => e.stopPropagation();
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.checked = a.enabled !== false;

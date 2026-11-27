@@ -298,18 +298,16 @@ def _limit_or_default(raw, default):
 
 
 def normalize_auto_continue(raw):
-    """自动续跑次数：0 = 关闭，1–10 = 次数，-1 = 无上限（非法值回落到 3）。
+    """自动续跑：0 = 关闭，-1 = 无上限（只保留这两档）。
 
-    无上限只是「不按次数刹车」：工具轮次仍受 max_rounds 限制，
-    连续空转另有保护（见 chat.py 的 auto_idle）。
+    旧配置里的 1–10（例如 3 / 5）统一按「无上限」处理：界面已删掉次数档，
+    不能让同一份配置在界面上显示「无上限」、实际却只跑 3 次。
     """
     try:
         n = int(raw)
     except (TypeError, ValueError):
-        return 3
-    if n < 0:
         return -1
-    return max(0, min(10, n))
+    return 0 if n == 0 else -1
 
 
 _CMD_NOISE_PREFIXES = (

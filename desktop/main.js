@@ -4,16 +4,19 @@
 // 顶栏（应用名 + 最小化 / 最大化 / 关闭）由网页里的 #titlebar 自绘，
 // 通过 preload 暴露的 window.gmWin 调用这里的 IPC。
 // 业务逻辑、页面、后端服务都不在这里改动。
-const { app, BrowserWindow, Menu, Notification, dialog, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, session, shell } = require('electron');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-// 窗口 / 任务栏图标：直接用项目根目录的 app.ico（内含 16/32/48/64/128/256 多尺寸帧，
-// 系统会挑最合适的一帧，不会被二次缩放到模糊）
+// 窗口 / 任务栏 / 托盘图标：项目根目录的 app.ico（16/20/24/32/40/48/64/128/256 多尺寸帧，
+// 每个尺寸都由 scripts/make_icon.py 从矢量重绘，系统直接挑合适的一帧，不做插值缩放）
 const ICON = path.join(ROOT, 'app.ico');
+// 气泡 / 系统通知会把图标放大：托盘帧只有 16–24px，放大后发糊。
+// app-512.png 由 scripts/make_icon.py 从同一条矢量生成，专门给这两处用。
+const ICON_HD = path.join(ROOT, 'app-512.png');
 
 // 用户数据放在项目自己的 data/ 下（和 --app 时代一致，便于整体清理 / 备份）
 const PROFILE_DIR = path.join(ROOT, 'data', '.electron_profile');
@@ -32,6 +35,18 @@ const DLOG = path.join(ROOT, 'data', 'desktop.log');
 // 因为用户从快捷方式启动时期望的是铺满，而不是一个孤零零的 1440×960 小窗。
 const WIN_STATE = path.join(PROFILE_DIR, 'window-state.json');
 const DEFAULT_BOUNDS = { width: 1440, height: 960 };
+// 当前窗口的整体缩放默认值：-0.5 ≈ 91%。只在没有手动缩放记录时应用，
+// 用户用 Ctrl+± 调过以后以 Electron 自己保存的 per-host zoom 为准。
+const DEFAULT_UI_ZOOM = -0.5;
+
+function configUiZoom() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'data', 'config.json'), 'utf8'));
+    const v = Number(cfg.ui_zoom_level);
+    if (Number.isFinite(v)) return Math.max(-3, Math.min(4, v));
+  } catch (e) { /* 首次启动还没有配置文件 */ }
+  return DEFAULT_UI_ZOOM;
+}
 
 function loadWindowState() {
   try {
@@ -77,11 +92,41 @@ function dlog(msg) {
 // System.AppUserModel.ID 一致：main.py 会读出来（已固定到任务栏时用资源管理器
 // 自动生成的那个 ID）并通过环境变量传进来，这里只留一个兜底值。
 app.setAppUserModelId(process.env.GM_AUMID || 'GalgameMonster.Desktop');
+// 窗口 / 菜单 / 通知里显示的应用名（不含 .exe）
+app.setName('Galgame_monster');
 
 // 启动参数里带界面的地址（main.py 传进来）
 const APP_URL = (process.argv.find((a) => /^https?:\/\//i.test(a)) || '').trim();
 
 let win = null;
+let tray = null;          // 托盘图标：存在时关窗 = 最小化到托盘
+let quitting = false;     // 托盘「退出」/ 系统退出：允许窗口真正关闭
+let hiddenNotified = false;
+
+function showWindow() {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function createTray() {
+  try {
+    tray = new Tray(ICON);
+    tray.setToolTip('Galgame_monster');
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: '打开主窗口', click: showWindow },
+      { type: 'separator' },
+      { label: '退出 Galgame_monster', click: () => { quitting = true; app.quit(); } },
+    ]));
+    tray.on('click', showWindow);
+    tray.on('double-click', showWindow);
+    dlog('tray ready');
+  } catch (e) {
+    tray = null;          // 托盘不可用：保持「关窗即退出」的旧行为
+    dlog('tray failed: ' + (e && e.message));
+  }
+}
 
 // 同一个窗口壳只允许一个实例：第二次启动只把已有窗口提到前面
 if (!app.requestSingleInstanceLock()) {
@@ -90,13 +135,16 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', () => {
     dlog('second-instance');
-    if (!win) return;
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
+    showWindow();
   });
-  app.on('window-all-closed', () => { dlog('window-all-closed'); app.quit(); });
-  app.on('before-quit', () => dlog('before-quit'));
+  app.on('window-all-closed', () => {
+    dlog('window-all-closed');
+    if (!tray) app.quit();          // 没有托盘才在关窗时退出
+  });
+  app.on('before-quit', () => { quitting = true; dlog('before-quit'); });
+  app.on('will-quit', () => {
+    if (tray) { try { tray.destroy(); } catch (e) { /* 已销毁 */ } tray = null; }
+  });
   app.on('child-process-gone', (_e, d) => {
     dlog('child-process-gone ' + JSON.stringify(d || {}));
   });
@@ -108,8 +156,12 @@ if (!app.requestSingleInstanceLock()) {
       return;
     }
     Menu.setApplicationMenu(null);
+    // 排查「切换 / 毛玻璃卡顿」时先看这一行：gpu_compositing 是否 enabled
+    // （软件渲染下 View Transition 和 backdrop-filter 都会明显变慢）
+    try { dlog('gpu ' + JSON.stringify(app.getGPUFeatureStatus())); } catch (e) { /* 旧版 Electron 无此 API */ }
     setupPermissions();
     createWindow();
+    createTray();
   });
 }
 
@@ -166,7 +218,28 @@ function createWindow() {
     if (!state || state.maximized) win.maximize();
     win.show();
   });
-  win.on('close', () => { saveBounds(); dlog('window close'); });
+  win.on('close', (e) => {
+    saveBounds();
+    if (tray && !quitting) {
+      // 关窗 = 最小化到托盘；后端继续跑（提醒 / 定时任务不受影响）
+      e.preventDefault();
+      win.hide();
+      if (!hiddenNotified) {
+        hiddenNotified = true;
+        try {
+          tray.displayBalloon({
+            icon: ICON_HD,
+            iconType: 'custom',
+            title: 'Galgame_monster 仍在运行',
+            content: '已最小化到托盘；右键托盘图标可选「退出」。',
+          });
+        } catch (err) { /* 不支持气泡就只隐藏窗口 */ }
+      }
+      dlog('window hidden to tray');
+      return;
+    }
+    dlog('window close');
+  });
   win.on('closed', () => { dlog('window closed'); win = null; });
   win.webContents.on('render-process-gone', (_e, d) => {
     dlog('render-process-gone ' + JSON.stringify(d || {}));
@@ -182,7 +255,14 @@ function createWindow() {
   win.on('unmaximize', () => pushMax(false));
   // 启动即最大化时，maximize 事件可能早于页面绑定监听（消息会丢），
   // 首帧加载完再补推一次当前状态，保证顶栏图标和窗口一致。
-  win.webContents.on('did-finish-load', () => pushMax(win && win.isMaximized()));
+  win.webContents.on('did-finish-load', () => {
+    pushMax(win && win.isMaximized());
+    // 整体缩放的默认值：只在没有手动缩放记录（0 = 100%）时应用。
+    // 用户用 Ctrl+± 调过以后，Electron 会把 per-host zoom 存进 profile，这里不再覆盖。
+    try {
+      if (!win.webContents.getZoomLevel()) win.webContents.setZoomLevel(configUiZoom());
+    } catch (e) { /* 旧版 Electron 没有该 API 时忽略 */ }
+  });
 
   // 系统全屏状态回推：用户按系统快捷键 / 阅读器点 ⤢ 都走这里同步 UI
   const pushFull = (v) => {
@@ -234,21 +314,19 @@ function bindKeys(wc) {
     } else if (k === 'f12' || (ctrl && input.shift && k === 'i')) {
       event.preventDefault();
       wc.toggleDevTools();
-    } else if (ctrl && (k === '=' || k === '+')) {
+    } else if (ctrl && !input.alt && !input.shift && (k === '=' || k === '+')) {
       event.preventDefault();
       setZoom(wc.getZoomLevel() + 0.5);
-    } else if (ctrl && k === '-') {
+    } else if (ctrl && !input.alt && !input.shift && k === '-') {
       event.preventDefault();
       setZoom(wc.getZoomLevel() - 0.5);
-    } else if (ctrl && k === '0') {
+    } else if (ctrl && !input.alt && !input.shift && k === '0') {
       event.preventDefault();
       setZoom(0);
     }
   });
-  // Ctrl + 滚轮缩放
-  wc.on('zoom-changed', (_e, dir) => {
-    setZoom(wc.getZoomLevel() + (dir === 'in' ? 0.5 : -0.5));
-  });
+  // Ctrl+滚轮不再统一缩放整个页面：页面里的缩放逻辑按鼠标位置分别缩编辑器 / 对话。
+  // 其它区域仍可用 Ctrl+= / Ctrl+- / Ctrl+0 调整整页缩放。
 }
 
 // 顶栏按钮（页面 → 壳）
@@ -290,9 +368,14 @@ ipcMain.on('notify:show', (_e, payload) => {
     const n = new Notification({
       title: String(p.title || 'Galgame_monster'),
       body: String(p.body || ''),
+      // 用 512px 的矢量导出图，避免 Windows 把低分辨率帧放大后发糊
+      icon: ICON_HD,
       // 提示音由渲染进程按类型（完成 / 待回答 / 提醒）现场合成播放；
       // 这里必须静音，否则 Windows 会再加一声系统通知音，听起来就是两声。
       silent: true,
+      // Windows 只支持「默认（约 5 秒）」和「不自动消失」；选后者，
+      // 免得任务跑完时人不在屏幕前、回来通知已经没了。
+      timeoutType: 'never',
     });
     liveNotifs.add(n);
     n.on('close', () => liveNotifs.delete(n));

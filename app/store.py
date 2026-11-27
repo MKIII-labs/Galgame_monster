@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 
-APP_VERSION = "3.5"
+APP_VERSION = "3.5.2"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(ROOT, "web")
 DATA_DIR = os.path.join(ROOT, "data")             # 运行时数据（整目录 gitignore）
@@ -21,7 +21,7 @@ PROFILE_FILE = os.path.join(DATA_DIR, "user_profile.json")
 SESSION_FILE = os.path.join(DATA_DIR, "sessions.json")
 LEGACY_HISTORY = os.path.join(DATA_DIR, "chat_history.txt")
 USAGE_FILE = os.path.join(DATA_DIR, "token_usage.jsonl")   # 用量流水（每行一条 JSON）
-TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")          # 定时提醒 / 主动聊天任务
+TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")          # 定时提醒任务
 NOTIFY_DIR = os.path.join(DATA_DIR, "notify")              # 系统通知的载荷文件（中文走文件，避开命令行编码坑）
 
 _lock = threading.Lock()
@@ -31,7 +31,7 @@ _PENDING_LOCK = threading.Lock()
 PENDING_STOP_TTL = 120.0
 
 # 会话即时开关（agent_enabled / sandbox）：设置接口写入，正在进行的回合每轮取走一次。
-# 只用于「同一轮回复中途改设置」；持久化仍以 sessions.json 为准，取走后自动删除，
+# 只用于「同一轮回复中途改设置」；持久化仍以会话存储为准，取走后自动删除，
 # 避免下次回合读到过期值。
 LIVE_SESSION_FLAGS = {}
 
@@ -142,6 +142,11 @@ def read_json(path, default=None):
     return data
 
 
+def read_json_copy(path, default=None):
+    """读取 JSON 并复制容器骨架；给会修改返回值的调用方用，避免污染读缓存。"""
+    return clone_containers(read_json(path, default))
+
+
 def write_json(path, obj, indent=2, remember=True):
     """写 JSON。先落临时文件再 os.replace —— 中途崩溃/断电不会把原文件写坏
     （os.replace 在同一分区上是原子的）。
@@ -173,14 +178,29 @@ def write_json(path, obj, indent=2, remember=True):
             os.remove(tmp)
         except OSError:
             pass
-        return
+        return False
     if not remember:
         _json_cache.pop(path, None)
-        return
+        return True
     try:
         _remember(path, os.path.getmtime(path), obj)
     except OSError:
         _json_cache.pop(path, None)
+    return True
+
+
+def put_cache(path, data):
+    """把内存里已修正过的数据登记为读缓存（不落盘）。
+
+    给「加载时修过数据、但不能立刻写盘」的路径用：修改结果只对下一次 read_json
+    生效，不会像 write_json 那样产生一次真实写入。
+    """
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return False
+    _remember(path, mtime, data)
+    return True
 
 
 def drop_cache(path):

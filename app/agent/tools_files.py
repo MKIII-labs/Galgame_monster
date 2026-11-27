@@ -632,14 +632,20 @@ def _t_recover_file(root, args, caps=None):
     return ("\n\n".join(lines) if lines else "没有可恢复的文件。"), None
 
 
-def missing_written_files(sid, root, limit=50):
-    """本会话写过、但现在不在磁盘上的文件（工具调用之外消失）。"""
+def missing_written_files(sid, root, limit=50, since=None):
+    """本会话写过、但现在不在磁盘上的文件（工具调用之外消失）。
+
+    since：只统计这个时间戳之后的写操作（验收按回合过滤用）；
+    None = 整个会话（文件监控用）。
+    """
     from .sandbox import (_real, _recover_rel)
     from .state import _ensure_loaded
     from .undo import (_UNDO, _undo_lock)
     _ensure_loaded(sid)
     with _undo_lock:
-        items = [v for v in _UNDO.values() if v.get("sid") == sid]
+        items = [v for v in _UNDO.values()
+                 if v.get("sid") == sid
+                 and (since is None or (v.get("ts") or 0) >= since)]
     items.sort(key=lambda v: v.get("ts") or 0, reverse=True)
     # 同一个文件可能被写过多次：只看**最后一次操作**。
     # 写完又主动 delete 的（最后一条 after_existed=False）不算「丢失」，

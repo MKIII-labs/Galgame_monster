@@ -135,7 +135,7 @@
         '<div class="rd-left"><div class="rd-pages"></div></div>' +
         '<div class="rd-split" title="拖动调整原页宽度"></div>' +
         '<div class="rd-right"><div class="rd-tpages hidden"></div><div class="rd-flow"></div>' +
-        '<div class="rd-loading">正在解析 PDF…</div></div>' +
+        '<div class="rd-loading" role="status" aria-live="polite">正在解析 PDF…</div></div>' +
         '<aside class="rd-settings hidden">' +
           '<div class="rd-set-head"><span>阅读设置</span><button class="rd-set-x" title="关闭">✕</button></div>' +
           '<div class="rd-set-scroll">' +
@@ -337,7 +337,7 @@
         ensureFlow().then(function () {
           var el = RD.blockEls[id];
           if (!el) return;
-          el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+          el.scrollIntoView({ block: 'start', behavior: GM_SMOOTH });
           el.classList.add('rd-flash');
           setTimeout(function () { el.classList.remove('rd-flash'); }, 1200);
         });
@@ -1324,7 +1324,7 @@
           if (tries++ < 3) setTimeout(flash, 300);
           return;
         }
-        box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        box.scrollIntoView({ block: 'center', behavior: GM_SMOOTH });
         box.classList.add('rd-flash');
         setTimeout(function () { box.classList.remove('rd-flash'); }, 1200);
       };
@@ -1336,7 +1336,7 @@
     var el = RD.blockEls[a.block_id];
     if (!el) { toast('这一段的批注暂时定位不到（文档可能已改动）'); return; }
     setTimeout(function () {
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.scrollIntoView({ block: 'center', behavior: GM_SMOOTH });
       el.classList.add('rd-flash');
       setTimeout(function () { el.classList.remove('rd-flash'); }, 1200);
     }, 60);
@@ -2550,7 +2550,7 @@
     var el = RD.blockEls[blockId];
     var flow = document.querySelector('.rd-right');
     if (!el || !flow) return;
-    flow.scrollTo({ top: Math.max(0, el.offsetTop - 80), behavior: 'smooth' });
+    flow.scrollTo({ top: Math.max(0, el.offsetTop - 80), behavior: GM_SMOOTH });
   }
 
   /* 右 → 左：先块级，再异步精修字符级 */
@@ -3074,7 +3074,7 @@
           var left = $('.rd-left');
           var st = RD.pages[best];
           if (left && st && Date.now() > (RD.leftManualUntil || 0)) {
-            left.scrollTo({ top: Math.max(0, st.el.offsetTop - 12), behavior: 'smooth' });
+            left.scrollTo({ top: Math.max(0, st.el.offsetTop - 12), behavior: GM_SMOOTH });
           }
         }
       }
@@ -3105,7 +3105,7 @@
         // 用户刚手动滚过左栏就先别抢它
         if (Date.now() > (RD.leftManualUntil || 0) &&
             (y < left.scrollTop || y + st.el.offsetHeight > left.scrollTop + left.clientHeight)) {
-          left.scrollTo({ top: Math.max(0, y - 12), behavior: 'smooth' });
+          left.scrollTo({ top: Math.max(0, y - 12), behavior: GM_SMOOTH });
         }
       }
       rdEnsurePages([page]);
@@ -3124,15 +3124,15 @@
     var flow = $('.rd-right');
     if (RD.mode === 'page' || RD.mode === 'page-dual') {
       var tp = RD.tpages[n];
-      if (tp) flow.scrollTo({ top: Math.max(0, tp.el.offsetTop - 8), behavior: 'smooth' });
+      if (tp) flow.scrollTo({ top: Math.max(0, tp.el.offsetTop - 8), behavior: GM_SMOOTH });
     } else {
       var mark = flow.querySelector('.rd-mark[data-page="' + n + '"]');
-      if (mark) flow.scrollTo({ top: mark.offsetTop - 8, behavior: 'smooth' });
+      if (mark) flow.scrollTo({ top: mark.offsetTop - 8, behavior: GM_SMOOTH });
     }
     rdEnsurePages([n]);
     if (RD.fileType === 'pdf') {
       var st = RD.pages[n];
-      if (st) $('.rd-left').scrollTo({ top: Math.max(0, st.el.offsetTop - 12), behavior: 'smooth' });
+      if (st) $('.rd-left').scrollTo({ top: Math.max(0, st.el.offsetTop - 12), behavior: GM_SMOOTH });
     }
     // 平滑滚动期间的中间帧会把页码判回旧页，动画结束后再放开滚动同步
     clearTimeout(RD._jumpTimer);

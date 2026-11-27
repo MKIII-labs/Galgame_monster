@@ -14,9 +14,9 @@ import copy
 # arg_mapper 为 None 时按原样透传（去掉 action 字段）。
 META = {
     "read": {
-        "desc": "读取与检索。action=list 列目录 / file 读文件 / files 批量读 / "
-                "search 正则搜 / semantic 语义搜 / map 仓库结构 / "
-                "mcp_list 列 MCP 资源 / mcp_read 读 MCP 资源 / preview 打开网页预览。",
+        "desc": "读取与检索。action=list 列目录 / file 读文件 / files 批量读 / search 正则 / "
+                "semantic 语义 / map 仓库结构 / mcp_list / mcp_read 列 / 读 MCP 资源 / "
+                "preview 网页预览。",
         "params": {
             "path": {"type": "string",
                      "description": "文件或目录（未选沙箱目录时用绝对路径）"},
@@ -52,9 +52,11 @@ META = {
     "edit": {
         "desc": "写文件。action=write 覆盖/新建 / patch 精确替换 / multi 多处原子替换 / "
                 "apply 应用 unified diff / notebook 编辑 .ipynb 单元格 / mkdir 建目录 / "
-                "move 移动 / copy 复制 / delete 删除。写前必须先 read。",
+                "move 移动 / copy 复制 / delete 删除 / doc 生成 docx/xlsx/pdf/pptx / "
+                "download 下载 URL。写前必须先 read。",
         "params": {
             "path": {"type": "string", "description": "目标文件或目录"},
+            "url": {"type": "string", "description": "下载地址"},
             "content": {"type": "string", "description": "write 的完整内容"},
             "old": {"type": "string", "description": "patch 要替换的原文（必须唯一）"},
             "new": {"type": "string", "description": "patch 的新文本"},
@@ -70,7 +72,12 @@ META = {
             "cell_type": {"type": "string", "description": "notebook 插入时的单元格类型"},
             "from": {"type": "string", "description": "move / copy 的源路径"},
             "to": {"type": "string", "description": "move / copy 的目标路径"},
-            "overwrite": {"type": "boolean", "description": "copy 时是否覆盖，默认 false"},
+            "overwrite": {"type": "boolean", "description": "覆盖已有文件（copy / doc）"},
+            "title": {"type": "string", "description": "doc 标题"},
+            "blocks": {"type": "array", "items": {"type": "object"},
+                       "description": "doc 内容块（heading/paragraph/table…）"},
+            "sheets": {"type": "array", "items": {"type": "object"},
+                       "description": "doc 的 Excel 表"},
         },
         "actions": {
             "write": ("write_file", ["path", "content"], None),
@@ -82,11 +89,15 @@ META = {
             "move": ("move_file", ["from", "to"], None),
             "copy": ("copy_file", ["from", "to"], None),
             "delete": ("delete_file", ["path"], None),
+            "doc": ("doc_create", ["path"], None),
+            "download": ("download_file", ["url", "path"], None),
         },
     },
     "run": {
-        "desc": "执行命令。action=exec 一次性命令（argv 数组，无管道）/ "
-                "terminal 持久终端（PowerShell，op=run/read/input/status/interrupt/close）。",
+        "desc": "执行。action=exec 一次性命令（argv 数组，无管道）/ "
+                "terminal 持久终端（PowerShell，op=run/read/input/status/interrupt/close）/ "
+                "script 用 Python 脚本批量编排多次工具调用（循环 / 并发，只有 print 回传；"
+                "写文件 / 命令需先在设置里放开）。",
         "params": {
             "argv": {"type": "array", "items": {"type": "string"},
                      "description": "exec 的命令与参数，如 [\"go\",\"test\",\"./...\"]"},
@@ -99,10 +110,13 @@ META = {
             "op": {"type": "string",
                    "enum": ["run", "read", "interrupt", "close", "input", "status"],
                    "description": "terminal 子操作，默认 run；status 查看存活/目录/最近输出"},
+            "code": {"type": "string",
+                     "description": "script 的完整 Python 源码（gm 已自动注入）"},
         },
         "actions": {
             "exec": ("run_command", ["argv"], None),
             "terminal": ("shell", [], "terminal"),
+            "script": ("run_script", ["code"], None),
         },
     },
     "code": {
@@ -206,8 +220,8 @@ META = {
         },
     },
     "web": {
-        "desc": "联网。action=search 搜索（复刻/还原类任务分轮补搜）/ fetch 抓网页 / "
-                "note 调研记录。",
+        "desc": "联网与发布。action=search 搜索（复刻/还原类任务分轮补搜）/ fetch 抓网页 / "
+                "note 调研记录 / deploy 发布静态站点（本机 + 局域网地址）。",
         "params": {
             "queries": {"type": "array", "items": {"type": "string"}},
             "query": {"type": "string"},
@@ -217,11 +231,16 @@ META = {
             "gaps": {"type": "array", "items": {"type": "object"}},
             "ids": {"type": "array", "items": {"type": "string"}},
             "claims": {"type": "array", "items": {"type": "object"}},
+            "path": {"type": "string", "description": "deploy 的静态站点根目录"},
+            "name": {"type": "string", "description": "deploy 的站点名"},
+            "port": {"type": "integer", "description": "deploy 的本机端口（可选）"},
+            "site_id": {"type": "string", "description": "deploy 停止时的站点 id"},
         },
         "actions": {
             "search": ("web_search", ["queries"], None),
             "fetch": ("fetch_url", ["url"], None),
             "note": ("research_note", [], "note"),
+            "deploy": ("deploy_site", [], None),
         },
     },
     "history": {

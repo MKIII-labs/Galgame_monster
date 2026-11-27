@@ -16,11 +16,11 @@ def test_parse_calls_fence_envelope():
 def test_adopt_bare_calls_from_visible():
     """裸 {"calls":...} 必须被提升为工具调用，而不是当正文显示"""
     from app.api import chat
-    rr = {"visible": '{"calls":[{"tool":"bili.up","args":{"name":"可可味","pages":2}}]}',
+    rr = {"visible": '{"calls":[{"tool":"memory.search","args":{"query":"偏好"}}]}',
           "tool_calls": [], "tool_block": ""}
     assert chat._adopt_bare_calls(rr) is True
     assert rr["visible"] == ""
-    assert rr["tool_calls"][0]["tool"] == "bili.up"
+    assert rr["tool_calls"][0]["tool"] == "memory.search"
     assert rr["tool_block"].startswith('{"calls"')
 
 
@@ -33,11 +33,11 @@ def test_adopt_bare_calls_keeps_normal_text():
 
 def test_strip_final_bare_calls():
     from app.api import chat
-    text = ('用 UID 直接拉投稿列表。\n\n'
-            '{"calls":[{"tool":"bili.up","args":{"name":"198439","pages":2}}]}')
+    text = ('先检索偏好再回答。\n\n'
+            '{"calls":[{"tool":"memory.search","args":{"query":"偏好"}}]}')
     cleaned, found = chat._strip_final_bare_calls(text)
     assert found is True
-    assert cleaned == "用 UID 直接拉投稿列表。"
+    assert cleaned == '先检索偏好再回答。'
     normal, found2 = chat._strip_final_bare_calls("普通回答")
     assert found2 is False and normal == "普通回答"
 

@@ -32,12 +32,7 @@ const fmtTime = (ts) => {
   return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { hour12: false });
 };
 
-// 通用加载骨架（占位文案统一观感）
-const skeletonHtml = (rows) => {
-  let s = '<div class="skeleton">';
-  for (let i = 0; i < (rows || 4); i++) s += '<div class="sk-line"></div>';
-  return s + '</div>';
-};
+// 通用加载骨架（占位文案统一观感）——统一由 page-transition.js 的 gmSkeletonHtml 生成
 
 async function openUsage(rangeKey) {
   const key = USAGE_RANGES[rangeKey] ? rangeKey : 'day7';
@@ -45,12 +40,12 @@ async function openUsage(rangeKey) {
   showWithAnim($('#usage-modal'));
   $$('#usage-modal .tab').forEach((t) => t.classList.toggle('active', t.dataset.usageRange === key));
   $('#usage-cards').innerHTML = '';
-  $('#usage-tables').innerHTML = skeletonHtml(5);
+  $('#usage-tables').innerHTML = gmSkeletonHtml(5);
   // 图表要先销毁再清容器：直接 innerHTML='' 会让旧的 ECharts 实例挂在已移除的节点上
   if (usageChart) { usageChart.dispose(); usageChart = null; }
   if (usageBars) { usageBars.dispose(); usageBars = null; }
-  $('#usage-chart').innerHTML = '<p class="usage-empty">加载中…</p>';
-  $('#usage-bars').innerHTML = '<p class="usage-empty">加载中…</p>';
+  $('#usage-chart').innerHTML = gmLoadingHtml('正在统计用量…', 'center');
+  $('#usage-bars').innerHTML = gmLoadingHtml('正在统计模型用量…', 'center');
   const rb = $('#usage-balance-refresh');
   if (rb) rb.onclick = () => loadUsageBalance();
   loadUsageBalance();                  // 余额单独拉，不阻塞下面的用量主体

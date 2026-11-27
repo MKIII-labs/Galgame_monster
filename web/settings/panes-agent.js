@@ -42,8 +42,8 @@ function buildAgentPane() {
     const n = parseInt(v, 10);
     return Number.isFinite(n) ? n : d;
   };
-  const acRaw = intVal(cfg.agent_auto_continue, 3);
-  const acNow = acRaw < 0 ? -1 : Math.max(0, Math.min(10, acRaw));   // -1 = 无上限
+  const acRaw = intVal(cfg.agent_auto_continue, -1);
+  const acNow = acRaw === 0 ? 0 : -1;   // 只保留「关闭 / 无上限」两档
   const gitModeNow = ['off', 'ask', 'auto'].indexOf(String(cfg.git_commit_mode || '')) >= 0
     ? String(cfg.git_commit_mode) : 'ask';
   // max 省略（传 0）= 不写 max 属性：Agent 那几项上限由用户自己取舍，表单不再定天花板
@@ -93,8 +93,6 @@ function buildAgentPane() {
     '自动续跑（任务没做完时自己继续）</div>' +
     '<div class="agent-approval" data-cfg="agent_auto_continue">' +
     acBtn(0, 'alert', '关闭', '每轮结束就停，等你说「继续」') +
-    acBtn(3, 'refresh', '最多 3 次', '推荐：连续开发') +
-    acBtn(5, 'refresh', '最多 5 次', '长任务') +
     acBtn(-1, 'refresh', '无上限', '一直推到做完') +
     '</div>' +
     hintHtml('模型想收尾、但计划里还有没做完的步骤（或结尾在问「要不要继续」）时，' +
@@ -149,11 +147,35 @@ function buildAgentPane() {
              + '子表达式 <code>$(...)</code>、脚本块 <code>{...}</code>、命令串联的写法一律回到审批。'
              + '白名单留空时使用内置查看类命令（Get-ChildItem / Get-Content / Select-String / git status 等）。',
              'Shell 只读 白名单 审批 重定向 子表达式') +
+    labelHtml('网络域名白名单（每行一条，留空 = 不限制）',
+              '网络 域名 白名单 fetch_url download 下载 联网') +
+    '<textarea id="agent-net-allow" class="field-input" rows="3" spellcheck="false" ' +
+    'placeholder="github.com&#10;raw.githubusercontent.com"></textarea>' +
+    hintHtml('只影响 <code>fetch_url</code> 与 <code>download_file</code> 两个联网工具；'
+             + '写 <code>github.com</code> 会同时放行 <code>api.github.com</code> 等子域名，'
+             + '<code>raw.githubusercontent.com</code> 是另一个域，需要单独写。'
+             + '留空时不做限制（默认）。',
+             '网络 域名 白名单 联网 下载') +
+    '<div class="agent-approval-cap" data-search="code mode 脚本 编排 run_script 写入 命令">' +
+    'Code Mode（脚本批量编排）</div>' +
+    checkRowHtml('code-mode-write',
+      '允许脚本直接写文件（仍限沙箱内，每次写入登记可撤销快照）',
+      'code mode 脚本 run_script 写入 编排') +
+    checkRowHtml('code-mode-cmd',
+      '允许脚本执行命令（仍过进程白名单与超时限制）',
+      'code mode 脚本 run_script 命令 执行 编排') +
+    hintHtml('<code>run_script</code> 让模型写一段 Python，在一次调用里循环 / 并发跑几十个工具，'
+             + '只有脚本输出回到对话，长任务能省下大量上下文。'
+             + '默认只读沙箱内文件（内置 <code>open()</code>、<code>os.remove</code>、'
+             + '<code>subprocess</code> 都会被护栏拒绝）；上面两项打开后，'
+             + '脚本才能写文件 / 执行命令，写入仍限沙箱内。脚本内部无法逐次弹审批，'
+             + '所以这是全局开关 —— 只在可信任务里打开。',
+             'code mode 脚本 写入 命令 沙箱 护栏 审批') +
     checkRowHtml('agent-hall-prompt',
-      '注入大厅功能说明（股票 / B 站）', '大厅 股票 B站 提示词 噪声') +
-    hintHtml('关闭后系统提示不再介绍模拟股市、B 站与大厅界面数据，减少纯代码任务的噪声；'
+      '注入大厅功能说明（模拟股市）', '大厅 股票 提示词 噪声') +
+    hintHtml('关闭后系统提示不再介绍模拟股市与大厅界面数据，减少纯代码任务的噪声；'
              + '日历 / 日程始终注入，不受影响。',
-             '大厅 股票 B站 提示词 噪声 日历') +
+             '大厅 股票 提示词 噪声 日历') +
     setGroupHtml('只读并行与预取', '并行 并发 读取 预取 速度') +
     labelHtml('只读工具并发数', '并发 并行 读取 预取 速度') +
     limitRow('agent-prefetch-workers', intVal(cfg.agent_prefetch_workers, 10)) +
@@ -367,8 +389,10 @@ function buildAgentPane() {
     labelHtml('允许操作的桌面程序（每行一个 exe 名，支持 *.exe）', '白名单 程序 exe') +
     '<textarea id="computer-apps" class="field-input" rows="3" spellcheck="false" ' +
     'placeholder="notepad.exe&#10;Code.exe"></textarea>' +
-    hintHtml('不在这个列表里的窗口连「列出」都不会出现 —— 这是桌面的第一道闸门。留空 = 桌面功能不可用。',
-             '白名单 程序 闸门') +
+    hintHtml('不在这个列表里的窗口连「列出」都不会出现 —— 这是桌面的第一道闸门。留空 = 桌面功能不可用。' +
+             'UWP 应用（计算器 / 设置 / 照片等）在窗口列表里显示为 <code>ApplicationFrameHost.exe</code>；' +
+             '不想按 exe 限制时用下面的「无限制」。',
+             '白名单 程序 闸门 uwp applicationframehost') +
     checkRowHtml('computer-desktop-unrestricted',
       '无限制：允许操作所有桌面程序（默认关闭）', '无限制 所有程序 桌面 白名单') +
     hintHtml('开启后不再检查 exe 白名单，任何可见窗口都能被列出和操作。' +
@@ -540,6 +564,12 @@ function buildAgentPane() {
   if (shAllowEl) shAllowEl.value = settingsList(cfg.agent_shell_allow).join('\n');
   const shDenyEl = qIn(root, 'agent-shell-deny');
   if (shDenyEl) shDenyEl.value = settingsList(cfg.agent_shell_deny).join('\n');
+  const netAllowEl = qIn(root, 'agent-net-allow');
+  if (netAllowEl) netAllowEl.value = settingsList(cfg.agent_net_allow).join('\n');
+  const cmWriteEl = qIn(root, 'code-mode-write');
+  if (cmWriteEl) cmWriteEl.checked = !!cfg.code_mode_allow_write;
+  const cmCmdEl = qIn(root, 'code-mode-cmd');
+  if (cmCmdEl) cmCmdEl.checked = !!cfg.code_mode_allow_cmd;
   const tpEl = qIn(root, 'agent-tool-parallel');
   if (tpEl) tpEl.checked = cfg.agent_tool_parallel !== false;
   const rrEl = qIn(root, 'agent-require-read');
@@ -689,6 +719,9 @@ function buildAgentPane() {
     agent_shell_autonomy: (qIn(root, 'agent-shell-autonomy') || {}).value || 'whitelist',
     agent_shell_allow: settingsList((qIn(root, 'agent-shell-allow') || {}).value || ''),
     agent_shell_deny: settingsList((qIn(root, 'agent-shell-deny') || {}).value || ''),
+    agent_net_allow: settingsList((qIn(root, 'agent-net-allow') || {}).value || ''),
+    code_mode_allow_write: !!(qIn(root, 'code-mode-write') || {}).checked,
+    code_mode_allow_cmd: !!(qIn(root, 'code-mode-cmd') || {}).checked,
     agent_prefetch_workers: clampLimit('agent-prefetch-workers', 10),
     agent_prefetch_max: clampLimit('agent-prefetch-max', 24),
     agent_tool_parallel: !!(qIn(root, 'agent-tool-parallel') || {}).checked,
@@ -736,6 +769,7 @@ function buildAgentPane() {
     'agent_tool_parallel', 'agent_tool_parallel_max', 'agent_require_read',
     'agent_hall_prompt', 'tool_result_max', 'tool_result_head', 'tool_result_tail',
     'tool_result_keep_recent', 'tool_result_fold_chars',
+    'code_mode_allow_write', 'code_mode_allow_cmd',
   ];
   const FLOW_KEYS = [
     'agent_explore_enabled', 'agent_explore_fork', 'agent_explore_fork_tokens',

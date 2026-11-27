@@ -6,15 +6,16 @@ from app.api import chat
 
 def test_refs_public_dedupes_and_drops_text():
     refs = [
-        {"path": "a.py", "start": 3, "end": 9, "symbol": "f", "auto": True,
-         "text": "secret"},
+        {"type": "code", "path": "a.py", "start": 3, "end": 9, "symbol": "f",
+         "auto": True, "text": "secret"},
         {"path": "a.py", "start": 3, "end": 9, "text": "dup"},
-        {"path": "b.md", "page": 2, "text": "doc"},
+        {"type": "doc", "path": "b.md", "page": 2, "text": "doc"},
     ]
     out = chat._refs_public(refs)
     assert [x["path"] for x in out] == ["a.py", "b.md"]
     assert out[0]["start"] == 3 and out[0]["auto"] is True
-    assert out[1]["page"] == 2
+    assert out[0]["type"] == "code"       # 回传前端时要保留类型
+    assert out[1]["page"] == 2 and out[1]["type"] == "doc"
     assert all("text" not in x for x in out)
 
 
@@ -80,3 +81,33 @@ def test_context_injects_auto_code_ref():
     })
     assert "【引用代码：a.py:3-7 · run】" in text
     assert "def run():" in text
+
+
+def test_context_injects_stored_quotes_with_label():
+    """「添加到对话」的引用随消息落库后，后续追问 / 重新发言仍能进上下文。"""
+    text = context._msg_text({
+        "role": "user", "content": "这句话什么意思",
+        "quotes": [{"text": "被引用的原文", "label": "笔记A"}],
+    })
+    assert "【用户引用的原文】" in text
+    assert "[来源：笔记A]" in text
+    assert "被引用的原文" in text
+
+
+def test_context_injects_quote_only_message():
+    text = context._msg_text({
+        "role": "user", "content": "",
+        "quotes": [{"text": "只有引用", "label": ""}],
+    })
+    assert text.startswith("【用户引用的原文】")
+    assert "只有引用" in text
+
+
+def test_normalize_quotes_skips_empty_and_clips():
+    qs = context.normalize_quotes([
+        {"text": "  ", "label": "空"},
+        {"text": "x" * (context.QUOTE_MAX_ONE + 10), "label": "长"},
+    ])
+    assert len(qs) == 1
+    assert qs[0]["text"].endswith("…（已截断）")
+    assert len(qs[0]["text"]) == context.QUOTE_MAX_ONE + len("…（已截断）")

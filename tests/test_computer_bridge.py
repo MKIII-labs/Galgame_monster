@@ -35,6 +35,51 @@ def test_check_key_header_and_query(monkeypatch):
     assert not bridge.check_key({}, "")
 
 
+# ---------------------------------------------------------------- 截图重试
+def test_capture_png_retries_with_surface_false(monkeypatch):
+    """首帧没产出时（窗口被遮挡）要置前 + fromSurface=false 再试一次。"""
+    from app.computer.cdp import CDPError
+    sent = []
+
+    class FakeConn:
+        def send(self, method, params=None, timeout=20):
+            sent.append((method, dict(params or {})))
+            if method == "Page.captureScreenshot":
+                if len([s for s in sent if s[0] == "Page.captureScreenshot"]) == 1:
+                    raise CDPError("命令超时")
+                return {"data": "QUJD"}
+            return {}
+
+    monkeypatch.setattr(browser, "conn", lambda: FakeConn())
+    assert browser.capture_png() == "QUJD"
+    caps = [p for m, p in sent if m == "Page.captureScreenshot"]
+    assert caps[0] == {"format": "png"}
+    assert caps[1].get("fromSurface") is False
+    assert any(m == "Page.bringToFront" for m, _ in sent)
+
+
+def test_desktop_see_failure_skips_auto_shot(monkeypatch):
+    """快照本身失败时不能补截图，否则同一句错误会出现两遍。"""
+    monkeypatch.setattr(computer.desktop, "snapshot",
+                        lambda *a, **k: "❌ 窗口编号 w1 不存在")
+    monkeypatch.setattr(computer.desktop, "last_snapshot", lambda k: {})
+    called = []
+    monkeypatch.setattr(computer, "maybe_auto_shot",
+                        lambda *a, **k: called.append(1) or "")
+    out = computer.dispatch("computer_see", {"target": "w1"})
+    assert out.count("窗口编号 w1 不存在") == 1
+    assert not called
+
+
+def test_computer_windows_error_is_wrapped(monkeypatch):
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(computer.desktop, "list_windows", boom)
+    out = computer.dispatch("computer_windows", {})
+    assert out.startswith("❌") and "boom" in out
+
+
 # ---------------------------------------------------------------- 队列
 def test_call_roundtrip(monkeypatch):
     bridge.reset()

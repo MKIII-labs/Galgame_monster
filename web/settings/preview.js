@@ -9,6 +9,7 @@ const SETTINGS_PREVIEW_KEYS = /^theme$/;
 const SETTINGS_KEY_LABELS = {
   theme: '界面主题',
   ui_process_follow: '过程智能跟随',
+  avatar_motion: 'AI 头像动效',
   ide_whitespace: '空白字符显示',
   ide_autosave: 'IDE 自动保存',
   settings_level: '设置显示级别',
@@ -85,7 +86,7 @@ function settingsPreviewReset() {
   const wasPreviewing = document.body.classList.contains('settings-previewing');
   document.body.classList.remove('settings-previewing');
   if (!wasPreviewing) return;              // 没预览过就别重复应用主题（会闪一下）
-  applyTheme((state.config && state.config.theme) || 'aurora');
+  applyTheme((state.config && state.config.theme) || 'light');
 }
 
 function settingsClearPreview() {

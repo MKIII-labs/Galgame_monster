@@ -359,23 +359,20 @@ for (const tab of ['agent', 'data', 'help', 'appearance']) {
   })()`);
   check(`设置页「${tab}」渲染`, ok);
 }
-check('设置显示级别与标签栏已渲染', await evaluate(`(() => {
-  const lv = document.querySelectorAll('#settings-level-bar .settings-level-btn');
-  const tags = document.querySelectorAll('#settings-tagbar .settings-tag-btn');
-  return lv.length === 3 && !!document.querySelector('#settings-level-bar .settings-level-btn.active')
-    && tags.length > 0;
+check('设置导航分组已渲染', await evaluate(`(() => {
+  const nav = document.querySelector('#modal .settings-nav');
+  return !!nav && nav.querySelectorAll('.snav-group').length >= 4
+    && nav.querySelectorAll('.snav-btn').length >= 10
+    && !!nav.querySelector('.snav-btn.active');
 })()`));
-check('设置级别可隐藏并恢复高级项', await evaluate(`(() => {
-  const pick = (l) => document.querySelector('#settings-level-bar .settings-level-btn[data-level="' + l + '"]');
-  const active = document.querySelector('#settings-level-bar .settings-level-btn.active');
-  const orig = active ? active.dataset.level : 'advanced';
-  if (pick('expert')) pick('expert').click();
-  const base = document.querySelectorAll('#modal .set-card.meta-hidden').length;
-  if (pick('basic')) pick('basic').click();
-  const hidden = document.querySelectorAll('#modal .set-card.meta-hidden').length;
-  if (pick(orig)) pick(orig).click();
-  const restored = document.querySelectorAll('#modal .set-card.meta-hidden').length;
-  return hidden > base && restored === base;
+check('设置页内锚点与卡片已渲染', await evaluate(`(() => {
+  const anchors = document.querySelector('#modal .set-anchors');
+  const cards = document.querySelectorAll('#modal .pane:not(.hidden) .set-card');
+  return !!anchors && !anchors.classList.contains('hidden')
+    && anchors.querySelectorAll('.set-anchor').length > 0
+    && cards.length > 0
+    && !!cards[0].querySelector('.set-card-head')
+    && !!cards[0].querySelector('.set-card-body');
 })()`));
 await evaluate(`document.querySelector('#modal .snav-btn[data-tab="data"]').click()`);
 await sleep(900);

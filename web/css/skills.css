@@ -8,7 +8,7 @@
 }
 
 /* 窄窗口：退回上下排列，列表限高避免把编辑器推太远 */
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .skill-wb { grid-template-columns: 1fr; }
   .skill-list { max-height: 240px; }
 }
@@ -22,7 +22,7 @@
 }
 .skill-side-top { display: flex; gap: 6px; }
 .skill-search { flex: 1; min-width: 0; }
-.skill-new-btn { flex: none; padding: 6px 12px; font-size: 12.5px; }
+.skill-new-btn { flex: none; padding: 6px 12px; font-size: var(--fs-sm); }
 
 .skill-list {
   display: flex;
@@ -36,8 +36,8 @@
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 7px 8px;
-  border-radius: 8px;
+  padding: 8px 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
 }
 .skill-row:hover { background: var(--bg-hover); }
@@ -45,30 +45,30 @@
 .skill-row-main { flex: 1; min-width: 0; }
 .skill-row-name {
   display: flex; align-items: center; gap: 6px;
-  font-size: 13px; font-weight: 600; color: var(--text);
+  font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .skill-row-desc {
-  margin-top: 2px; font-size: 11.5px; color: var(--text-dim);
+  margin-top: 2px; font-size: var(--fs-xs); color: var(--text-dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .skill-badge {
-  flex: none; padding: 0 4px; font-size: 10px; font-weight: 400;
-  color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px;
+  flex: none; padding: 0 4px; font-size: var(--fs-2xs); font-weight: var(--fw-normal);
+  color: var(--text-dim); border: 1px solid var(--border); border-radius: var(--radius-xs);
 }
-.skill-empty-tip { padding: 10px 6px; font-size: 12px; color: var(--text-dim); text-align: center; }
+.skill-empty-tip { padding: 10px 6px; font-size: var(--fs-xs); color: var(--text-dim); text-align: center; }
 .skill-row .ui-switch { margin-top: 2px; }
 
 .skill-side-foot {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
 }
-.skill-count { font-size: 11.5px; color: var(--text-dim); }
+.skill-count { font-size: var(--fs-xs); color: var(--text-dim); }
 .skill-foot-actions { display: flex; gap: 2px; flex-wrap: wrap; justify-content: flex-end; }
 .link-btn {
-  padding: 2px 4px; border: 0; border-radius: 4px;
+  padding: 2px 4px; border: 0; border-radius: var(--radius-xs);
   background: transparent; color: var(--accent);
-  font: inherit; font-size: 12px; cursor: pointer;
+  font: inherit; font-size: var(--fs-xs); cursor: pointer;
 }
 .link-btn:hover { background: var(--accent-soft); }
 
@@ -76,7 +76,7 @@
 .skill-main { min-width: 0; }
 .skill-empty {
   padding: 48px 12px; text-align: center;
-  font-size: 12.5px; color: var(--text-dim);
+  font-size: var(--fs-sm); color: var(--text-dim);
   border: 1px dashed var(--border); border-radius: var(--radius-md);
 }
 .skill-editor { display: flex; flex-direction: column; gap: 10px; }
@@ -85,38 +85,38 @@
 }
 .skill-editor-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .skill-editor-title b {
-  font-size: 14px; color: var(--text);
+  font-size: var(--fs-md); color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.skill-ed-state { flex: none; font-size: 11.5px; color: var(--text-dim); }
+.skill-ed-state { flex: none; font-size: var(--fs-xs); color: var(--text-dim); }
 .skill-ed-state.dirty { color: var(--warn); }
 .skill-editor-actions { display: flex; flex: none; gap: 8px; }
 
 .skill-meta {
-  font-size: 11.5px; color: var(--text-dim);
-  line-height: 1.7; word-break: break-all;
+  font-size: var(--fs-xs); color: var(--text-dim);
+  line-height: var(--lh); word-break: break-all;
 }
 .skill-meta code {
-  padding: 1px 5px; border-radius: 4px;
-  font-family: var(--mono); font-size: 11px;
+  padding: 1px 6px; border-radius: var(--radius-xs);
+  font-family: var(--mono); font-size: var(--fs-2xs);
   color: var(--text); background: var(--inline-bg);
 }
 
 .skill-field {
-  display: flex; flex-direction: column; gap: 5px;
-  font-size: 12px; color: var(--text-dim);
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: var(--fs-xs); color: var(--text-dim);
 }
 .skill-field-body textarea {
   min-height: 220px;
-  font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+  font-family: var(--mono); font-size: var(--fs-sm); line-height: var(--lh);
   resize: vertical;
 }
 
 /* ---------- 校验结果 ---------- */
 .skill-lint { display: flex; flex-direction: column; gap: 4px; margin-top: -2px; }
 .slint-item {
-  font-size: 11.5px; line-height: 1.5; padding: 4px 8px;
-  border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim);
+  font-size: var(--fs-xs); line-height: var(--lh-snug); padding: 4px 8px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-dim);
 }
 .slint-item.error {
   color: #c0392b; border-color: rgba(192, 57, 43, .35); background: rgba(192, 57, 43, .06);
@@ -131,12 +131,12 @@
   margin-top: 12px; padding: 10px;
   border: 1px solid var(--border); border-radius: var(--radius-md);
 }
-.skill-trigger-head { font-size: 11.5px; color: var(--text-dim); margin-bottom: 6px; }
+.skill-trigger-head { font-size: var(--fs-xs); color: var(--text-dim); margin-bottom: 6px; }
 .skill-trigger-row { display: flex; gap: 6px; }
 .skill-trigger-row .field-input { flex: 1; min-width: 0; }
-.skill-trigger-out { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; font-size: 11.5px; }
-.strig-hit { padding: 3px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--text); }
-.strig-cur { padding: 3px 8px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); }
+.skill-trigger-out { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; font-size: var(--fs-xs); }
+.strig-hit { padding: 4px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--text); }
+.strig-cur { padding: 4px 8px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); }
 .strig-none { color: var(--text-dim); }
 
 /* ---------- 参考文件 ---------- */
@@ -146,17 +146,17 @@
 }
 .skill-refs-head {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  font-size: 11.5px; color: var(--text-dim);
+  font-size: var(--fs-xs); color: var(--text-dim);
 }
 .skill-ref-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .skill-ref-item {
   display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px;
-  border: 1px solid var(--border); border-radius: 6px; background: transparent;
-  color: var(--text); font: inherit; font-size: 11.5px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: transparent;
+  color: var(--text); font: inherit; font-size: var(--fs-xs); cursor: pointer;
 }
 .skill-ref-item:hover { background: var(--bg-hover); }
 .skill-ref-item.active { background: var(--accent-soft); border-color: var(--accent); }
-.skill-ref-size { color: var(--text-dim); font-size: 10.5px; }
-.skill-ref-empty { font-size: 11.5px; color: var(--text-dim); }
+.skill-ref-size { color: var(--text-dim); font-size: var(--fs-2xs); }
+.skill-ref-empty { font-size: var(--fs-xs); color: var(--text-dim); }
 .skill-ref-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .skill-ref-actions { display: flex; gap: 6px; }

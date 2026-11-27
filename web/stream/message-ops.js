@@ -170,7 +170,7 @@ async function revertDiscardedFiles(index, opts) {
    opts 可换标题 / 提示文案：「撤回」用户消息复用的就是这套流程。 */
 async function rollbackMessage(index, opts) {
   const o = opts || {};
-  if (state.streaming || typeof index !== 'number') return;
+  if (isStreaming() || typeof index !== 'number') return;
   const s = curSession();
   const msgs = (s && s.messages) || [];
   if (!s || index < 0 || index >= msgs.length) return;
@@ -217,7 +217,7 @@ function shareMessage(index) {
 
 // 仅删除这一条消息（不影响前后其它消息）
 async function deleteMessage(index) {
-  if (state.streaming || typeof index !== 'number') return;
+  if (isStreaming() || typeof index !== 'number') return;
   const s = curSession();
   const m = s && s.messages[index];
   if (!m) return;
@@ -289,7 +289,7 @@ function cancelEditTarget(clearInput) {
 }
 
 async function regenerateReply(index) {
-  if (state.streaming || typeof index !== 'number') return;
+  if (isStreaming() || typeof index !== 'number') return;
   if (!hasChatKey()) { toast('请先在「设置 → 模型接入」中填写密钥', 'error'); return; }
   await resend({ mode: 'regenerate', index: index });
 }
@@ -342,7 +342,7 @@ function refreshUserRow(index) {
 }
 
 function previewVersion(index, vidx) {
-  if (state.streaming || typeof index !== 'number') return;
+  if (isStreaming() || typeof index !== 'number') return;
   const s = curSession();
   const m = s && s.messages[index];
   if (!m || !Array.isArray(m.versions)) return;
@@ -359,7 +359,7 @@ function cancelVersionPreview(index) {
 }
 
 async function switchVersion(index, vidx) {
-  if (state.streaming || typeof index !== 'number') return;
+  if (isStreaming() || typeof index !== 'number') return;
   const s = curSession();
   const m = s && s.messages[index];
   if (!m || !Array.isArray(m.versions)) return;
@@ -380,8 +380,11 @@ async function switchVersion(index, vidx) {
 }
 
 async function resend(opts) {
-  if (state.streaming) return;
-  const s = curSession();
+  // opts.sid：调用方在 await 之前定下的目标会话；不给就取当前会话
+  const sid = String(opts.sid || state.sessions.current || '');
+  // 以该会话的实时流状态为准：state.streaming 是快照，切会话后可能过期
+  if (typeof isStreaming === 'function' ? isStreaming(sid) : state.streaming) return;
+  const s = (state.sessions.sessions || []).find((x) => String(x.id) === sid) || null;
   if (!s) return;
   const m = s.messages[opts.index];
   // 本地先做同样的处理，界面立刻反映；服务端同样会处理
@@ -401,7 +404,8 @@ async function resend(opts) {
   } else {
     s.messages.length = opts.index;
   }
-  renderMessages();
+  // 只有目标会话仍在前台时才需要立刻重画；后台会话等切回去由 renderMessages 重建
+  if (String(state.sessions.current || '') === sid) renderMessages();
   const body = {
     resend: { mode: opts.mode, index: opts.index, vidx: opts.vidx },
     content: opts.content || '',
@@ -415,7 +419,7 @@ async function resend(opts) {
   }
   if (opts.reuseImages) body.reuse_images = opts.reuseImages;
   if (opts.reuseDocs) body.reuse_docs = opts.reuseDocs;
-  await streamChat(body);
+  await streamChat(body, null, null, { sid: sid });
 }
 
 function toggleRawView(row) {
@@ -453,6 +457,10 @@ function toggleRawView(row) {
     if (window.enhanceRichMedia) window.enhanceRichMedia(row._content);
   } else {
     row._content.innerHTML = safeRenderMarkdown(row._raw);
+    const trace = row.querySelector('.search-trace');
+    if (trace && typeof decorateCitations === 'function') {
+      decorateCitations(row._content, trace);
+    }
     if (window.enhanceRichMedia) window.enhanceRichMedia(row._content);
   }
   if (row._selBtn) {

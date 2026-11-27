@@ -98,6 +98,7 @@
               rect: ctx.rect,
               quick: QUICK,
               onQuote: (text) => addQuote(text, '对话 · #' + raw.msg_index),
+              onCapture: (qa, rect) => captureAside(raw.text, qa.history, raw, rect),
             });
           },
         },
@@ -107,6 +108,19 @@
             if (typeof addQuote !== 'function') return toast('这段内容无法引用', 'error');
             addQuote(ctx.raw.text, '对话 · #' + ctx.raw.msg_index);
             toast('已添加到对话');
+          },
+        },
+        {
+          id: 'capture', label: '记入笔记', icon: 'note',
+          run: (ctx) => {
+            if (typeof window.notesCapture !== 'function') {
+              return toast('笔记面板未加载，请刷新页面', 'error');
+            }
+            const cs = (typeof curSession === 'function') ? curSession() : null;
+            window.notesCapture(ctx.raw.copy_text || ctx.raw.text, {
+              session_id: sidNow(), session_title: cs && cs.title,
+              msg_index: ctx.raw.msg_index, role: ctx.raw.role, rect: ctx.rect,
+            });
           },
         },
         {
@@ -252,6 +266,39 @@
       && state.sessions.current) || '');
   }
 
+  /* ---------------- 记入笔记 ---------------- */
+  /* 笔记摘录 = 原文 + 本旁注的全部问答；落到哪篇笔记由 notesCapture 的浮层决定。 */
+  function asideNoteText(quote, turns) {
+    const parts = [];
+    const q0 = String(quote || '').trim();
+    if (q0) parts.push('原文：\n' + q0);
+    (turns || []).forEach((t) => {
+      if (t && t.q) parts.push('问：' + t.q);
+      if (t && t.a) parts.push('答：' + t.a);
+    });
+    return parts.join('\n\n');
+  }
+
+  function captureAside(quote, turns, meta, rect) {
+    if (typeof window.notesCapture !== 'function') {
+      toast('笔记面板未加载，请刷新页面', 'error');
+      return;
+    }
+    const text = asideNoteText(quote, turns);
+    if (!text) { toast('还没有可记入的内容', 'error'); return; }
+    const cs = (typeof curSession === 'function') ? curSession() : null;
+    window.notesCapture(text, {
+      session_id: sidNow(),
+      session_title: cs && cs.title,
+      msg_index: meta && meta.msg_index,
+      role: (meta && meta.role) || '',
+      rect: rect || (meta && meta.rect) || null,
+    });
+  }
+
+  // 检查器「旁注」列表回看时也用它把问答记入笔记
+  window.asideCapture = captureAside;
+
   /* ---------------- 问答卡片（AskKit 统一渲染） ---------------- */
 
   function init() {
@@ -285,12 +332,15 @@
       title: '旁注',
       rect: rect || null,
       onQuote: (t) => addQuote(t, '代码 · ' + (path || '编辑器')),
+      onCapture: (qa, r) => captureAside(text, qa.history, {}, r),
     });
   };
 
   // 切会话：收起卡片（线程按会话分组，下次打开时重新拉取）
   window.asideOnSessionChange = function (sid) {   // eslint-disable-line no-unused-vars
     if (window.AskKit) window.AskKit.close();
+    // 检查器的「旁注」列表也按会话分组，切会话后要重新拉一次
+    if (typeof window.uiInspectorRefreshAsides === 'function') window.uiInspectorRefreshAsides();
   };
 
   if (document.readyState === 'loading') {

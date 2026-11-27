@@ -532,8 +532,19 @@ function scrollToBottomSmooth() {
   scrollToBottom(true);
 }
 
-function restoreChatScroll(sid) {
-  const c = chatBox();
+/* 迟到的布局变化（5MB 字体、富媒体、收尾折叠动画）会把「已经到底」的视野留在半截。
+   在仍然处于跟随状态时分几拍确认底部；用户一旦上翻 pinned=false，后续拍子自动跳过，
+   不会把正在读历史的用户拽回底部。 */
+function settleChatBottom(delays) {
+  const marks = Array.isArray(delays) ? delays : [0, 120, 320, 800, 1600];
+  marks.forEach((d) => setTimeout(() => {
+    if (!CHAT_FOLLOW || !CHAT_FOLLOW.isPinned()) return;
+    if (CHAT_FOLLOW.distance() > 2) CHAT_FOLLOW.snap();
+  }, d));
+}
+window.settleChatBottom = settleChatBottom;
+
+function restoreChatScroll(sid) {  const c = chatBox();
   if (!c) return;
   const y = _chatScrollMem.get(String(sid || ''));
   if (!CHAT_FOLLOW) {
@@ -756,8 +767,7 @@ function chatFollowTargets(box) {
 function bindChatFollow() {
   const box = chatBox();
   if (!box || CHAT_FOLLOW) return;
-  CHAT_FOLLOW = gmFollowBind({
-    scrollEl: box,
+  CHAT_FOLLOW = gmFollowBind({    scrollEl: box,
     pinned: _followBottom,
     observeChildren: true,
     targets: chatFollowTargets,
@@ -832,4 +842,10 @@ function bindChatFollow() {
   }
   box.classList.toggle('following', _followBottom);
   syncBottomBtn();
+  // 5MB 的 Semibold 字体迟到会让整段文字重排：就绪后（非首屏）再确认一次底部
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => {
+      if (!$('#empty')) settleChatBottom([0, 160, 500, 1200]);
+    }).catch(() => {});
+  }
 }

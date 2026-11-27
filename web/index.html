@@ -1,36 +1,29 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="aurora" data-theme-mode="light" data-style="aurora" data-mood="flow" data-motion="full">
+<html lang="zh-CN" data-theme="light" data-theme-mode="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- color-scheme 让原生控件/滚动条跟随主题；theme-color 给 Edge/Chrome 应用窗口的标题栏上色 -->
 <meta name="color-scheme" content="light">
-<meta name="theme-color" id="theme-color" content="#f4f6ff">
+<meta name="theme-color" id="theme-color" content="#ffffff">
 <link rel="icon" type="image/png" href="/static/icons/app-64.png">
 <title>Galgame_monster</title>
 <script>
   /* Electron 壳里 preload 已注入 window.gmWin：根节点挂标记，自绘标题栏随之出现。
      用 --app 回退时这里什么都不做，仍由系统标题栏负责。 */
   if (window.gmWin) document.documentElement.classList.add('electron');
-  /* 开屏前先恢复上次的设计风格：雾光（aurora）或 现代扁平化（light / dark）。
-     同时恢复雾光的氛围 / 动效偏好，避免首帧闪一下旧配色。 */
+  /* 开屏前先恢复上次的明暗主题，避免首帧闪一下旧配色。
+     历史值 aurora / 其它一律迁移到浅色。 */
   (function () {
     try {
       var root = document.documentElement;
-      var t = localStorage.getItem('gm.theme') || 'aurora';
-      var known = { aurora: 0, light: 0, dark: 1 };
-      if (!Object.prototype.hasOwnProperty.call(known, t)) t = 'aurora';
-      var dark = !!known[t];
-      var style = (t === 'aurora') ? 'aurora' : 'flat';
+      var t = localStorage.getItem('gm.theme') === 'dark' ? 'dark' : 'light';
+      var dark = t === 'dark';
       root.setAttribute('data-theme', t);
       root.setAttribute('data-theme-mode', dark ? 'dark' : 'light');
-      root.setAttribute('data-style', style);
       root.style.colorScheme = dark ? 'dark' : 'light';
-      var mood = localStorage.getItem('gm.mood');
-      if (mood === 'calm' || mood === 'flow' || mood === 'glow') root.setAttribute('data-mood', mood);
-      if (localStorage.getItem('gm.motion') === 'lite') root.setAttribute('data-motion', 'lite');
       var tc = document.querySelector('meta[name="theme-color"]');
-      if (tc) tc.setAttribute('content', t === 'aurora' ? '#f4f6ff' : (dark ? '#1a1b1e' : '#ffffff'));
+      if (tc) tc.setAttribute('content', dark ? '#1e1e1e' : '#ffffff');
     } catch (e) { /* 隐私模式禁用 localStorage：用 HTML 上的默认值 */ }
   })();
   /* 嵌入模式（历史兼容）：外部页面把经典界面的某个工作区 iframe 进来时用这些参数：
@@ -75,6 +68,7 @@
   })();
 </script>
 <!-- 样式按功能拆分，按顺序加载（顺序即层叠顺序，等价于原来的单文件） -->
+<link rel="stylesheet" href="/static/css/tokens.css">
 <link rel="stylesheet" href="/static/css/base.css">
 <link rel="stylesheet" href="/static/css/notes.css">
 <link rel="stylesheet" href="/static/css/kb.css">
@@ -104,25 +98,60 @@
 <link rel="stylesheet" href="/static/css/shell.css">
 <!-- 新会话首屏（#empty）：氛围背景 / 分段切换 / 卡片微交互 -->
 <link rel="stylesheet" href="/static/css/home.css">
-<!-- 雾光主题（全站视觉体系）：只在 data-style="aurora" 时生效，现代扁平化不受影响 -->
-<link rel="stylesheet" href="/static/css/aurora.css">
-<!-- 复古像素主题用的点阵字体：只有 pixel 主题会引用这个字体族，因此 woff2 实际是「用到才下载」；
-     非阻塞加载，失败即移除并回退到系统宋体 / 等宽（保证离线可用） -->
-<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/dotgothic16/index.css"
-      media="print" onload="this.media='all'" onerror="this.remove()">
-<!-- 第三方样式非阻塞加载（否则慢 CDN 会拖住首屏）；加载后由 app.js 补齐渲染 -->
-<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-light"
-      media="print" onload="this.media='all'"
-      onerror="__fbc(this,'https://cdn.staticfile.org/highlight.js/11.9.0/styles/github.min.css')">
-<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-dark" disabled
-      media="print" onload="this.media='all'">
+<!-- 现代扁平化主题（明 / 暗两套，颜色全部走 tokens.css） -->
+<!-- 代码高亮主题改成本地文件：CDN 实测要 3s（还会拖住 load 事件），而它只有 1.3KB。
+     亮 / 暗两份常驻 head，由 settings/theme.js 用 disabled 切换。 -->
+<link rel="stylesheet" href="/static/vendor/highlight/github.min.css" id="hljs-light">
+<link rel="stylesheet" href="/static/vendor/highlight/github-dark.min.css" id="hljs-dark" disabled>
 <link rel="stylesheet" href="/static/vendor/katex/katex.min.css"
       media="print" onload="this.media='all'"
       onerror="__fbc(this,'https://cdn.staticfile.org/KaTeX/0.16.9/katex.min.css')">
 <script>
   /* CDN 兜底 + 「库就绪」通知：脚本/样式都不阻塞首屏，就绪后再补齐渲染 */
   window.__libs = {};
+  /* Monaco 的 AMD loader 会安装全局 define。之后再执行 UMD 库（echarts / vis / hljs / xterm…）
+     时，它们会被当成匿名 AMD 模块：既拿不到 window.echarts，也会污染 Monaco 的模块队列
+     （语言分词器加载失败 → 编辑器代码整片纯白）。加载期间临时隐藏 define.amd，执行完恢复。 */
+  window.__gmAmdGuard = (function () {
+    var n = 0, saved = null;
+    return {
+      enter: function () {
+        var d = window.define;
+        if (!d || !d.amd) return;
+        if (!n) { saved = d.amd; d.amd = undefined; }
+        n++;
+      },
+      leave: function () {
+        if (n > 0) n--;
+        if (!n && saved) { try { window.define.amd = saved; } catch (e) { } saved = null; }
+      }
+    };
+  })();
+  /* 少数 UMD 只判断「define 是不是函数」，不看 define.amd（mermaid 里的部分依赖）。
+     这类库需要在**执行**期间把整个 define 藏起来；网络请求仍放在遮罩之外，
+     避免长时间挡住 Monaco 的模块加载。 */
+  window.__gmDefineGuard = (function () {
+    var n = 0, saved = null, had = false;
+    return {
+      enter: function () {
+        if (!n) {
+          had = Object.prototype.hasOwnProperty.call(window, 'define');
+          saved = window.define;
+          try { window.define = undefined; } catch (e) { }
+        }
+        n++;
+      },
+      leave: function () {
+        if (n > 0) n--;
+        if (n) return;
+        try {
+          if (had) window.define = saved;
+          else delete window.define;
+        } catch (e) { }
+        saved = null;
+      }
+    };
+  })();
   window.__libReady = function (name) {
     if (!name) return;
     window.__libs[name] = true;
@@ -134,36 +163,102 @@
     l.media = 'print'; l.onload = function () { this.media = 'all'; };
     document.head.appendChild(l);
   };
+  /* UMD 库（echarts / vis / hljs / mermaid）用 fetch + 局部 define 执行：
+     Monaco 的 AMD loader 会在 window.load 后安装全局 define，UMD 一旦看到 define.amd
+     就改走 AMD 分支 —— 既挂不上 window.echarts，也会污染 Monaco 的模块队列
+     （语言分词器加载失败 → 编辑器代码整片纯白）。
+     new Function 的 define 形参只在这段代码内生效，遮成 undefined 后 UMD 必然走
+     「挂到 window」的分支，与加载先后顺序无关。 */
+  window.__gmEvalUmd = function (url) {
+    return fetch(url, { mode: 'cors', credentials: 'omit' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    }).then(function (code) {
+      var f = new Function('define', 'module', 'exports', 'require',
+                           code + '\n//# sourceURL=' + url);
+      f(undefined, undefined, undefined, undefined);
+    });
+  };
   window.__fb = function (el, url, name) {
     if (el.dataset.fb) return; el.dataset.fb = '1';
-    var s = document.createElement('script'); s.async = true; s.src = url;
-    s.onload = function () { window.__libReady(name); };
-    document.head.appendChild(s);
+    window.__gmEvalUmd(url).then(function () { window.__libReady(name); }, function () { });
   };
   /* 可选三方库改为「首屏之后空闲时」再拉：
-     highlight / echarts / vis-network 只在用到时才需要，放在这里能少掉 3s 的 load 等待 */
+     highlight / echarts / vis-network 只在用到时才需要，放在这里能少掉 3s 的 load 等待。
+     umd=true：走 fetch + 局部 define（echarts / vis 会检测 define.amd）；
+     umd=false：普通脚本，顶层 var 直接挂到 window（hljs / mermaid 不能被包进函数作用域）。 */
   window.__lazyLibs = {
-    hljs: ['https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/highlight.min.js',
-           'https://cdn.staticfile.org/highlight.js/11.9.0/highlight.min.js'],
-    echarts: ['https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js',
-              'https://cdn.staticfile.org/echarts/5.5.0/echarts.min.js'],
+    hljs: { umd: false, urls: [
+      '/static/vendor/highlight/highlight.min.js',
+      'https://cdn.bootcdn.net/ajax/libs/highlight.js/11.9.0/highlight.min.js',
+      'https://cdn.staticfile.org/highlight.js/11.9.0/highlight.min.js'] },
+    echarts: { umd: true, urls: [
+      'https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js',
+      'https://cdn.staticfile.org/echarts/5.5.0/echarts.min.js'] },
     /* 图谱库内置在本地：断网也能画关系图；CDN 仅作为文件缺失时的兜底 */
-    vis: ['/static/vendor/vis-network/vis-network.min.js',
-          'https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js',
-          'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js'],
-    /* mermaid 只在实际出现 ```mermaid 块时按需拉取（体积较大，不做空闲预加载） */
-    mermaid: ['https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js',
-              'https://unpkg.com/mermaid@11/dist/mermaid.min.js']
+    vis: { umd: true, urls: [
+      '/static/vendor/vis-network/vis-network.min.js',
+      'https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js',
+      'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js'] },
+    /* mermaid 只在实际出现 ```mermaid 块时按需拉取（体积较大，不做空闲预加载）。
+       shieldDefine：它 bundle 里的部分依赖只判断「define 是函数」，必须整个藏起来。 */
+    mermaid: { umd: false, shieldDefine: true, urls: [
+      'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js',
+      'https://unpkg.com/mermaid@11/dist/mermaid.min.js'] },
+    /* katex 只在真的出现公式时加载：本地文件优先，CDN 兜底（与原来 defer 的两个源一致）。 */
+    katex: { umd: false, urls: [
+      '/static/vendor/katex/katex.min.js',
+      'https://cdn.staticfile.org/KaTeX/0.16.9/katex.min.js'] }
   };
   window.__lazyBusy = {};
   window.__lazyPromises = {};
+  /* 普通脚本（非 UMD）：顶层 var 需要真实 script 标签才能落到 window。
+     执行期间同样要遮住 define.amd：hljs / mermaid 检测到 AMD 会走匿名 define 分支，
+     既挂不上 window，也会被 Monaco 的 loader 拒绝（Can only have one anonymous define）。 */
+  window.__gmLoadScript = function (url) {
+    return new Promise(function (ok, bad) {
+      var guard = window.__gmAmdGuard;
+      if (guard) guard.enter();
+      var done = function (fn, arg) {
+        if (guard) guard.leave();
+        fn(arg);
+      };
+      var s = document.createElement('script');
+      s.async = true;
+      s.src = url;
+      s.onload = function () { done(ok); };
+      s.onerror = function () { done(bad, new Error('script load failed')); };
+      document.head.appendChild(s);
+    });
+  };
+  /* 先取回脚本文本，再用真实 <script> 执行：
+     既保留「顶层 var 挂到 window」的行为，又能只在执行期间遮住 define，
+     不会像 new Function 那样把顶层变量困在函数作用域里。 */
+  window.__gmRunScript = function (url) {
+    return fetch(url, { mode: 'cors', credentials: 'omit' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    }).then(function (code) {
+      var guard = window.__gmDefineGuard;
+      if (guard) guard.enter();
+      try {
+        var s = document.createElement('script');
+        s.textContent = code + '\n//# sourceURL=' + url;
+        document.head.appendChild(s);
+        s.remove();                       // 执行完就把 3MB 文本从 DOM 里释放
+      } finally {
+        if (guard) guard.leave();
+      }
+    });
+  };
   /* 返回 Promise：知识库冷启动时要「等 vis 就绪再画」，不能像以前那样直接回退列表。
      同一库并发调用共用同一个 Promise；失败后清掉缓存，下次还能重试。 */
   window.loadLazyLib = function (name) {
     if (!name) return Promise.resolve(false);
     if (window.__libs[name]) return Promise.resolve(true);
     if (window.__lazyPromises[name]) return window.__lazyPromises[name];
-    var urls = window.__lazyLibs[name] || [];
+    var def = window.__lazyLibs[name] || {};
+    var urls = def.urls || [];
     var i = 0;
     window.__lazyBusy[name] = true;
     var p = new Promise(function (resolve) {
@@ -174,12 +269,21 @@
           resolve(false);
           return;
         }
-        var s = document.createElement('script');
-        s.async = true;
-        s.src = urls[i++];
-        s.onload = function () { window.__lazyBusy[name] = false; window.__libReady(name); resolve(true); };
-        s.onerror = next;
-        document.head.appendChild(s);
+        var url = urls[i++];
+        var load;
+        if (def.shieldDefine) load = window.__gmRunScript(url);
+        else if (def.umd === false) load = window.__gmLoadScript(url);
+        else load = window.__gmEvalUmd(url);
+        load.then(function () {
+          // onload 只代表脚本执行完：还要确认全局真的挂上了（AMD 冲突时会是 undefined），
+          // 没挂上就换下一个源，避免把失败缓存成「已就绪」。
+          if (!window[name]) { next(); return; }
+          window.__lazyBusy[name] = false;
+          window.__libReady(name);
+          resolve(true);
+        }, function () {
+          next();
+        });
       }
       next();
     });
@@ -188,7 +292,11 @@
   };
   window.addEventListener('load', function () {
     var kick = function () {
-      ['hljs', 'echarts', 'vis'].forEach(function (n) { window.loadLazyLib(n); });
+      /* 只预热代码高亮：代码块首屏可见，晚一步就会看到「先灰后彩」。
+         echarts / 图谱库（vis）都只在真的出现图表 / 打开知识库时才需要，
+         由 rich-media.js / knowledge.js 自己 loadLazyLib；放在这里会让首屏后
+         一秒的网络和解析被它们占住（实测 load 从 1.1s 降到 0.2s）。 */
+      window.loadLazyLib('hljs');
     };
     if (window.requestIdleCallback) requestIdleCallback(kick, { timeout: 2000 });
     else setTimeout(kick, 300);
@@ -196,13 +304,6 @@
 </script>
 </head>
 <body>
-<!-- 雾光氛围层：只在 data-style="aurora" 时显示，铺在所有工作区之下 -->
-<div class="aurora-atmos" aria-hidden="true">
-  <span class="aa-blob aa-1"></span>
-  <span class="aa-blob aa-2"></span>
-  <span class="aa-blob aa-3"></span>
-  <span class="aa-grain"></span>
-</div>
 <!-- 图标库（SVG sprite）：24×24 线性图标，笔画与配色全部由 .ic 类控制（currentColor 跟随主题） -->
 <svg id="icon-sprite" xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
   <symbol id="i-attach" viewBox="0 0 24 24"><path d="M20.5 11.7l-8.2 8.2a5.1 5.1 0 01-7.2-7.2l8.7-8.7a3.4 3.4 0 014.8 4.8l-8.7 8.7a1.7 1.7 0 01-2.4-2.4l8-8"/></symbol>
@@ -274,8 +375,8 @@
 <!-- 自绘标题栏：只在 Electron 壳里显示（html.electron）；回退到 Edge --app 时整条隐藏 -->
 <header id="titlebar">
   <div class="tb-brand">
-    <!-- 图标用矢量绘制（形状/配色按 app.ico 复刻：蓝 #4d6bfe 圆角方块 + 白色四角星）；
-         位图在 16px 缩放下尖角会糊，矢量在任意 DPI 都清晰 -->
+    <!-- 图标用矢量绘制（蓝 #4d6bfe 圆角方块 + 白色四角星）；位图在 16px 缩放下尖角会糊，
+         矢量在任意 DPI 都清晰。app.ico 由 scripts/make_icon.py 用同一套几何生成，改这里要一起改。 -->
     <svg class="tb-logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
       <rect x="0.75" y="0.75" width="30.5" height="30.5" rx="5.6" fill="#4d6bfe"/>
       <path d="M16 5 L18 13.88 L27 16 L18.12 17.88 L16 27 L13.88 18 L5 16 L13.75 14 Z" fill="#fff"/>
@@ -319,10 +420,9 @@
       <button id="btn-notes" class="ghost wide rail-btn" title="内置笔记库（Markdown + 双链 + 关系图谱）" aria-label="笔记"><svg class="ic"><use href="#i-notebook"/></svg><span>笔记</span></button>
       <button id="btn-reload" class="ghost wide rail-btn" title="刷新页面（重新加载界面，等同 Ctrl+R）" aria-label="刷新页面"><svg class="ic"><use href="#i-refresh"/></svg><span>刷新</span></button>
       <button id="btn-theme" class="ghost rail-btn theme-rail-btn" type="button"
-              title="氛围：流动（点击切换 静谧 / 流动 / 辉光）" aria-label="切换氛围">
-        <svg class="ic theme-rail-flat"><use href="#i-theme"/></svg>
-        <span class="mood-orb theme-rail-aurora" aria-hidden="true"><i></i><i></i><b></b></span>
-        <span class="theme-rail-label">氛围</span>
+              title="切换深浅（当前浅色，点击切到深色）" aria-label="切换深浅">
+        <svg class="ic"><use href="#i-theme"/></svg>
+        <span class="theme-rail-label">深浅</span>
       </button>
       <button id="btn-settings" class="ghost rail-btn" title="设置" aria-label="设置"><svg class="ic"><use href="#i-gear"/></svg><span>设置</span></button>
     </div>
@@ -333,6 +433,8 @@
     <div class="sidebar-body">
     <div class="side-top">
       <button id="btn-new" class="new-chat"><svg class="ic"><use href="#i-plus"/></svg>新建对话</button>
+      <button id="btn-handoff" class="handoff-new" type="button"
+              title="把当前会话整理成交接摘要，开一个新会话接着做（长任务省上下文；不复制历史消息）">带摘要续</button>
     </div>
     <div class="side-head">
       <span class="side-label">会话记录</span>
@@ -389,7 +491,7 @@
           var app = document.getElementById('app');
           if (app) app.classList.add('mode-' + m);
           if (m === 'ide') {
-            // 聊天栏宽度也提前恢复，避免先 460 再跳到上次拖动的宽度
+            // 聊天栏宽度也提前恢复，避免先 518 再跳到上次拖动的宽度
             var w = parseInt(localStorage.getItem('gm.ideChatW') || '', 10);
             if (w >= 300 && w <= 820) {
               document.documentElement.style.setProperty('--ide-chat-w', w + 'px');
@@ -400,6 +502,7 @@
     </script>
     <!-- IDE 模式：以「当前会话的沙箱」为根的工作区（Solo 模式下隐藏） -->
     <section id="ide-panel" class="ide-panel hidden">
+      <template id="tpl-ide-panel">
       <!-- 窄屏提示：只在 ≤900px 显示，不隐藏任何功能，仅说明可横向滚动 -->
       <div id="ide-mobile-tip" class="ide-mobile-tip" role="note">
         IDE 建议在桌面使用：当前窗口较窄，可横向滚动查看文件树、编辑区与终端。
@@ -417,9 +520,6 @@
         <button class="act-btn" data-act="annos" title="批注">
           <svg class="ic"><use href="#i-pin"/></svg>
           <span id="ide-anno-badge" class="act-badge hidden">0</span>
-        </button>
-        <button class="act-btn" data-act="docs" title="文献库">
-          <svg class="ic"><use href="#i-note"/></svg>
         </button>
         <button class="act-btn" id="ide-term-act" title="终端（Ctrl+`）"><svg class="ic"><use href="#i-terminal"/></svg></button>
         <span class="act-spacer"></span>
@@ -534,22 +634,6 @@
         </div>
       </div>
 
-      <!-- 侧边栏：文献库（当前沙箱里的文献条目） -->
-      <div class="ide-side hidden" id="ide-side-docs">
-        <div class="ide-side-head">
-          <span class="ide-side-title">文献库</span>
-          <span class="ide-side-actions">
-            <button id="ide-doc-refresh" class="ico-btn" title="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
-          </span>
-        </div>
-        <div class="ide-doc-search">
-          <input id="ide-doc-q" class="field-input" placeholder="搜索标题 / 作者 / 出处">
-        </div>
-        <div id="ide-doc-list" class="ide-doc-list">
-          <div class="ide-empty">打开 PDF 后会自动生成文献条目</div>
-        </div>
-      </div>
-
       <!-- 侧边栏：源代码管理（Git） -->
       <div class="ide-side hidden" id="ide-side-git">
         <div class="ide-side-head">
@@ -603,7 +687,7 @@
 
       </div><!-- /.ide-sides -->
 
-      <!-- 侧栏宽度拖拽条（双击恢复 260px） -->
+      <!-- 侧栏宽度拖拽条（双击恢复 245px） -->
       <div id="ide-side-resizer" class="ide-side-resizer" title="拖动调整侧栏宽度（双击恢复默认）"></div>
 
       <!-- 编辑区 -->
@@ -778,6 +862,11 @@
           <span class="ide-status-right">
             <button id="ide-status-problems" class="ide-status-chip hidden" type="button"
                     title="问题（Ctrl+Shift+M）">✖ 0  ⚠ 0</button>
+            <span class="ide-zoom-ctl" title="编辑器缩放：Ctrl+Alt+= / -，Ctrl+Alt+0 重置；也可 Ctrl+滚轮">
+              <button type="button" data-editor-zoom="-1" aria-label="缩小编辑器字体">−</button>
+              <button type="button" id="ide-status-zoom-val" class="ide-zoom-val" title="点击恢复 100%">100%</button>
+              <button type="button" data-editor-zoom="1" aria-label="放大编辑器字体">＋</button>
+            </span>
             <span id="ide-status-enc"></span>
             <span id="ide-status-pos"></span>
             <span id="ide-status-lang"></span>
@@ -804,6 +893,7 @@
         </div>
       </div>
       </div>
+      </template>
     </section>
 
     <!-- IDE 模式：拖动它调整右侧聊天栏宽度 -->
@@ -829,6 +919,7 @@
 
     <!-- 工作台：今日驾驶舱 / 计划 / 看板 / 复盘（前端逻辑见 web/work/） -->
     <section id="work-panel" class="work-panel hidden">
+      <template id="tpl-work-panel">
       <div class="work-head">
         <div class="work-titles">
           <div class="work-title">工作台</div>
@@ -853,7 +944,6 @@
             <div id="work-more-menu" class="work-more-menu hidden" role="group" aria-label="更多工作台工具">
               <button id="work-focus" class="work-btn ghost" title="专注计时：开启一段专注，结束后记入统计">专注</button>
               <button id="work-workflows" class="work-btn ghost" title="工作流：触发器 → 动作">工作流</button>
-              <button id="work-new-image" class="work-btn ghost" title="用本地 ComfyUI 生成图片">图片</button>
               <button id="work-memory" class="work-btn ghost" title="统一记忆：检索与手动记录">记忆</button>
               <button id="work-backup" class="work-btn ghost" title="导出 / 预检 / 恢复全量数据">备份</button>
             </div>
@@ -961,6 +1051,7 @@
       <div id="work-view-month" class="work-view hidden"></div>
       <div id="work-view-board" class="work-view hidden"></div>
       <div id="work-view-stats" class="work-view hidden"></div>
+      </template>
     </section>
 
     <div class="chat-col">
@@ -1095,12 +1186,8 @@
     <!-- 提问标记：Solo 模式下右侧悬浮按钮，点一下跳回被标记的关键提问 -->
     <div id="qmarks" class="qmarks hidden" aria-label="提问标记"></div>
 
-    <!-- 后台任务仍在跑（刷新 / 重开 / 断线后本地没有流）：一键把实时输出接回这个会话 -->
-    <div id="resume-bar" class="resume-bar hidden" role="status" aria-live="polite">
-      <span class="resume-dot" aria-hidden="true"></span>
-      <span class="resume-text">任务仍在后台运行</span>
-      <button id="btn-resume" class="resume-btn" type="button">回到实时输出</button>
-    </div>
+    <!-- 后台任务仍在跑（刷新 / 重开 / 断线后本地没有流）：自动恢复会挂轻量回放；
+         需要完整实时流时用这条最后一条消息上的「回到流式输出」按钮。 -->
     <div class="composer">
       <button id="composer-handle" class="composer-toggle tip" type="button"
               data-tip="收起输入框" aria-label="收起输入框" aria-expanded="true">
@@ -1199,6 +1286,10 @@
             <button id="btn-search" class="pill" title="开启 / 关闭联网搜索">
               <svg class="ic"><use href="#i-search"/></svg>联网搜索
             </button>
+            <button id="btn-plan" class="pill" type="button" aria-pressed="false"
+                    title="规划模式：先只读探索，再出计划卡；你确认后才开始执行（输入框打 /plan 也可单次触发）">
+              <svg class="ic"><use href="#i-list"/></svg>计划
+            </button>
             <span class="agent-wrap">
               <button id="btn-agent" class="pill" title="开启 / 关闭 Agent 沙箱：模型可在指定目录内自主读写文件，并执行白名单内的命令">
                 <svg class="ic"><use href="#i-terminal"/></svg>Agent
@@ -1250,16 +1341,6 @@
                     <span class="approve-opt-text"><b>关闭</b><i>每轮结束就停</i></span>
                     <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
                   </button>
-                  <button class="approve-opt continue-opt" type="button" data-continue="3" title="计划没做完、或结尾在问「要不要」时自动继续，最多 3 次">
-                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-refresh"/></svg></span>
-                    <span class="approve-opt-text"><b>最多 3 次</b><i>推荐：连续开发</i></span>
-                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
-                  </button>
-                  <button class="approve-opt continue-opt" type="button" data-continue="5" title="长任务：自动继续最多 5 次">
-                    <span class="approve-opt-ico"><svg class="ic"><use href="#i-refresh"/></svg></span>
-                    <span class="approve-opt-text"><b>最多 5 次</b><i>长任务</i></span>
-                    <span class="approve-opt-check"><svg class="ic"><use href="#i-check"/></svg></span>
-                  </button>
                   <button class="approve-opt continue-opt" type="button" data-continue="-1" title="无上限：一直推到任务做完或达到「单轮最多调用轮次」；连续 3 次续跑都没执行工具会自动停">
                     <span class="approve-opt-ico"><svg class="ic"><use href="#i-refresh"/></svg></span>
                     <span class="approve-opt-text"><b>无上限</b><i>一直推到做完</i></span>
@@ -1273,6 +1354,10 @@
               <svg class="ic"><use href="#i-sparkle"/></svg>AI 优化输入
             </button>
             </div><!-- /#cap-tray -->
+            <button id="btn-ref-note" class="pill hidden"
+                    title="把当前笔记整篇作为参考，随下一条消息一起发送">
+              <svg class="ic"><use href="#i-note"/></svg>参考整篇笔记
+            </button>
           </div>
           <div class="toolbar-right">
             <div class="swap-slot">
@@ -1294,6 +1379,11 @@
       </div>
       <div class="composer-hint-row">
         <div id="composer-hint" class="composer-hint" aria-live="polite"></div>
+        <span class="ide-zoom-ctl chat-zoom-ctl" title="对话缩放：Ctrl+Shift+= / -，Ctrl+Shift+0 重置；也可 Ctrl+滚轮">
+          <button type="button" data-chat-zoom="-1" aria-label="缩小对话">−</button>
+          <button type="button" id="chat-zoom-val" class="ide-zoom-val" title="点击恢复 100%">100%</button>
+          <button type="button" data-chat-zoom="1" aria-label="放大对话">＋</button>
+        </span>
         <span id="ctx-meter" class="ctx-meter hidden" aria-live="polite"></span>
       </div>
       </div></div><!-- /.composer-body -->
@@ -1311,6 +1401,7 @@
         <button class="insp-tab" type="button" data-itab="tools" role="tab" aria-selected="false">工具</button>
         <button class="insp-tab" type="button" data-itab="usage" role="tab" aria-selected="false">用量</button>
         <button class="insp-tab" type="button" data-itab="trajectory" role="tab" aria-selected="false">轨迹</button>
+        <button class="insp-tab" type="button" data-itab="aside" role="tab" aria-selected="false">旁注</button>
       </div>
       <button id="insp-close" class="insp-close" type="button" title="收起检查器" aria-label="收起检查器">✕</button>
     </div>
@@ -1336,7 +1427,24 @@
         <p class="insp-text">查看本轮的提示、上下文、思考、工具与耗时。</p>
         <button id="insp-traj-more" class="ghost wide insp-btn" type="button">打开轨迹</button>
       </section>
+      <section class="insp-pane hidden" data-ipane="aside">
+        <p id="insp-asides-hint" class="insp-text">本会话的划词提问会显示在这里。</p>
+        <div id="insp-asides" class="insp-asides"></div>
+      </section>
     </div>
+  </aside>
+
+  <!-- 联网搜索结果侧栏：点击对话里的「搜索到 N 个网页」展开 -->
+  <aside id="search-panel" class="search-panel" tabindex="-1" aria-label="搜索结果" aria-hidden="true">
+    <div class="search-panel-head">
+      <span class="search-panel-title">搜索结果</span>
+      <span id="search-panel-count" class="search-panel-count" aria-live="polite"></span>
+      <button id="search-panel-close" class="search-panel-close" type="button"
+              title="关闭搜索结果" aria-label="关闭搜索结果">
+        <svg class="ic"><use href="#i-cross"/></svg>
+      </button>
+    </div>
+    <div id="search-panel-list" class="search-panel-list"></div>
   </aside>
 
   <!-- 命令面板（Ctrl / ⌘ K） -->
@@ -1400,20 +1508,27 @@
       <nav class="settings-nav" aria-label="设置分类">
         <div class="snav-group">
           <div class="snav-group-title">常用</div>
-          <button class="snav-btn active" data-tab="model" data-search="api 密钥 key 模型 接口 预设 轻量 深度思考 推理 reasoning 上下文 token 压缩 图片 识图 视觉 vision"><svg class="ic"><use href="#i-chat"/></svg>模型与对话</button>
-          <button class="snav-btn" data-tab="search" data-search="联网 检索 搜索 bocha b站 bilibili 视频 评论 字幕 ai总结 sessdata cookie 数据源"><svg class="ic"><use href="#i-globe"/></svg>联网与检索</button>
+          <button class="snav-btn active" data-tab="chat" data-search="模型 接口 api 密钥 key 预设 余额 视觉 识图 vision"><svg class="ic"><use href="#i-chat"/></svg>模型接入</button>
+          <button class="snav-btn" data-tab="context" data-search="上下文 token 容量 预留 省费 压缩 记忆 检索 context"><svg class="ic"><use href="#i-brain"/></svg>上下文与记忆</button>
+          <button class="snav-btn" data-tab="search" data-search="联网 检索 搜索 bocha 服务商 抓取 数据源"><svg class="ic"><use href="#i-globe"/></svg>联网与检索</button>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">能力</div>
-          <button class="snav-btn" data-tab="tools" data-search="agent 轮次 子代理 编排 技能 skill mcp hooks computer 浏览器 桌面 图片 生成 工具 审批 命令"><svg class="ic"><use href="#i-terminal"/></svg>能力与工具</button>
+          <div class="snav-group-title">Agent</div>
+          <button class="snav-btn" data-tab="agent" data-search="执行 节奏 轮次 通知 审批 命令 沙箱 写入 agent"><svg class="ic"><use href="#i-terminal"/></svg>执行与审批</button>
+          <button class="snav-btn" data-tab="flow" data-search="子代理 代理 delegate 自动派发 编排 工作流 并行 探索 嵌套 研究闸门 审阅 脚本"><svg class="ic"><use href="#i-graph"/></svg>子代理与流程</button>
+          <button class="snav-btn" data-tab="ext" data-search="编辑器 补全 代码工具 pyright git mcp hooks 钩子 电脑操作 浏览器 桌面 skill 技能 工具 扩展"><svg class="ic"><use href="#i-toolbox"/></svg>工具与扩展</button>
         </div>
         <div class="snav-group">
-          <div class="snav-group-title">偏好</div>
-          <button class="snav-btn" data-tab="ui" data-search="主题 设计风格 雾光 扁平 氛围 动效 外观 快捷键 按键 语音 识别 朗读 tts 音色 降噪 提醒 通知"><svg class="ic"><use href="#i-theme"/></svg>界面与提醒</button>
+          <div class="snav-group-title">体验</div>
+          <button class="snav-btn" data-tab="appearance" data-search="主题 明暗 浅色 深色 外观 氛围 动效 对话过程 空白字符 自动保存"><svg class="ic"><use href="#i-theme"/></svg>外观与对话</button>
+          <button class="snav-btn" data-tab="speech" data-search="语音 识别 朗读 tts 音色 降噪 提醒 通知 闹钟"><svg class="ic"><use href="#i-mic"/></svg>语音与提醒</button>
+          <button class="snav-btn" data-tab="keys" data-search="快捷键 按键 改键 说明"><svg class="ic"><use href="#i-grid"/></svg>快捷键</button>
         </div>
         <div class="snav-group">
           <div class="snav-group-title">系统</div>
-          <button class="snav-btn" data-tab="data" data-search="用户 画像 规则 记忆 学习 手机 移动端 局域网 数据 目录 备份 恢复 版本 关于 重置"><svg class="ic"><use href="#i-folder"/></svg>数据与用户</button>
+          <button class="snav-btn" data-tab="profile" data-search="用户 画像 规则 记忆 学习 指令"><svg class="ic"><use href="#i-book"/></svg>用户规则</button>
+          <button class="snav-btn" data-tab="mobile" data-search="手机 移动端 局域网 网关 https 端口 二维码 配对 设备 审计"><svg class="ic"><use href="#i-external"/></svg>手机访问</button>
+          <button class="snav-btn" data-tab="data" data-search="数据 目录 备份 恢复 会话 存储 运行状态 轨迹 索引 右键菜单 配置历史 重置 关于 版本"><svg class="ic"><use href="#i-folder"/></svg>系统维护</button>
           <button class="snav-btn" data-tab="help" data-search="帮助 说明 文档 faq"><svg class="ic"><use href="#i-question"/></svg>帮助</button>
         </div>
       </nav>
@@ -1432,7 +1547,6 @@
           </div>
           <button id="settings-page-reset" class="ghost set-page-reset" type="button">恢复本页默认</button>
         </div>
-        <div id="settings-subnav" class="settings-subnav hidden" role="tablist" aria-label="本页分区"></div>
         <section class="pane" data-pane="chat"></section>
         <section class="pane hidden" data-pane="search"></section>
         <section class="pane hidden" data-pane="context"></section>
@@ -1453,9 +1567,6 @@
           <label class="check-row" data-search="日程 日历 提醒">
             <input type="checkbox" id="reminder-calendar-enabled"> 日程到点提醒
           </label>
-          <label class="check-row" data-search="主动聊天 AI 自动 消息">
-            <input type="checkbox" id="auto-chat-enabled"> 允许 AI 主动聊天（每个会话仍需单独开启）
-          </label>
           <h4 class="set-group">定时提醒（新提醒进入工作台）</h4>
           <p class="hint" id="remind-syshint">系统通知：检查中…</p>
           <label class="field-label">时间</label>
@@ -1470,39 +1581,7 @@
           </select>
           <button id="remind-add" class="ghost wide"><svg class="ic"><use href="#i-plus"/></svg>添加提醒</button>
           <div id="remind-list" class="remind-list"></div>
-          <p class="hint">新提醒会直接进入工作台「日程」（到点弹 Windows 系统通知，<strong>即使本程序已关闭</strong>，由系统计划任务负责），并在会话里留一条消息。也可以在工作台用<strong>快速添加</strong>（如「明天 10 点 开会」）或「＋ 日程」创建；点已有日程可改时间 / 地点 / 重复规则与提醒。这里保留未迁移/停用的旧提醒与主动聊天。</p>
-
-          <h4 class="set-group">主动聊天</h4>
-          <p class="hint">开启后 AI 会隔一段时间主动找你说话（仅在程序运行时；连续 2 次没得到回应会自动暂停）。<strong>开启后约 20 秒会先发一条</strong>，让你立刻看到效果，之后才按下面的间隔。</p>
-          <label class="check-row">
-            <input type="checkbox" id="autochat-on"> 为当前会话开启主动聊天
-          </label>
-          <label class="field-label">最短间隔（分钟）</label>
-          <input id="autochat-min" class="field-input" type="number" min="1" value="40">
-          <label class="field-label">最长间隔（分钟）</label>
-          <input id="autochat-max" class="field-input" type="number" min="1" value="120">
-          <p class="hint">改完间隔<strong>立刻生效</strong>，不用关掉再开。</p>
-          <button id="autochat-test" class="ghost wide"><svg class="ic"><use href="#i-play"/></svg>立即发一条试试</button>
-          <div id="autochat-list" class="remind-list"></div>
-        </section>
-        <section class="pane hidden" data-pane="image">
-          <h4 class="set-group" data-search="图片生成 图像 文生图 comfyui flux">图片生成（本地 ComfyUI）</h4>
-          <label class="check-row" data-search="启用 图片 生成 开关">
-            <input type="checkbox" id="image-enabled"> 启用图片生成（需要本机运行 ComfyUI）
-          </label>
-          <label class="field-label" data-search="comfyui 地址 端口">ComfyUI 地址</label>
-          <input id="image-comfy-url" class="field-input" type="text"
-                 placeholder="http://127.0.0.1:8188">
-          <label class="field-label" data-search="工作流 api 格式 json 路径">工作流 JSON（API 格式）</label>
-          <input id="image-workflow" class="field-input" type="text"
-                 placeholder="留空使用 data/image_workflow.json">
-          <div class="preset-row">
-            <button id="image-test" class="ghost" type="button">测试连接</button>
-            <span id="image-test-result" class="hint"></span>
-          </div>
-          <p class="hint">模型建议：FLUX 3 Image Klein 蒸馏版（INT8 / NVFP4）+ Qwen3-VL-4B 编码器 + FLUX.2 VAE。
-            在 ComfyUI 里打开官方模板后用「另存为 API 格式」导出到上面的路径；正向提示词里保留
-            <code>__PROMPT__</code> 占位符，生成时会替换成你输入的描述。固定 16 步，尺寸只给三档。</p>
+          <p class="hint">新提醒会直接进入工作台「日程」（到点弹 Windows 系统通知，<strong>即使本程序已关闭</strong>，由系统计划任务负责），并在会话里留一条消息。也可以在工作台用<strong>快速添加</strong>（如「明天 10 点 开会」）或「＋ 日程」创建；点已有日程可改时间 / 地点 / 重复规则与提醒。这里保留未迁移/停用的旧提醒。</p>
         </section>
         <section class="pane hidden" data-pane="profile">
           <h4 class="set-group" data-search="全局规则 手动偏好 规则 回答方式">全局规则</h4>
@@ -1738,77 +1817,42 @@
           </div>
         </section>
         <section class="pane hidden" data-pane="appearance">
-          <h4 class="set-group" data-search="主题 设计风格 雾光 扁平 外观">界面设计风格</h4>
-          <div class="theme-grid style-grid" role="radiogroup" aria-label="界面设计风格">
-            <button type="button" class="theme-card is-on" data-style-choice="aurora" role="radio" aria-checked="true">
-              <span class="theme-preview tp-aurora" aria-hidden="true">
+          <h4 class="set-group" data-search="主题 深浅 浅色 深色 外观">界面主题</h4>
+          <div class="theme-grid" role="radiogroup" aria-label="界面主题">
+            <button type="button" class="theme-card is-on" data-theme-choice="light" role="radio" aria-checked="true">
+              <span class="theme-preview tp-theme-light" aria-hidden="true">
                 <span class="tp-side"></span>
                 <span class="tp-main"><span class="tp-line"></span><span class="tp-card"></span><span class="tp-card short"></span></span>
               </span>
-              <span class="theme-card-copy"><strong>雾光</strong><em>光雾背景 · 冷紫强调 · 全站动效</em></span>
+              <span class="theme-card-copy"><strong>浅色</strong><em>白色纸面 · 冷灰蓝分层</em></span>
               <span class="theme-card-check" aria-hidden="true">✓</span>
             </button>
-            <button type="button" class="theme-card" data-style-choice="flat" role="radio" aria-checked="false" tabindex="-1">
-              <span class="theme-preview tp-flat" aria-hidden="true">
+            <button type="button" class="theme-card" data-theme-choice="dark" role="radio" aria-checked="false" tabindex="-1">
+              <span class="theme-preview tp-theme-dark" aria-hidden="true">
                 <span class="tp-side"></span>
                 <span class="tp-main"><span class="tp-line"></span><span class="tp-card"></span><span class="tp-card short"></span></span>
               </span>
-              <span class="theme-card-copy"><strong>现代扁平化</strong><em>经典界面 · 支持浅色 / 深色</em></span>
+              <span class="theme-card-copy"><strong>深色</strong><em>VS Code 深灰画布 · 层级分明</em></span>
               <span class="theme-card-check" aria-hidden="true">✓</span>
             </button>
-            <input type="radio" name="theme" value="aurora" checked hidden>
-            <input type="radio" name="theme" value="light" hidden>
+            <input type="radio" name="theme" value="light" checked hidden>
             <input type="radio" name="theme" value="dark" hidden>
           </div>
-          <p class="hint">雾光会把所有界面重绘为光雾与冷紫强调的视觉体系；现代扁平化保留原来的浅色 / 深色。</p>
-
-          <div id="theme-mode-row" class="theme-mode-row" hidden>
-            <span class="theme-mode-label">深浅模式</span>
-            <div class="theme-mode-seg" role="radiogroup" aria-label="现代扁平化深浅模式">
-              <button type="button" class="theme-mode-btn is-on" data-flat-mode="light" role="radio" aria-checked="true">浅色</button>
-              <button type="button" class="theme-mode-btn" data-flat-mode="dark" role="radio" aria-checked="false" tabindex="-1">深色</button>
-            </div>
-            <span class="theme-mode-hint">也可以点左下角的「深浅」按钮快速切换</span>
-          </div>
-
-          <div id="mood-section" class="mood-section">
-            <h4 class="set-group" data-search="氛围 光雾 静谧 流动 辉光 背景">氛围</h4>
-            <div class="mood-grid" role="radiogroup" aria-label="雾光氛围">
-              <button type="button" class="mood-card" data-mood-choice="calm" role="radio" aria-checked="false" tabindex="-1">
-                <span class="mood-swatch mood-calm" aria-hidden="true"><i></i></span>
-                <span class="mood-copy"><strong>静谧</strong><em>几乎静止的雾面，适合专注阅读</em></span>
-                <span class="mood-check" aria-hidden="true">✓</span>
-              </button>
-              <button type="button" class="mood-card is-on" data-mood-choice="flow" role="radio" aria-checked="true">
-                <span class="mood-swatch mood-flow" aria-hidden="true"><i></i></span>
-                <span class="mood-copy"><strong>流动</strong><em>缓慢漂移的冷紫光雾（默认）</em></span>
-                <span class="mood-check" aria-hidden="true">✓</span>
-              </button>
-              <button type="button" class="mood-card" data-mood-choice="glow" role="radio" aria-checked="false" tabindex="-1">
-                <span class="mood-swatch mood-glow" aria-hidden="true"><i></i></span>
-                <span class="mood-copy"><strong>辉光</strong><em>更亮的强调色与呼吸光，氛围感更强</em></span>
-                <span class="mood-check" aria-hidden="true">✓</span>
-              </button>
-            </div>
-            <p class="hint">氛围改变背景光雾的强度与运动方式；左下角的「氛围」按钮可随时快速切换。</p>
-
-            <h4 class="set-group" data-search="动效 动画 过渡 精简 减少">动效</h4>
-            <div class="motion-grid" role="radiogroup" aria-label="界面动效">
-              <button type="button" class="motion-card is-on" data-motion-choice="full" role="radio" aria-checked="true">
-                <strong>完整动效</strong><em>页面切换、卡片抬升与氛围漂移全部启用</em>
-              </button>
-              <button type="button" class="motion-card" data-motion-choice="lite" role="radio" aria-checked="false" tabindex="-1">
-                <strong>精简动效</strong><em>保留必要反馈，关闭持续背景动画</em>
-              </button>
-            </div>
-            <p class="hint">系统开启「减少动态效果」时会自动按精简动效运行。</p>
-          </div>
+          <p class="hint">明暗配色参考 VS Code：白色 / 深灰画布（#1e1e1e）、冷灰分层、蓝色强调；左下角「深浅」按钮可随时切换。</p>
 
           <h4 class="set-group" data-search="过程 步骤 自动跟随 滚动 暂停 高亮">对话过程</h4>
           <label class="check-row" data-search="过程 步骤 自动跟随 滚动 暂停 当前步骤">
             <input type="checkbox" id="ui-process-follow"> 过程步骤自动跟随（滚到当前步骤；用户上翻时暂停）
           </label>
           <p class="hint">开启后，过程折叠区里每出现一个新步骤会自动带进视野，但不强行拉到整条消息底部；你往上翻立即暂停，回到底部或点右下「回到底部」恢复。关闭后只更新「N 步」统计，不再自动滚动（当前步骤高亮与已完成步骤的自动收起仍然生效）。</p>
+
+          <h4 class="set-group" data-search="头像 表情 眼睛 动效 生动 眨眼 光标">AI 头像动效</h4>
+          <select id="avatar-motion" class="field-input" data-search="头像 表情 眼睛 动效 生动 眨眼 跟随 光标">
+            <option value="calm">克制（默认：偶尔瞥一眼，光标停住才看）</option>
+            <option value="lively">活泼（更爱动，动作更快）</option>
+            <option value="off">关闭（静态头像）</option>
+          </select>
+          <p class="hint">克制：光标在消息上停住约 0.3 秒后才看过去，看一会儿会自己移开；生成中视线落在自己写出的文字上，写完回中眨一次。活泼：停留更短、幅度更大、反应更快。关闭：头像完全静止。系统开启「减少动态效果」时会自动按关闭处理。</p>
 
           <h4 class="set-group" data-search="空白 空格 中点 whitespace 可视化 制表符 缩进">空白字符</h4>
           <select id="ide-whitespace" class="field-input" data-search="空白 空格 中点 全部 选区内 尾随 边界 关闭">
@@ -1906,11 +1950,41 @@
         </div>
 
         <h4 class="set-group" data-search="会话 存储 压缩 sessions json 附件 体积">会话存储</h4>
-        <p class="hint">清理附件正文的重复副本与二进制乱码，不会删除消息内容；写回前会自动备份 sessions.json。</p>
+        <p class="hint">清理附件正文的重复副本与二进制乱码，不会删除消息内容；写回前会自动备份会话缓存目录。</p>
         <div class="preset-row">
           <button id="app-compact-sessions" class="ghost" type="button">检查并压缩会话存储</button>
         </div>
         <p id="app-storage-status" class="hint">点了才会读取当前体积；平时不扫描。</p>
+
+        <h4 class="set-group" data-search="磁盘 占用 体积 缓存 目录 扫描 空间">磁盘占用</h4>
+        <p class="hint">按目录统计体积（会话事件流、轨迹、撤销快照、浏览器配置缓存等）。只读扫描，不删任何东西。</p>
+        <div class="preset-row">
+          <button id="disk-scan" class="ghost" type="button">扫描磁盘占用</button>
+          <span id="disk-at" class="hint"></span>
+        </div>
+        <div id="disk-body" class="health-body">还没扫描。</div>
+
+        <h4 class="set-group" data-search="事件 日志 孤儿 压缩 清理 event orphan">事件日志与孤儿目录</h4>
+        <p class="hint">把已被会话快照覆盖的历史事件压成一条基线，并清掉已删除会话留下的残留目录；
+          写回前会自动备份到 <code>data/event_prune_backup/</code>。会话缓存本身用上面的按钮压缩。</p>
+        <div class="preset-row">
+          <button id="prune-check" class="ghost" type="button">检查可回收体积</button>
+          <button id="prune-apply" class="ghost" type="button" disabled>备份并清理</button>
+        </div>
+        <p id="prune-status" class="hint">先检查再清理；有会话正在生成时会拒绝执行。</p>
+        <label class="check-row" data-search="自动 压缩 启动 事件 日志 存储">
+          <input type="checkbox" id="storage-auto-prune">
+          启动时自动压缩超过 256MB 的事件日志
+        </label>
+
+        <h4 class="set-group" data-search="运行 状态 健康 指标 事件 体积 孤儿 缓存 耗时 分位 性能">运行状态</h4>
+        <p class="hint">只读指标：会话与事件流体积、孤儿事件目录、内存缓存，以及最近 200 轮的分段耗时。
+          打开本页时自动读取，也可手动刷新。</p>
+        <div class="preset-row">
+          <button id="health-refresh" class="ghost" type="button">刷新状态</button>
+          <span id="health-at" class="hint"></span>
+        </div>
+        <div id="health-body" class="health-body">加载中…</div>
 
         <h4 class="set-group" data-search="轨迹 trajectory 事件 账本 记录">轨迹</h4>
         <label class="check-row" data-search="轨迹 trajectory 记录 事件">
@@ -1956,7 +2030,7 @@
         <div id="settings-history-diff" class="settings-history-diff hidden"></div>
 
         <h4 class="set-group" data-search="重置 恢复默认 全部设置">重置</h4>
-        <p class="hint">把设置页里的可调项恢复为出厂默认值（需点「保存」生效）。API 密钥、B 站 SESSDATA 与自定义预设会保留。</p>
+        <p class="hint">把设置页里的可调项恢复为出厂默认值（需点「保存」生效）。API 密钥与自定义预设会保留。</p>
         <button id="app-reset-all" class="ghost wide danger" type="button">恢复所有设置为默认</button>
       </section>
       <section class="pane hidden" data-pane="help">
@@ -2131,11 +2205,11 @@
 
         <h4 class="set-group">外观与演出</h4>
 
-        <details class="help-sec" data-search="主题 雾光 氛围 动效 外观 标题栏 空白字符 空格">
+        <details class="help-sec" data-search="主题 明暗 浅色 深色 外观 标题栏 空白字符 空格">
           <summary>主题与外观</summary>
           <div class="help-body">
             <ul>
-              <li><strong>界面设计风格</strong>（设置 →「主题与外观」）：雾光 / 现代扁平化。雾光是光雾与冷紫强调的完整视觉体系；现代扁平化保留浅色 / 深色两种模式，切换后界面与应用窗口标题栏一起变。</li>
+              <li><strong>界面主题</strong>（设置 →「主题与外观」）：浅色 / 深色两套，采用 DeepSeek 网页版的冷灰蓝分层与蓝色强调；切换后界面与应用窗口标题栏一起变。</li>
               <li><strong>空白字符可视化</strong>（同页「空白字符」）：关闭 / 仅选区内 / 仅行尾 / 词之间 / 全部。空格显示为浅灰中点 <code>·</code>、制表符显示为 <code>→</code>，颜色采用 VS Code 标准值，与主题无关。</li>
               <li><strong>覆盖关系</strong>：IDE 模式跟随界面主题（Monaco 语法色随明暗切换）。</li>
             </ul>
@@ -2168,7 +2242,7 @@
               <li><strong>IDE</strong>：VS Code 风格布局 —— 最左<strong>活动栏</strong>（资源管理器 / 搜索 / 在 VS Code 打开）、<strong>侧边栏文件树</strong>、中间<strong>多标签编辑器</strong>、底部<strong>状态栏</strong>（路径 / 编码 / 行列 / 语言），右侧仍是窄栏对话。工作区根目录 = <strong>当前会话的沙箱</strong>，切会话会自动换。</li>
               <li><strong>编辑器</strong>：内置 <strong>Monaco</strong>（VS Code 同款，<strong>本地内置、离线可用</strong>）——语法高亮、多光标、查找替换、MiniMap、代码折叠。</li>
               <li><strong>AI Tab 补全</strong>：在编辑器里停一下，模型会在光标处给出补全；<code>Tab</code> 采纳、<code>Esc</code> 收起、<code>Alt+\</code> 手动触发。默认开启，但需要先在「模型接入 → 轻量任务的模型」填一个模型才会真正请求（避免用主模型高频烧 token）；一次最多 8 行、不跨文件。</li>
-              <li><strong>编辑器主题</strong>：跟随界面明暗（雾光与扁平化浅色为浅色，扁平化深色为深色），IDE 界面与 Monaco 语法色一起切换，不再单独配置。</li>
+              <li><strong>编辑器主题</strong>：跟随界面明暗（浅色主题配浅色编辑器，深色主题配深色编辑器），IDE 界面与 Monaco 语法色一起切换，不再单独配置。</li>
               <li><strong>空白字符</strong>：同页「空白字符可视化」可选 关闭 / 仅选区内 / 仅行尾 / 词之间 / 全部（默认「全部」）；空格显示为浅灰中点 <code>·</code>、制表符为 <code>→</code>。</li>
               <li><strong>文件管理区收起</strong>：点活动栏里<strong>当前已激活</strong>的图标即可收起右侧的视图区（再点任意图标展开），或按 <code>Ctrl+B</code> 切换；收起状态会被记住。命令面板里也有「收起 / 展开文件管理区」。</li>
               <li><strong>快捷键</strong>：<code>Ctrl+S</code> 保存、<code>Ctrl+P</code> 快速打开文件、<code>Ctrl+Shift+P</code> 命令面板、<code>Ctrl+B</code> 收起 / 展开文件管理区、<code>Ctrl+`</code> 终端；完整清单见左侧「快捷键」。</li>
@@ -2755,14 +2829,20 @@
 
 <!-- 笔记工作区（全屏）：左栏树 / 中栏块编辑 + 预览 / 右栏大纲·反链·批注·图谱 -->
 <div id="notes-modal" class="modal notes-ws hidden" aria-label="笔记工作区">
+  <div id="nt-dock-resize" class="nt-dock-resize" title="拖动调整宽度"></div>
   <div class="notes-shell">
     <header class="notes-top">
-      <div class="nt-brand"><svg class="ic"><use href="#i-note"/></svg><span>笔记</span></div>
+      <div class="nt-brand"><svg class="ic"><use href="#i-note"/></svg><span>笔记</span>
+        <span id="nt-vault-meta" class="nt-vault-meta"></span></div>
+      <select id="nt-dock-files" class="nt-dock-files hidden" title="切换笔记"></select>
       <button type="button" id="nt-quickbtn" class="nt-quick" title="快速打开（Ctrl+P）">
         <svg class="ic"><use href="#i-search"/></svg><span>搜索或跳转…</span><kbd>Ctrl P</kbd>
       </button>
       <div class="nt-top-acts">
-        <button type="button" id="nt-new" class="ghost"><svg class="ic"><use href="#i-plus"/></svg>笔记</button>
+        <button type="button" id="nt-dock-side" class="ghost icon hidden" title="大纲 / 批注"
+                aria-label="大纲与批注"><svg class="ic"><use href="#i-list"/></svg></button>
+        <button type="button" id="nt-dock" class="ghost icon" title="停靠到右侧"
+                aria-label="切换全屏 / 停靠"><svg class="ic"><use href="#i-sidebar"/></svg></button>
         <button type="button" id="nt-more" class="ghost icon" title="更多" aria-label="更多操作">⋯</button>
         <button id="btn-close-notes" class="modal-close" title="关闭（Esc）">✕</button>
       </div>
@@ -2770,9 +2850,21 @@
 
     <div class="notes-body">
       <aside class="notes-left" id="nt-left">
+        <div class="nt-side-head">
+          <span class="nt-side-title">文件</span>
+          <div class="nt-side-acts">
+            <button type="button" id="nt-new" class="nt-icon-btn" title="新建笔记（Ctrl+N）"><svg class="ic"><use href="#i-file-plus"/></svg></button>
+            <button type="button" id="nt-new-folder" class="nt-icon-btn" title="新建文件夹"><svg class="ic"><use href="#i-folder-plus"/></svg></button>
+            <button type="button" id="nt-sort" class="nt-icon-btn" title="排序"><svg class="ic"><use href="#i-list"/></svg></button>
+            <button type="button" id="nt-collapse-all" class="nt-icon-btn" title="全部折叠"><svg class="ic"><use href="#i-chevron"/></svg></button>
+          </div>
+        </div>
+        <div id="nt-sort-pop" class="nt-sort-pop hidden">
+          <button type="button" data-sort="name">名称（文件夹优先）</button>
+          <button type="button" data-sort="mtime">修改时间（新→旧）</button>
+        </div>
         <div class="nt-left-top">
           <input id="nt-search" class="field-input" placeholder="搜索标题 / 全文…">
-          <button type="button" id="nt-new-folder" class="ghost icon" title="新建文件夹">＋</button>
         </div>
         <div id="nt-hits" class="notes-hits hidden"></div>
         <div id="nt-tree" class="notes-tree"></div>
@@ -2787,15 +2879,33 @@
             <span id="nt-save" class="nt-save" title="保存状态">—</span>
           </div>
           <div class="nt-view-switch" role="group" aria-label="视图">
-            <button type="button" id="nt-view-block" class="active" title="块编辑（Ctrl+E 切源码）">编辑</button>
-            <button type="button" id="nt-view-split" title="左写右看">分栏</button>
-            <button type="button" id="nt-view-preview" title="只读预览">预览</button>
-            <button type="button" id="nt-view-source" title="Markdown 源码">源码</button>
+            <button type="button" id="nt-view-edit" class="active" title="编辑（Obsidian 风格：输入即格式）">编辑</button>
+            <button type="button" id="nt-view-source" title="Markdown 源码（Ctrl+E）">源码</button>
+            <button type="button" id="nt-view-reading" title="只读阅读">阅读</button>
+            <button type="button" id="nt-view-split" class="nt-split-toggle" title="分栏：左右各自选择视图">分栏</button>
           </div>
           <div class="notes-actions">
             <button id="nt-lint" class="ghost nt-lint" title="Markdown 语法纠错：只在编辑区下方提示问题，可一键修正安全项"
                     aria-pressed="true"><span class="nt-lint-sw"></span>纠错<b id="nt-lint-n" class="nt-lint-n"></b></button>
           </div>
+        </div>
+
+        <div id="nt-split-bar" class="nt-split-bar hidden">
+          <label>左侧
+            <select id="nt-split-left" title="左栏视图">
+              <option value="edit">编辑</option>
+              <option value="source">源码</option>
+              <option value="reading">阅读</option>
+            </select>
+          </label>
+          <label>右侧
+            <select id="nt-split-right" title="右栏视图">
+              <option value="edit">编辑</option>
+              <option value="source">源码</option>
+              <option value="reading">阅读</option>
+            </select>
+          </label>
+          <span class="nt-split-hint">同一编辑类型只能出现在一栏；重复时另一栏自动改为阅读</span>
         </div>
 
         <div id="nb-toolbar" class="nb-toolbar" role="toolbar" aria-label="格式">
@@ -2819,12 +2929,14 @@
         </div>
 
         <div class="notes-edit-wrap" id="nt-edit-wrap">
-          <div id="nb-editor" class="nb-editor" aria-label="块编辑器"></div>
-          <textarea id="nt-textarea" class="notes-textarea hidden" spellcheck="false"
-                    placeholder="# 标题&#10;&#10;正文…用 [[笔记名]] 建立双链。"></textarea>
-          <div class="nt-preview-pane hidden" id="nt-preview-pane">
-            <div id="nt-preview-box" class="notes-preview content"></div>
+          <div class="nt-pane" id="nt-pane-left">
+            <div id="nb-editor" class="nb-editor" aria-label="块编辑器"></div>
+            <textarea id="nt-textarea" class="notes-textarea hidden" spellcheck="false"
+                      placeholder="# 标题&#10;&#10;正文…用 [[笔记名]] 建立双链。"></textarea>
+            <!-- 源码模式的 Monaco 宿主（本地内置，加载失败时仍用上面的 textarea） -->
+            <div id="nt-src-editor" class="nt-src-editor hidden" aria-label="Markdown 源码"></div>
           </div>
+          <div class="nt-pane hidden" id="nt-pane-right"></div>
         </div>
 
         <div id="nt-lint-box" class="nt-lint-box hidden"></div>
@@ -2921,10 +3033,8 @@
        accept=".txt,.md,.markdown,.tex,.csv,.tsv,.json,.jsonl,.log,.yaml,.yml,.py,.js,.ts,.html,.css,.xml,.docx,.pptx,.xlsx,.pdf">
 
 <script>window.__TOKEN__ = "%%TOKEN%%";</script>
-<!-- 以下三方库全部异步加载：不阻塞首屏，加载完成后由 app.js 补齐渲染 -->
-<script async src="/static/vendor/katex/katex.min.js"
-        onload="__libReady('katex')"
-        onerror="__fb(this,'https://cdn.staticfile.org/KaTeX/0.16.9/katex.min.js','katex')"></script>
+<!-- katex 改为按需加载（math-pending 出现时才拉，见 mathHtml / scheduleMathUpgrade）：
+     271KB 的解析在没有任何公式的会话里纯属浪费；就绪后 upgradeMath 会补齐公式。 -->
 <!-- highlight / echarts / vis-network 移到 window.load 之后空闲加载（见 head 里的 loadLazyLib），
      需要时也可直接调用 window.loadLazyLib('echarts') -->
 <!-- 轨迹：模型视角的事件账本（只读） -->
@@ -2938,14 +3048,18 @@
         <span id="traj-sub" class="traj-sub"></span>
       </div>
       <div class="traj-actions">
+        <button id="traj-rail-toggle" class="ghost traj-mini traj-only-sm" type="button" title="轮次导航">轮次</button>
         <label class="traj-check" title="弹窗打开时自动刷新最新记录">
           <input type="checkbox" id="traj-follow" checked> 实时
         </label>
         <button id="traj-refresh" class="ghost traj-mini" type="button" title="重新读取">刷新</button>
+        <button id="traj-viz-toggle" class="ghost traj-mini traj-toggle" type="button" title="打开 / 关闭观测图表">观测</button>
+        <button id="traj-ins-toggle" class="ghost traj-mini traj-toggle" type="button" title="打开 / 关闭详情检查器">检查器</button>
         <div class="traj-menu">
           <button id="traj-export" class="ghost traj-mini" type="button" title="导出 / 复制">导出 ▾</button>
           <div id="traj-export-menu" class="traj-menu-pop hidden">
             <button type="button" data-fmt="json">导出 JSON（全量事件）</button>
+            <button type="button" data-fmt="html">导出 HTML（只读页面）</button>
             <button type="button" data-fmt="md">导出 Markdown（当前筛选）</button>
             <button type="button" data-fmt="copy">复制当前筛选结果</button>
           </div>
@@ -2964,6 +3078,10 @@
         <span id="traj-hits" class="traj-hits"></span>
         <button id="traj-search-clear" class="traj-x hidden" type="button" title="清除搜索">✕</button>
       </div>
+      <div id="traj-view" class="traj-seg" role="group" aria-label="视图">
+        <button type="button" data-view="timeline" class="on">时间线</button>
+        <button type="button" data-view="list">列表</button>
+      </div>
       <div id="traj-filters" class="traj-filters"></div>
       <select id="traj-tool" class="traj-select" title="按工具名筛选">
         <option value="">全部工具</option>
@@ -2972,10 +3090,10 @@
       <button id="traj-fold" class="ghost traj-mini" type="button" title="折叠 / 展开全部轮次">折叠全部</button>
     </div>
 
-    <div class="traj-main">
+    <div id="traj-main" class="traj-main ins-off">
       <nav id="traj-rail" class="traj-rail" aria-label="轮次导航"></nav>
       <div class="traj-stream">
-        <section id="traj-viz" class="traj-viz">
+        <section id="traj-viz" class="traj-viz drawer hidden">
           <div class="traj-viz-head">
             <span class="traj-cap">观测</span>
             <div id="traj-viz-tabs" class="traj-viz-tabs" role="tablist">
@@ -2985,7 +3103,7 @@
               <button type="button" data-viz="marks" role="tab">里程碑</button>
             </div>
             <span id="traj-viz-note" class="traj-cap traj-dim"></span>
-            <button id="traj-viz-fold" class="ghost traj-mini" type="button" title="收起观测区">收起</button>
+            <button id="traj-viz-fold" class="ghost traj-mini" type="button" title="关闭观测">关闭</button>
           </div>
           <div id="traj-viz-body" class="traj-viz-body"></div>
         </section>

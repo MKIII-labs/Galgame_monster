@@ -8,7 +8,7 @@
   align-items: center;
   gap: 1px;
   max-width: calc(100vw - 16px);
-  padding: 3px;
+  padding: 4px;
   /* --bg-panel 从未定义过：以前一直落到 #fff，深色主题下浮层是白块 */
   background: var(--bg-elevated, #fff);
   border: 1px solid var(--border, #ddd);
@@ -27,7 +27,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-dim, #888);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 .selbar-sep {
@@ -44,7 +44,7 @@
   gap: 4px;
   padding: 4px 8px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -58,12 +58,12 @@
 .selbar-btn:hover .ic { color: var(--accent, #3b82f6); }
 
 .selbar-more { color: var(--text-dim, #777); }
-.selbar-caret { font-size: 9px; margin-left: 1px; }
+.selbar-caret { font-size: var(--fs-2xs); margin-left: 1px; }
 
 .selbar-trunc {
   padding: 0 6px;
   color: var(--warn, #c27c0e);
-  font-size: 11px;
+  font-size: var(--fs-2xs);
 }
 
 .selbar-dot {

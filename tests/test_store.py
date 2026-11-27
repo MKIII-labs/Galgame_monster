@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """store：JSON 原子写 + mtime 缓存"""
+import json
 import os
 
 from app import store
@@ -60,3 +61,24 @@ def test_json_cache_is_bounded(tmp_path):
         store._JSON_CACHE_MAX = old_max
         for p in paths:
             store.drop_cache(p)
+
+
+def test_read_json_copy_does_not_pollute_cache(tmp_path):
+    """复制版给会改返回值的调用方：改了副本，下一次读仍是磁盘内容。"""
+    p = str(tmp_path / "copy.json")
+    store.write_json(p, {"a": 1, "nested": {"x": 1}})
+    d = store.read_json_copy(p)
+    d["a"] = 2
+    d["nested"]["x"] = 9
+    assert store.read_json(p) == {"a": 1, "nested": {"x": 1}}
+
+
+def test_put_cache_only_affects_memory(tmp_path):
+    """put_cache 只更新读缓存，不落盘（启动对账把修复结果留在内存用）。"""
+    p = str(tmp_path / "put.json")
+    store.write_json(p, {"v": 1})
+    assert store.read_json(p) == {"v": 1}
+    assert store.put_cache(p, {"v": 2}) is True
+    assert store.read_json(p) == {"v": 2}
+    with open(p, "r", encoding="utf-8") as f:
+        assert json.load(f) == {"v": 1}

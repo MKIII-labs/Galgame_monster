@@ -53,6 +53,69 @@ def test_pending_approvals_snapshot():
     assert agent.pending_approvals("s_pending") == []
 
 
+class _ApproveHandler:
+    """只实现审批接口用到的三个方法；_sb 不发送响应，便于断言。"""
+
+    def __init__(self, body, sb="SB_REC"):
+        self.body = body
+        self.sb = sb
+        self.calls = []
+
+    def _body(self):
+        return self.body
+
+    def _json(self, obj, code=200):
+        self.calls.append((code, obj))
+        return obj
+
+    def _sb(self, body):
+        sid = str(body.get("session_id") or "")
+        if sid == "s_missing":
+            return None, None
+        return {"id": sid}, self.sb
+
+
+def test_resolve_approval_requires_matching_sid():
+    aid = agent.new_approval("s_a", "read_file", {})
+    assert agent.resolve_approval(aid, True, sid="s_b") is False
+    assert agent.resolve_approval(aid, True, sid="s_a") is True
+    agent.wait_approval(aid, timeout=0.2)
+
+
+def test_approve_rejects_cross_session(monkeypatch):
+    """审批归属以记录为准：前端当前会话不能替另一条审批写规则。"""
+    aid = agent.new_approval("s_rec", "write_file", {"path": "a.py"})
+    h = _ApproveHandler({"session_id": "s_other", "aid": aid,
+                         "ok": True, "always": True})
+    seen = []
+    monkeypatch.setattr(agent, "remember_approval_rule",
+                        lambda sb, name, args: (seen.append((sb, name, args))
+                                                or (True, "ok")))
+    sandbox_api._api_agent_approve(h)
+
+    assert h.calls[-1][0] == 409
+    assert seen == []
+    assert agent.pending_approvals("s_rec")          # 仍然等原会话处理
+    agent.resolve_approval(aid, False, sid="s_rec")
+    agent.wait_approval(aid, timeout=0.2)
+
+
+def test_approve_uses_record_sandbox(monkeypatch):
+    """「始终允许」必须写到审批所属会话的沙箱，而不是请求体里的会话。"""
+    aid = agent.new_approval("s_rec", "write_file", {"path": "a.py"})
+    h = _ApproveHandler({"session_id": "s_rec", "aid": aid,
+                         "ok": True, "always": True}, sb="SB_REC")
+    seen = []
+    monkeypatch.setattr(agent, "remember_approval_rule",
+                        lambda sb, name, args: (seen.append((sb, name, args))
+                                                or (True, "已写入")))
+    sandbox_api._api_agent_approve(h)
+
+    assert seen == [("SB_REC", "write_file", {"path": "a.py"})]
+    assert h.calls[-1] == (200, {"ok": True, "rule": "已写入"})
+    agent.wait_approval(aid, timeout=0.2)
+
+
 def test_stream_alive_ignores_zombie_lease(monkeypatch):
     """没有 job 的租约不能再永远算「生成中」；等用户交互时则必须算活着。"""
     import app.session_status as st
@@ -870,4 +933,16 @@ def test_prompt_tells_read_only_without_sandbox():
     assert "read_file" in p
     assert "选择工作目录" in p
     assert "读（绝对路径）" in p
+
+
+def test_prompt_tells_read_only_when_agent_off_with_sandbox(tmp_path):
+    """Agent 关了但目录还在：仍然只读，不能再说「对话模式没有文件工具」。"""
+    from app.agent.prompt import build_agent_prompt
+
+    p = build_agent_prompt({"agent_enabled": False, "sandbox": str(tmp_path)},
+                           native_tools=True)
+    assert "文件读取（未开启 Agent，仅只读）" in p
+    assert "read_file" in p
+    assert "当前模式：对话（没有文件 / 命令工具）" not in p
+    assert "读（沙箱内相对路径 / 沙箱外绝对路径）" in p
 

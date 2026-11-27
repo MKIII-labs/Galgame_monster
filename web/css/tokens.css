@@ -9,9 +9,34 @@
    2) 语义层（semantic）：表面 / 描边 / 文字 / 层级 / 动效，全站只认这些名字。
    改配色只动主题块，改观感只动语义层，组件样式不用跟着动。
    ============================================================ */
+/* 字重配对：400 = 系统 MiSans Regular，600 = 项目内置的 MiSans Semibold。
+   两份都声明在同一个族里，浏览器才会用真字形而不是「合成粗体」。 */
+@font-face {
+  font-family: "MiSans App";
+  src: local("MiSans"), local("MiSans-Regular");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MiSans App";
+  /* 本机装了 MiSans Semibold 就直接用系统字体，省掉 1.1MB 下载；
+     没装才取项目内置的子集（GB2312 + 界面常用字，约 1.1MB）。 */
+  src: local("MiSans Semibold"), local("MiSans-Semibold"), local("MiSansSemiBold"),
+       url("/static/fonts/MiSans-Semibold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+/* 没有对应字重的字体不再让浏览器描边合成，宁可退到最近的实字重 */
+html { font-synthesis: none; }
+
 :root {
   /* ── 字体 ─────────────────────────────────────────────── */
-  --font: "MiSans", "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  /* "MiSans App" 是本项目自己的字重配对：400 用系统安装的 MiSans Regular，
+     600 用 web/fonts/MiSans-Semibold.otf（MiSans 官方免费商用）。
+     以前只装 Regular，所有 600 都是浏览器「合成粗体」，中文笔画会糊。 */
+  --font: "MiSans App", "MiSans", "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
   --mono: "Cascadia Code", Consolas, "SFMono-Regular", Menlo, monospace;
 
   /* 字号刻度：11 / 12 / 13 / 14 / 15 / 17 / 20 / 24 —— 只用这八档 */
@@ -23,23 +48,24 @@
   --fs-lg: 17px;
   --fs-xl: 20px;
   --fs-2xl: 24px;
-  /* 行高：紧凑（标题 / 单行）· 正文 · 长文 */
+  /* 行高：紧凑（标题 / 单行）· 稍紧（卡片标题）· 正文 · 长文 */
   --lh-tight: 1.35;
+  --lh-snug: 1.5;
   --lh: 1.6;
   --lh-loose: 1.75;
   --fw-normal: 400;
-  /* 本机 MiSans 只有 Regular：请求 600 会被浏览器合成加粗、笔画发糊，
-     所以「加粗」统一用 500，只有等宽/数字场景才偶尔用 600 */
+  /* 600 现在有真字形（web/fonts/MiSans-Semibold.otf），不再是合成粗体 */
   --fw-medium: 500;
   --fw-bold: 600;
   --ls-wide: .04em;          /* 仅全大写小标签用 */
 
-  /* ── 圆角：控件 / 卡片 / 大容器（收敛成三档 + 药丸）────── */
+  /* ── 圆角：控件 / 卡片 / 大容器（收敛成 4 档 + 药丸）──────── */
+  --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius: 10px;             /* 兼容既有引用 */
   --radius-lg: 14px;
-  --radius-xl: 18px;
+  --radius-xl: 18px;          /* 只给全屏级浮层用，普通卡片请用 lg */
   --radius-pill: 999px;
 
   /* ── 间距：4 的倍数，只用这几档 ───────────────────────── */
@@ -85,31 +111,32 @@
   --sidebar-w: 268px;
 
   /* ── 品牌强调色：只用于选中 / 主操作 / 焦点，不做大面积铺底 ── */
-  --accent: #4d6bfe;
-  --accent-hover: #3f5cf0;
-  --accent-soft: rgba(77, 107, 254, .12);   /* 弱化强调底色（替代整块铺满） */
+  --accent: #3964fe;
+  --accent-hover: #5686fe;
+  --accent-soft: rgba(57, 100, 254, .12);   /* 弱化强调底色（替代整块铺满） */
   --on-accent: #fff;          /* 实心强调色底上的文字色。IDE 主题里 Trae 品牌绿需要配近黑字，
                                  所以凡是「背景 var(--accent) + 文字」的地方都要走这个 token */
 
   /* ── 遮罩：弹窗 / 抽屉背后的压暗层 ─────────────────────── */
   --overlay: rgba(0, 0, 0, .45);
 
-  /* ── 语义色：每色三档（文字/图标 · 实色底 · 描边）─────── */
-  --danger: #f14c4c;             /* 危险 / 失败 —— 文字与图标 */
+  /* ── 语义色：每色三档（文字/图标 · 实色底 · 描边）
+     文字档必须满足 WCAG AA 4.5:1（白底 / 侧栏底 / 悬停底都要过）─────── */
+  --danger: #c92a2a;             /* 危险 / 失败 —— 文字与图标（原 #f14c4c 对比度 3.57 不达标） */
   --danger-strong: #a83b3b;
-  --danger-line: rgba(241, 76, 76, .5);
-  --ok: #4aa96c;                 /* 成功 / 通过 —— 文字与图标 */
+  --danger-line: rgba(201, 42, 42, .5);
+  --ok: #2f7a4a;                 /* 成功 / 通过 —— 文字与图标（原 #4aa96c 对比度 2.92 不达标） */
   --ok-strong: #1f7a4d;          /* 实色底（配白字） */
-  --ok-line: rgba(74, 169, 108, .45);
-  --warn: #c98a12;               /* 警告 / 注意 —— 文字与图标 */
-  --warn-line: rgba(201, 138, 18, .55);
+  --ok-line: rgba(47, 122, 74, .45);
+  --warn: #8f5f08;               /* 警告 / 注意 —— 文字与图标（原 #c98a12 对比度 2.95 不达标） */
+  --warn-line: rgba(143, 95, 8, .5);
 
   /* ── 语义底色：标签 / 行内提示的低透明度色块 ───────────── */
   --ok-soft: rgba(74, 169, 108, .14);
   --warn-soft: rgba(201, 138, 18, .14);
   --danger-soft: rgba(241, 76, 76, .14);
-  --accent-line: rgba(77, 107, 254, .35);   /* 强调色描边（输入框 / 选中行） */
-  --accent-faint: rgba(77, 107, 254, .06);  /* 极弱强调底（选中项背景） */
+  --accent-line: rgba(57, 100, 254, .35);   /* 强调色描边（输入框 / 选中行） */
+  --accent-faint: rgba(57, 100, 254, .06);  /* 极弱强调底（选中项背景） */
 
   /* ── 数据分类色：固定不随主题变，保证同一类别永远同色 ──── */
   --cat-1: #6b8afd;   /* 规则 */
@@ -159,11 +186,11 @@
   --text-weak: var(--text-mute);
 
   /* ── 阴影：xs 静置 · sm 微浮 · md 卡片 · lg 弹窗 ──────── */
-  --shadow-xs: 0 1px 1px rgba(15, 20, 40, .04);
-  --shadow-sm: 0 1px 2px rgba(15, 20, 40, .06);
-  --shadow-md: 0 2px 10px rgba(15, 20, 40, .08);
+  --shadow-xs: 0 1px 1px rgba(0, 0, 0, .04);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .06);
+  --shadow-md: 0 2px 10px rgba(0, 0, 0, .08);
   --shadow: var(--shadow-md);
-  --shadow-lg: 0 16px 44px rgba(15, 20, 40, .20);
+  --shadow-lg: 0 16px 44px rgba(0, 0, 0, .18);
   --ring: 0 0 0 3px var(--accent-soft);
 
   /* ── 动效令牌：统一缓动与时长，避免各处各写一套 ────────── */
@@ -179,113 +206,96 @@
   /* 图谱配色（知识库 / 笔记 / GAL 关系图共用）：
      节点填充必须明显区别于画布，否则默认节点会"融进"背景。
      每个主题在下面各自覆盖一次，JS 通过 getComputedStyle 读取。 */
-  --kb-graph-bg: #eef0f4;
-  --kb-graph-dot: #d5d9e0;
-  --kb-node-bg: #dbe2ed;          /* 浅色下默认节点用浅灰蓝实心，纯白会和画布糊在一起 */
-  --kb-node-border: #7f8b9e;
-  --kb-node-shadow: rgba(15, 20, 40, .18);
-  --kb-edge: #8b8f99;
-  --kb-label-bg: #eef0f4;
+  --kb-graph-bg: #f5f6f7;
+  --kb-graph-dot: #e5e5e5;
+  --kb-node-bg: #e4edfd;          /* 浅色下默认节点用浅蓝实心，纯白会和画布糊在一起 */
+  --kb-node-border: #b7c8fe;
+  --kb-node-shadow: rgba(15, 17, 21, .14);
+  --kb-edge: #adb2b8;
+  --kb-label-bg: #f5f6f7;
 }
 
-/* 浅色：VS Code Light+ 镜像（提高文字与边框对比度） */
+/* 浅色：白底 + 冷灰蓝分层 + DeepSeek 蓝强调 */
 html[data-theme="light"] {
   color-scheme: light;        /* 原生控件 / 滚动条跟随浅色 */
-  --accent: #3b57e0; --accent-hover: #2f49c9; --accent-soft: rgba(59, 87, 224, .12);
+  --accent: #3560f5; --accent-hover: #5686fe; --accent-soft: #edf3fe;
+  --accent-line: #b7c8fe;
+  --accent-faint: rgba(57, 100, 254, .05);
   --bg: #ffffff;
-  --bg-side: #f6f7f9;
-  --bg-hover: #eef0f3;
-  --bg-active: #e3e6eb;
-  --bg-input: #f7f8fa;
+  --bg-side: #f9fafb;
+  --bg-hover: #f1f3f5;
+  --bg-active: #ebeef2;
+  --bg-input: #ffffff;
   --bg-elevated: #ffffff;
-  --overlay: rgba(15, 20, 40, .3);
-  --text: #1b1e23;
-  --text-dim: #5b6169;
-  --text-mute: #8b9199;
-  --border-subtle: #eff1f4;
-  --border: #e1e4e9;
-  --border-strong: #c3c8cf;
-  --bubble-user: #3b57e0;
-  --bubble-user-text: #ffffff;
-  --code-bg: #f7f8fa;
-  --code-head: #eef0f3;
-  --inline-bg: #eef0f3;
-  --quote-bar: #c3c8cf;
-  --scroll: #d3d7dc;
-  --scroll-hover: #b7bcc4;
+  --overlay: rgba(0, 0, 0, .24);
+  --text: #0f1115;
+  --text-dim: #61666b;
+  --text-mute: #696e74;        /* 原 #81858c 只有 3.71:1，加深到 4.62:1（含悬停底） */
+  --border-subtle: rgba(0, 0, 0, .04);
+  --border: rgba(0, 0, 0, .10);
+  --border-strong: rgba(0, 0, 0, .16);
+  --bubble-user: #edf3fe;
+  --bubble-user-text: #0f1115;
+  --code-bg: #f5f6f7;
+  --code-head: #ebeef2;
+  --inline-bg: #f1f3f5;
+  --quote-bar: rgba(0, 0, 0, .16);
+  --scroll: #e5e5e5;
+  --scroll-hover: #d0d0d0;
+  --kb-graph-bg: #f9fafb;
+  --kb-graph-dot: #e5e5e5;
+  --kb-node-bg: #e4edfd;
+  --kb-node-border: #b7c8fe;
+  --kb-node-shadow: rgba(15, 17, 21, .14);
+  --kb-edge: #adb2b8;
+  --kb-label-bg: #f9fafb;
 }
 
-/* 雾光：新会话首屏的视觉语言提炼成主题（浅底 + 冷紫强调 + 更柔的圆角/阴影） */
-html[data-theme="aurora"] {
-  color-scheme: light;
-  --accent: #5b6cff; --accent-hover: #4a5bf0; --accent-soft: rgba(91, 108, 255, .14);
-  --bg: #f4f6ff;
-  --bg-side: #eef1fc;
-  --bg-hover: #e7ecfb;
-  --bg-active: #dde4f8;
-  --bg-input: #f8f9ff;
-  --bg-elevated: #ffffff;
-  --overlay: rgba(24, 30, 60, .28);
-  --text: #1b1f2e;
-  --text-dim: #5a6078;
-  --text-mute: #8a90a5;
-  --border-subtle: #edf0fb;
-  --border: #dfe4f2;
-  --border-strong: #c6cde3;
-  --bubble-user: #5b6cff;
-  --bubble-user-text: #ffffff;
-  --code-bg: #f7f8ff;
-  --code-head: #eef1fb;
-  --inline-bg: #eef1fb;
-  --quote-bar: #c6cde3;
-  --scroll: #d3d9ec;
-  --scroll-hover: #b9c1da;
-  --accent-line: rgba(91, 108, 255, .38);
-  --accent-faint: rgba(91, 108, 255, .07);
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --shadow-md: 0 4px 18px rgba(60, 80, 180, .10);
-  --shadow-lg: 0 18px 48px rgba(40, 60, 160, .18);
-  --kb-graph-bg: #f0f3ff;
-  --kb-graph-dot: #d9dff2;
-  --kb-node-bg: #dfe6f7;
-  --kb-node-border: #8d97b5;
-  --kb-node-shadow: rgba(40, 60, 140, .16);
-  --kb-edge: #8d93a8;
-  --kb-label-bg: #f0f3ff;
-}
-
-/* 深色：VS Code Dark+ 镜像（提高文字与边框对比度） */
+/* 深色：VS Code Dark+ 的画布 / 侧栏层级 + DeepSeek 亮蓝强调 */
 html[data-theme="dark"] {
   color-scheme: dark;         /* 原生控件 / 滚动条跟随深色 */
-  --accent: #6b86ff; --accent-hover: #7d95ff; --accent-soft: rgba(107, 134, 255, .18);
-  --bg: #17181b;              /* 编辑器 / 主区背景 */
-  --bg-side: #1c1e21;         /* 侧边栏 */
-  --bg-hover: #25282c;        /* 列表悬停 */
-  --bg-active: #2d3136;       /* 列表选中 */
-  --bg-input: #22252a;        /* 输入框底色 */
-  --bg-elevated: #24272b;     /* 浮层（菜单 / 弹窗 / 气泡） */
-  --overlay: rgba(0, 0, 0, .45);
-  --text: #e6e8ea;
-  --text-dim: #9ba1a8;
-  --text-mute: #6f757c;
-  --border-subtle: #24272b;   /* 内部分隔：几乎只靠色差，不抢视觉 */
-  --border: #2e3238;
-  --border-strong: #42474e;
-  --bubble-user: #3b57e0;
-  --bubble-user-text: #ffffff;
-  --code-bg: #131417;
-  --code-head: #1b1d20;
-  --inline-bg: #24272b;
-  --quote-bar: #42474e;
-  --scroll: #35383d;
-  --scroll-hover: #4a4e54;
-  --kb-graph-bg: #131417;
-  --kb-graph-dot: #292c31;
-  --kb-node-bg: #34383f;
-  --kb-node-border: #5b626c;
+  --accent: #6490ff; --accent-hover: #7ba4ff; --accent-soft: #283142;
+  --accent-line: #4868b2;
+  --accent-faint: rgba(86, 134, 254, .08);
+  --bg: #1e1e1e;              /* 主区背景：对齐 VS Code editor.background */
+  --bg-side: #252526;         /* 侧边栏：对齐 VS Code sideBar.background（比画布亮） */
+  --bg-hover: #2c2c2e;        /* 列表悬停 */
+  --bg-active: #353638;       /* 列表选中 */
+  --bg-input: #2c2c2e;        /* 输入框底色 */
+  --bg-elevated: #353638;     /* 浮层（菜单 / 弹窗 / 气泡） */
+  --overlay: rgba(0, 0, 0, .5);
+  --text: #f9fafb;
+  --text-dim: #cfd3d6;
+  --text-mute: #adb2b8;
+  /* 深色底上语义色要反过来提亮，否则会掉到 AA 以下 */
+  --danger: #f76a6a;
+  --danger-line: rgba(247, 106, 106, .5);
+  --ok: #4aa96c;
+  --ok-line: rgba(74, 169, 108, .45);
+  --warn: #c98a12;
+  --warn-line: rgba(201, 138, 18, .55);
+  --border-subtle: rgba(255, 255, 255, .06);
+  --border: rgba(255, 255, 255, .12);
+  --border-strong: rgba(255, 255, 255, .20);
+  --bubble-user: #2c2c2e;
+  --bubble-user-text: #f9fafb;
+  --code-bg: #1e1e1e;         /* 代码块与 VS Code 编辑区同底，靠边框 / 头部区分 */
+  --code-head: #252526;       /* 代码块头部：对齐 VS Code 面板色 */
+  --inline-bg: #353638;
+  --quote-bar: rgba(255, 255, 255, .20);
+  --scroll: #3c3c3d;
+  --scroll-hover: #545557;
+  --kb-graph-bg: #1e1e1e;
+  --kb-graph-dot: #2c2c2e;
+  --kb-node-bg: #43454a;
+  --kb-node-border: #545557;
   --kb-node-shadow: rgba(0, 0, 0, .55);
-  --kb-edge: #8b919b;
-  --kb-label-bg: #131417;
+  --kb-edge: #81858c;
+  --kb-label-bg: #1e1e1e;
+  /* 深色底需要更重的阴影才能看出浮层抬升；与笔记皮肤的深色档保持一致 */
+  --shadow-xs: 0 1px 1px rgba(0, 0, 0, .35);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .40);
+  --shadow-md: 0 2px 10px rgba(0, 0, 0, .45);
+  --shadow-lg: 0 16px 44px rgba(0, 0, 0, .60);
 }
 

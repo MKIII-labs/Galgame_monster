@@ -273,6 +273,43 @@ def _is_audio_att(name, mime=""):
     return str(name or "").lower().endswith(_AUDIO_EXT)
 
 
+# 「添加到对话」引用块：单条 / 合计 / 条数上限，避免一次贴进太多原文撑爆请求
+QUOTE_MAX_ONE = 4000
+QUOTE_MAX_TOTAL = 12000
+QUOTE_MAX_COUNT = 8
+
+
+def normalize_quotes(quotes):
+    """把前端传入的 quotes 规整成可落库的 [{text, label}]。"""
+    if not isinstance(quotes, list):
+        return []
+    out, total = [], 0
+    for q in quotes[:QUOTE_MAX_COUNT]:
+        text = str((q.get("text") if isinstance(q, dict) else q) or "").strip()
+        if not text:
+            continue
+        if len(text) > QUOTE_MAX_ONE:
+            text = text[:QUOTE_MAX_ONE] + "…（已截断）"
+        if total + len(text) > QUOTE_MAX_TOTAL:
+            break
+        total += len(text)
+        label = str((q.get("label") if isinstance(q, dict) else "") or "").strip()[:24]
+        out.append({"text": text, "label": label})
+    return out
+
+
+def quotes_block(quotes):
+    """把引用拼成给模型看的文本；返回空串表示没有可用引用。"""
+    items = normalize_quotes(quotes)
+    if not items:
+        return ""
+    lines = []
+    for i, q in enumerate(items, 1):
+        src = ("[来源：%s] " % q["label"]) if q.get("label") else ""
+        lines.append("%d. %s%s" % (i, src, q["text"]))
+    return "【用户引用的原文】\n" + "\n".join(lines)
+
+
 def _msg_text(m, refs_handle=False):
     """一条消息真正发给模型的文本：正文 + 图片描述 + 附件正文。
     估算与拼装必须共用这一个函数，否则进度条会低估附件体积。
@@ -296,6 +333,10 @@ def _msg_text(m, refs_handle=False):
     if m.get("vision"):
         text = (text + "\n\n【图片内容】\n" + m["vision"]) if text \
                else ("【用户上传了一张图片】\n" + m["vision"])
+    # 「添加到对话」的引用：跟着用户消息一起进历史，后续追问 / 重新发言仍能看到
+    _quotes = quotes_block(m.get("quotes"))
+    if _quotes:
+        text = (text + "\n\n" + _quotes) if text else _quotes
     # 文档附件：新消息把每份附件的正文存在 docs[].text；旧消息只有 doc_text（第一份）
     _docs = m.get("docs") if isinstance(m.get("docs"), list) else None
     if _docs:

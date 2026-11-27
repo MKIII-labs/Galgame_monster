@@ -299,7 +299,8 @@ def _sandbox_root(sandbox):
     return root
 
 
-TREE_TTL = 3.0                 # 目录树缓存（秒）：既要避免每轮重扫，也要尽快反映改动
+TREE_TTL = 12.0                # 目录树缓存（秒）：写 / 删 / 移动会主动失效，
+                               # 这里只兜底「IDE 每 5 秒轮询」；3 秒会让每次轮询都重扫
 
 
 def invalidate_tree(root=None):

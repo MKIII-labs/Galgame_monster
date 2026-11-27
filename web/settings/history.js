@@ -58,7 +58,7 @@ function renderSettingsHistory() {
 async function loadSettingsHistory() {
   const box = $('#settings-history-list');
   if (!box) return;
-  box.textContent = '加载中…';
+  box.innerHTML = gmLoadingHtml('正在读取配置历史…');
   try {
     const r = await api('/api/settings', { op: 'history' });
     _settingsHistory = r.items || [];

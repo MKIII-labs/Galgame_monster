@@ -39,11 +39,12 @@ SEE_MAX_IMAGES = 4                    # see_image 一次最多看几张（多图
 SEE_MAX_TOTAL = 24 * 1024 * 1024      # 多图合计上限
 
 
-TOOLS = ("list_dir", "read_file", "read_files", "search_files", "search_code", "repo_map", "write_file", "edit_file",
+TOOLS = ("list_dir", "read_file", "read_files", "search_files", "search_code", "repo_map", "write_file", "download_file", "doc_create", "edit_file",
          "multi_edit", "apply_patch", "notebook_edit",
          "code_context", "impact",
-         "make_dir", "move_file", "copy_file", "delete_file", "run_command", "shell",
+         "make_dir", "move_file", "copy_file", "delete_file", "run_command", "shell", "run_script",
          "fetch_url", "sleep", "open_preview", "render_check",
+         "deploy_site",
          "visual_check", "render_views", "scene_assert", "geometry_compare",
          "asset_scan", "asset_convert", "asset_atlas", "asset_inline", "asset_validate",
          "mesh_inspect",
@@ -75,7 +76,7 @@ TOOLS = TOOLS + tuple(tool_meta.META)
 COMPUTER_TOOLS = computer.TOOLS
 
 
-WRITE_TOOLS = ("write_file", "edit_file", "multi_edit", "apply_patch", "notebook_edit",
+WRITE_TOOLS = ("write_file", "download_file", "doc_create", "edit_file", "multi_edit", "apply_patch", "notebook_edit",
                "make_dir", "move_file", "copy_file", "delete_file",
                "lsp_rename", "recover_file",
                "asset_convert", "asset_atlas", "asset_inline")
@@ -118,7 +119,7 @@ _PLUGIN_TOOLS_LOCK = threading.Lock()
 
 
 FILE_TOOLS = {"list_dir", "read_file", "read_files", "search_files", "search_code", "repo_map",
-              "code_context", "impact", "write_file",
+              "code_context", "impact", "write_file", "download_file", "doc_create",
               "edit_file", "multi_edit", "apply_patch", "notebook_edit",
               "make_dir", "move_file", "copy_file", "delete_file",
               # 下面这些同样以沙箱为根，归到同一类：normalize_tool_name 与
@@ -127,7 +128,7 @@ FILE_TOOLS = {"list_dir", "read_file", "read_files", "search_files", "search_cod
               "lsp_hover", "lsp_symbols", "lsp_implementation", "lsp_calls",
                "git_status", "git_diff", "git_log", "git_commit", "split_commit",
               "list_steps", "undo_step", "redo_step", "recover_file",
-              "open_preview", "visual_check", "asset_scan", "asset_convert", "asset_atlas",
+              "open_preview", "deploy_site", "visual_check", "asset_scan", "asset_convert", "asset_atlas",
               "asset_inline", "asset_validate", "run_workflow_script"}
 
 # 没有沙箱目录（未选工作目录）时仍然可用的只读工具：读文件 / 列目录 / 看图 / 会话附件。
@@ -218,11 +219,6 @@ TOOL_ALIASES = {
     "memory_search": "memory.search", "recall": "memory.search",
     "remember": "memory.remember", "forget": "memory.forget",
     "task_create": "task.create", "task_list": "task.list", "task_get": "task.get",
-    "bili": "bili.analyze", "bilibili": "bili.analyze",
-    "bili_analyze": "bili.analyze", "bili_up": "bili.up",
-    "bili_search": "bili.up", "bili_comments": "bili.comments",
-    "bili_danmaku": "bili.danmaku", "bili_transcript": "bili.transcript",
-    "bili_timeline": "bili.timeline",
     "ask": "ask_user", "question": "ask_user",
     # 显式收尾：模型常写成 done / complete / task_done（Trae 的叫法）
     "done": "finish", "complete": "finish", "finished": "finish",
@@ -238,7 +234,7 @@ def _capability_ids():
         return set()
 
 
-_CAP_NAMESPACES = {"bili", "calendar", "stock", "memory", "task", "note",
+_CAP_NAMESPACES = {"calendar", "stock", "memory", "task", "note",
                    "observe", "skill", "doc", "llm", "search",
                    "workflow", "computer", "kb", "image"}
 
@@ -364,6 +360,9 @@ _REQUIRED_ARGS = {
     "read_file": ("path",),
     "read_files": ("paths",),
     "write_file": ("path", "content"),
+    "download_file": ("url", "path"),
+    "doc_create": ("path",),
+    "run_script": ("code",),
     "edit_file": ("path", "old", "new"),
     "multi_edit": ("path", "edits"),
     "apply_patch": ("path", "patch"),

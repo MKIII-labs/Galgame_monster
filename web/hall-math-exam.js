@@ -109,8 +109,7 @@ function mathExamRender() {
   ov.foot.innerHTML = '';
   const st = math.exam;
   if (st.loading) {
-    ov.body.innerHTML = '<div class="math-loading"><span class="math-spinner"></span>'
-      + '正在准备期末复习数据…</div>';
+    ov.body.innerHTML = gmLoadingHtml('正在准备期末复习数据…', 'center');
     return;
   }
   if (st.view === 'setup') mathExamRenderSetup();
@@ -172,7 +171,7 @@ function mathExamRenderSetup() {
   const ov = math.overlay;
   const st = math.exam;
   if (!st.meta) {
-    ov.body.innerHTML = '<div class="math-loading"><span class="math-spinner"></span>正在加载课程…</div>';
+    ov.body.innerHTML = gmLoadingHtml('正在加载课程…', 'center');
     return;
   }
   const skills = mathExamCourseSkills(st.course);
@@ -431,7 +430,7 @@ async function mathExamSubmit(auto) {
   });
   const ov = math.overlay;
   if (ov) {
-    ov.body.innerHTML = '<div class="math-loading"><span class="math-spinner"></span>正在批改…</div>';
+    ov.body.innerHTML = gmLoadingHtml('正在批改…', 'center');
     ov.foot.innerHTML = '';
   }
   try {
@@ -818,7 +817,7 @@ function mathExamRenderProof() {
     + '</select></div></div>'
     + '<div class="math-exam-note">AI 按步骤点评，只评价你实际写出的内容；'
     + '不是形式化验证，也不能替代老师阅卷。</div>'
-    + (pf.loading ? '<div class="math-loading"><span class="math-spinner"></span>加载证明题…</div>'
+    + (pf.loading ? gmLoadingHtml('加载证明题…', 'center')
       : (pf.list && pf.list.length ? '<div class="math-exam-proof-list">'
         + pf.list.map((p) => '<button type="button" class="math-exam-proof" data-proof="'
           + mathExamEsc(p.id) + '"><b>' + mathExamEsc(p.prompt) + '</b><span>'

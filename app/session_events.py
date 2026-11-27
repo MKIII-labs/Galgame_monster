@@ -1,27 +1,28 @@
 # -*- coding: utf-8 -*-
-"""append-only 会话事件日志（旁路）。
+"""append-only 会话事件日志（会话内容的唯一事实源）。
 
-`sessions.json` 仍是唯一的读写入口；这里只是把「每次落库带来的变化」追加成事件，
-用于崩溃恢复、审计，以及后续的 resume / fork。它不参与任何读取路径，
-写失败也只打印一行日志，绝不影响主流程。
+每个会话一个 `data/sessions/<会话 id>/events.jsonl`：只追加、不滚动、不覆盖，
+永久保留。`data/session_store/<会话 id>.json` 只是从它物化出来的读缓存，
+可以随时删除并重建。
 
-为什么要有它：sessions.json 是整体快照，进程写到一半崩溃时只能看到半截；
-事件流是只追加的，最多丢最后一条未闭合事件，前面的内容完好。
+为什么用事件流：整体快照写到一半崩溃时只能看到半截；事件流是只追加的，
+最多丢最后一条未闭合事件，前面的内容完好。用户显式删除会话时会删掉整个目录。
 
 事件格式（每行一个 JSON）：
 
+    {"ts": 1792..., "type": "session/baseline", "session": {...}}
     {"ts": 1792..., "type": "session/created", "session": {...}}
     {"ts": ..., "type": "session/meta", "fields": {"title": "..."}}
     {"ts": ..., "type": "message/append", "index": 0, "message": {...}}
     {"ts": ..., "type": "message/append_content", "index": 3, "text": "新增的正文"}
     {"ts": ..., "type": "message/append_tools", "index": 3, "tools": [...]}
+    {"ts": ..., "type": "message/append_blocks", "index": 3, "blocks": [...]}
+    {"ts": ..., "type": "message/append_block_text", "index": 3, "bi": 0, "text": "增量"}
     {"ts": ..., "type": "message/patch", "index": 3, "fields": {...}}
     {"ts": ..., "type": "message/replace", "index": 3, "message": {...}}
     {"ts": ..., "type": "message/truncate", "keep": 5}
-
-落盘位置：data/sessions/<会话 id>/events.jsonl。单文件超过上限时滚动到
-events.1.jsonl（只保留一份历史，更老的会被覆盖）。
 """
+import collections
 import json
 import os
 import re
@@ -30,17 +31,46 @@ import time
 
 from app.store import DATA_DIR, clone_containers
 
-_LOCK = threading.Lock()
-# 每个会话「上一次落库时的快照」。sessions.json 的读缓存会返回同一个对象，
-# 调用方是就地修改的，磁盘旧版本在内存里已经没了 —— 只能靠这份快照做 diff。
-_LAST = {}
+# 每会话一把写锁：不同会话可以并行追加；同一会话必须串行（事件靠 diff）。
+_WRITE_LOCKS = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+# 单会话事件文件超过这个体积就滚动成 .1.jsonl（重建时会按 .1 → 当前 的顺序读）。
+MAX_BYTES = 64 * 1024 * 1024
+
+
+def _write_lock(sid):
+    key = str(sid or "")
+    with _WRITE_LOCKS_GUARD:
+        lk = _WRITE_LOCKS.get(key)
+        if lk is None:
+            lk = _WRITE_LOCKS[key] = threading.Lock()
+        return lk
+
+
+def _rotate(path):
+    """超过阈值就把当前文件滚到 .1.jsonl；旧 .1 直接覆盖（只保留两份）。"""
+    try:
+        if os.path.getsize(path) < MAX_BYTES:
+            return
+    except OSError:
+        return
+    bak = path[:-len(".jsonl")] + ".1.jsonl"
+    try:
+        os.replace(path, bak)
+    except OSError as e:
+        print("[事件] 滚动失败（继续追加原文件）：%s" % e)
+
+# 每个会话「上一次落库时的快照」。读取时会登记物化缓存里的状态，
+# 这样进程启动后的第一次落库也能算出正确增量。
+# 用 OrderedDict + 上限：会话多时不能把每一份完整会话都常驻内存。
+_LAST = collections.OrderedDict()
 _LAST_LOCK = threading.Lock()
+LAST_CAP = 64
 # 事件序号：新事件带 seq，重建时可校验单调递增；旧事件没有 seq，按 0 处理。
 _SEQ = {}
 _SEQ_LOCK = threading.Lock()
 _ISSUES = {}          # sid -> 最近一次重建发现的序号问题
 _WARNED = set()       # 已经打印过问题的会话，避免每次重建都刷日志
-MAX_BYTES = 32 * 1024 * 1024      # 单文件上限：超过后滚动，避免长任务无限增长
 _SID_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
@@ -87,18 +117,30 @@ def path_of(sid, data_dir=None):
     return os.path.join(base, "events.jsonl")
 
 
-def _rotate(path):
-    """事件文件超过上限时滚动到 events.1.jsonl（旧的一份被覆盖）。"""
-    try:
-        if os.path.getsize(path) < MAX_BYTES:
-            return
-    except OSError:
-        return
-    bak = path[:-len(".jsonl")] + ".1.jsonl"
-    try:
-        os.replace(path, bak)
-    except OSError:
-        pass
+def _blocks_events(i, old_blocks, new_blocks):
+    """blocks 的增量事件；表达不了时返回 None（调用方整条替换）。
+
+    取消思考上限后，一次进度落库再整段重写 blocks 会让日志迅速膨胀：
+    - 流式思考只增长最后一块 → 只记文本增量；
+    - 每轮新增工具 / 文本块 → 只记新增的块。
+    """
+    ob = list(old_blocks or [])
+    nb = list(new_blocks or [])
+    n = min(len(ob), len(nb))
+    if all(ob[k] == nb[k] for k in range(n)):
+        if len(nb) > len(ob):
+            return [("message/append_blocks", {"index": i, "blocks": nb[len(ob):]})]
+        return [] if len(nb) == len(ob) else None
+    if len(ob) == len(nb) and n >= 1 and all(ob[k] == nb[k] for k in range(n - 1)):
+        a, b = ob[-1], nb[-1]
+        at = str(a.get("text") or "") if isinstance(a, dict) else ""
+        bt = str(b.get("text") or "") if isinstance(b, dict) else ""
+        if (isinstance(a, dict) and isinstance(b, dict) and set(a) == set(b)
+                and a.get("kind") == b.get("kind")
+                and bt.startswith(at) and len(bt) > len(at)):
+            return [("message/append_block_text",
+                     {"index": i, "bi": n - 1, "text": bt[len(at):]})]
+    return None
 
 
 def _msg_events(i, old, new):
@@ -123,10 +165,19 @@ def _msg_events(i, old, new):
 
     fields = {}
     for k in _MSG_FIELDS:
+        if k == "blocks":
+            continue                      # blocks 单独做增量
         if old.get(k) != new.get(k):
             fields[k] = new.get(k)
     if fields:
         out.append(("message/patch", {"index": i, "fields": fields}))
+    if old.get("blocks") != new.get("blocks"):
+        evs = _blocks_events(i, old.get("blocks"), new.get("blocks"))
+        if evs is None:
+            # 增量表达不了（编辑 / 撤回 / 重排）：整条替换，前面的增量被覆盖
+            out.append(("message/replace", {"index": i, "message": new}))
+        else:
+            out.extend(evs)
     return out
 
 
@@ -170,61 +221,101 @@ def _sig(s):
     """廉价变化指纹：签名相同就跳过深拷贝与 diff。"""
     msgs = s.get("messages") or []
     last = msgs[-1] if msgs else {}
+    blocks = last.get("blocks") or []
+    # 思考 / 工具块的增长也要进签名：否则进度落库时只有 blocks 变化会被整条跳过
     return (s.get("title"), s.get("summary_upto"), len(str(s.get("summary") or "")),
             s.get("updated_at"), len(msgs),
-            len(str(last.get("content") or "")), len(last.get("tools") or []))
+            len(str(last.get("content") or "")), len(last.get("tools") or []),
+            len(blocks), len(str(blocks[-1].get("text") or "")) if blocks else 0)
+
+
+def _set_last(sid, snap):
+    """登记会话快照，并按最近使用淘汰，避免常驻内存随会话数无限增长。"""
+    with _LAST_LOCK:
+        _LAST[sid] = snap
+        _LAST.move_to_end(sid)
+        while len(_LAST) > LAST_CAP:
+            _LAST.popitem(last=False)
+
+
+def seed_last(s):
+    """登记当前内存快照：进程启动加载后调用，第一次落库才能算出正确增量。"""
+    if not isinstance(s, dict) or not s.get("id"):
+        return
+    _set_last(s.get("id"), clone_containers(s))
+
+
+def append_baseline(s, data_dir=None):
+    """无条件追加一条完整基线（迁移 / 缓存丢失后对账用）；返回事件 ts。
+
+    与 `record` 的区别：不做增量 diff，整份会话作为 `session/baseline` 写入，
+    重建时从这一条开始覆盖之前的内容。
+    """
+    if not isinstance(s, dict) or not s.get("id"):
+        return 0
+    sid = s.get("id")
+    snap = clone_containers(s)
+    _set_last(sid, clone_containers(snap))
+    path = path_of(sid, data_dir)
+    ts = time.time()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        line = json.dumps({"ts": ts, "seq": _next_seq(sid, path),
+                           "type": "session/baseline", "session": snap},
+                          ensure_ascii=False) + "\n"
+        with _write_lock(sid):
+            _rotate(path)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        return ts
+    except OSError as e:
+        print("[事件] 基线写入失败：%s" % e)
+        return 0
 
 
 def record(new, data_dir=None):
-    """把一次落库的变化追加到事件日志。失败只打印，不抛给调用方。
+    """把一次落库的变化追加到事件日志；返回最后一条事件的 ts（没写返回 0）。
 
-    首次见到某个会话时只建立基线：如果事件文件已存在，先从事件流恢复基线；
-    否则直接返回 —— 这样进程重启后不会把整份历史重复记一遍。
-    代价是重启后第一次落库的那点变化不会进日志（可接受）。
+    首次见到某个会话时只建立基线：如果事件文件已存在，说明启动加载时已经
+    登记过快照（见 `seed_last`），直接返回 —— 这样进程重启后不会把整份历史
+    重复记一遍。
     """
     try:
         if not isinstance(new, dict) or not new.get("id"):
-            return
+            return 0
         sid = new.get("id")
         with _LAST_LOCK:
             old = _LAST.get(sid)
         if old is not None and _sig(old) == _sig(new):
-            return                       # 没变化：不深拷贝、不写事件
+            return 0                     # 没变化：不深拷贝、不写事件
         snap = clone_containers(new)
-        with _LAST_LOCK:
-            _LAST[sid] = snap
+        _set_last(sid, snap)
         if old is None:
-            # 本进程第一次见到这个会话：sessions.json / 单会话快照在启动时已经
-            # 对账过，当前内存状态就是最新状态，直接拿它当基线即可。
-            # 以前这里会 rebuild（重放整份事件日志，最大的会话 50MB+ 要几百毫秒），
-            # 现在只在「事件文件还不存在」时补一条完整基线。
             path = path_of(sid, data_dir)
             if os.path.exists(path) or os.path.exists(path[:-len(".jsonl")] + ".1.jsonl"):
-                return
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            _rotate(path)
-            with _LOCK:
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({"ts": time.time(),
-                                        "seq": _next_seq(sid, path),
-                                        "type": "session/baseline",
-                                        "session": snap}, ensure_ascii=False) + "\n")
-            return
+                return 0
+            return append_baseline(snap, data_dir)
         evs = diff(old, new)
         if not evs:
-            return
+            return 0
         path = path_of(sid, data_dir)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        _rotate(path)
         now = time.time()
-        with _LOCK:
+        # 先序列化（可能几 MB），再进会话写锁；锁内只做 rotate + append。
+        lines = []
+        for typ, data in evs:
+            item = {"ts": now, "seq": _next_seq(sid, path), "type": typ}
+            item.update(data)
+            lines.append(json.dumps(item, ensure_ascii=False) + "\n")
+        payload = "".join(lines)
+        with _write_lock(sid):
+            _rotate(path)
             with open(path, "a", encoding="utf-8") as f:
-                for typ, data in evs:
-                    item = {"ts": now, "seq": _next_seq(sid, path), "type": typ}
-                    item.update(data)
-                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                f.write(payload)
+        return now
     except Exception as e:
-        print("[事件] 旁路写入失败（不影响主流程）：%s" % e)
+        print("[事件] 写入失败（不影响主流程）：%s" % e)
+        return 0
 
 
 def record_all(rows, data_dir=None):
@@ -300,6 +391,17 @@ def _apply(evt, s, messages):
         idx = int(evt.get("index") or 0)
         if 0 <= idx < len(messages):
             messages[idx]["tools"] = (messages[idx].get("tools") or []) + (evt.get("tools") or [])
+    elif typ == "message/append_blocks":
+        idx = int(evt.get("index") or 0)
+        if 0 <= idx < len(messages):
+            messages[idx]["blocks"] = (messages[idx].get("blocks") or []) + (evt.get("blocks") or [])
+    elif typ == "message/append_block_text":
+        idx = int(evt.get("index") or 0)
+        bi = int(evt.get("bi") or 0)
+        if 0 <= idx < len(messages):
+            blocks = messages[idx].get("blocks") or []
+            if 0 <= bi < len(blocks) and isinstance(blocks[bi], dict):
+                blocks[bi]["text"] = str(blocks[bi].get("text") or "") + (evt.get("text") or "")
     elif typ == "message/patch":
         idx = int(evt.get("index") or 0)
         if 0 <= idx < len(messages):
@@ -375,7 +477,7 @@ def rebuild(sid, data_dir=None):
 def load_all(data_dir=None):
     """扫描 data/sessions/*/events.jsonl，返回 {会话 id: 重建结果}。
 
-    只用于启动时的对账：事件流比 sessions.json 新时以事件流为准。
+    用于判断事件流是否比物化缓存新。
     单个会话损坏不影响其它会话（跳过并打印）。
     """
     base = os.path.join(data_dir or DATA_DIR, "sessions")

@@ -2,57 +2,6 @@
    由 work.js 按功能拆分；普通脚本共享全局作用域，加载顺序见 index.html。 */
 'use strict';
 
-function workOpenImageDialog() {
-  let size = 'square';
-  let promptEl = null;
-  workOpenDialog('生成图片', (body) => {
-    promptEl = workField(body, '提示词',
-      workElNew('textarea', 'work-input work-textarea'));
-    promptEl.rows = 5;
-    promptEl.placeholder = '描述你想要的画面，例如：雨夜的霓虹街道，电影感，35mm';
-    const chips = workElNew('div', 'work-dt-chips');
-    workFieldBox(body, '尺寸', chips);
-    const opts = [
-      ['square', '方形 1024²'],
-      ['portrait', '竖图 832×1216'],
-      ['landscape', '横图 1216×832'],
-    ];
-    const btns = opts.map(([v, label]) => {
-      const b = workElNew('button', 'work-dt-chip' + (v === size ? ' on' : ''), label);
-      b.type = 'button';
-      b.onclick = () => {
-        size = v;
-        btns.forEach(([btn, val]) => btn.classList.toggle('on', val === size));
-      };
-      chips.appendChild(b);
-      return [b, v];
-    });
-    body.appendChild(workElNew('div', 'work-hint',
-      '本地 FLUX 3 Image Klein（16 步）。首次生成要加载模型，可能多等十几秒；'
-      + '结果会放进右侧「产物」栏，点开可预览。'));
-  }, async () => {
-    const prompt = promptEl.value.trim();
-    if (!prompt) { toast('请填写提示词', 'error'); return false; }
-    const okBtn = workEl('work-dialog-ok');
-    const label = okBtn ? okBtn.textContent : '生成';
-    if (okBtn) { okBtn.disabled = true; okBtn.textContent = '生成中…'; }
-    try {
-      const r = await api('/api/image/generate', { prompt, size });
-      if (!r.ok) throw new Error(r.error || '生成失败');
-      await workLoad(true);
-      toast('图片已生成，见「产物」栏', 'success');
-      const art = r.artifact;
-      workCloseDialog();
-      if (art && art.id) workPreviewArtifact(art.id).catch(() => {});
-      return false;                       // 弹窗已在上面关掉
-    } catch (e) {
-      toastErr('生成图片失败', e);
-      if (okBtn) { okBtn.disabled = false; okBtn.textContent = label || '生成'; }
-      return false;
-    }
-  }, { okText: '生成' });
-}
-
 function workSceneName(id) {
   const hit = (WORK.scenes || []).find((s) => s.id === id);
   return hit ? hit.name : (id || '通用');

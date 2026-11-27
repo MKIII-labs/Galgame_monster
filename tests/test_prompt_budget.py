@@ -5,7 +5,7 @@ import json
 import pytest
 
 from app import agent, mem_tool  # noqa: F401
-from app import httpd  # noqa: F401  导入即注册能力（bili / calendar / stock / memory / observe）
+from app import httpd  # noqa: F401  导入即注册能力（calendar / stock / memory / observe）
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +46,7 @@ def test_agent_prompt_without_domains_is_compact(tmp_path):
     assert len(text) < 9000, "Agent 提示 %d 字" % len(text)
     assert "沙箱目录树" not in text            # 有历史 + 原生工具 → 不再每轮塞树
     assert "calendar.create" in text           # 提醒约定必须保留
-    assert "bili.analyze" not in text          # 未命中 B 站域 → 相关长约定不注入
+    assert "stock.brief" not in text           # 未命中股市域 → 相关长约定不注入
 
 
 def test_agent_prompt_first_turn_keeps_tree(tmp_path):
@@ -58,11 +58,11 @@ def test_agent_prompt_first_turn_keeps_tree(tmp_path):
 def test_schema_gating_by_domain():
     none_dom = agent.native_tool_schemas(agent_on=True, search_ready=True, cap_domains=set())
     names = [t["function"]["name"] for t in none_dom]
-    assert "bili_analyze" not in names and "calendar_create" not in names
-    bili = agent.native_tool_schemas(agent_on=True, search_ready=True, cap_domains={"bili"})
-    bnames = [t["function"]["name"] for t in bili]
-    assert "bili_analyze" in bnames and "calendar_create" not in bnames
-    assert len(bili) > len(none_dom)
+    assert "calendar_create" not in names
+    cal = agent.native_tool_schemas(agent_on=True, search_ready=True, cap_domains={"calendar"})
+    cnames = [t["function"]["name"] for t in cal]
+    assert "calendar_create" in cnames
+    assert len(cal) > len(none_dom)
 
 
 def test_schema_always_keeps_all():
@@ -102,9 +102,19 @@ def test_tool_search_unlocks_group():
 
 def test_cap_domains_for_keywords():
     from app.api import chat
-    assert "bili" in chat._cap_domains_for("帮我看看这个 BV1xx411c7mD 视频")
     assert "calendar" in chat._cap_domains_for("明天早上提醒我交作业")
     assert chat._cap_domains_for("今天天气不错") == set()
+
+
+def test_capability_boundary_requires_schema_tool_names():
+    """挂了能力工具时必须按 schema 原文（下划线）调用，不能把内部点号 id 当工具名。"""
+    from app.agent.prompt import capability_boundary
+    for text in (capability_boundary(False, cap_names=True),
+                 capability_boundary(True, cap_names=True)):
+        assert "calendar_list" in text
+        assert "不要写成点号形式" in text
+    # 没挂能力工具时不占提示词预算
+    assert "不要写成点号形式" not in capability_boundary(False)
 
 
 def test_rank_items_can_skip_model():

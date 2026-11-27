@@ -67,6 +67,34 @@ font-size:12.5px}
 .sh-toc-item.lvl3{padding-left:14px;font-size:12px}
 .sh-foot{margin-top:32px;padding-top:14px;border-top:1px solid var(--line);
 font-size:12px;color:var(--dim)}
+/* 联网搜索 trace（静态版）：只保留「搜索到 N 个网页 / 浏览页面 / 检索式」 */
+.sh-a .search-trace{margin:10px 0 16px;font-size:13px}
+.sh-a .search-trace .think-head{display:flex;align-items:center;gap:7px;color:var(--dim);cursor:default}
+.sh-a .search-trace .think-caret{display:none}
+.sh-a .search-trace .think-body{padding-top:2px}
+.sh-a .search-favicons{display:inline-flex;align-items:center;gap:2px;margin-left:2px}
+.sh-a .search-favicon{width:14px;height:14px;display:inline-flex;overflow:hidden;border-radius:50%}
+.sh-a .search-favicon-text{display:none}
+.sh-a .search-favicon-img{width:100%;height:100%;object-fit:cover}
+.sh-a .search-favicon.more{display:none}
+.sh-a .search-pages{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;margin-top:3px}
+.sh-a .search-pages-label{display:inline-flex;align-items:center;gap:5px;color:var(--dim);font-size:12px}
+.sh-a .search-pages-label .ic,.sh-a .search-page-arrow{display:none}
+.sh-a .search-page-links{display:flex;flex-wrap:wrap;gap:4px 14px}
+.sh-a .search-page-link{color:var(--accent);text-decoration:none;font-size:12.5px}
+.sh-a .search-meta{margin-top:4px;font-size:12px;color:var(--dim)}
+.sh-a .search-warn{margin-top:4px;font-size:12px;color:#b45309}
+.sh-a .cite-ref{display:inline-flex;align-items:center;justify-content:center;min-width:15px;
+height:15px;padding:0 3px;margin:0 1px;border-radius:4px;background:rgba(59,130,246,.14);
+color:var(--accent);font-size:10.5px;line-height:1;vertical-align:2px}
+/* 整段会话分享：用户气泡 / 附件 */
+.sh-a .share-msg{margin:16px 0}
+.sh-a .share-role{font-size:11px;color:var(--dim);margin-bottom:4px}
+.sh-a .bubble{white-space:pre-wrap;word-break:break-word;background:var(--code);
+border-radius:8px;padding:8px 12px}
+.sh-a .msg-images{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.sh-a .msg-image img{max-width:200px;height:auto;border-radius:8px}
+.sh-a .msg-docs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;font-size:12px;color:var(--dim)}
 """
 
 

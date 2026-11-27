@@ -51,7 +51,19 @@ def _api_notes_rename(h):
 
 def _api_notes_move(h):
         body = h._body()
-        ok, info = noteslib.move_note(body.get("path"), body.get("to") or "")
+        to = body.get("to") or ""
+        paths = body.get("paths")
+        if isinstance(paths, list) and paths:
+            moved, errors = [], []
+            for rel in paths:
+                ok, info = noteslib.move_path(rel, to)
+                if ok:
+                    moved.append({"from": rel, "to": info})
+                else:
+                    errors.append({"path": rel, "error": info})
+            return h._json({"ok": True, "moved": moved, "errors": errors,
+                            "tree": noteslib.list_tree(), "graph": noteslib.graph()})
+        ok, info = noteslib.move_path(body.get("path"), to)
         if not ok:
             return h._json({"ok": False, "error": info}, 400)
         h._json({"ok": True, "path": info, "tree": noteslib.list_tree(),
@@ -101,3 +113,16 @@ def _api_notes_anno_delete(h):
         body = h._body()
         noteslib.delete_annotation(body.get("path"), str(body.get("id") or ""))
         h._json({"ok": True, "items": noteslib.list_annotations(body.get("path"))})
+
+
+def _api_notes_capture(h):
+        ok, info = noteslib.capture_from_chat(h._body())
+        if not ok:
+            return h._json({"ok": False, "error": info}, 400)
+        payload = dict(info, ok=True, tree=noteslib.list_tree(), graph=noteslib.graph())
+        h._json(payload)
+
+
+def _api_notes_captures(h):
+        sid = h._body().get("session_id")
+        h._json({"ok": True, "items": noteslib.list_chat_captures(sid)})

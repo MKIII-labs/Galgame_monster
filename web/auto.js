@@ -1,14 +1,15 @@
 'use strict';
 
 /* ============================================================
-   自主推送：常驻通道（/api/events）+ 系统通知 + 提醒 / 主动聊天
+   自主推送：常驻通道（/api/events）+ 系统通知 + 定时提醒
    ------------------------------------------------------------
    与 /api/chat 的流式不同，这条连接**长期挂着**：服务端在没人提问时
-   （定时提醒到点、AI 主动发消息）也能把内容推过来。
+   （定时提醒到点）也能把内容推过来。
    ============================================================ */
 
 const AUTO = {
   ctrl: null,      // AbortController：重连前先掐掉旧连接
+  timer: 0,        // 重连计时器：退出 / 重连时清掉，避免页面销毁后还在连
   retry: 0,        // 连续失败次数（用于退避）
   notified: false, // 是否已问过通知权限
   notifiedKeys: new Set(),   // 同一件事只提醒一次（任务确认 / 任务完成等）
@@ -174,10 +175,41 @@ async function notifyJump(target) {
     }
     if (target.sessionId) {
       if (typeof setUiMode === 'function' && state.uiMode !== 'solo') await setUiMode('solo');
-      if (target.sessionId !== state.sessions.current && typeof selectSession === 'function') {
+      const same = target.sessionId === state.sessions.current;
+      if (!same && typeof selectSession === 'function') {
         await selectSession(target.sessionId);
+      } else if (same && typeof attachStreamHost === 'function') {
+        // 本会话的实时行可能被切走过：先挂回末尾，再决定怎么滚
+        attachStreamHost(target.sessionId);
       }
       const idx = Number(target.messageIndex);
+      const chat = $('#chat');
+      const now = (typeof curSession === 'function') ? curSession() : null;
+      const total = (now && Array.isArray(now.messages)) ? now.messages.length : 0;
+      const isLatest = !Number.isFinite(idx) || idx >= total - 1;
+      // 后台刚结束时**不要整窗重建**：内存里的消息可能还没同步，重建会把正在显示的
+      // 实时行冲掉（表现就是「点通知回来，AI 输出消失」）。
+      // 1) 目标行已经在 DOM 里：只滚动，不重排；
+      if (!isLatest && chat) {
+        const row = chat.querySelector('.msg[data-idx="' + idx + '"]');
+        if (row && typeof chatScrollRow === 'function' && chatScrollRow(row)) return;
+      }
+      // 2) 最新一条（绝大多数完成通知）：直接回到底部看流式 / 最终输出；
+      if (isLatest) {
+        if (typeof scrollToBottom === 'function') scrollToBottom(true);
+        return;
+      }
+      // 3) 更早的消息且不在当前窗口：先拉一次最新状态再定位，避免用过期数据重建
+      try {
+        if (typeof api === 'function') {
+          const r = await api('/api/session/select', { id: target.sessionId });
+          if (r && r.sessions && typeof applySessionsPayload === 'function') {
+            applySessionsPayload(r.sessions, { keepCurrent: false });
+            if (typeof renderSessions === 'function') renderSessions();
+            if (typeof renderMessages === 'function') renderMessages();
+          }
+        }
+      } catch (e) { /* 拉取失败就继续用本地数据试一次 */ }
       if (Number.isFinite(idx) && typeof ssFocusMessage === 'function') {
         try { await ssFocusMessage(idx); return; } catch (e) { /* 定位失败回退到底部 */ }
       }
@@ -234,6 +266,7 @@ async function syncPendingState() {
 
 function startEvents() {
   if (AUTO.ctrl) { try { AUTO.ctrl.abort(); } catch (e) { /* ignore */ } }
+  if (AUTO.timer) { clearTimeout(AUTO.timer); AUTO.timer = 0; }
   AUTO.ctrl = new AbortController();
   (async () => {
     let ok = false;
@@ -269,7 +302,7 @@ function startEvents() {
     AUTO.retry = Math.min((AUTO.retry || 0) + 1, 10);
     const wait = Math.min(3000 * AUTO.retry, 30000);
     if (!ok) console.warn('[自主推送] 连接失败，' + wait + 'ms 后重试');
-    setTimeout(startEvents, wait);
+    AUTO.timer = setTimeout(startEvents, wait);
   })();
 }
 
@@ -317,6 +350,18 @@ function handleAutoEvent(obj) {
     }
     return;
   }
+  if (obj.type === 'session_title') {
+    // 后台生成标题完成后推送：只改这一行的标题，避免整份 /api/state 重拉
+    const sid = String(obj.sid || '');
+    const title = String(obj.title || '');
+    if (sid && title) {
+      const rows = (state.sessions && state.sessions.sessions) || [];
+      const row = rows.find((x) => x && x.id === sid);
+      if (row) row.title = title;
+      if (typeof renderSessions === 'function') renderSessions();
+    }
+    return;
+  }
   if (obj.type === 'notify') {
     showSystemNotify(obj.title || '提醒', obj.text || '', 'remind',
                      { sessionId: obj.session_id });
@@ -324,14 +369,6 @@ function handleAutoEvent(obj) {
       appendAutoMessage(obj.text || '', obj.title || '提醒');
     } else {
       toast('⏰ ' + (obj.text || '有一条提醒'), 'success');
-    }
-    return;
-  }
-  if (obj.type === 'auto_msg') {
-    if (obj.session_id === state.sessions.current) {
-      appendAutoMessage(obj.text || '', '');
-    } else {
-      toast(obj.text || '', 'success');
     }
     return;
   }
@@ -343,6 +380,10 @@ function handleAutoEvent(obj) {
   // 后台预压缩完成：事件里已带最新占用，直接刷新当前会话的进度条
   if (obj.type === 'context_update') {
     const cur = (state.sessions || {}).current;
+    // 压缩结束：按事件里的 sid 清掉「正在压缩」标记（别的会话也不能留着）
+    if (typeof compressPendingClear === 'function') {
+      compressPendingClear(obj.session_id || cur);
+    }
     if (!obj.session_id || obj.session_id === cur) {
       if (obj.context && typeof renderContextBar === 'function') {
         renderContextBar(obj.context);   // 内部会同步压缩分隔线
@@ -353,8 +394,8 @@ function handleAutoEvent(obj) {
   // 后台预压缩开始：只提示，不阻塞发送
   if (obj.type === 'context_compressing') {
     const cur = (state.sessions || {}).current;
-    if (!obj.session_id || obj.session_id === cur) {
-      compressPending();
+    if (typeof compressPending === 'function') {
+      compressPending(obj.session_id || cur);
     }
     return;
   }
@@ -445,7 +486,6 @@ async function loadTasks() {
       ? '系统通知：可用（即使本程序没开也会弹）'
       : '系统通知：不可用，将只在程序运行时提醒';
     const rt = items.filter((t) => t.kind === 'reminder');
-    const ac = items.filter((t) => t.kind === 'auto_chat');
     box.innerHTML = '';
     if (!rt.length) {
       box.innerHTML = '<div class="remind-empty">还没有提醒任务</div>';
@@ -468,34 +508,6 @@ async function loadTasks() {
       };
       box.appendChild(row);
     });
-    // 主动聊天：把当前会话的任务状态同步到开关
-    const cur = state.sessions.current;
-    const mine = ac.find((t) => t.session_id === cur && !t.paused);
-    const on = $('#autochat-on');
-    if (on) on.checked = !!mine;
-
-    // 主动聊天：列出所有已开启的会话（含下次触发时间）
-    const acBox = $('#autochat-list');
-    if (acBox) {
-      acBox.innerHTML = '';
-      if (!ac.length) {
-        acBox.innerHTML = '<div class="remind-empty">当前没有开启主动聊天的会话</div>';
-      }
-      ac.forEach((t) => {
-        const row = document.createElement('div');
-        row.className = 'remind-row' + (t.paused ? ' off' : '');
-        row.innerHTML = '<span class="remind-when">' + fmtTaskTime(t.at) + '</span>'
-          + '<span class="remind-text"></span>'
-          + '<span class="remind-rep">' + (t.paused ? '已暂停' : '主动聊天') + '</span>'
-          + '<button class="remind-del" title="关闭这个会话的主动聊天">✕</button>';
-        row.querySelector('.remind-text').textContent = sessionTitle(t.session_id);
-        row.querySelector('.remind-del').onclick = async () => {
-          await api('/api/tasks', { op: 'delete', id: t.id });
-          loadTasks();
-        };
-        acBox.appendChild(row);
-      });
-    }
   } catch (e) {
     toastErr('读取提醒任务', e);
   }
@@ -508,10 +520,9 @@ const REMINDER_SWITCHES = [
   ['reminder-inapp-enabled', 'reminder_inapp_enabled'],
   ['reminder-system-enabled', 'reminder_system_enabled'],
   ['reminder-calendar-enabled', 'reminder_calendar_enabled'],
-  ['auto-chat-enabled', 'auto_chat_enabled'],
 ];
 const REMINDER_SUB_IDS = ['#reminder-inapp-enabled', '#reminder-system-enabled',
-  '#reminder-calendar-enabled', '#auto-chat-enabled'];
+  '#reminder-calendar-enabled'];
 
 function syncReminderSwitches() {
   const cfg = state.config || {};
@@ -573,63 +584,5 @@ async function addReminder() {
     loadTasks();
   } catch (e) {
     toastErr('添加提醒', e);
-  }
-}
-
-/* ---------- 主动聊天 ---------- */
-
-async function toggleAutoChat(on) {
-  if (on) {
-    const p = await ensureNotifyPermission();
-    if (p === 'denied') toast('系统通知被拒绝，只会显示在会话里', 'error');
-  }
-  const lo = parseInt(($('#autochat-min') || {}).value, 10) || 40;
-  const hi = parseInt(($('#autochat-max') || {}).value, 10) || 120;
-  try {
-    const r = await api('/api/tasks', {
-      op: 'autochat', session_id: state.sessions.current,
-      enabled: !!on, gap_min: lo, gap_max: hi,
-    });
-    if (!r || !r.ok) { toast('设置失败', 'error'); return; }
-    toast(on ? '已开启主动聊天' : '已关闭主动聊天', 'success');
-    loadTasks();
-  } catch (e) {
-    toastErr('设置主动聊天', e);
-  }
-}
-
-// 会话 id → 标题（主动聊天列表里显示用）
-function sessionTitle(sid) {
-  const list = (state.sessions && state.sessions.sessions) || [];
-  const s = list.find((x) => x.id === sid);
-  return (s && s.title) || sid;
-}
-
-// 改间隔即时生效（当前会话已开启时，不用关掉再开）
-async function updateAutoChatGap() {
-  const on = $('#autochat-on');
-  if (!on || !on.checked) return;
-  const lo = parseInt(($('#autochat-min') || {}).value, 10) || 40;
-  const hi = parseInt(($('#autochat-max') || {}).value, 10) || 120;
-  try {
-    const r = await api('/api/tasks', {
-      op: 'autochat', session_id: state.sessions.current,
-      enabled: true, gap_min: lo, gap_max: hi,
-    });
-    if (r && r.ok) { toast('间隔已更新（约 20 秒后先发一条）', 'success'); loadTasks(); }
-  } catch (e) {
-    toastErr('更新间隔', e);
-  }
-}
-
-// 立即发一条试试
-async function testAutoChat() {
-  try {
-    toast('正在生成…');
-    const r = await api('/api/tasks', { op: 'autochat_test', session_id: state.sessions.current });
-    if (!r || !r.ok) { toast('生成失败——检查「模型接入」里的聊天接口密钥是否已配置', 'error'); return; }
-    toast('已发送一条主动消息', 'success');
-  } catch (e) {
-    toastErr('试发', e);
   }
 }

@@ -21,6 +21,20 @@ def test_uploads_helpers_callable(tmp_path, monkeypatch):
     assert uploads._upload_path("sid", "../escape.png") is None
 
 
+def test_upload_path_rejects_session_traversal(tmp_path, monkeypatch):
+    """session_id 不能用 `..` 跳出 uploads；文件名也不能带路径分隔符。"""
+    root = tmp_path / "uploads"
+    root.mkdir()
+    monkeypatch.setattr(uploads, "UPLOAD_DIR", str(root))
+    (tmp_path / "config.json").write_text("secret", encoding="utf-8")
+
+    assert uploads._upload_dir("..") == str(root / "_")
+    assert uploads._upload_path("..", "config.json") is None
+    assert uploads._upload_path("sid", "../config.json") is None
+    assert uploads._upload_path("sid", "..\\config.json") is None
+    assert uploads._upload_path("sid", "config.json") is None
+
+
 def test_export_markdown_callable():
     md = export_md.session_markdown({"title": "测试会话", "messages": [
         {"role": "user", "content": "你好"},

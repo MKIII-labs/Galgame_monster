@@ -13,6 +13,11 @@ def _prepare(tmp_path, monkeypatch, sessions):
     up.mkdir()
     monkeypatch.setattr(uploads, "UPLOAD_DIR", str(up))
     monkeypatch.setattr(uploads, "load_sessions", lambda: sessions)
+    # conftest 默认把 sessions.SESSION_FILE 指到 tmp；这里还原成默认路径，
+    # 才能测「会话文件没被重定向时才会清理」的正常分支
+    from app import sessions as session_mod
+    from app import store
+    monkeypatch.setattr(session_mod, "SESSION_FILE", store.SESSION_FILE)
     monkeypatch.delenv("GM_NO_SWEEP", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     return up
@@ -63,6 +68,17 @@ def test_sweep_skips_when_session_file_redirected(tmp_path, monkeypatch):
     import app.sessions as session_mod
     monkeypatch.setattr(session_mod, "SESSION_FILE",
                         str(tmp_path / "elsewhere" / "sessions.json"))
+    d = up / "s_old"
+    d.mkdir()
+    (d / "a.bin").write_bytes(b"x")
+
+    uploads.sweep_uploads()
+    assert (d / "a.bin").exists()
+
+
+def test_sweep_skips_single_empty_session(tmp_path, monkeypatch):
+    """只加载到 1 个空会话时不能清理：这正是 2026-11-23 附件被隔离的事故形态。"""
+    up = _prepare(tmp_path, monkeypatch, {"sessions": [{"id": "s_new", "messages": []}]})
     d = up / "s_old"
     d.mkdir()
     (d / "a.bin").write_bytes(b"x")

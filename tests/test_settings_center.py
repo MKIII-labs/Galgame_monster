@@ -71,6 +71,38 @@ def test_history_redacts_nested_preset_keys(cfg_env):
     assert snap["config"]["chat_presets"]["p"]["model"] == "m"
 
 
+def test_load_config_mutation_does_not_pollute_cache(cfg_env):
+    """load_config 补默认键只能落在副本里，不能变成「未保存已生效」。"""
+    from app import config
+
+    _write_cfg(cfg_env, {"chat_round_retries": 7})
+    first = config.load_config()
+    assert first["chat_round_retries"] == 7
+    first["chat_round_retries"] = 99
+    first["brand_new_key"] = 1
+
+    again = config.load_config()
+    assert again["chat_round_retries"] == 7
+    assert "brand_new_key" not in again
+
+
+def test_save_config_raises_on_write_failure(cfg_env, monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "write_json", lambda *a, **k: False)
+    with pytest.raises(OSError):
+        config.save_config({"chat_round_retries": 8})
+
+
+def test_save_patch_reports_write_failure(cfg_env, monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "write_json", lambda *a, **k: False)
+    res = sc.save_patch({"chat_round_retries": 15})
+    assert res["ok"] is False
+    assert "写入失败" in res["errors"][0]["message"]
+
+
 def test_rollback_restores_nested_current_secret(cfg_env):
     _write_cfg(cfg_env, {"chat_presets": {"p": {"api_key": "old"}}, "chat_round_retries": 6})
     hid = sc.save_patch({"chat_round_retries": 15})["history_id"]

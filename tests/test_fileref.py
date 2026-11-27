@@ -11,8 +11,20 @@ def test_from_client_file_and_code(tmp_path):
         str(tmp_path))
     assert ws is False and len(refs) == 2
     assert refs[0]["path"] == "a.py" and "line1" in refs[0]["text"]
+    assert refs[0]["type"] == "file"
     assert refs[1]["start"] == 2 and refs[1]["end"] == 3
+    assert refs[1]["type"] == "code"
     assert refs[1]["text"] == "line2\nline3"
+
+
+def test_expand_absolute_path_without_sandbox(tmp_path):
+    """没选沙箱也能用绝对路径 @ 引用（与只读模式一致）。"""
+    f = tmp_path / "a.txt"
+    f.write_text("绝对路径内容", encoding="utf-8")
+    refs = fileref.expand("@%s" % f, "")
+    assert refs and refs[0]["text"] == "绝对路径内容"
+    # 相对路径没有基准目录：保持原文不动，不生成引用
+    assert fileref.expand("@a.txt", "") == []
 
 
 def test_from_client_code_falls_back_to_snapshot(tmp_path):
@@ -32,6 +44,7 @@ def test_from_client_folder(tmp_path):
     refs, _ws = fileref.from_client([{"type": "folder", "path": "src"}],
                                     str(tmp_path))
     assert {r["path"] for r in refs} == {"src/a.py", "src/b.txt"}
+    assert all(r["type"] == "file" for r in refs)
 
 
 def test_from_client_terminal_problems_and_workspace():
@@ -42,8 +55,10 @@ def test_from_client_terminal_problems_and_workspace():
         "C:/not-real",
         problems=[{"path": "a.py", "line": 3, "severity": "error", "message": "boom"}])
     assert ws is True
-    assert any(r["path"] == "终端输出" and "npm ERR!" in r["text"] for r in refs)
-    assert any(r["path"] == "IDE 问题" and "a.py:3" in r["text"] for r in refs)
+    assert any(r["path"] == "终端输出" and r["type"] == "terminal" and "npm ERR!" in r["text"]
+               for r in refs)
+    assert any(r["path"] == "IDE 问题" and r["type"] == "problems" and "a.py:3" in r["text"]
+               for r in refs)
 
 
 def test_from_client_memory():
@@ -51,6 +66,7 @@ def test_from_client_memory():
         [{"type": "memory", "id": "m1"}], "",
         memory_nodes=[{"id": "m1", "title": "偏好", "content": "喜欢简短回答"}])
     assert refs and refs[0]["path"] == "记忆：偏好"
+    assert refs[0]["type"] == "memory"
     assert "简短" in refs[0]["text"]
 
 
@@ -60,6 +76,7 @@ def test_from_client_doc(monkeypatch):
         "nodes": [{"id": "n1", "title": "术语", "content": "GAL=视觉小说"}]})
     refs, _ws = fileref.from_client([{"type": "doc", "kb": "k1", "node": "n1"}], "")
     assert refs and refs[0]["path"] == "知识库：术语"
+    assert refs[0]["type"] == "doc"
     assert "视觉小说" in refs[0]["text"]
 
 

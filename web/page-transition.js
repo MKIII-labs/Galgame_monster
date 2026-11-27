@@ -58,19 +58,22 @@
     try { window.gmLoadGroup(kind).catch(() => {}); } catch (e) { /* 忽略 */ }
   }
 
+  /* 骨架 markup：settings 等用 innerHTML 的地方也复用这一套（行宽递减 + 读屏旁白） */
+  function gmSkeletonHtml(rows) {
+    const n = Number(rows) || 4;
+    const widths = [38, 100, 88, 96, 74, 90, 62];   // 首行标题短，其余逐行收窄
+    let s = '<div class="page-skeleton skeleton" aria-busy="true">';
+    for (let i = 0; i < n; i += 1) {
+      s += '<div class="sk-line" style="width:' + widths[i % widths.length] + '%"></div>';
+    }
+    s += '<span class="gm-sr-only" role="status" aria-live="polite">正在加载…</span></div>';
+    return s;
+  }
+
   function gmSkeleton(el, rows) {
     if (!el) return;
     gmSkeletonClear(el);
-    const box = document.createElement('div');
-    box.className = 'page-skeleton skeleton';
-    const n = Number(rows) || 4;
-    for (let i = 0; i < n; i += 1) {
-      const line = document.createElement('div');
-      line.className = 'sk-line';
-      line.style.width = i === 0 ? '38%' : (i % 3 === 0 ? '72%' : '100%');
-      box.appendChild(line);
-    }
-    el.appendChild(box);
+    el.insertAdjacentHTML('beforeend', gmSkeletonHtml(rows));
   }
 
   function gmSkeletonClear(el) {
@@ -79,9 +82,22 @@
     if (box) box.remove();
   }
 
+  /* 统一的行内加载旁白（转圈 + 一句状态）。extraClass 用于沿用各模块的定位容器，
+     例如知识库图谱的绝对定位骨架、工作台 AI 面板的行内占位。 */
+  function gmLoadingHtml(text, extraClass) {
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const cls = 'gm-loading' + (extraClass ? ' ' + extraClass : '');
+    return '<div class="' + cls + '" role="status" aria-live="polite">'
+      + '<span class="gm-spin" aria-hidden="true"></span>'
+      + '<span>' + esc(text || '正在加载…') + '</span></div>';
+  }
+
   window.gmPageIn = gmPageIn;
   window.gmPageTransition = gmPageTransition;
   window.gmPrefetchGroup = gmPrefetchGroup;
   window.gmSkeleton = gmSkeleton;
+  window.gmSkeletonHtml = gmSkeletonHtml;
   window.gmSkeletonClear = gmSkeletonClear;
+  window.gmLoadingHtml = gmLoadingHtml;
 })();

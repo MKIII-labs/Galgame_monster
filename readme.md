@@ -4,14 +4,24 @@
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows&logoColor=white)
 ![Stack](https://img.shields.io/badge/Stack-Vanilla%20JS%20%2B%20Python-000000)
 ![LLM](https://img.shields.io/badge/LLM-OpenAI%20Compatible-412991)
-![Version](https://img.shields.io/badge/Version-3.5-2ea44f)
+![Version](https://img.shields.io/badge/Version-3.5.2-2ea44f)
 
 > **本机运行的 AI 工作台**：对话、文件 Agent、VS Code 风格 IDE、文档阅读与翻译、长期记忆、日程任务、手机访问与功能大厅集中在同一个界面。程序在本地运行，模型走你自己的 API，数据全部留在 `data/`。
 
-**v3.5 更新说明**
+**近期更新（3.5 → 3.5.2）**
+
+- 部署与发布：沙箱里的静态站点可一键发布到内置静态服务器，生成局域网可访问的链接；同一来源重复部署为原地更新，可随时停止。
+- 交互可视化与文档生成：`archify` 把结构化图描述渲染成可交互 HTML 卡片嵌进对话；`doc_create` 直接写 docx / xlsx / pptx / pdf（Office 三件套用标准库写 OOXML，不新增依赖；PDF 走已有的 reportlab）。
+- 会话交接：对齐 `new_context` —— 新开一个会话，只带一段交接摘要，不继承整段历史。
+- 存储维护：磁盘占用概览、会话缓存压缩、事件日志压缩与孤儿目录清理，可选启动时自动压缩。
+- 体感：大厅首屏渐进出卡片、会话悬停预取、API JSON gzip（>8KB）、KaTeX 按需加载、中文字体子集化（4.9MB → 1.1MB）。
+- 外观：AI 头像重做为「注意力 + 扫视」并支持三档动效（克制 / 活泼 / 关闭）；IDE 文件区与对话栏默认宽度 245 / 518px。
+- 内置 Skill 现有 20 个（含 security-review、code-review、debug-helper 等）。
+
+**v3.5 主要变化**
 
 - 界面重构收尾：固定导航 / 顶栏 / 检查器 / 命令面板 / 全屏设置，新会话首屏与页面过渡，移动端适配。
-- 设置中心重做：6 个一级页面、页内分区与高级项、右侧目录、设置搜索直达并高亮；页面按需挂载。
+- 设置中心重做：按「常用 / Agent / 体验 / 系统」分组，页内分区与高级项、右侧目录、设置搜索直达并高亮；页面按需挂载。
 - Agent 增强：实时开关、验收子代理开关、清空沙箱后用绝对路径只读、完成声明（摘要 + 可折叠操作明细）。
 - 会话能力：用「从这条回复分支」取代存档点；新增会话存储压缩与会话事件清理。
 - 手机访问：同一 Wi-Fi 下 HTTPS 网关 + 扫码配对 + 端到端加密；新增 `gm` 终端客户端。
@@ -56,7 +66,7 @@ Galgame_monster 是一个**纯本地**的个人 AI 工作台：界面用原生 W
 
 - **持续记忆**：用户画像、知识库图谱、笔记库与会话记忆跨会话复用，不必每次重新交代背景。
 - **真实文件操作**：文件 Agent 有沙箱边界、写操作审批、逐次变更 diff 与步级撤回。
-- **本地事件**：系统通知、定时任务、工作流与主动消息都在本机执行。
+- **本地事件**：系统通知、定时任务与工作流都在本机执行。
 
 ### 适用与不适用
 
@@ -79,13 +89,13 @@ Galgame_monster 是一个**纯本地**的个人 AI 工作台：界面用原生 W
 | --- | --- | --- |
 | Solo 对话 | 多会话、流式输出、停止 / 继续、上下文压缩、token 用量核算、分支、轨迹回放 | 支持 Markdown / KaTeX、附件、联网搜索、语音输入、旁注提问与自动跟随 |
 | 文件 Agent | 沙箱内读写与执行、计划驱动多轮、子代理、验收与完成声明 | 对话中可实时开关；写操作按审批档位执行；清空沙箱后仍可用绝对路径只读 |
+| 文档与部署 | `doc_create` 生成 Word / Excel / PPT / PDF；`deploy` 把沙箱内静态站点发布到内置服务器，给出本机 + 局域网链接 | Office 三件套用标准库写 OOXML（PDF 用 reportlab）；重复部署原地更新，可随时停止 |
 | IDE 工作区 | Monaco 编辑器、文件树、多标签、终端、Git、Python 调试、语义索引、AI Tab 补全 | 内置 Monaco，离线可用；编码按原文件自动识别 |
 | 文档阅读与翻译 | PDF / Word / PPT 沉浸式阅读、按章节翻译、术语表、公式与图表裁图、译文导出 | 左栏原页 + 右栏重排阅读流；导出仅译文 / 双语 PDF / Markdown |
 | 记忆与知识 | 用户画像、知识图谱、会话记忆、笔记库、统一记忆索引 | 知识图谱可视化编辑；笔记为普通 Markdown 文件 |
-| 检索与多模态 | 联网搜索、B 站视频 / 评论 / 字幕、网页抓取、图像识别、文档解析、语音输入与朗读 | 搜索默认关闭，可在设置中启用免注册引擎链或指定服务商 |
+| 检索与多模态 | 联网搜索、网页抓取、图像识别、文档解析、语音输入与朗读 | 搜索默认关闭，可在设置中启用免注册引擎链或指定服务商 |
 | 手机访问 | 同一 Wi-Fi 下用手机继续对话；HTTPS 网关、扫码配对、设备吊销 | 主服务仍只监听 `127.0.0.1`；传输叠加应用层端到端加密 |
 | 终端客户端 | `gm` 连上正在运行的应用，复用同一会话与沙箱 | 交互式多轮或单次问答；`gm --start` 可顺带拉起应用 |
-| 图片生成 | 通过本机 ComfyUI + FLUX 工作流出图，结果登记为工作台产物 | 默认关闭，不影响其它功能 |
 | 功能大厅 | 图寻、数学竞技场、模拟股市、模拟面试、研究道场、学习观测 | 各模块自行注册；数据独立存储 |
 | 工作台 | 日程、任务拆解与执行、产物归档、工作流、专注计时 | 任务与步骤实时落盘，重启可恢复 |
 | 插件与 MCP | Python 工具插件、MCP 服务器、内置安装源与 DSH 索引 | 默认关闭；安装 / 启用需确认，重启后加载 |
@@ -117,7 +127,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe main.py
 ```
 
-也可直接双击 `Galgame_monster.bat`（无控制台窗口）。首次启动后进入「设置 → 模型与对话」填写 API 密钥。
+也可直接双击 `Galgame_monster.bat`（无控制台窗口）。首次启动后进入「设置 → 模型接入」填写 API 密钥。
 
 - 退出：关闭应用窗口，或在控制台按 `Ctrl+C`。
 - 单实例：已有实例在运行时再次启动只会打开已有窗口；检测到代码已更新时会提示先关闭旧实例。
@@ -174,6 +184,7 @@ python scripts/fetch_embed_model.py
 | Markdown / 公式 | 标题、粗体、列表、引用、表格、代码高亮、KaTeX 公式；渲染失败退回原文，不显示红色报错 |
 | 多会话 | 新建 / 切换 / 双击重命名 / 删除（二次确认）；会话列表支持置顶、分组与搜索；新会话首屏带问候、最近会话与快捷入口 |
 | 分支 | 在任意一条 AI 回复处「从这条回复分支」：按消息切片复制出新会话，原会话原样保留；不再生成磁盘存档副本 |
+| 会话交接 | 从当前会话新开一个只带交接摘要的会话（`/api/session/handoff`），不继承整段历史；适合长对话换窗口继续 |
 | 自动跟随 | 长回复与工具过程自动贴底；向上翻时暂停，回到底部自动恢复；过程折叠块内部独立跟随 |
 | 消息操作 | 用户消息可「撤回」「修改」后重发；AI 回复可「重新发言」、切换源码视图；支持复制 / 删除 |
 | 提问标记 | 给关键提问起名，Solo 模式右侧出现悬浮按钮，一键跳回；右键改名 / 删除 |
@@ -184,9 +195,9 @@ python scripts/fetch_embed_model.py
 | 语音输入 | 边说边出字（本机流式识别），停止后可用精修模型复识别，可选 AI 矫正；降噪可单独开启 |
 | Token 用量 | 7 天 / 30 天 / 12 个月概览、按模型趋势、输入输出堆叠、按端点 / 通道 / 来源明细与逐次溯源 |
 | 上下文上限 | 输入框上方实时显示占用进度条；接近上限自动压缩较早历史 |
-| 子代理 | 「设置 → 子代理」用 Markdown 定义工具白名单、模型、轮次与只读权限；主 Agent 可 delegate / explore / followup |
+| 子代理 | 「设置 → 子代理与流程」用 Markdown 定义工具白名单、模型、轮次与只读权限；主 Agent 可 delegate / explore / followup |
 | 轨迹 | 侧栏「轨迹」查看模型实际收到的系统提示、上下文、思考、工具与每步耗时，可按工具过滤、搜索、导出 |
-| 主题与键盘 | 界面主题 6 套；侧栏会话、思考卡、工具卡、笔记树均可 `Tab` 走通，危险操作二次确认 |
+| 主题与键盘 | 界面主题 6 套；AI 头像动效三档（克制 / 活泼 / 关闭）；侧栏会话、思考卡、工具卡、笔记树均可 `Tab` 走通，危险操作二次确认 |
 
 ### 4.2 文件 Agent（沙箱）
 
@@ -194,7 +205,7 @@ python scripts/fetch_embed_model.py
 | --- | --- |
 | 开启与沙箱 | 点输入区上方「Agent」，选择沙箱目录；设置按会话保存，对话进行中切换也会在下一轮生效 |
 | 清空沙箱（只读） | 「清空目录」回到未指定沙箱的状态：仍可用绝对路径读取 / 列目录 / 看图，写入与命令需要先选目录 |
-| 工具分组 | **读取** list / file / files / search / semantic / map；**编辑** write / patch / mkdir / move / copy / delete；**执行** exec / terminal；**代码** diagnostics / definition / references / hover / symbols / implementation / calls / rename / check / find / impact / context；**Git** status / diff / log / commit / split；**计划** update / patch；**子代理** delegate / explore / followup / status / result / cancel；**联网** search / fetch / note；**历史** list / undo / redo / recover；**视觉** render / qa / views / geometry / scene；**图片** see / compare / analyze；**素材** scan / convert / atlas / inline / validate / mesh；**音频** probe / compare；**工作流** run / script / status / resume / cancel；**其他** sleep / reminder，以及 `calendar.*` / `task.*` / `memory.*` / `note.*` / `bili.*` / `stock.*` |
+| 工具分组 | **读取** list / file / files / search / semantic / map；**编辑** write / patch / mkdir / move / copy / delete；**执行** exec / terminal；**代码** diagnostics / definition / references / hover / symbols / implementation / calls / rename / check / find / impact / context；**Git** status / diff / log / commit / split；**计划** update / patch；**子代理** delegate / explore / followup / status / result / cancel；**联网** search / fetch / note；**历史** list / undo / redo / recover；**视觉** render / qa / views / geometry / scene；**图片** see / compare / analyze；**素材** scan / convert / atlas / inline / validate / mesh；**音频** probe / compare；**工作流** run / script / status / resume / cancel；**文档与部署** doc_create / archify / deploy；**其他** sleep / reminder，以及 `calendar.*` / `task.*` / `memory.*` / `note.*` / `stock.*` |
 | 安全边界 | 写入只接受沙箱内路径，读取可用绝对路径访问沙箱外；`.git` / `.venv` / `node_modules` / `__pycache__` 与本项目 `data/` 永久禁止访问；秘密文件默认拒读 |
 | 审批档位 | `ask` 手动审批 / `ai` 智能审批（默认；只读与普通命令放行，安装、联网、改历史类才问）/ `full` 完全自动 / `custom` 自定义规则（沙箱内 `.gm/agent-rules.json`） |
 | Shell 自由度 | `standard`（默认，允许 `\|` 与沙箱内重定向，每段仍过白名单）/ `strict`（禁用管道与重定向）/ `trusted`（额外允许 `;` `&&` `\|\|`） |
@@ -212,10 +223,10 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 功能 | 说明 |
 | --- | --- |
 | 基础编辑 | `Ctrl+S` 保存、`Ctrl+P` 快速打开、`Ctrl+Shift+P` 命令面板；沙箱内搜索；UTF-8 / GBK 自动识别并按原编码写回 |
-| 布局 | 文件管理区可收起（`Ctrl+B`）；右侧聊天栏可拖拽调宽，双击还原 |
+| 布局 | 文件管理区可收起（`Ctrl+B`），也可拖拽调宽（双击恢复 245px）；右侧聊天栏可拖拽调宽（双击恢复 518px） |
 | 主题 | 跟随界面主题（浅色 / 深色 / 高对比暗 / 暗夜紫 / 深林绿 / 护眼纸白），IDE 与编辑器语法色一起跟随 |
 | 空白字符 | 关闭 / 仅选区内 / 仅行尾 / 词之间 / 全部 |
-| 侧边栏 | 资源管理器 / 沙箱内搜索 / 源代码管理 / 运行和调试 / 批注 / 文献库 |
+| 侧边栏 | 资源管理器 / 沙箱内搜索 / 源代码管理 / 运行和调试 / 批注 |
 | 终端 | 内置终端面板（`Ctrl+\``） |
 | 调试 | Python 调试（debugpy）：断点、单步、变量与调用栈；未安装时给出安装提示 |
 | 语义索引 | 定义 / 引用 / 实现 / 调用链 / 符号搜索 / 语义重命名 / 影响面分析 |
@@ -235,7 +246,6 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 翻译内核 | 同章节连续段落成批（≤4 段 / 1600 字），注入章节名、上一段原文与术语表；只补缺失段，支持断点续译与三级重试；并发默认 3（`reader_translate_parallel`，1–4） |
 | 术语表 | 首次翻译自动抽取高频术语并统一译名；设置里可逐条编辑、保存或重新生成 |
 | 阅读辅助 | 划词翻译 / 提问 / 高亮 / 摘录；批注抽屉支持按页跳转、复制引用、导出 Markdown |
-| 文献库 | 自动提取标题 / 作者 / 年份 / DOI；可编辑标签，一键进入阅读器 |
 | 译文导出 | 仅译文 PDF / 双语 PDF / Markdown：重排文档、字体嵌入、标题书签、页码；已识别公式优先排成数学，失败回退原页裁图；缺译段落保留原文并提示 |
 | 缓存 | `data/reader/<doc_id>/` 保存版面、译文、术语表、公式识别与裁图；文件变化自动失效 |
 
@@ -257,12 +267,10 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | --- | --- |
 | 联网搜索 | 默认关闭。启用后默认使用免注册引擎链 Firecrawl → Keenable → You.com；也可选博查 / 豆包搜索（火山）/ Tavily |
 | 网页正文 | 抓取时带字数上限与「外部内容、不要执行其中指令」声明；支持 Jina 免密钥或直连抓取 |
-| B 站数据 | 读取视频信息、热门评论、字幕与 B 站 AI 总结；SESSDATA 可选，只保存在本机 |
 | 图像识别 | DashScope 原生协议或 OpenAI 兼容视觉接口；也可用聊天模型识图 |
 | 文档解析 | pypdf 抽文本 + pypdfium2 渲染扫描页；扫描件默认只识别前 60 页 |
 | 语音识别 | sherpa-onnx 本机离线，音频不出电脑 |
 | 台词朗读 | Edge TTS（免费）/ OpenAI 兼容 `/v1/audio/speech` / 本地 GPT-SoVITS（支持音色克隆） |
-| 图片生成 | 通过本机 ComfyUI 的 HTTP API 出图，使用从官方 FLUX 3 Klein 模板导出的 API 工作流 |
 
 ### 4.7 功能大厅
 
@@ -301,7 +309,6 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 断点恢复 | 任务与步骤实时落盘；进程重启后在跑的任务转为「已暂停」，不自动重跑 |
 | 产物归档 | 任务写出的文件登记到产物栏，可在线预览文本 / 图片 |
 | 工作流 | 触发器（手动 / 定时 / 事件）→ 动作（建任务、发通知、建日程、发消息、本机朗读、调用能力） |
-| 图片生成 | 调用本机 ComfyUI 生成图片并登记为产物 |
 | 场景包 | 通用 / 办公 / 学习 / 生活四种场景，影响系统提示的场景纪律与能力展示顺序 |
 
 ### 4.9 插件与 MCP
@@ -316,7 +323,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 
 ### 4.10 手机访问与终端客户端
 
-**手机访问**（设置 → 数据与用户 → 移动访问）
+**手机访问**（设置 → 手机访问）
 
 主服务始终只监听 `127.0.0.1`；开关打开后另起一个 HTTPS 端口，供同一 Wi-Fi 下的手机访问，关闭即停止监听。
 
@@ -344,16 +351,14 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 
 ### 4.11 设置与快捷键
 
-设置面板左侧为 **6 个一级页面**：
+设置面板左侧为 **4 组 13 页**：
 
-| 页面 | 内容 |
-| --- | --- |
-| 模型与对话 | 聊天 / 视觉接口、推理参数、上下文预算与压缩 |
-| 联网与检索 | 搜索服务商、抓取策略与 B 站读取 |
-| 能力与工具 | 执行策略、子代理与流程、技能与外部工具、图像（4 个二级分段） |
-| 界面与提醒 | 主题外观、快捷键、语音与朗读、提醒 |
-| 数据与用户 | 用户规则、移动访问、存储维护与重置 |
-| 帮助 | 各项功能的实际作用与差异 |
+| 分组 | 页面 | 内容 |
+| --- | --- | --- |
+| 常用 | 模型接入 / 上下文与记忆 / 联网与检索 | 聊天与视觉接口、预设与余额；上下文预算、省费与压缩；搜索服务商与抓取策略 |
+| Agent | 执行与审批 / 子代理与流程 / 工具与扩展 | 执行节奏、通知与写入审批；子代理团队与工作流；编辑器补全、代码工具、MCP / Hooks、电脑操作与 Skill |
+| 体验 | 外观与对话 / 语音与提醒 / 快捷键 | 主题、氛围、过程跟随、AI 头像动效、编辑器；语音输入与朗读、提醒；逐项改键 |
+| 系统 | 用户规则 / 手机访问 / 系统维护 / 帮助 | 全局规则与自动记录；局域网网关与设备；存储维护与重置；功能说明 |
 
 - 顶部搜索框可直达设置项：跨页切换、展开高级项 / 折叠分区，并滚动到目标高亮；`Ctrl+K` 聚焦搜索。
 - 页内按任务分区，可单独展开高级项；右侧为本页目录；每页可「恢复本页默认」。
@@ -370,7 +375,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 窗口 | Electron 窗口壳（可选）/ Edge、Chrome 应用模式（`--app`） |
 | 后端 | Python 标准库 `http.server`（多线程）+ `requests`；SSE 流式响应 |
 | 手机网关 | aiohttp（独立 HTTPS 端口）+ cryptography（ECDH / AES-256-GCM）+ qrcode（配对二维码） |
-| 前端第三方库 | KaTeX、Monaco、pdf.js、vis-network、xterm、Seti 图标（本地内置）；highlight.js、ECharts、Mermaid（CDN，带备用源） |
+| 前端第三方库 | KaTeX、highlight.js、Monaco、pdf.js、vis-network、xterm、Seti 图标（本地内置）；ECharts、Mermaid（CDN，带备用源） |
 | 编辑器 | Monaco（本地内置，离线可用） |
 | PDF 阅读 | pdf.js（本地渲染）· pypdfium2（裁图 / 扫描页）· pypdf（文本层） |
 | PDF 导出 | reportlab（矢量文字、字体嵌入、书签）· matplotlib mathtext（公式，缺失时回退裁图） |
@@ -385,6 +390,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 语言服务 | pyright（首次调用经 npx 拉取） |
 | 调试 | debugpy（Python DAP） |
 | 图标 | 内嵌 SVG sprite（`currentColor` 跟随主题） |
+| 字体 | MiSans Semibold（子集化后本地内置，首屏不再拉完整字体） |
 
 ---
 
@@ -407,7 +413,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 
 只填 base URL（如 `https://api.deepseek.com`）时会自动补全为 `/v1/chat/completions`。地址 + 模型 + 密钥可以打包成「API 预设」，随时切换服务商；也可用 `chat_fallback` 配置故障转移链（主服务商失败且未输出任何内容时按序尝试）。
 
-主要参数（设置 → 模型与对话）：
+主要参数（设置 → 模型接入）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -420,7 +426,6 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | `chat_retry_mode` | `always` | 断流重试策略（瞬时错误无上限重试，billing / auth / context 类不重试） |
 | `chat_stream_idle_timeout` | `90` | 上游多久没有任何数据就中止本轮（秒） |
 | `chat_stream_stall_timeout` | `45` | 有数据但无有效增量的超时（秒） |
-| `chat_persist_reasoning` | `true` | 是否把思考落库（只写本地，不上传） |
 | `usage_daily_tokens` | `0` | 每日 token 上限；`0` = 不限 |
 
 ### 6.3 轻量模型与视觉模型
@@ -454,7 +459,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `agent_max_rounds` | `0` | 单轮最多「调工具 → 再问模型」几次；`0` = 不限 |
-| `agent_auto_continue` | `3` | 任务没做完时自动续跑几次；`0` 关闭，`-1` 不限 |
+| `agent_auto_continue` | `-1` | 任务没做完时自动续跑；`0` 关闭，`-1` 无上限（只保留这两档） |
 | `agent_repeat_limit` | `5` | 同工具同参数连续几次就拦截 |
 | `agent_cmd_timeout` | `60` | 命令默认超时（秒）；`0` = 不限 |
 | `agent_require_read` | `true` | 覆盖已有文件前必须先读过 |
@@ -469,7 +474,7 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 | `tool_spill_max` | `12000` | 超过该字符数的工具结果落盘，模型可用 `read_tool_result` 取回 |
 | `subagent_context_tokens` | `60000` | 子代理独立上下文预算 |
 
-### 6.6 联网搜索与 B 站
+### 6.6 联网搜索
 
 联网搜索默认关闭（`search_enabled = false`）。启用后默认使用「自动」免注册引擎链：
 
@@ -482,8 +487,6 @@ VS Code 风格：活动栏、文件树、多标签编辑器、状态栏，内置
 也可改为单服务商：豆包搜索（火山）、博查 Bocha、Tavily。额度 / 鉴权失败的引擎会冷却一段时间。
 
 相关参数：`search_provider`、`search_engine_keys`、`search_engine_enabled`、`search_count`（默认 8）、`search_fetch`、`search_fetch_cloud`、`search_fetch_count`（默认 4）、`search_fetch_chars`（默认 2500）、`search_merged_max`（默认 12）、`search_fetch_reader`（`jina` / `direct`）、`search_cache_ttl`（默认 3600 秒）。
-
-B 站数据读取在「设置 → 联网与数据源 → B 站数据」配置：不填 SESSDATA 也能读视频信息与评论；字幕与官方 AI 总结需要登录凭证。SESSDATA 只保存在本机，不会发送给模型。
 
 ### 6.7 语音识别与台词朗读
 
@@ -503,32 +506,27 @@ python api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
 
 硬件要求：推理需 6GB 显存起，微调 8–12GB。RTX 50 系必须用 cu128 版 PyTorch。
 
-### 6.8 提醒与主动消息
+### 6.8 提醒
 
 调度线程每 15 秒扫描一次到期任务，任务存在 `data/tasks.json`。
 
 - **定时提醒**：对话里说「明天 9 点提醒我」由 AI 登记，或在设置里手动添加。系统通知通过 Windows 计划任务实现，程序关闭也会提醒。
-- **主动聊天**：仅程序运行时发生；间隔为最短–最长之间的随机值；3 分钟内有活动会先让路，连续 2 次无回应自动暂停。
 
-### 6.9 图片生成
-
-默认关闭（`image_enabled = false`）。需要本机运行 ComfyUI：在 ComfyUI 里打开官方 FLUX 3 Klein 模板，用「另存为 API 格式」导出工作流 JSON，把路径填进「设置 → 图片生成」。模型建议 INT8 / NVFP4 量化版 + Qwen3-VL-4B 编码器 + FLUX.2 VAE。
-
-### 6.10 余额查询
+### 6.9 余额查询
 
 - DeepSeek：按接口地址自动识别，调用 `GET /user/balance`。
 - 其它厂商：在「余额查询地址」填 GET + Bearer 鉴权的接口；留空且非 DeepSeek 则显示「不支持」。
 
-### 6.11 数据文件
+### 6.10 数据文件
 
 | 类型 | 内容 |
 | --- | --- |
-| JSON | `config.json`（密钥与预设，明文）、`sessions.json`（会话快照）、`user_profile.json`（画像）、`tasks.json`（提醒 / 任务） |
-| JSON 目录 | `session_store/`（单会话热落库快照，回合收尾后自动清理） |
+| JSON | `config.json`（密钥与预设，明文）、`user_profile.json`（画像）、`tasks.json`（提醒 / 任务） |
+| JSONL / JSON | `sessions/<id>/events.jsonl`（会话事实源，只追加、永久保留）、`sessions/index.json`（会话顺序与 current）、`session_store/<id>.json`（可重建的物化缓存） |
 | Markdown | `notes/`（笔记库）、`knowledge/`（知识库）、`agents/`（子代理定义）、`skills/`（Skill） |
 | SQLite | `assistant.db`（工作台任务 / 日程 / 产物）、`stock.db`（模拟股市） |
-| JSONL | `token_usage.jsonl`（逐次调用用量）、`sessions/<id>/events.jsonl`（会话事件流） |
-| 目录 | `uploads/`（聊天附件）、`reader/`（版面 / 译文 / 裁图缓存）、`plugins/`（工具插件）、`models/`（语音 / embedding 模型）、`mobile/`（手机身份 / 设备 / 证书 / 审计）、`trajectory/`（轨迹）、`tool_trace/`（工具结果原文）、`subagents/`（子代理批次）、`worktrees/`（Git 隔离） |
+| JSONL | `token_usage.jsonl`（逐次调用用量） |
+| 目录 | `uploads/`（聊天附件）、`reader/`（版面 / 译文 / 裁图缓存）、`plugins/`（工具插件）、`models/`（语音 / embedding 模型）、`mobile/`（手机身份 / 设备 / 证书 / 审计）、`trajectory/`（轨迹）、`tool_trace/`（工具结果原文）、`subagents/`（子代理批次）、`worktrees/`（Git 隔离）、`deploy/`（发布站点）、`archify/`（交互图产物） |
 
 `resources/presets/` 在启动时按「缺失才补、不覆盖已有」播种到 `data/`。
 
@@ -560,7 +558,7 @@ python api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
 
 - 会话、密钥、画像、知识库、笔记、附件、语音模型、阅读缓存全部在 `data/`。
 - `config.json` 中的密钥是**明文**。多人共用电脑时注意目录权限。
-- 唯一的出网行为是你配置的模型接口、搜索服务、B 站接口，以及显式启用的浏览器 / 电脑操作。
+- 唯一的出网行为是你配置的模型接口、搜索服务，以及显式启用的浏览器 / 电脑操作。
 
 ---
 
@@ -595,7 +593,7 @@ robocopy "data" "..\_backup_data" /E /XD ".browser_profile"
 **平台与环境**
 
 - 仅支持 Windows：系统通知、计划任务与部分兼容性检测按 Windows 实现。
-- 程序关闭时，主动聊天、工作流、任务执行都不会发生；定时提醒除外（走计划任务）。
+- 程序关闭时，工作流、任务执行都不会发生；定时提醒除外（走计划任务）。
 - 需要保持后端进程运行；关闭控制台或应用窗口会一并退出。
 
 **能力边界**
@@ -609,6 +607,9 @@ robocopy "data" "..\_backup_data" /E /XD ".browser_profile"
 - 导出的 PDF 依赖 `reportlab`；未安装时只有 PDF 导出不可用。
 - `run_command` 不支持管道、重定向与后台常驻；需要复杂命令时用 `shell`。
 - IDE 的 AI Tab 补全依赖 `light_model`，且只对代码类语言、行尾位置生效。
+- `doc_create` 只生成基础结构（标题 / 段落 / 列表 / 表格），复杂版式与图表对象需用 Office 二次编辑。
+- `deploy` 只监听本机 / 局域网，不做公网托管；需要公网访问请自行做内网穿透。
+- `archify` 需要本机装有 Node（缺 Node 时会直接说明，可改用 Markdown / Mermaid）。
 - 代码语义检索需要先运行 `scripts/fetch_embed_model.py` 下载本地模型。
 - 笔记库是 Obsidian 核心功能的自主实现，不含插件系统、主题、模板与同步；与 Obsidian 无代码关系。
 - 图寻游戏必须使用 WGS-84 瓦片（OpenStreetMap）。
@@ -645,20 +646,21 @@ Galgame_monster/
 │   │   ├── hall*.py      # 大厅：图寻 / 数学 / 股市 / 面试 / 道场
 │   │   ├── tasks.py · work.py · workflow.py · calendar.py
 │   │   └── memory.py · skills.py · mcp.py · terminal.py · git.py · anno.py · aside.py
-│   ├── agent/            # 文件 Agent：工具实现 / 沙箱安全闸 / 审批 / 提问 / 撤销 / 子代理
+│   ├── agent/            # 文件 Agent：工具实现 / 沙箱安全闸 / 审批 / 提问 / 撤销 / 子代理 / 文档生成
 │   ├── mobile/           # 手机网关：HTTPS / 配对 / 设备 / 证书 / 审计
 │   ├── reader.py         # 文档版面重建、公式识别、翻译内核
 │   ├── reader_export.py  # 译文导出：仅译文 / 双语 PDF、Markdown（reportlab）
 │   ├── docparse.py       # PDF / Office 文本提取与扫描件识别
 │   ├── llm.py · context.py · prompt_assembly.py · prompts.py
-│   ├── search*.py · bilibili.py
+│   ├── search*.py
 │   ├── knowledge.py · notes.py · profile.py · mem_tool.py · memory.py
-│   ├── image_gen.py · imaging.py · speech.py · tts.py
+│   ├── imaging.py · speech.py · tts.py
 │   ├── hall.py · interview.py · stock.py · math_arena.py · dojo/
 │   ├── branch.py · session_compact.py · session_event_prune.py
 │   ├── task_engine.py · workflow.py · scenes.py · scheduler.py · notify.py
 │   ├── plugin_manager.py · mcp.py · skills.py · market.py
 │   ├── codeindex.py · debugger.py · trajectory.py · aside.py · anno.py · library.py
+│   ├── deploy.py · archify.py   # 静态站点发布 / 交互式图示渲染
 │   └── …                 # 其余按功能拆分，详见目录
 ├── web/                  # 前端界面（无框架、无构建）
 │   ├── index.html        # 页面结构 + SVG 图标库（sprite）
@@ -699,10 +701,10 @@ Galgame_monster/
 ## 11. 常见问题
 
 **Q：提示「尚未配置聊天 API 密钥」**
-到「设置 → 模型与对话」填写地址、模型名与密钥并保存。
+到「设置 → 模型接入」填写地址、模型名与密钥并保存。
 
 **Q：公式显示成代码、代码块没有颜色**
-KaTeX 已内置在 `web/vendor/katex`；代码高亮依赖 CDN 加载 highlight.js，请确认网络可用。加载失败会降级，不影响聊天。
+KaTeX 与 highlight.js 都已内置在 `web/vendor`（本地优先，CDN 仅作备用）；只有图表（ECharts / Mermaid）需要联网，加载失败会降级，不影响聊天。KaTeX 为按需加载：消息里出现公式时才拉取。
 
 **Q：关掉控制台窗口后界面还能用吗**
 不能。后端服务随该进程运行，请保持控制台窗口开启（最小化即可）。
@@ -745,6 +747,15 @@ KaTeX 已内置在 `web/vendor/katex`；代码高亮依赖 CDN 加载 highlight.
 
 **Q：工作流到点了没执行**
 定时与事件触发都依赖程序正在运行。检查工作流是否启用、时间与星期是否填对（0 = 周一，留空 = 每天）；调度器每 15 秒扫一次，休眠唤醒后会补跑。
+
+**Q：部署出来的链接为什么只能局域网访问**
+发布走内置静态服务器，只监听本机 / 局域网，不会自动暴露到公网；同一来源重复部署会原地更新文件，端口在发布记录里可见。要公网访问需自行做内网穿透。
+
+**Q：让 AI 画流程图，提示缺少 Node / 生成失败**
+`archify` 依赖本机 Node 与 `vendor/archify`；缺失时会直接说明。也可以让它用 Markdown / Mermaid 代码块画图，界面同样能渲染。
+
+**Q：`doc_create` 生成的 Office 文件版式很简单**
+它用标准库直接写 OOXML，只提供标题、段落、列表、表格等基础结构，不含复杂样式与图表对象；需要精细版式时请用 Office 另存后再改。
 
 ---
 

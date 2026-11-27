@@ -193,7 +193,7 @@ function helpApplyFilter(q) {
 
 function helpJumpGroup(g) {
   if (!g) return;
-  g.h4.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  g.h4.scrollIntoView({ block: 'start', behavior: GM_SMOOTH });
 }
 
 function helpGoSetting(tab, kw) {
@@ -207,7 +207,7 @@ function helpGoSetting(tab, kw) {
       (el) => (el.dataset.search || '').toLowerCase().includes(k));
   }
   requestAnimationFrame(() => {
-    (target || pane).scrollIntoView({ block: 'center', behavior: 'smooth' });
+    (target || pane).scrollIntoView({ block: 'center', behavior: GM_SMOOTH });
     if (!target) return;
     target.classList.add('help-flash');
     setTimeout(() => target.classList.remove('help-flash'), 1200);
@@ -267,5 +267,5 @@ function openHelpAnchor(id) {
   const sec = document.getElementById(id);
   if (!sec) return;
   sec.open = true;
-  requestAnimationFrame(() => sec.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+  requestAnimationFrame(() => sec.scrollIntoView({ block: 'center', behavior: GM_SMOOTH }));
 }

@@ -23,15 +23,21 @@
   const PAGE = 8;                  // 首屏 / 每次加载的轮数
   const FOLLOW_MS = 3000;
   const CHUNK = 60000;             // 单个文本面板首屏渲染的字符数
+  const INLINE_CHUNK = 6000;       // 时间线内联展开的正文上限
   const MAX_ROWS = 600;            // 单轮一次渲染的上限，超出给「显示更多」
 
   const T = {
     sid: '', turns: [], cells: [], byRid: {}, stats: {}, tools: [],
     series: [], marks: [], hasMore: false, totalTurns: 0, source: 'events',
+    turnIndex: [],                 // 全量轮次摘要（P1）
+    searchHits: [], searchTotal: 0, searchOffset: 0, searchBusy: false,
     filter: 'all', tool: '', q: '', errorsOnly: false,
     selected: '', selectedTurn: 0, tab: 'overview',
     detail: {}, expand: {}, collapsed: {}, stepFold: {}, more: {},
-    viz: 'waterfall', vizFold: false, follow: true,
+    inlineOpen: {},                // 时间线里已展开的记录
+    view: 'timeline', insOpen: false, vizOpen: false, railOpen: false,
+    io: null,                      // 步骤懒渲染的 IntersectionObserver
+    viz: 'waterfall', follow: true,
     loading: false, opened: false, atBottom: true,
     timer: null, qTimer: null, revKey: '', sig: '', uid: 0,
   };
@@ -176,9 +182,10 @@
 
   // ---------------------------------------------------------------- 读取
 
-  async function fetchView(before, limit) {
+  async function fetchView(before, limit, turn) {
     const body = { session_id: T.sid, limit: limit || PAGE };
-    if (before) body.before = before;
+    if (turn) body.turn = turn;
+    else if (before) body.before = before;
     const r = await api('/api/trajectory', body);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取轨迹失败');
     T.revKey = JSON.stringify(r.rev || null);
@@ -233,6 +240,89 @@
     }
   }
 
+  async function loadTurnIndex() {
+    try {
+      const r = await api('/api/trajectory/turns', { session_id: T.sid, limit: 1000 });
+      if (r && r.ok) {
+        T.turnIndex = r.turns || [];
+        if (r.total) T.totalTurns = r.total;
+      }
+    } catch (e) { /* 导航失败不影响主视图 */ }
+  }
+
+  function turnSummaries() {
+    return (T.turnIndex && T.turnIndex.length) ? T.turnIndex : T.turns;
+  }
+
+  async function jumpTurn(n) {
+    n = Number(n) || 0;
+    if (!n) return;
+    const loaded = (T.turns || []).some((t) => Number(t.turn) === n);
+    if (loaded) { gotoTurn(n); return; }
+    if (T.loading) return;
+    T.loading = true;
+    try {
+      const view = await fetchView(0, PAGE, n);
+      applyView(view, false);
+      render();
+      gotoTurn(n);
+    } catch (e) {
+      toastErr('读取轨迹', e);
+    } finally {
+      T.loading = false;
+    }
+  }
+
+  async function runSearch(append) {
+    const q = String(T.q || '').trim();
+    if (!q) {
+      T.searchHits = [];
+      T.searchTotal = 0;
+      T.searchOffset = 0;
+      renderList();
+      updateFoot();
+      return;
+    }
+    if (T.searchBusy) return;
+    T.searchBusy = true;
+    const offset = append ? T.searchOffset : 0;
+    const kinds = T.filter !== 'all' ? [T.filter] : null;
+    try {
+      const r = await api('/api/trajectory/search', {
+        session_id: T.sid, q: q, kinds: kinds, tool: T.tool,
+        errors: T.errorsOnly, limit: 50, offset: offset,
+      });
+      if (!r || !r.ok) throw new Error((r && r.error) || '搜索失败');
+      T.searchHits = append ? (T.searchHits || []).concat(r.hits || []) : (r.hits || []);
+      T.searchTotal = Number(r.total) || 0;
+      T.searchOffset = offset + (r.hits || []).length;
+      renderList();
+      updateFoot();
+    } catch (e) {
+      toastErr('搜索轨迹', e);
+    } finally {
+      T.searchBusy = false;
+    }
+  }
+
+  async function jumpToHit(idx) {
+    const hit = (T.searchHits || [])[Number(idx)];
+    if (!hit) return;
+    // 跳到命中处时退出搜索结果视图，回到时间线，才能看到高亮的 cell
+    T.q = '';
+    T.searchHits = [];
+    T.searchTotal = 0;
+    T.searchOffset = 0;
+    const box = el('traj-search');
+    if (box) box.value = '';
+    await jumpTurn(hit.turn);
+    if (hit.recordId && T.byRid[hit.recordId]) {
+      select(hit.recordId, { noScroll: true });
+    }
+    const row = cellNode(hit.recordId || '');
+    if (row) row.scrollIntoView({ block: 'center' });
+  }
+
   async function quietRefresh() {
     if (T.loading || !T.opened || document.hidden || !T.sid || !T.follow) return;
     try {
@@ -252,6 +342,7 @@
       T.turns = keep.concat(incoming);
       T.sig = signature(view);
       indexCells();
+      await loadTurnIndex();
       const list = el('traj-list');
       const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
       render();
@@ -324,8 +415,8 @@
       b.onclick = () => {
         T.filter = b.dataset.kind || 'all';
         renderFilters();
-        renderList();
-        updateFoot();
+        if (T.q.trim()) runSearch(false);
+        else { renderList(); updateFoot(); }
       };
     });
   }
@@ -343,20 +434,28 @@
   // ---------------------------------------------------------------- 左：轮次导航
 
   function renderRail() {
-    const turns = T.turns || [];
+    const turns = turnSummaries();
     let peak = 1;
     turns.forEach((t) => { peak = Math.max(peak, Number((t.stats || {}).peakIn) || 0); });
     const rows = turns.map((t) => {
       const st = t.stats || {};
       const w = Math.round(Math.max(2, (Number(st.peakIn) || 0) / peak * 100));
       const on = Number(t.turn) === Number(T.selectedTurn);
+      const flags = [];
+      if (st.errors) flags.push('✗' + st.errors);
+      if (st.writes) flags.push('▲' + st.writes);
+      if (st.subagents) flags.push('◆' + st.subagents);
+      if (st.reviews) flags.push('✦');
       return '<button type="button" class="traj-rail-item' +
         (on ? ' on' : '') + (st.errors ? ' err' : '') +
-        '" data-turn="' + Number(t.turn) + '" title="Turn ' + Number(t.turn) +
-        ' · ' + (st.steps || 0) + ' 步 · ' + chars(st.outTok) + ' 输出">' +
+        '" data-turn="' + Number(t.turn) + '" title="' + esc(
+          'Turn ' + Number(t.turn) + ' · ' + (t.title || '') + ' · ' +
+          (st.steps || 0) + ' 步 · ' + (st.tools || 0) + ' 工具' +
+          (t.reason ? ' · ' + t.reason : '')) + '">' +
         '<span class="tr-no">T' + Number(t.turn) + '</span>' +
         '<span class="tr-bar"><i style="width:' + w + '%"></i></span>' +
         '<span class="tr-meta">' + (st.steps || 0) + '步 · ' + (st.tools || 0) + '工具' +
+        (flags.length ? ' · ' + flags.join(' ') : '') +
         '</span>' +
         (st.errors ? '<span class="tr-err">' + st.errors + '</span>' : '') +
         '</button>';
@@ -364,9 +463,7 @@
     el('traj-rail').innerHTML =
       '<div class="traj-rail-h"><span class="traj-cap">轮次</span><b>' +
       (T.totalTurns || turns.length) + '</b></div>' +
-      (rows || '<div class="traj-empty">暂无轮次</div>') +
-      (T.hasMore ? '<button type="button" class="ghost traj-rail-more" ' +
-        'id="traj-rail-more">加载更早</button>' : '');
+      (rows || '<div class="traj-empty">暂无轮次</div>');
     const box = el('traj-rail');
     const on = box.querySelector('.traj-rail-item.on');
     if (on) {
@@ -529,15 +626,26 @@
       b.classList.toggle('on', b.dataset.viz === T.viz);
     });
     const body = el('traj-viz-body');
-    el('traj-viz').classList.toggle('folded', T.vizFold);
-    el('traj-viz-fold').textContent = T.vizFold ? '展开' : '收起';
-    if (T.vizFold) { body.innerHTML = ''; return; }
+    el('traj-viz').classList.toggle('hidden', !T.vizOpen);
+    el('traj-viz-toggle').classList.toggle('on', T.vizOpen);
+    if (!T.vizOpen) { body.innerHTML = ''; return; }
     if (T.viz === 'tokens') body.innerHTML = vizTokens();
     else if (T.viz === 'tools') body.innerHTML = vizTools();
     else if (T.viz === 'marks') body.innerHTML = vizMarks();
     else body.innerHTML = vizWaterfall();
     el('traj-viz-note').textContent = T.viz === 'waterfall' ? 'WATERFALL'
       : T.viz === 'tokens' ? 'TOKENS' : T.viz === 'tools' ? 'TOOLS' : 'MARKS';
+  }
+
+  /* 视图 / 抽屉 / 检查器的显隐统一在这里同步 */
+  function applyChrome() {
+    el('traj-main').classList.toggle('ins-off', !T.insOpen);
+    el('traj-ins-toggle').classList.toggle('on', T.insOpen);
+    el('traj-rail').classList.toggle('open', !!T.railOpen);
+    el('traj-rail-toggle').classList.toggle('on', !!T.railOpen);
+    el('traj-view').querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.view === T.view);
+    });
   }
 
   // ---------------------------------------------------------------- 事件流
@@ -691,16 +799,268 @@
     return out;
   }
 
+  // ---------------------------------------------------------------- 时间线
+
+  function turnTitle(t) {
+    for (const g of t.groups || []) {
+      for (const c of g.cells || []) {
+        if (c.kind === 'user') return oneLine(c.text || '', 100) || '（空输入）';
+      }
+    }
+    return 'Turn ' + Number(t.turn);
+  }
+
+  function stepMeta(g) {
+    let tools = 0;
+    let errors = 0;
+    let peak = 0;
+    let out = 0;
+    let secs = 0;
+    (g.cells || []).forEach((c) => {
+      if (c.kind === 'tool' || c.kind === 'subtool') tools += 1;
+      if (c.isError) errors += 1;
+      peak = Math.max(peak, Number(c.input) || 0);
+      out += Number(c.output) || 0;
+      secs += Number(c.timeSeconds) || 0;
+    });
+    const meta = [];
+    if (tools) meta.push(tools + ' 工具');
+    if (peak || out) meta.push(num(peak) + ' → ' + num(out));
+    if (secs) meta.push(durMs(secs * 1000));
+    if (errors) meta.push(errors + ' 失败');
+    return meta.join(' · ');
+  }
+
+  function cellBlock(c) {
+    const k = kindOf(c);
+    const rid = cid(c);
+    const open = !!T.inlineOpen[rid];
+    const flags = [];
+    if (c.isError) flags.push('<span class="traj-flag err">失败</span>');
+    if (c.write) flags.push('<span class="traj-flag">写入</span>');
+    if (c.subagent) flags.push('<span class="traj-flag">子代理</span>');
+    return '<div class="tl-cell k-' + k.cls + (c.isError ? ' err' : '') +
+      (open ? ' open' : '') + (T.selected === rid ? ' on' : '') +
+      '" role="button" tabindex="-1" data-rid="' + esc(rid) + '">' +
+      '<span class="tl-dot"></span>' +
+      '<span class="tl-cell-main">' +
+      '<span class="tl-cell-line"><span class="traj-kind">' + esc(k.label) + '</span>' +
+      '<span class="tl-cell-title">' + markHtml(c.text || '（空）', T.q) + '</span></span>' +
+      '<span class="tl-cell-meta">' + esc(metaBits(c).join(' · ') || '—') + '</span>' +
+      '</span>' +
+      '<span class="tl-cell-flags">' + flags.join('') + '</span>' +
+      '<span class="tl-cell-caret">' + (open ? '▾' : '▸') + '</span>' +
+      (open ? '<div class="tl-inline">' + inlineHtml(c) + '</div>' : '') +
+      '</div>';
+  }
+
+  function inlinePane(cell, tab, label, text) {
+    const body = String(text || '');
+    const long = body.length > INLINE_CHUNK;
+    return '<div class="tl-pane"><div class="tl-pane-h"><span>' + esc(label) +
+      '</span><span>' + chars(body.length) + '</span></div>' +
+      '<pre class="traj-pre">' + textHtml(long ? body.slice(0, INLINE_CHUNK) : body, tab) + '</pre>' +
+      (long ? '<div class="tl-pane-h"><span>已截断</span><span>用「检查器」看全文</span></div>' : '') +
+      '</div>';
+  }
+
+  const INLINE_TABS = [
+    ['input', '输入'], ['thinking', '思考'], ['output', '输出'],
+    ['diff', '差异'], ['schema', 'Schema'],
+  ];
+
+  function inlineHtml(cell) {
+    if (!partsLoaded(cell)) {
+      ensureDetail(cell);
+      return '<div class="tl-loading">读取中…</div>';
+    }
+    const kind = cell.kind;
+    const rid = cid(cell);
+    const tabs = tabsFor(cell).map((x) => x.id);
+    let html = '<div class="tl-inline-bar"><span class="traj-cap">' +
+      esc(kindOf(cell).label) + ' #' + pad(cell.index) + '</span><span class="sp"></span>' +
+      '<button type="button" data-inline-act="copy" data-rid="' + esc(rid) + '">复制</button>' +
+      '<button type="button" data-inline-act="ins" data-rid="' + esc(rid) + '">检查器</button>' +
+      '</div>';
+    let panes = '';
+    INLINE_TABS.forEach(([tab, label]) => {
+      if (tabs.indexOf(tab) < 0) return;
+      if (tab === 'output' && kind === 'system') return;
+      const text = paneText(cell, tab);
+      if (!text) return;
+      panes += inlinePane(cell, tab, label, text);
+    });
+    return html + (panes || '<div class="traj-empty">没有可显示的正文。</div>');
+  }
+
+  function stepBodyNode(t, g) {
+    return el('traj-list').querySelector(
+      '.tl-step-body[data-turn="' + Number(t.turn) + '"]' +
+      '[data-step="' + cssEsc(g.step || g.title || '') + '"]');
+  }
+
+  function fillStep(node) {
+    if (!node || node.dataset.rendered) return;
+    const t = (T.turns || []).find((x) => Number(x.turn) === Number(node.dataset.turn));
+    const g = t && (t.groups || []).find((x) =>
+      String(x.step || x.title || '') === String(node.dataset.step));
+    if (!t || !g) return;
+    node.dataset.rendered = '1';
+    node.innerHTML = (g.cells || []).map(cellBlock).join('');
+  }
+
+  /* 长列表懒渲染：步骤进入视口附近才生成 cell 节点 */
+  function setupLazy() {
+    if (T.io) { T.io.disconnect(); T.io = null; }
+    const nodes = el('traj-list').querySelectorAll('.tl-step-body[data-step]');
+    if (!nodes.length) return;
+    if (!('IntersectionObserver' in window)) {
+      nodes.forEach(fillStep);
+      return;
+    }
+    T.io = new IntersectionObserver((entries) => {
+      entries.forEach((en) => {
+        if (!en.isIntersecting) return;
+        T.io.unobserve(en.target);
+        fillStep(en.target);
+      });
+    }, { root: el('traj-list'), rootMargin: '600px 0px' });
+    nodes.forEach((n) => T.io.observe(n));
+  }
+
+  function revealCell(rid) {
+    const item = T.byRid[rid];
+    if (!item) return;
+    const body = stepBodyNode(item.t, item.g);
+    if (body) fillStep(body);
+  }
+
+  function refreshInline(rid) {
+    const item = T.byRid[rid];
+    if (!item || !T.inlineOpen[rid]) return;
+    const node = el('traj-list').querySelector(
+      '.tl-cell[data-rid="' + cssEsc(rid) + '"] .tl-inline');
+    if (node) node.innerHTML = inlineHtml(item.c);
+  }
+
+  function toggleInline(rid) {
+    const item = T.byRid[rid];
+    if (!item) return;
+    const open = !T.inlineOpen[rid];
+    if (open) T.inlineOpen[rid] = true;
+    else delete T.inlineOpen[rid];
+    T.selected = rid;
+    T.selectedTurn = Number(item.t.turn);
+    const node = el('traj-list').querySelector('.tl-cell[data-rid="' + cssEsc(rid) + '"]');
+    if (node) {
+      node.classList.toggle('open', open);
+      node.classList.toggle('on', open);
+      const caret = node.querySelector('.tl-cell-caret');
+      if (caret) caret.textContent = open ? '▾' : '▸';
+      const old = node.querySelector('.tl-inline');
+      if (!open) {
+        if (old) old.remove();
+      } else {
+        let box = old;
+        if (!box) {
+          box = document.createElement('div');
+          box.className = 'tl-inline';
+          node.appendChild(box);
+        }
+        box.innerHTML = inlineHtml(item.c);
+      }
+    }
+    el('traj-list').querySelectorAll('.tl-cell.on').forEach((n) => {
+      if (n.dataset.rid !== rid) n.classList.remove('on');
+    });
+    if (open) revealCell(rid);
+    renderRail();
+  }
+
+  function turnCard(t) {
+    const st = t.stats || {};
+    const collapsed = isCollapsed(t);
+    const meta = [];
+    if (st.steps) meta.push(st.steps + ' 步');
+    meta.push((st.cells || 0) + ' 条');
+    if (st.tools) meta.push(st.tools + ' 工具');
+    if (st.errors) meta.push(st.errors + ' 失败');
+    const steps = (t.groups || []).filter((g) => (g.cells || []).length);
+    return '<section class="tl-turn' + (collapsed ? ' collapsed' : '') +
+      (st.errors ? ' err' : '') + '" data-turn="' + Number(t.turn) + '">' +
+      '<header class="tl-turn-h" data-turn="' + Number(t.turn) + '">' +
+      '<span class="tl-turn-no">T' + Number(t.turn) + '</span>' +
+      '<span class="tl-turn-title">' + esc(turnTitle(t)) + '</span>' +
+      '<span class="tl-turn-meta">' + esc(meta.join(' · ')) + '</span>' +
+      '<span class="tl-turn-at">' + esc(clock(t.start)) + '</span>' +
+      '<span class="tl-turn-dur">' + esc(durMs(st.durMs)) + '</span>' +
+      '<span class="tl-caret">▾</span></header>' +
+      (collapsed ? '' : '<div class="tl-steps">' +
+        steps.map((g) => stepCard(t, g)).join('') + '</div>') +
+      '</section>';
+  }
+
+  function stepCard(t, g) {
+    const folded = isStepFolded(t, g);
+    const meta = stepMeta(g);
+    return '<article class="tl-step' + (folded ? ' folded' : '') + '">' +
+      '<header class="tl-step-h" data-turn="' + Number(t.turn) +
+      '" data-step="' + esc(g.step || g.title || '') + '">' +
+      '<span class="tl-step-i">' + esc(g.step || '·') + '</span>' +
+      '<span class="tl-step-t">' + esc(g.title || '') + '</span>' +
+      '<span class="tl-step-m">' + esc(meta) + '</span>' +
+      '<span class="tl-step-n">' + (g.cells || []).length + ' 条</span></header>' +
+      (folded ? '' : '<div class="tl-step-body" data-turn="' + Number(t.turn) +
+        '" data-step="' + esc(g.step || g.title || '') + '"></div>') +
+      '</article>';
+  }
+
+  function renderTimeline() {
+    return '<div class="tl">' + (T.turns || []).map(turnCard).join('') + '</div>';
+  }
+
+  function renderSearchResults() {
+    const hits = T.searchHits || [];
+    if (!hits.length) {
+      return '<div class="traj-empty">' +
+        (T.searchBusy ? '搜索中…' : '没有匹配的记录，试试换关键词或清空筛选。') + '</div>';
+    }
+    let out = '';
+    let lastTurn = null;
+    hits.forEach((h, i) => {
+      if (Number(h.turn) !== lastTurn) {
+        out += '<div class="traj-group-h static">Turn ' + Number(h.turn) +
+          (h.step ? ' · 第 ' + Number(h.step) + ' 步' : '') + '</div>';
+        lastTurn = Number(h.turn);
+      }
+      out += '<button type="button" class="traj-hit" data-hit="' + i + '">' +
+        '<span class="traj-hit-kind">' +
+        esc((KIND[h.kind] || {}).label || h.kind || '?') + '</span>' +
+        '<span class="traj-hit-text">' + markHtml(h.snippet || '', T.q) + '</span>' +
+        '</button>';
+    });
+    out += '<div class="traj-search-foot">共 ' + T.searchTotal + ' 条命中' +
+      (T.searchOffset < T.searchTotal
+        ? ' · <button type="button" class="ghost traj-more-hits">加载更多</button>' : '') +
+      '</div>';
+    return out;
+  }
+
   function renderList(opts) {
     const list = el('traj-list');
     const top = opts && opts.keepScroll ? list.scrollTop : null;
     let html = '';
-    if (T.hasMore && !filterActive()) {
-      html += '<button type="button" class="ghost traj-loadmore" id="traj-more">加载更早</button>';
-    }
-    if (filterActive()) {
+    if (T.q.trim()) {
+      html = renderSearchResults();
+    } else if (filterActive()) {
+      if (T.hasMore) {
+        html += '<button type="button" class="ghost traj-loadmore" id="traj-more">加载更早</button>';
+      }
       html += renderFiltered();
-    } else {
+    } else if (T.view === 'list') {
+      if (T.hasMore) {
+        html += '<button type="button" class="ghost traj-loadmore" id="traj-more">加载更早</button>';
+      }
       (T.turns || []).forEach((t) => {
         const collapsed = isCollapsed(t);
         html += '<section class="traj-turn' + (collapsed ? ' collapsed' : '') +
@@ -712,19 +1072,35 @@
       if (!T.turns.length) {
         html += '<div class="traj-empty">这个会话还没有轨迹记录。</div>';
       }
+    } else {
+      if (T.hasMore) {
+        html += '<button type="button" class="ghost traj-loadmore" id="traj-more">加载更早</button>';
+      }
+      html += renderTimeline();
+      if (!T.turns.length) {
+        html += '<div class="traj-empty">这个会话还没有轨迹记录。</div>';
+      }
     }
     list.innerHTML = html;
     if (top != null) list.scrollTop = top;
+    setupLazy();
     updateFoot();
   }
 
   function updateFoot() {
     const total = T.cells.length;
-    const shown = filterActive() ? filteredItems().length : total;
-    el('traj-hits').textContent = filterActive() ? shown + ' / ' + total : '';
+    const searching = !!T.q.trim();
+    const shown = searching ? (T.searchHits || []).length
+      : (filterActive() ? filteredItems().length : total);
+    el('traj-hits').textContent = searching
+      ? shown + ' / ' + (T.searchTotal || 0)
+      : (filterActive() ? shown + ' / ' + total : '');
     el('traj-search-clear').classList.toggle('hidden', !T.q);
-    el('traj-foot-stat').textContent = '显示 ' + shown + ' / ' + total +
-      ' 条 · ' + T.turns.length + ' 个已加载轮次 · 共 ' + (T.totalTurns || 0) + ' 轮';
+    el('traj-foot-stat').textContent = searching
+      ? '搜索命中 ' + shown + ' / ' + (T.searchTotal || 0) + ' 条 · ' +
+        T.turns.length + ' 个已加载轮次 · 共 ' + (T.totalTurns || 0) + ' 轮'
+      : '显示 ' + shown + ' / ' + total + ' 条 · ' +
+        T.turns.length + ' 个已加载轮次 · 共 ' + (T.totalTurns || 0) + ' 轮';
   }
 
   // ---------------------------------------------------------------- 检查器
@@ -814,6 +1190,7 @@
     T.detail[rid] = { parts: {}, loading: true, promise: job };
     await job;
     if (T.selected === rid) renderInspector(cell);
+    refreshInline(rid);
   }
 
   function kvRow(k, v, copyValue) {
@@ -979,6 +1356,19 @@
 
   // ---------------------------------------------------------------- 选中
 
+  function cellNode(rid) {
+    return el('traj-list').querySelector(
+      '.traj-row[data-rid="' + cssEsc(rid) + '"], .tl-cell[data-rid="' + cssEsc(rid) + '"]');
+  }
+
+  function markSelected(rid) {
+    el('traj-list').querySelectorAll('.traj-row.on, .tl-cell.on').forEach((r) => {
+      if (r.dataset.rid !== rid) r.classList.remove('on');
+    });
+    const row = cellNode(rid);
+    if (row) row.classList.add('on');
+  }
+
   function select(rid, opts) {
     const item = T.byRid[rid];
     if (!item) return;
@@ -1000,15 +1390,12 @@
     }
     if (needRender) {
       renderList();
-      renderRail();
       renderViz();
-    } else {
-      el('traj-list').querySelectorAll('.traj-row.on').forEach((r) => r.classList.remove('on'));
-      const row = el('traj-list').querySelector('.traj-row[data-rid="' + cssEsc(rid) + '"]');
-      if (row) row.classList.add('on');
-      renderRail();
     }
-    const row = el('traj-list').querySelector('.traj-row[data-rid="' + cssEsc(rid) + '"]');
+    revealCell(rid);                 // 时间线步骤是懒渲染的，先补齐再定位
+    markSelected(rid);
+    renderRail();
+    const row = cellNode(rid);
     if (row && !(opts && opts.noScroll)) {
       const list = el('traj-list');
       const rb = row.getBoundingClientRect();
@@ -1034,7 +1421,8 @@
     renderRail();
     renderViz();
     if (first) select(cid(first), { noScroll: true });
-    const sec = el('traj-list').querySelector('.traj-turn[data-turn="' + Number(n) + '"]');
+    const sec = el('traj-list').querySelector(
+      '.tl-turn[data-turn="' + Number(n) + '"], .traj-turn[data-turn="' + Number(n) + '"]');
     if (sec) sec.scrollIntoView({ block: 'start' });
   }
 
@@ -1069,6 +1457,7 @@
     renderFilters();
     renderToolSelect();
     renderRail();
+    applyChrome();
     renderViz();
     renderList();
     renderInspector(T.selected ? (T.byRid[T.selected] || {}).c : null);
@@ -1076,7 +1465,8 @@
 
   // ---------------------------------------------------------------- 打开 / 关闭
 
-  async function open(rid) {
+  async function open(opts) {
+    const o = (typeof opts === 'string') ? { rid: opts } : (opts || {});
     const sid = (state.sessions && state.sessions.current) || '';
     if (!sid) { toast('先打开一个会话'); return; }
     T.sid = sid;
@@ -1087,6 +1477,10 @@
     T.tools = [];
     T.series = [];
     T.marks = [];
+    T.turnIndex = [];
+    T.searchHits = [];
+    T.searchTotal = 0;
+    T.searchOffset = 0;
     T.selected = '';
     T.selectedTurn = 0;
     T.detail = {};
@@ -1094,13 +1488,18 @@
     T.collapsed = {};
     T.stepFold = {};
     T.more = {};
+    T.inlineOpen = {};
     T.filter = 'all';
     T.tool = '';
     T.q = '';
     T.errorsOnly = false;
     T.tab = 'overview';
     T.viz = 'waterfall';
-    T.vizFold = false;
+    T.view = 'timeline';
+    T.insOpen = false;
+    T.vizOpen = false;
+    T.railOpen = false;
+    if (T.io) { T.io.disconnect(); T.io = null; }
     T.opened = true;
     T.revKey = '';
     el('traj-search').value = '';
@@ -1111,13 +1510,27 @@
       gmPageIn(card || el('trajectory-modal'));
     }
     document.body.classList.add('traj-locked');
+    applyChrome();
     el('traj-list').innerHTML = '<div class="traj-empty">读取中…</div>';
     el('traj-inspector').innerHTML = '<div class="traj-empty">读取中…</div>';
     el('traj-hud').innerHTML = '';
     el('traj-rail').innerHTML = '';
     el('traj-viz-body').innerHTML = '';
-    await load(0, false);
-    if (rid) select(rid, { noScroll: true });
+    await loadTurnIndex();
+    if (o.turn) {
+      try {
+        const view = await fetchView(0, PAGE, Number(o.turn));
+        applyView(view, false);
+        render();
+        gotoTurn(Number(o.turn));
+      } catch (e) {
+        toastErr('读取轨迹', e);
+        await load(0, false);
+      }
+    } else {
+      await load(0, false);
+    }
+    if (o.rid) select(o.rid, { noScroll: true });
     try { el('traj-list').focus({ preventScroll: true }); } catch (e) {}
     startFollow();
   }
@@ -1175,6 +1588,17 @@
     }
   }
 
+  async function exportHtml() {
+    try {
+      const r = await api('/api/trajectory/export', { session_id: T.sid, format: 'html' });
+      if (!r || !r.ok) throw new Error((r && r.error) || '导出失败');
+      download(r.html || '', 'trajectory-' + (T.sid || 'session') + '.html',
+        'text/html;charset=utf-8');
+    } catch (e) {
+      toastErr('导出轨迹', e);
+    }
+  }
+
   function hideExportMenu() {
     el('traj-export-menu').classList.add('hidden');
   }
@@ -1191,10 +1615,15 @@
     if (e.key === 'Escape') {
       e.stopPropagation();           // 弹窗打开时独占 Esc，避免被全局浮层逻辑抢走
       if (!el('traj-export-menu').classList.contains('hidden')) { hideExportMenu(); return; }
+      if (T.vizOpen) { T.vizOpen = false; renderViz(); return; }
+      if (T.railOpen) { T.railOpen = false; applyChrome(); return; }
       const box = el('traj-search');
       if (box.value) {               // 先清搜索，再按一次才关闭
         box.value = '';
         T.q = '';
+        T.searchHits = [];
+        T.searchTotal = 0;
+        T.searchOffset = 0;
         renderList();
         updateFoot();
         return;
@@ -1222,9 +1651,11 @@
       if (rs.length) select(cid(rs[rs.length - 1]));
     } else if (e.key === '[' || e.key === ']') {
       e.preventDefault();
-      const i = T.turns.findIndex((t) => Number(t.turn) === Number(T.selectedTurn));
-      const next = T.turns[Math.max(0, Math.min(T.turns.length - 1, i + (e.key === ']' ? 1 : -1)))];
-      if (next) gotoTurn(next.turn);
+      const turns = turnSummaries();
+      const i = turns.findIndex((t) => Number(t.turn) === Number(T.selectedTurn));
+      const next = turns[Math.max(0, Math.min(turns.length - 1,
+        i + (e.key === ']' ? 1 : -1)))];
+      if (next) jumpTurn(next.turn);
     } else if (/^[1-7]$/.test(e.key)) {
       const cell = T.selected && T.byRid[T.selected];
       if (!cell) return;
@@ -1238,7 +1669,9 @@
 
   function bind() {
     el('traj-close').onclick = close;
-    el('traj-refresh').onclick = () => { if (T.sid) load(0, false); };
+    el('traj-refresh').onclick = () => {
+      if (T.sid) loadTurnIndex().then(() => load(0, false));
+    };
     el('traj-follow').onchange = (e) => {
       T.follow = !!e.target.checked;
       if (T.follow) startFollow(); else stopFollow();
@@ -1251,6 +1684,7 @@
       hideExportMenu();
       const fmt = b.dataset.fmt;
       if (fmt === 'json') exportJson();
+      else if (fmt === 'html') exportHtml();
       else if (fmt === 'md') {
         download(buildMarkdown(), 'trajectory-' + (T.sid || 'session') + '.md', 'text/markdown;charset=utf-8');
       } else if (fmt === 'copy') {
@@ -1267,13 +1701,15 @@
       clearTimeout(T.qTimer);
       T.qTimer = setTimeout(() => {
         T.q = search.value || '';
-        renderList();
-        updateFoot();
-      }, 120);
+        runSearch(false);
+      }, 180);
     };
     el('traj-search-clear').onclick = () => {
       search.value = '';
       T.q = '';
+      T.searchHits = [];
+      T.searchTotal = 0;
+      T.searchOffset = 0;
       renderList();
       updateFoot();
       search.focus();
@@ -1281,13 +1717,13 @@
 
     el('traj-tool').onchange = (e) => {
       T.tool = e.target.value || '';
-      renderList();
-      updateFoot();
+      if (T.q.trim()) runSearch(false);
+      else { renderList(); updateFoot(); }
     };
     el('traj-errors').onchange = (e) => {
       T.errorsOnly = !!e.target.checked;
-      renderList();
-      updateFoot();
+      if (T.q.trim()) runSearch(false);
+      else { renderList(); updateFoot(); }
     };
     el('traj-fold').onclick = () => {
       const anyOpen = T.turns.some((t) => !isCollapsed(t));
@@ -1296,15 +1732,38 @@
       el('traj-fold').textContent = anyOpen ? '展开全部' : '折叠全部';
     };
 
+    el('traj-view').onclick = (e) => {
+      const b = e.target.closest('button[data-view]');
+      if (!b || b.dataset.view === T.view) return;
+      T.view = b.dataset.view;
+      applyChrome();
+      renderList();
+    };
+    el('traj-viz-toggle').onclick = () => {
+      T.vizOpen = !T.vizOpen;
+      renderViz();
+    };
+    el('traj-ins-toggle').onclick = () => {
+      T.insOpen = !T.insOpen;
+      applyChrome();
+      if (T.insOpen && T.selected) {
+        const item = T.byRid[T.selected];
+        if (item) renderInspector(item.c);
+      }
+    };
+    el('traj-rail-toggle').onclick = () => {
+      T.railOpen = !T.railOpen;
+      applyChrome();
+    };
+
     el('traj-viz-tabs').onclick = (e) => {
       const b = e.target.closest('button[data-viz]');
       if (!b) return;
       T.viz = b.dataset.viz;
-      T.vizFold = false;
       renderViz();
     };
     el('traj-viz-fold').onclick = () => {
-      T.vizFold = !T.vizFold;
+      T.vizOpen = false;
       renderViz();
     };
     el('traj-viz-body').onclick = (e) => {
@@ -1329,7 +1788,7 @@
         return;
       }
       const b = e.target.closest('[data-turn]');
-      if (b) gotoTurn(b.dataset.turn);
+      if (b) jumpTurn(b.dataset.turn);
     };
 
     el('traj-newtip').onclick = () => {
@@ -1344,6 +1803,9 @@
       if (T.atBottom) el('traj-newtip').classList.add('hidden');
     };
     list.onclick = (e) => {
+      const hit = e.target.closest('.traj-hit');
+      if (hit) { jumpToHit(hit.dataset.hit); return; }
+      if (e.target.closest('.traj-more-hits')) { runSearch(true); return; }
       if (e.target.closest('.traj-loadmore')) {
         const first = T.turns.length ? T.turns[0].turn : 0;
         if (first) load(first, true);
@@ -1355,6 +1817,37 @@
         renderList();
         return;
       }
+      // 时间线：内联详情里的操作按钮
+      const iact = e.target.closest('[data-inline-act]');
+      if (iact) {
+        const rid = iact.dataset.rid;
+        const item = T.byRid[rid];
+        if (item && iact.dataset.inlineAct === 'copy') copyText(item.c.text || '');
+        else if (item && iact.dataset.inlineAct === 'ins') {
+          T.insOpen = true;
+          applyChrome();
+          select(rid, { noScroll: true });
+        }
+        return;
+      }
+      if (e.target.closest('.tl-inline')) return;   // 详情里选中文字时不折叠
+      const tlTurn = e.target.closest('.tl-turn-h');
+      if (tlTurn) {
+        const turn = Number(tlTurn.dataset.turn);
+        const t = T.turns.find((x) => Number(x.turn) === turn);
+        T.collapsed[turn] = !isCollapsed(t);
+        renderList({ keepScroll: true });
+        return;
+      }
+      const tlStep = e.target.closest('.tl-step-h');
+      if (tlStep) {
+        const key = stepKey(tlStep.dataset.turn, { step: tlStep.dataset.step });
+        T.stepFold[key] = !T.stepFold[key];
+        renderList({ keepScroll: true });
+        return;
+      }
+      const tlCell = e.target.closest('.tl-cell');
+      if (tlCell) { toggleInline(tlCell.dataset.rid); return; }
       const head = e.target.closest('.traj-turn-h');
       if (head && !head.classList.contains('static')) {
         const sec = head.closest('.traj-turn');

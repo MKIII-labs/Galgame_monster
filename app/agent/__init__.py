@@ -58,7 +58,7 @@ from .prompt import (
     _NO_SEARCH_PROMPT, _PICKER_CODE, _PICK_MARK, _PLAN_MODE_PROMPT, _PLAN_PROMPT,
     _REMINDER_PROMPT, _RESEARCH_PROMPT, _RESEARCH_PROMPT_SHORT, _SEARCH_PROMPT,
     _VISUAL_BITMAP_NO, _VISUAL_BITMAP_OK, _VISUAL_DIAGRAM_OFF, _VISUAL_DIAGRAM_READY,
-    _VISUAL_HEAD, _VISUAL_TAIL, _bili_hint, _calendar_hint, _capability_prompt, _file_hint,
+    _VISUAL_HEAD, _VISUAL_TAIL, _calendar_hint, _capability_prompt, _file_hint,
     _full_agent_prompt, _line_cid, _memory_hint, _proto_block, _reminder_hint, _stock_hint,
     _tool_decision_prompt, _visual_prompt, _web_hint, build_agent_prompt, intent_hint,
     proto_block,

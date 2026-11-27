@@ -22,6 +22,68 @@ async function loadAppInfo() {
   }
 }
 
+/* 运行状态：/api/health 的只读视图（存储体积 / 孤儿目录 / 内存缓存 / 分段耗时） */
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
+async function loadHealth() {
+  const box = $('#health-body');
+  if (!box) return;
+  box.textContent = '读取中…';
+  const row = (label, val, warn) => '<div class="health-row' + (warn ? ' warn' : '') + '">'
+    + '<span>' + escapeHtml(label) + '</span><b>' + escapeHtml(String(val)) + '</b></div>';
+  const msRow = (label, key, timing) => {
+    const t = timing[key] || {};
+    if (!t.n) return '<div class="health-sub">' + escapeHtml(label) + '：暂无数据</div>';
+    return '<div class="health-sub">' + escapeHtml(label) + '：p50 ' + t.p50
+      + ' ms · p90 ' + t.p90 + ' ms · p99 ' + t.p99 + ' ms（n=' + t.n + '）</div>';
+  };
+  try {
+    const r = await api('/api/health', null, { method: 'GET' });
+    if (!r || !r.ok) throw new Error((r && r.error) || '读取失败');
+    const st = r.storage || {};
+    const rt = r.runtime || {};
+    const tm = r.timing || {};
+    let html = '';
+    if (st.error) {
+      html += row('存储指标', '读取失败：' + st.error, true);
+    } else {
+      html += row('会话数', st.sessions || 0);
+      html += row('事件流体积', fmtBytes(st.event_bytes));
+      html += row('最大单会话事件', fmtBytes(st.largest_event_bytes), !!st.event_warn);
+      html += row('物化缓存体积', fmtBytes(st.cache_bytes));
+      html += row('孤儿事件目录', st.orphan_dirs || 0, Number(st.orphan_dirs) > 0);
+      html += row('已删除会话墓碑', st.tombstones || 0);
+    }
+    html += row('活跃流', rt.active_streams || 0);
+    html += row('SSE 任务', rt.sse_jobs || 0);
+    html += row('事件内存缓存', rt.events_last || 0);
+    html += row('JSON 缓存', rt.json_cache || 0);
+    html += msRow('最近 200 轮 · 装配', 'assemble_ms', tm);
+    html += msRow('最近 200 轮 · 首 token', 'first_token_ms', tm);
+    html += msRow('最近 200 轮 · 总耗时', 'total_ms', tm);
+    if (st.event_warn) {
+      html += '<p class="hint">有会话的事件日志超过 64MB：事件流只追加、不自动删除，'
+        + '建议定期运行 scripts/prune_session_events.py 归档。</p>';
+    }
+    if (Number(st.orphan_dirs) > 0) {
+      html += '<p class="hint">孤儿目录是索引里已不存在的会话事件目录；'
+        + '用 scripts/prune_session_events.py 校验后移入隔离区，不要直接删除。</p>';
+    }
+    box.innerHTML = html;
+    const at = $('#health-at');
+    if (at) at.textContent = '更新于 ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    box.textContent = '读取失败：' + (e.message || e);
+  }
+}
+
+
 async function openDataDir() {
   try {
     const r = await api('/api/app/open-data-dir');
@@ -103,7 +165,7 @@ function closeModal(force) {
   if (!force && settingsChangedNow()) {
     if (!window.confirm('有未保存的改动，关闭后将丢弃。确定关闭？')) return false;
     // 主题卡是即时预览：取消关闭时回到已保存的主题，避免「取消了但界面已经变了」
-    const saved = normalizeTheme((state.config && state.config.theme) || 'aurora');
+    const saved = normalizeTheme((state.config && state.config.theme) || 'light');
     applyTheme(saved);
   }
   settingsDirty = false;
@@ -149,6 +211,7 @@ async function saveModal() {
   }
   syncSearchPill();
   applyTheme(cfg.theme);
+  if (typeof avaMotionSync === 'function') avaMotionSync();
   ideApplyWhitespace();
   updateStatusLine();
   updateSettingsDirty();

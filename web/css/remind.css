@@ -1,4 +1,4 @@
-/* 提醒任务 / 主动聊天 —— 设置面板「提醒与主动」页 */
+/* 提醒任务 —— 设置面板「语音与提醒」页 */
 
 .remind-list {
   margin-top: 8px;
@@ -10,7 +10,7 @@
   gap: 8px;
   padding: 8px 10px;
   margin-bottom: 6px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   background: var(--panel, rgba(127, 127, 127, .08));
   border: 1px solid var(--border, rgba(127, 127, 127, .2));
   border-radius: var(--radius, 8px);
@@ -36,7 +36,7 @@
 .remind-rep {
   flex: none;
   padding: 0 4px;
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--text-dim);
   border: 1px solid var(--border, rgba(127, 127, 127, .2));
   border-radius: var(--radius-sm, 4px);
@@ -57,6 +57,6 @@
 
 .remind-empty {
   padding: 6px 0;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--text-dim);
 }

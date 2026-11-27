@@ -10,6 +10,8 @@ from app.mem_tool import _loads_loose
 
 from .base import _t_split_commit
 from .tools_computer import (_t_computer_act, _t_computer_open, _t_computer_read, _t_computer_see, _t_computer_shot, _t_computer_windows)
+from .tools_deploy import _t_deploy_site
+from .tools_doc import _t_doc_create
 from .tools_exec import (_t_run_command, _t_run_workflow_script, _t_shell)
 from .tools_files import (_t_apply_patch, _t_attachment_read, _t_check_code, _t_code_context, _t_copy_file, _t_delete_file, _t_edit_file, _t_find_symbol, _t_impact, _t_list_dir, _t_list_steps, _t_make_dir, _t_move_file, _t_multi_edit, _t_notebook_edit, _t_read_file, _t_read_files, _t_read_tool_result, _t_recover_file, _t_redo_step, _t_repo_map, _t_search_code, _t_search_files, _t_sleep, _t_undo_step, _t_write_file)
 from .tools_git import (_t_git_commit, _t_git_diff, _t_git_log, _t_git_status)
@@ -17,7 +19,7 @@ from .tools_lsp import (_t_lsp_calls, _t_lsp_definition, _t_lsp_diagnostics, _t_
 from .tools_mcp import (_t_mcp_list_resources, _t_mcp_list_servers, _t_mcp_list_tools, _t_mcp_read_resource)
 from .tools_media import (_t_archify, _t_asset_atlas, _t_asset_convert, _t_asset_inline, _t_asset_scan, _t_asset_validate, _t_audio_compare, _t_audio_probe, _t_geometry_compare, _t_image_analyze, _t_image_compare, _t_mesh_inspect, _t_render_check, _t_render_views, _t_scene_assert, _t_see_image, _t_visual_check)
 from .tools_preview import _t_open_preview
-from .tools_web import _t_fetch_url
+from .tools_web import _t_download_file, _t_fetch_url
 
 
 def normalize_tool_name(name):
@@ -88,7 +90,7 @@ def normalize_args(tool, args):
             elif tool == "search_files":
                 k = "pattern"
             else:
-                k = lk          # memory.search 用 query，bili.up 用 keyword，保持原样
+                k = lk          # memory.search 用 query，保持原样
         elif lk in ("old_string", "old_text", "oldtext", "find"):
             k = "old"
         elif lk in ("new_string", "new_text", "newtext"):
@@ -238,6 +240,9 @@ _HANDLERS = {
     "code_context": _t_code_context,
     "impact": _t_impact,
     "write_file": _t_write_file,
+    "download_file": _t_download_file,
+    "doc_create": _t_doc_create,
+    "deploy_site": _t_deploy_site,
     "edit_file": _t_edit_file,
     "multi_edit": _t_multi_edit,
     "apply_patch": _t_apply_patch,
@@ -444,7 +449,7 @@ def _run_tool_impl(sandbox, name, args, allow_outside=False, caps=None, stop_eve
         return tool_protocol.error(
             tool_protocol.PERMISSION,
             "archify（流程图 / 架构图 / 时序图）只在 Agent 模式下可用。"
-            "当前会话不是 Agent：请改用内联 svg / mermaid / chart，"
+            "当前会话不是 Agent：请改用内联 svg / mermaid / chart / html，"
             "或告诉用户「开启 Agent 模式后可以生成可交互页面」。",
             name=name, args=args), None, False
     # 同一回合内重复读同一个没变的文件：只回一行，不再把全文重发一遍。

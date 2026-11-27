@@ -22,15 +22,30 @@ function tdPreview(m) {
 }
 
 /* 全部用户提问；n 是「第几次提问」，idx 是消息下标（跳转用）。
-   面板一次只显示约 12 条，但数据是全量的 —— 往上滑能一直看到第一条。 */
+   面板一次只显示约 12 条，但数据是全量的 —— 往上滑能一直看到第一条。
+   结果按会话指纹缓存：滚动时每帧都会调用，不能每帧对全部消息跑正则。 */
+let _tdItemsCache = { sig: '', items: [] };
+
 function tdItems() {
   const s = typeof curSession === 'function' ? curSession() : null;
   const msgs = (s && s.messages) || [];
+  let lastUserAt = -1;
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    if (msgs[i] && msgs[i].role === 'user') { lastUserAt = i; break; }
+  }
+  const lastUser = lastUserAt >= 0 ? msgs[lastUserAt] : null;
+  const sig = [
+    (s && s.id) || '', (s && s.updated_at) || 0, msgs.length, lastUserAt,
+    lastUser ? String(lastUser.content || '').length : 0,
+    lastUser && lastUser.images ? 1 : 0, lastUser && lastUser.doc ? 1 : 0,
+  ].join('|');
+  if (_tdItemsCache.sig === sig) return _tdItemsCache.items;
   const all = [];
   msgs.forEach((m, idx) => {
     if (!m || m.role !== 'user') return;
     all.push({ idx: idx, n: all.length + 1, text: tdPreview(m) });
   });
+  _tdItemsCache = { sig: sig, items: all };
   return all;
 }
 
@@ -85,15 +100,28 @@ function tdActiveIdx() {
   if (!chat) return -1;
   const box = chat.getBoundingClientRect();
   const line = box.top + Math.min(48, box.height * 0.18);
+  const rows = chat.querySelectorAll('.msg.user[data-idx]');
+  if (!rows.length) return -1;
+  const idxOf = (el) => Number(el.dataset.idx);
+  const first = idxOf(rows[0]);
+  if (!Number.isFinite(first)) return -1;
+  // 消息行按文档顺序从上到下排列：二分找「最后一个 top <= line」，
+  // 避免每帧对几百行逐个 getBoundingClientRect 造成强制布局。
+  let lo = 0;
+  let hi = rows.length - 1;
   let hit = -1;
-  let first = -1;
-  chat.querySelectorAll('.msg.user[data-idx]').forEach((row) => {
-    const i = Number(row.dataset.idx);
-    if (!Number.isFinite(i)) return;
-    if (first < 0) first = i;
-    if (row.getBoundingClientRect().top <= line) hit = i;
-  });
-  return hit >= 0 ? hit : first;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].getBoundingClientRect().top <= line) {
+      hit = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (hit < 0) return first;
+  const i = idxOf(rows[hit]);
+  return Number.isFinite(i) ? i : first;
 }
 
 /* 圆点覆盖整段对话，最多 TD_LIMIT 个：问题多时以当前位置为中心取窗口，

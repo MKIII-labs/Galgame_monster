@@ -9,21 +9,15 @@ const $ = (s) => document.querySelector(s)
   || (typeof window.__gmDetachedEl === 'function' ? window.__gmDetachedEl(s) : null);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 
-// 界面设计风格（style）与具体主题（theme）：
-//   aurora = 雾光（网页级光雾视觉，单一模式）
-//   flat   = 现代扁平化（经典界面，light / dark 两种模式）
+// 界面主题：浅色 / 深色（两套都属于现代扁平化）
 // dark=深色底（用于图表配色 / color-scheme / 应用标题栏）；title=窗口标题栏底色
 const THEME_META = {
-  'aurora': { style: 'aurora', dark: false, title: '#f4f6ff' },
-  'light':  { style: 'flat',   dark: false, title: '#ffffff' },
-  'dark':   { style: 'flat',   dark: true,  title: '#1a1b1e' },
+  'light': { dark: false, title: '#ffffff' },
+  'dark':  { dark: true,  title: '#1e1e1e' },
 };
-// 把任意历史值归一为当前支持的主题；缺省用雾光
+// 把任意历史值归一为当前支持的主题；缺省用浅色（旧 aurora 也迁到浅色）
 function normalizeTheme(theme) {
-  return THEME_META[theme] ? theme : 'aurora';
-}
-function themeStyle(theme) {
-  return THEME_META[normalizeTheme(theme)].style;
+  return theme === 'dark' ? 'dark' : 'light';
 }
 // 当前主题是否深色底（图表 / 图谱等需要按明暗配色的地方统一用这个判断）
 function isDarkTheme() {
@@ -57,9 +51,11 @@ const state = {
   // 第一条消息落库时随 /api/session/new 一起创建，不必先建一个空会话。
   draftAgent: { enabled: false, sandbox: '' },
   streaming: false,
-  stopping: false,           // 已点「停止」，正在等后端收尾
+  stopping: false,           // 已点「停止」，正在等后端收尾（当前会话的派生值）
   streams: {},               // sid -> { host, row, stopping }：每个会话一条独立的流
   streamingSids: {},         // sid -> true：后端仍在跑的会话（刷新 / 后台恢复用）
+  stoppingSids: {},          // sid -> true：已点停止、正在等收尾的会话
+  compressingSids: {},       // sid -> true：正在压缩较早历史（发送 / 修改要排队）
   unread: {},                // sid -> true：在后台生成完、还没切回去看的会话
   acc: '',
   pendingImage: null,        // 待发送图片：第一张（兼容旧逻辑）
@@ -73,6 +69,8 @@ const state = {
   kbFamily: '',              // 当前主题筛选（空 = 全部）
   uiMode: 'solo',            // solo | ide | gal | hall
   ideTree: null,
+  ideTreeSid: '',            // ideTree 属于哪个会话（切会话时缓存失效）
+  ideTreeSig: '',            // 已渲染树的签名：内容没变就不重绘
   ideOpen: '',               // 当前打开的文件（沙箱内相对路径）
   ideDir: '',                // 当前选中的目录（新建时的默认父目录）
   ideClip: null,             // 文件树剪贴板：{ mode: 'copy' | 'cut', paths: [] }
@@ -121,6 +119,14 @@ const state = {
   msgCache: {},              // sid -> { messages, msg_loaded_start }：切回会话先秒出内容
 };
 
+/* 会话消息缓存最多保留几份：开过的长会话太多会一直占内存。 */
+const MSG_CACHE_MAX = 3;
+function trimMsgCache() {
+  if (!state.msgCache) return;
+  const keys = Object.keys(state.msgCache);
+  while (keys.length > MSG_CACHE_MAX) delete state.msgCache[keys.shift()];
+}
+
 /* 服务端只回最近 MSG_WINDOW 条消息（带 msg_total / msg_start）。
    前端把数组补齐成「全局下标」：老消息位置放 null，按下标访问的撤回 / 编辑 /
    版本预览等逻辑不用改；已展开过的旧消息优先保留，避免每次刷新回到 80 条。 */
@@ -143,6 +149,7 @@ function applySessionsPayload(payload, opts) {
       };
     }
   }
+  trimMsgCache();
   payload.sessions.forEach((s) => {
     const incoming = Array.isArray(s.messages) ? s.messages : null;
     const total = Number(s.msg_total);
@@ -194,43 +201,79 @@ function cacheLooseMessages() {
   if (!s || !Array.isArray(s.messages)) return;
   if (!state.msgCache) state.msgCache = {};
   state.msgCache[s.id] = { messages: s.messages, msg_loaded_start: s.msg_loaded_start || 0 };
-  const keys = Object.keys(state.msgCache);
-  while (keys.length > 3) delete state.msgCache[keys.shift()];
+  trimMsgCache();
 }
 
 /* ---------------- HTTP ---------------- */
 /* 把 HTTP 失败翻译成「能看懂 + 知道去哪儿检查」的文案。
    全站的失败提示都从 api() 出去，所以引导性文案在这里统一加，而不是让每个调用点各自拼。 */
-async function api(path, body) {
-  const res = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Auth-Token': TOKEN },
-    body: JSON.stringify(body || {}),
-  });
-  if (res.ok) return res.json();
-  let msg = '';
-  try {
-    const j = await res.json();                     // 服务端通常带 error / message
-    if (j && (j.message || j.error)) msg = String(j.message || j.error);
-  } catch (e) { /* 响应不是 JSON（如 500 页面）→ 走下面的状态码推断 */ }
-  if (!msg) {
-    const s = res.status;
-    if (s === 401 || s === 403) msg = '鉴权失败：密钥无效或未授权（去「设置 → 接入与密钥」检查）';
-    else if (s === 404) msg = '接口不存在：服务端版本与前端不匹配';
-    else if (s === 409) msg = '操作冲突：同一会话可能已有任务在执行';
-    else if (s === 413) msg = '内容过大：请精简后重试';
-    else if (s >= 500) msg = '服务端出错：可稍后重试，或查看控制台日志';
-    else msg = '请求失败';
-    msg += '（HTTP ' + s + '）';
+async function api(path, body, opts) {
+  const method = (opts && opts.method) || 'POST';
+  // 长任务（压缩 / 重建索引 / 翻译导出 / 备份）不设超时；其余 30 秒兜底，避免请求悬挂。
+  const SLOW = ['/api/storage/', '/api/codeindex/reindex', '/api/reader/translate',
+                '/api/reader/export', '/api/reader/open', '/api/backup/',
+                '/api/work/assist', '/api/kb/'];
+  const slow = SLOW.some((p) => String(path).indexOf(p) === 0);
+  const timeout = (opts && opts.timeout != null) ? Number(opts.timeout) : (slow ? 0 : 30000);
+  const caller = opts && opts.signal;
+  let ctrl = null;
+  let timer = 0;
+  let signal = caller;
+  if (timeout > 0) {
+    ctrl = new AbortController();
+    timer = setTimeout(() => { try { ctrl.abort(); } catch (e) { /* 已结束 */ } }, timeout);
+    if (!caller) {
+      signal = ctrl.signal;
+    } else if (typeof AbortSignal !== 'undefined' && AbortSignal.any) {
+      signal = AbortSignal.any([caller, ctrl.signal]);
+    } else {
+      caller.addEventListener('abort', () => { try { ctrl.abort(); } catch (e) { /* 已结束 */ } },
+        { once: true });
+      signal = ctrl.signal;
+    }
   }
-  throw new Error(msg);
+  try {
+    const res = await fetch(path, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'X-Auth-Token': TOKEN },
+      body: method === 'GET' ? undefined : JSON.stringify(body || {}),
+      signal: signal,
+    });
+    if (res.ok) return await res.json();
+    let msg = '';
+    try {
+      const j = await res.json();                     // 服务端通常带 error / message
+      if (j && (j.message || j.error)) msg = String(j.message || j.error);
+    } catch (e) { /* 响应不是 JSON（如 500 页面）→ 走下面的状态码推断 */ }
+    if (!msg) {
+      const s = res.status;
+      if (s === 401 || s === 403) msg = '鉴权失败：密钥无效或未授权（去「设置 → 接入与密钥」检查）';
+      else if (s === 404) msg = '接口不存在：服务端版本与前端不匹配';
+      else if (s === 409) msg = '操作冲突：同一会话可能已有任务在执行';
+      else if (s === 413) msg = '内容过大：请精简后重试';
+      else if (s >= 500) msg = '服务端出错：可稍后重试，或查看控制台日志';
+      else msg = '请求失败';
+      msg += '（HTTP ' + s + '）';
+    }
+    throw new Error(msg);
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      if (caller && caller.aborted) throw e;          // 调用方主动取消
+      throw new Error('请求超时：服务端 ' + Math.round(timeout / 1000) + ' 秒内没有响应');
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /* ---------------- Toast：底部堆叠 ----------------
    以前是单例 div：第二条提示直接把第一条顶掉，连点「复制」也只闪一下。
    现在最多同时 3 条；同一句 2.6s 内只累加计数（×2 / ×3），点一下即可关掉。 */
 const TOAST_MAX = 3;
-const TOAST_MS = 1800;
+// 应用内轻提示停留时长：1.8 秒读不完一句长文案，放到 5 秒（点击可提前关闭）
+const TOAST_MS = 5000;
+const TOAST_MS_OK = 2400;      // 成功提示（已复制等）扫一眼就够，别长时间挡住视线
 const _toastRecs = new Map();          // key -> { el, n, timer, key }
 
 function _toastStack() {
@@ -270,7 +313,7 @@ function toast(msg, type) {
     const c = prev.el.querySelector('.toast-count');
     if (c) { c.textContent = '×' + prev.n; c.hidden = false; }
     clearTimeout(prev.timer);
-    prev.timer = setTimeout(() => _dismissToast(prev), TOAST_MS);
+    prev.timer = setTimeout(() => _dismissToast(prev), kind === 'ok' ? TOAST_MS_OK : TOAST_MS);
     return;
   }
   // 超出上限：先送走最旧的一条（正在退场的不计入）
@@ -298,7 +341,7 @@ function toast(msg, type) {
   _toastRecs.set(key, rec);
   void el.offsetWidth;                 // 强制重排，保证从隐藏态开始播入场过渡
   el.classList.add('show');
-  rec.timer = setTimeout(() => _dismissToast(rec), TOAST_MS);
+  rec.timer = setTimeout(() => _dismissToast(rec), kind === 'ok' ? TOAST_MS_OK : TOAST_MS);
 }
 
 /* 一次性入场动画：先摘类、强制重排、再加回。
@@ -393,6 +436,11 @@ function foldTransition(root, body, open, opts) {
 function toastErr(what, e) {
   toast(what + '失败：' + e, 'error');
 }
+
+/* 平滑滚动也要尊重「减少动态效果」：reduce 时退化为瞬时定位。
+   供 chat / reader / notes / 设置帮助等处的 scrollIntoView 复用。 */
+const GM_SMOOTH = (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches)
+  ? 'auto' : 'smooth';
 
 /* 让 <div>/<span> 这类非交互元素也能用键盘操作（Tab 可达 + Enter/Space 触发）。
    项目里不少列表项 / 折叠头是 div + onclick，键盘用户原本完全够不着。 */

@@ -484,6 +484,8 @@ def turn_undo(sid):
 
 _WRITE_LABEL = {
     "write_file": "新建或覆盖文件",
+    "download_file": "下载文件到沙箱",
+    "doc_create": "生成 Word / Excel / PDF 文档",
     "edit_file": "修改已有文件",
     "make_dir": "新建目录",
     "move_file": "移动或重命名",

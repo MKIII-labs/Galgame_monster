@@ -19,7 +19,6 @@ def test_default_config_covers_settings_pages():
     cfg = default_config()
     for key in ("chat_url", "chat_model", "chat_context_limit", "chat_think_mode",
                 "chat_round_retries", "chat_stream_stall_timeout",
-                "chat_persist_reasoning", "chat_reasoning_keep_chars",
                 "speech_polish", "agent_max_undo"):
         assert key in cfg
 

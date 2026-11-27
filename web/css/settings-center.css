@@ -53,7 +53,7 @@
 #modal .settings-toc-title {
   margin: 0 0 8px;
   padding: 0 8px;
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   letter-spacing: .08em;
   text-transform: uppercase;
   color: var(--text-dim);
@@ -76,7 +76,7 @@
   background: transparent;
   color: var(--text-dim);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   text-align: left;
   cursor: pointer;
 }
@@ -85,39 +85,10 @@
   border-left-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent);
-  font-weight: 600;
+  font-weight: var(--fw-bold);
 }
 @media (max-width: 1200px) {
   #modal .settings-toc { display: none; }
-}
-
-/* ---------- 能力与工具：页内二级分段 ---------- */
-#modal .settings-subnav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-width: 980px;
-  margin: 0 auto 14px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border);
-}
-#modal .settings-subnav.hidden { display: none; }
-#modal .settings-subnav-btn {
-  padding: 5px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-#modal .settings-subnav-btn:hover { background: var(--bg-hover); color: var(--text); }
-#modal .settings-subnav-btn.active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 600;
 }
 
 /* ---------- 页内任务分区 ---------- */
@@ -136,117 +107,20 @@
   flex: 1;
   min-width: 0;
   margin: 0;
-  font-size: 13.5px;
-  font-weight: 650;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-bold);
   letter-spacing: .01em;
   color: var(--text);
-}
-#modal .set-section-adv {
-  flex: none;
-  padding: 3px 9px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 11.5px;
-  cursor: pointer;
-}
-#modal .set-section-adv:hover { background: var(--bg-hover); color: var(--text); }
-#modal .set-section-adv[aria-expanded="true"] {
-  border-color: var(--accent);
-  color: var(--accent);
 }
 #modal .set-section-danger .set-section-title { color: #c0392b; }
 #modal .set-section-danger .set-section-head {
   border-top: 1px dashed color-mix(in srgb, #c0392b 40%, transparent);
   padding-top: 12px;
 }
-#modal .set-card.adv-hidden { display: none !important; }
 #modal .pane > .set-card { max-width: 980px; margin-left: auto; margin-right: auto; }
-
 /* 卡片头只留折叠按钮后，右侧操作区更安静 */
 #modal .set-card-acts .set-card-act[data-act="reset-card"] { display: none; }
 
-
-/* ---------- 显示级别 ---------- */
-.settings-level {
-  margin: 8px 10px 0;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-side);
-}
-.settings-level-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 6px;
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-.settings-level-hint {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 10.5px;
-}
-.settings-level-opts {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 3px;
-  margin-top: 6px;
-}
-.settings-level-btn {
-  padding: 4px 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 11.5px;
-  cursor: pointer;
-}
-.settings-level-btn:hover { background: var(--bg-hover); }
-.settings-level-btn.active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--text);
-  font-weight: 600;
-}
-
-/* ---------- 标签筛选 ---------- */
-.settings-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 8px 10px 0;
-}
-.settings-tag-btn {
-  padding: 2px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 10.5px;
-  cursor: pointer;
-}
-.settings-tag-btn:hover { background: var(--bg-hover); }
-.settings-tag-btn.active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--text);
-}
-
-/* ---------- 被级别 / 标签隐藏的分区 ---------- */
-.set-card.meta-hidden { display: none !important; }
-.settings-meta-hint {
-  margin: 0 0 8px;
-  padding: 6px 8px;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-md);
-}
 
 /* ---------- 草稿恢复条 ---------- */
 .settings-draft-bar {
@@ -255,11 +129,11 @@
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 8px;
-  padding: 7px 10px;
+  padding: 8px 10px;
   border: 1px solid var(--accent);
   border-radius: var(--radius-md);
   background: var(--accent-soft);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .settings-draft-acts { display: flex; gap: 6px; flex: none; }
 
@@ -269,7 +143,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-dim);
 }
 
@@ -282,13 +156,13 @@
   gap: 10px;
   padding: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .settings-history-main { min-width: 0; }
-.settings-history-time { font-size: 12px; color: var(--text); }
+.settings-history-time { font-size: var(--fs-xs); color: var(--text); }
 .settings-history-keys {
   margin-top: 1px;
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -305,7 +179,7 @@
 }
 .settings-history-diff-head {
   margin-bottom: 6px;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-dim);
 }
 .settings-history-diff-row {
@@ -313,9 +187,9 @@
   grid-template-columns: minmax(120px, 1fr) minmax(0, 2fr) 16px minmax(0, 2fr);
   gap: 6px;
   align-items: baseline;
-  padding: 3px 0;
+  padding: 4px 0;
   border-top: 1px dashed var(--border);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 .settings-history-diff-row code { color: var(--text-dim); }
 .shd-before { color: var(--text-dim); text-decoration: line-through; }
@@ -329,7 +203,7 @@
 #modal input[type="number"],
 #modal input[type="text"],
 #modal input[type="password"] {
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   transition: border-color .12s ease, box-shadow .12s ease;
 }
 #modal .field-input:focus,
@@ -353,7 +227,7 @@
 #modal .range-row input[type="range"] { flex: 1; min-width: 0; }
 #modal .range-row input[type="number"] { width: 88px; flex: none; }
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .foot-summary { display: none; }
   .settings-history-diff-row { grid-template-columns: 1fr; }
   .shd-arrow { display: none; }

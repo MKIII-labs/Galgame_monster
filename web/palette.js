@@ -15,11 +15,11 @@
   if (!palette || !input || !list) return;
 
   const SETTINGS = [
-    ['chat', '模型接入'], ['search', '联网与数据源'], ['context', '上下文与压缩'],
-    ['remind', '主动与提醒'], ['agent', 'Agent 执行'], ['agents', '子代理'],
-    ['skills', 'Skill'], ['image', '图片生成'], ['profile', '用户画像与学习'],
-    ['appearance', '主题与外观'], ['speech', '语音与朗读'], ['keys', '快捷键'],
-    ['data', '数据与高级'], ['help', '功能说明'],
+    ['chat', '模型接入'], ['context', '上下文与记忆'], ['search', '联网与检索'],
+    ['agent', '执行与审批'], ['flow', '子代理与流程'], ['ext', '工具与扩展'],
+    ['appearance', '外观与对话'], ['speech', '语音与提醒'], ['keys', '快捷键'],
+    ['profile', '用户规则'], ['mobile', '手机访问'], ['data', '系统维护'],
+    ['help', '帮助'],
   ];
 
   const MODES = [
@@ -61,7 +61,7 @@
       run: () => { const b = $('#btn-settings'); if (b) b.click(); },
     });
     out.push({
-      group: '操作', label: '切换界面风格 / 氛围', sub: '雾光氛围 · 扁平化深浅',
+      group: '操作', label: '切换界面主题', sub: '浅色 / 深色',
       run: () => { const b = $('#btn-theme'); if (b) b.click(); },
     });
     // 侧栏底部工具：窄屏（底部导航）下这些入口可能收进命令面板，保证全部可达

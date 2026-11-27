@@ -16,10 +16,40 @@ function hallRegister(feature) {
   if (HALL_FEATURES.some((f) => f.id === feature.id)) return;   // 脚本重复加载时兜底
   feature.name = feature.name || feature.id;
   HALL_FEATURES.push(feature);
+  // 已经停在大厅首页：把新注册的卡片补进网格（不重放整页淡入，避免闪）
+  if (hallInited && !hallCurrent) hallRefreshCards();
+}
+
+function hallRefreshCards() {
+  if (_hallCardsRaf) return;
+  const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16));
+  _hallCardsRaf = raf(() => {
+    _hallCardsRaf = 0;
+    if (!hallInited || hallCurrent) return;
+    if (typeof state !== 'undefined' && state.uiMode && state.uiMode !== 'hall') return;
+    const body = hallEl('hall-body');
+    if (!body) return;
+    let grid = body.querySelector('.hall-grid');
+    if (!grid) {
+      if (typeof gmSkeletonClear === 'function') gmSkeletonClear(body);
+      body.innerHTML = '';
+      grid = document.createElement('div');
+      grid.className = 'hall-grid';
+      body.appendChild(grid);
+    }
+    const shown = new Set(Array.prototype.map.call(grid.children,
+      (c) => c.dataset && c.dataset.hallId));
+    HALL_FEATURES.forEach((f) => {
+      if (!shown.has(f.id)) grid.appendChild(hallCardEl(f));
+    });
+    hallSetBadge(HALL_FEATURES.length ? (HALL_FEATURES.length + ' 个功能') : '');
+  });
 }
 
 let hallCurrent = null;      // 当前打开的功能
 let hallInited = false;
+// 首次进大厅时模块是逐个执行注册的：卡片跟着一个个出现，不再等整组脚本加载完
+let _hallCardsRaf = 0;
 
 const HALL_AI_KEY = 'gm.hall.ai_enabled.v1';
 
@@ -171,6 +201,7 @@ function hallCardEl(f) {
     e.stopPropagation();
     openThis();
   };
+  card.dataset.hallId = f.id;      // 增量补卡片时用来去重
   return card;
 }
 
@@ -251,17 +282,21 @@ function hallOpenFeature(id) {
 function hallEnterMode() {
   if (!hallInited) {
     hallInited = true;
+    try { localStorage.setItem('gm.hall.visited', '1'); } catch (e) { /* 隐私模式 */ }
     const body = hallEl('hall-body');
     if (body) {
       // 首次进大厅要下载 8 个模块脚本：先铺骨架，别留一句「正在加载」白屏
       if (typeof gmSkeleton === 'function') gmSkeleton(body, 6);
       else body.innerHTML = '<div class="hall-empty">正在加载功能…</div>';
     }
-    // 六个模块的脚本较大，首次进入大厅时才加载（见 web/feature-loader.js）
+    // 不等整组加载完：模块注册一个就补一张卡片（hallRegister → hallRefreshCards）
     const ready = typeof window.gmLoadGroup === 'function'
       ? window.gmLoadGroup('hall')
       : Promise.resolve();
-    ready.then(() => hallRenderHome()).catch((e) => {
+    ready.then(() => {
+      if (!HALL_FEATURES.length) hallRenderHome();
+      else hallRefreshCards();
+    }).catch((e) => {
       if (body) body.innerHTML = '';
       const err = document.createElement('div');
       err.className = 'hall-empty';
@@ -270,6 +305,7 @@ function hallEnterMode() {
     });
     return;
   }
+  hallRefreshCards();          // 之后每次回来：补齐可能漏注册的卡片
   if (hallCurrent && typeof hallCurrent.onShow === 'function') {
     try { hallCurrent.onShow(); } catch (e) { /* 重新量尺寸失败不该影响切模式 */ }
   }
@@ -287,4 +323,20 @@ function initHall() {
   const back = hallEl('hall-back');
   if (back) back.onclick = () => hallRenderHome();
   if (typeof window.hallRegister !== 'function') window.hallRegister = hallRegister;
+  // 预取：鼠标移到「大厅」入口就开下载；老用户（来过大厅的）在空闲时提前加载，
+  // 这样点进去时卡片已经在手上，不再出现「先白一下再出卡片」。
+  const warm = () => {
+    try { if (typeof window.gmLoadGroup === 'function') window.gmLoadGroup('hall'); } catch (e) { /* 忽略 */ }
+  };
+  document.querySelectorAll('[data-mode="hall"]').forEach((b) => {
+    b.addEventListener('pointerenter', warm, { passive: true });
+  });
+  let visited = false;
+  try { visited = localStorage.getItem('gm.hall.visited') === '1'; } catch (e) { /* 隐私模式 */ }
+  if (visited) {
+    const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 2500));
+    const kick = () => idle(() => warm(), { timeout: 4000 });
+    if (document.readyState === 'complete') kick();
+    else window.addEventListener('load', kick, { once: true });
+  }
 }

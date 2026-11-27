@@ -35,7 +35,6 @@
   border-radius: 50%;
   filter: blur(86px);
   opacity: .32;
-  will-change: transform;
 }
 .nh-blob-1 {
   width: 38vw; height: 38vw; left: -8%; top: -18%;
@@ -71,9 +70,13 @@
   mask-image: radial-gradient(120% 80% at 50% 0%, #000 0%, transparent 70%);
 }
 html[data-theme="light"] .nh-blob { opacity: .22; }
-html[data-theme="aurora"] .nh-blob { opacity: .30; }
 html[data-theme="dark"] .nh-blob { opacity: .26; }
 html[data-theme="dark"] .nh-scan { opacity: .10; }
+/* 深色画布要像 VS Code 一样保持中性：第三块原来是青色，会把画布下缘染绿，
+   这里换成与强调色同系的冷蓝，保留氛围层但不引入绿色。 */
+html[data-theme="dark"] .nh-blob-3 {
+  background: radial-gradient(circle at 42% 58%, rgba(86, 134, 254, .26), transparent 66%);
+}
 
 /* ---------------- 内容骨架 ---------------- */
 .nh-shell {
@@ -107,7 +110,7 @@ html[data-theme="dark"] .nh-scan { opacity: .10; }
 }
 .nh-caret {
   width: 3px; height: .9em;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   background: var(--accent);
   transform: translateY(.08em);
   animation: nhBlink 1.15s steps(1, end) infinite;
@@ -126,7 +129,7 @@ html[data-theme="dark"] .nh-scan { opacity: .10; }
   color: var(--text-dim);
   border: 1px solid var(--border);
   background: var(--bg-side);
-  padding: 3px 9px;
+  padding: 4px 10px;
   border-radius: var(--radius-pill);
   white-space: nowrap;
 }
@@ -165,7 +168,7 @@ html[data-theme="dark"] .nh-scan { opacity: .10; }
   color: var(--text-dim);
   font: inherit;
   font-size: var(--fs-xs);
-  padding: 7px 16px;
+  padding: 8px 16px;
   border-radius: var(--radius-pill);
   cursor: pointer;
   transition: color var(--t) var(--ease);
@@ -245,7 +248,7 @@ html[data-theme="dark"] .nh-scan { opacity: .10; }
   flex: none;
   width: 34px; height: 34px;
   display: grid; place-items: center;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--accent-soft);
   color: var(--accent);
   transition: transform var(--t-slower) var(--ease-out);
@@ -401,12 +404,12 @@ html[data-theme="dark"] .nh-scan { opacity: .10; }
 }
 .nh-foot kbd {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   line-height: 1;
-  padding: 3px 5px;
+  padding: 4px 6px;
   border: 1px solid var(--border);
   border-bottom-width: 2px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg-side);
   color: var(--text-dim);
 }
@@ -430,17 +433,18 @@ html[data-theme="dark"] .nh-scan { opacity: .10; }
 .empty.nh .nh-foot { animation: nhUp .58s var(--ease-out) .3s both; }
 
 /* ---------------- 动效关键帧 ---------------- */
+/* 只做平移：blur 图层一旦叠加 scale，浏览器就要按新倍率重新栅格化 */
 @keyframes nhDrift1 {
-  from { transform: translate3d(0, 0, 0) scale(1); }
-  to   { transform: translate3d(6vw, 4vh, 0) scale(1.08); }
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(6vw, 4vh, 0); }
 }
 @keyframes nhDrift2 {
-  from { transform: translate3d(0, 0, 0) scale(1.04); }
-  to   { transform: translate3d(-5vw, 6vh, 0) scale(.96); }
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-5vw, 6vh, 0); }
 }
 @keyframes nhDrift3 {
-  from { transform: translate3d(0, 0, 0) scale(.98); }
-  to   { transform: translate3d(4vw, -5vh, 0) scale(1.06); }
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(4vw, -5vh, 0); }
 }
 @keyframes nhPulse {
   0%   { box-shadow: 0 0 0 0 var(--ok-line); }
@@ -461,7 +465,7 @@ html[data-theme="dark"] .nh-scan { opacity: .10; }
 }
 
 /* ---------------- 响应式 ---------------- */
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .empty.nh {
     padding: 24px 16px 20px;
   }
@@ -470,13 +474,13 @@ html[data-theme="dark"] .nh-scan { opacity: .10; }
   .nh-grid-space { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .nh-space { min-height: 72px; padding: 14px; }
   .nh-switch { width: 100%; }
-  .nh-switch-btn { flex: 1; padding: 7px 10px; }
+  .nh-switch-btn { flex: 1; padding: 8px 10px; }
   .nh-foot { gap: 10px; }
   .nh-blob { filter: blur(56px); }
   .nh-blob-1, .nh-blob-3 { width: 70vw; height: 70vw; }
   .nh-blob-2 { width: 58vw; height: 58vw; }
 }
-@media (max-width: 420px) {
+@media (max-width: 640px) {
   .nh-grid-space { grid-template-columns: minmax(0, 1fr); }
   .nh-meta .nh-chip:nth-child(n+4) { display: none; }
 }

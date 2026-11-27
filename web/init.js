@@ -73,7 +73,13 @@ function upgradeMath() {
 // 监听 #chat，发现新的待渲染公式就补一次。
 let _mathUpgradeTimer = null;
 function scheduleMathUpgrade() {
-  if (!window.katex) return;
+  if (!window.katex) {
+    // katex 改成按需加载：看到待渲染公式就去拉，就绪后 __onLibReady 会再调 upgradeMath
+    try {
+      if (typeof window.loadLazyLib === 'function') window.loadLazyLib('katex');
+    } catch (e) { /* 忽略 */ }
+    return;
+  }
   clearTimeout(_mathUpgradeTimer);
   _mathUpgradeTimer = setTimeout(upgradeMath, 30);
 }
@@ -94,18 +100,10 @@ function watchMathNodes() {
 }
 
 function upgradeCode() {
-  if (!window.hljs) return;
-  document.querySelectorAll('#chat pre code.hljs').forEach((el) => {
-    if (el.dataset.upgraded) return;
-    el.dataset.upgraded = '1';
-    const lang = el.getAttribute('data-lang');
-    const raw = el.textContent;
-    try {
-      el.innerHTML = (lang && hljs.getLanguage(lang))
-        ? hljs.highlight(raw, { language: lang }).value
-        : hljs.highlightAuto(raw).value;
-    } catch (e) { }
-  });
+  /* hljs 就绪后交给 rich-media.js 的视口增强器：已经在视口里的代码块会立刻上色，
+     视口外的等滚到再处理。**不要**在这里整窗高亮（那等于把按需高亮又改回全量，
+     首屏 14 个代码块会被一次性刷成上万 span）。 */
+  if (window.enhanceRichMedia) window.enhanceRichMedia(document);
 }
 
 /* Ctrl+Shift+V（Solo）：切换 AI 回复的「渲染 / 源码」。
@@ -138,12 +136,231 @@ function toggleChatRenderByKey() {
 }
 
 /* ============================================================
+   独立缩放：编辑器（Monaco 字号）与主聊天框（CSS zoom）互不影响
+   ------------------------------------------------------------
+   · Ctrl+滚轮：鼠标在编辑器上缩编辑器，在对话栏上缩对话；
+   · Ctrl+Alt+= / - / 0：编辑器；
+   · Ctrl+Shift+= / - / 0：对话；
+   · 状态栏 / 输入区下方的小控件也可点，点百分比恢复 100%。
+   页面整体缩放仍由 Electron 的 Ctrl+= / Ctrl+- 处理（与两者叠加）。
+   ============================================================ */
+const ZOOM_MIN = 0.8;
+const ZOOM_MAX = 2;
+const ZOOM_STEP = 0.1;
+let _zoomWheelAt = 0;
+let _zoomSavePatch = {};
+let _zoomSaveTimer = 0;
+
+function clampZoom(z) {
+  const n = Number(z);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.round(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, n)) * 10) / 10;
+}
+function chatZoomValue() {
+  return clampZoom(state.config && state.config.chat_zoom);
+}
+function editorZoomValue() {
+  return clampZoom(state.config && state.config.ide_editor_zoom);
+}
+function updateZoomUI() {
+  const ec = document.getElementById('ide-status-zoom-val');
+  const cc = document.getElementById('chat-zoom-val');
+  if (ec) ec.textContent = Math.round(editorZoomValue() * 100) + '%';
+  if (cc) cc.textContent = Math.round(chatZoomValue() * 100) + '%';
+}
+function persistZoom(key, value) {
+  state.config = Object.assign({}, state.config || {}, { [key]: value });
+  _zoomSavePatch[key] = value;
+  clearTimeout(_zoomSaveTimer);
+  _zoomSaveTimer = setTimeout(() => {
+    const patch = _zoomSavePatch;
+    _zoomSavePatch = {};
+    if (Object.keys(patch).length) api('/api/config', patch).catch(() => {});
+  }, 250);
+}
+function applyChatZoom() {
+  const z = chatZoomValue();
+  document.documentElement.style.setProperty('--chat-zoom', String(z));
+  updateZoomUI();
+  if (typeof scrollToBottom === 'function') scrollToBottom(true);
+}
+function applyEditorZoom() {
+  const ed = state.ideEditor;
+  if (ed) {
+    const base = Number((state.ideMonacoDefaults || {}).fontSize) || 14;
+    const px = Math.max(8, Math.min(40, Math.round(base * editorZoomValue())));
+    try { ed.updateOptions({ fontSize: px }); } catch (e) { /* 编辑器未就绪 */ }
+  }
+  updateZoomUI();
+}
+function setChatZoom(z) {
+  const v = clampZoom(z);
+  if (v === chatZoomValue()) return;
+  persistZoom('chat_zoom', v);
+  applyChatZoom();
+}
+function setEditorZoom(z) {
+  const v = clampZoom(z);
+  if (v === editorZoomValue()) return;
+  persistZoom('ide_editor_zoom', v);
+  applyEditorZoom();
+}
+function stepChatZoom(dir) { setChatZoom(chatZoomValue() + dir * ZOOM_STEP); }
+function stepEditorZoom(dir) { setEditorZoom(editorZoomValue() + dir * ZOOM_STEP); }
+
+function bindZoom() {
+  window.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey || e.metaKey) return;
+    const t = e.target;
+    const inEditor = t && t.closest && t.closest('#ide-editor');
+    const inChat = t && t.closest && t.closest('.chat-col');
+    if (!inEditor && !inChat) return;
+    e.preventDefault();
+    const now = Date.now();
+    if (now - _zoomWheelAt < 45) return;
+    _zoomWheelAt = now;
+    const dir = e.deltaY < 0 ? 1 : -1;
+    if (inEditor) stepEditorZoom(dir);
+    else stepChatZoom(dir);
+  }, { passive: false });
+  document.addEventListener('keydown', (e) => {
+    if (!e.ctrlKey || e.metaKey) return;
+    const k = String(e.key || '');
+    const plus = k === '=' || k === '+';
+    const minus = k === '-' || k === '_';
+    const zero = k === '0' || k === ')';
+    if (e.altKey && !e.shiftKey) {
+      if (plus) { e.preventDefault(); stepEditorZoom(1); }
+      else if (minus) { e.preventDefault(); stepEditorZoom(-1); }
+      else if (zero) { e.preventDefault(); setEditorZoom(1); }
+    } else if (e.shiftKey && !e.altKey) {
+      if (plus) { e.preventDefault(); stepChatZoom(1); }
+      else if (minus) { e.preventDefault(); stepChatZoom(-1); }
+      else if (zero) { e.preventDefault(); setChatZoom(1); }
+    }
+  }, true);
+  bindZoomButtons();
+}
+
+/* 缩放的 −/＋/百分比按钮：IDE 状态栏里的那组在面板惰性挂载后才存在，
+   所以单独拆出来，挂载后可以再调一次（用 onclick 赋值，重复调用不会叠加）。 */
+function bindZoomButtons() {
+  document.querySelectorAll('[data-editor-zoom]').forEach((b) => {
+    b.onclick = () => stepEditorZoom(Number(b.dataset.editorZoom) || 0);
+  });
+  document.querySelectorAll('[data-chat-zoom]').forEach((b) => {
+    b.onclick = () => stepChatZoom(Number(b.dataset.chatZoom) || 0);
+  });
+  const ec = document.getElementById('ide-status-zoom-val');
+  if (ec) ec.onclick = () => setEditorZoom(1);
+  const cc = document.getElementById('chat-zoom-val');
+  if (cc) cc.onclick = () => setChatZoom(1);
+}
+window.gmApplyEditorZoom = applyEditorZoom;
+
+/* IDE 面板在 index.html 里放在 <template id="tpl-ide-panel">，首次进入 IDE 才挂载；
+   面板内控件的绑定统一放这里，挂载完成（gm:panel-mounted）后执行一次。 */
+let _idePanelBound = false;
+function bindIdePanelUI() {
+  if (_idePanelBound) return;
+  if (!document.querySelector('#ide-panel .ide-body')) return;   // 还没挂载
+  _idePanelBound = true;
+  $('#ide-refresh').onclick = () => loadIdeTree();
+  ideInitNotice();
+  if ($('#ide-tree')) $('#ide-tree').addEventListener('keydown', ideTreeKeydown);
+  $('#ide-newfile').onclick = () => ideNew(false);
+  $('#ide-newdir').onclick = () => ideNew(true);
+  $('#ide-rename').onclick = ideRename;
+  $('#ide-deldir').onclick = ideDelete;
+  $('#ide-save').onclick = saveIdeFile;
+  if ($('#ide-diff-btn')) $('#ide-diff-btn').onclick = () => ideShowDiff(state.ideOpen);
+  $('#ide-text').addEventListener('input', () => ideSetDirty(state.ideOpen, true));
+  // 活动栏（点当前已激活的图标 = 收起文件管理区，见 ideToggleSide）
+  $$('#ide-panel .act-btn[data-act]').forEach((b) => {
+    b.onclick = () => ideToggleSide(b.dataset.act);
+  });
+  if ($('#ide-open-vscode')) $('#ide-open-vscode').onclick = ideOpenInVsCode;
+  if ($('#ide-anno-add')) $('#ide-anno-add').onclick = () => ideAnnoAdd();
+  if ($('#ide-anno-refresh')) $('#ide-anno-refresh').onclick = () => ideAnnoLoad(state.ideOpen);
+  // 沙箱内搜索
+  if ($('#ide-search-input')) {
+    $('#ide-search-input').addEventListener('keydown', (e) => {
+      if (isImeComposing(e)) return;
+      if (e.key === 'Enter') { e.preventDefault(); ideSearch(); }
+    });
+  }
+  // 命令面板
+  if ($('#ide-cmd-input')) {
+    $('#ide-cmd-input').addEventListener('input', (e) => { state.idePaletteSel = 0; idePaletteRender(e.target.value); });
+    $('#ide-cmd-input').addEventListener('keydown', (e) => {
+      if (isImeComposing(e)) return;
+      const items = state.idePaletteItems || [];
+      if (e.key === 'ArrowDown') { e.preventDefault(); state.idePaletteSel = Math.min(items.length - 1, state.idePaletteSel + 1); idePaletteRender($('#ide-cmd-input').value); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); state.idePaletteSel = Math.max(0, state.idePaletteSel - 1); idePaletteRender($('#ide-cmd-input').value); }
+      else if (e.key === 'Enter') { e.preventDefault(); idePaletteRun(state.idePaletteSel); }
+      else if (e.key === 'Escape') { e.preventDefault(); idePaletteClose(); }
+    });
+    $('#ide-cmd').addEventListener('mousedown', (e) => { if (e.target && e.target.id === 'ide-cmd') idePaletteClose(); });
+  }
+  if ($('#ide-info-close')) $('#ide-info-close').onclick = () => $('#ide-info').classList.add('hidden');
+  // 状态栏的缩放控件也在面板里：挂载后再绑定一次并刷新显示
+  bindZoomButtons();
+  updateZoomUI();
+  setupIdeSideResizer();
+}
+document.addEventListener('gm:panel-mounted', (e) => {
+  if (e.detail && e.detail.id === 'ide-panel') bindIdePanelUI();
+});
+
+/* IDE 模式：拖动调整左侧文件管理区宽度（双击恢复默认 245px；松手后记住） */
+function setupIdeSideResizer() {
+  const rz = $('#ide-side-resizer');
+  if (!rz) return;
+  const DEFAULT_SIDE_W = 245;
+  const clamp = (v) => Math.max(180, Math.min(460, Math.round(v)));
+  const apply = (w) => document.documentElement.style.setProperty('--ide-side-w', clamp(w) + 'px');
+  const saved = Number((state.config || {}).ide_side_width);
+  if (saved >= 180 && saved <= 460) apply(saved);
+  // 宽度按容器 #ide-sides 计（面板本身是 100%，容器还带着 4px 拖拽条）
+  const persist = () => {
+    const wrap = $('#ide-sides');
+    const w = (wrap && wrap.offsetParent) ? clamp(wrap.getBoundingClientRect().width) : DEFAULT_SIDE_W;
+    const cfg = Object.assign({}, state.config || {}, { ide_side_width: w });
+    api('/api/config', cfg).then(() => { state.config = cfg; }).catch(() => {});
+  };
+  rz.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const wrap = $('#ide-sides');
+    if (!wrap) return;
+    const startX = e.clientX;
+    const startW = wrap.getBoundingClientRect().width;
+    rz.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    const onMove = (ev) => apply(startW + (ev.clientX - startX));
+    const onUp = () => {
+      rz.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      persist();
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  rz.addEventListener('dblclick', () => { apply(DEFAULT_SIDE_W); persist(); });
+}
+
+/* ============================================================
    初始化
    ============================================================ */
 async function init() {
+  bindZoom();
   const res = await fetch('/api/state', { headers: { 'X-Auth-Token': TOKEN } });
   const data = await res.json();
   state.config = data.config;
+  // 启动时先把头像动效档位落到 <html>，breathing / off 的首帧就正确（不依赖第一条消息渲染）
+  if (typeof avaMotionSync === 'function') avaMotionSync();
+  applyChatZoom();
   state.profile = data.profile;
   applySessionsPayload(data.sessions);
   state.kbs = data.kbs || [];
@@ -194,10 +411,11 @@ async function init() {
   Object.keys(window.__libs || {}).forEach(onLibReady);
 
   $('#btn-new').onclick = newSession;
+  const handoffBtn = $('#btn-handoff');
+  if (handoffBtn) handoffBtn.onclick = handoffSession;
   $('#btn-send').onclick = sendMessage;
-  // 「回到实时输出」：把后台仍在跑的任务接回前端完整流式渲染
-  if ($('#btn-resume')) $('#btn-resume').onclick = () => resumeLiveOutput(state.sessions.current);
   $('#attach-remove').onclick = clearAttach;
+  if ($('#search-panel-close')) $('#search-panel-close').onclick = () => closeSearchPanel(true);
   $('#btn-stop').onclick = stopStreaming;
   if ($('#queue-cancel')) $('#queue-cancel').onclick = () => cancelSendQueue();
   if ($('#queue-toggle')) $('#queue-toggle').onclick = () => toggleSendQueue();
@@ -247,33 +465,14 @@ async function init() {
   $('#btn-reload').onclick = () => location.reload();
 
   $('#btn-theme').onclick = () => {
-    const style = document.documentElement.getAttribute('data-style') || 'aurora';
-    if (style === 'flat') {
-      // 现代扁平化：这个按钮只负责浅色 ↔ 深色
-      const cur = document.documentElement.getAttribute('data-theme') || 'light';
-      const next = cur === 'dark' ? 'light' : 'dark';
-      applyTheme(next);
-      api('/api/config', Object.assign({}, state.config, { theme: next })).then(() => {
-        state.config.theme = next;
-      });
-      return;
-    }
-    // 雾光：左下角按钮是这套主题专属的「氛围」入口（静谧 → 流动 → 辉光）
-    if (typeof cycleMood === 'function') cycleMood();
+    const cur = document.documentElement.getAttribute('data-theme');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    const prev = state.config.theme;
+    state.config.theme = next;
+    applyTheme(next);
+    api('/api/config', Object.assign({}, state.config, { theme: next }))
+      .catch(() => { state.config.theme = prev; });
   };
-
-  // 雾光卡片：指针跟随高光（CSS 用 --mx / --my 画一层很淡的径向光）
-  // 只在悬停到卡片时写变量，避免全局 pointermove 频繁触发布局
-  document.addEventListener('pointermove', (e) => {
-    if (document.documentElement.getAttribute('data-style') !== 'aurora') return;
-    const el = e.target && e.target.closest
-      ? e.target.closest('.hall-card,.work-task,.mk-plugin,.mk-card,.theme-card,.mood-card')
-      : null;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    el.style.setProperty('--mx', (e.clientX - r.left) + 'px');
-    el.style.setProperty('--my', (e.clientY - r.top) + 'px');
-  }, { passive: true });
 
   // 深度思考开关 + 档位（状态存进 config.json，重启保留）
   // 档位不再用常驻下拉：和 Agent 一样收进小箭头浮层，工具栏只留一个胶囊
@@ -329,6 +528,12 @@ async function init() {
     if (!e.target.closest || !e.target.closest('.think-wrap')) closeThinkMenu();
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThinkMenu(); });
+  // 搜索结果侧栏：Esc 关闭（与其它浮层并存时各自处理）
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const p = $('#search-panel');
+    if (p && p.classList.contains('open')) closeSearchPanel(true);
+  });
 
   // 联网搜索开关（未配置密钥时不允许点亮）
   state.searchEnabled = !!state.config.search_enabled && hasSearchKey();
@@ -352,6 +557,16 @@ async function init() {
     syncSearchPill();
     api('/api/config', { search_enabled: state.searchEnabled })
       .then(() => { state.config.search_enabled = state.searchEnabled; });
+  };
+
+  // 规划模式开关（对齐 Trae 的 Plan mode）：持久化在本地，刷新后仍生效
+  try { state.planMode = localStorage.getItem('gm.planMode') === '1'; } catch (e) { state.planMode = false; }
+  syncPlanPill();
+  $('#btn-plan').onclick = () => {
+    state.planMode = !state.planMode;
+    try { localStorage.setItem('gm.planMode', state.planMode ? '1' : '0'); } catch (e) { /* 忽略 */ }
+    syncPlanPill();
+    toast(state.planMode ? '规划模式：先只读探索，出计划卡后再执行' : '规划模式已关闭');
   };
 
   // 用量统计
@@ -448,52 +663,7 @@ async function init() {
     const km = $('#kb-modal');
     if (km && !km.classList.contains('hidden')) { closeKbModal(); return; }
   });
-  $('#ide-refresh').onclick = () => loadIdeTree();
-  ideInitNotice();
-  if ($('#ide-tree')) $('#ide-tree').addEventListener('keydown', ideTreeKeydown);
-  $('#ide-newfile').onclick = () => ideNew(false);
-  $('#ide-newdir').onclick = () => ideNew(true);
-  $('#ide-rename').onclick = ideRename;
-  $('#ide-deldir').onclick = ideDelete;
-  $('#ide-save').onclick = saveIdeFile;
-  if ($('#ide-diff-btn')) $('#ide-diff-btn').onclick = () => ideShowDiff(state.ideOpen);
-  $('#ide-text').addEventListener('input', () => ideSetDirty(state.ideOpen, true));
-  // 活动栏（点当前已激活的图标 = 收起文件管理区，见 ideToggleSide）
-  $$('#ide-panel .act-btn[data-act]').forEach((b) => {
-    b.onclick = () => ideToggleSide(b.dataset.act);
-  });
-  if ($('#ide-open-vscode')) $('#ide-open-vscode').onclick = ideOpenInVsCode;
-  if ($('#ide-anno-add')) $('#ide-anno-add').onclick = () => ideAnnoAdd();
-  if ($('#ide-anno-refresh')) $('#ide-anno-refresh').onclick = () => ideAnnoLoad(state.ideOpen);
-  if ($('#ide-doc-refresh')) $('#ide-doc-refresh').onclick = () => ideDocsLoad($('#ide-doc-q') ? $('#ide-doc-q').value : '');
-  if ($('#ide-doc-q')) {
-    $('#ide-doc-q').addEventListener('input', () => {
-      clearTimeout(window.__ideDocTimer);
-      window.__ideDocTimer = setTimeout(
-        () => ideDocsLoad($('#ide-doc-q').value), 250);
-    });
-  }
-  // 沙箱内搜索
-  if ($('#ide-search-input')) {
-    $('#ide-search-input').addEventListener('keydown', (e) => {
-      if (isImeComposing(e)) return;
-      if (e.key === 'Enter') { e.preventDefault(); ideSearch(); }
-    });
-  }
-  // 命令面板
-  if ($('#ide-cmd-input')) {
-    $('#ide-cmd-input').addEventListener('input', (e) => { state.idePaletteSel = 0; idePaletteRender(e.target.value); });
-    $('#ide-cmd-input').addEventListener('keydown', (e) => {
-      if (isImeComposing(e)) return;
-      const items = state.idePaletteItems || [];
-      if (e.key === 'ArrowDown') { e.preventDefault(); state.idePaletteSel = Math.min(items.length - 1, state.idePaletteSel + 1); idePaletteRender($('#ide-cmd-input').value); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); state.idePaletteSel = Math.max(0, state.idePaletteSel - 1); idePaletteRender($('#ide-cmd-input').value); }
-      else if (e.key === 'Enter') { e.preventDefault(); idePaletteRun(state.idePaletteSel); }
-      else if (e.key === 'Escape') { e.preventDefault(); idePaletteClose(); }
-    });
-    $('#ide-cmd').addEventListener('mousedown', (e) => { if (e.target && e.target.id === 'ide-cmd') idePaletteClose(); });
-  }
-  if ($('#ide-info-close')) $('#ide-info-close').onclick = () => $('#ide-info').classList.add('hidden');
+  // IDE 面板内的控件在惰性挂载后绑定（见 bindIdePanelUI）
   // IDE 快捷键（仅 IDE 模式生效；键位可在「?」清单里改）
   document.addEventListener('keydown', (e) => {
     if (state.uiMode !== 'ide') return;
@@ -646,13 +816,9 @@ async function init() {
     }
   });
 
-  // 自主推送：定时提醒 / 主动聊天
+  // 自主推送：定时提醒
   if ($('#remind-add')) $('#remind-add').onclick = addReminder;
-  if ($('#autochat-on')) $('#autochat-on').onchange = (e) => toggleAutoChat(e.target.checked);
   if ($('#reminders-enabled') && typeof bindReminderSwitches === 'function') bindReminderSwitches();
-  if ($('#autochat-min')) $('#autochat-min').onchange = updateAutoChatGap;
-  if ($('#autochat-max')) $('#autochat-max').onchange = updateAutoChatGap;
-  if ($('#autochat-test')) $('#autochat-test').onclick = testAutoChat;
   startEvents();          // 常驻通道：服务端可在没人提问时主动推送
   // 从后台 / 休眠切回前台：SSE 可能已断，待办状态先对一次账
   document.addEventListener('visibilitychange', () => {
@@ -663,7 +829,7 @@ async function init() {
   (function setupIdeResizer() {
     const rz = $('#ide-resizer');
     if (!rz) return;
-    const DEFAULT_W = 460;
+    const DEFAULT_W = 518;
     const clamp = (v) => Math.max(300, Math.min(820, Math.round(v)));
     // 按实际栏宽给排版降级：narrow ≤440 收紧内边距，tiny ≤340 让出头像
     const tune = (w) => {
@@ -733,42 +899,7 @@ async function init() {
     rz.addEventListener('dblclick', () => { apply(DEFAULT_W); persist(); });
   })();
 
-  // IDE 模式：拖动调整左侧文件管理区宽度（双击恢复 260px；松手后记住）
-  (function setupIdeSideResizer() {
-    const rz = $('#ide-side-resizer');
-    if (!rz) return;
-    const clamp = (v) => Math.max(180, Math.min(460, Math.round(v)));
-    const apply = (w) => document.documentElement.style.setProperty('--ide-side-w', clamp(w) + 'px');
-    const saved = Number((state.config || {}).ide_side_width);
-    if (saved >= 180 && saved <= 460) apply(saved);
-    // 宽度按容器 #ide-sides 计（面板本身是 100%，容器还带着 4px 拖拽条）
-    const persist = () => {
-      const wrap = $('#ide-sides');
-      const w = (wrap && wrap.offsetParent) ? clamp(wrap.getBoundingClientRect().width) : 260;
-      const cfg = Object.assign({}, state.config || {}, { ide_side_width: w });
-      api('/api/config', cfg).then(() => { state.config = cfg; }).catch(() => {});
-    };
-    rz.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      const wrap = $('#ide-sides');
-      if (!wrap) return;
-      const startX = e.clientX;
-      const startW = wrap.getBoundingClientRect().width;
-      rz.classList.add('dragging');
-      document.body.style.userSelect = 'none';
-      const onMove = (ev) => apply(startW + (ev.clientX - startX));
-      const onUp = () => {
-        rz.classList.remove('dragging');
-        document.body.style.userSelect = '';
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        persist();
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    });
-    rz.addEventListener('dblclick', () => { apply(260); persist(); });
-  })();
+  // IDE 模式：拖动调整左侧文件管理区宽度（见 setupIdeSideResizer，随面板挂载时绑定）
 
   // 代码块：复制 / 超长折叠展开
   const onCodeBlockClick = (e) => {
@@ -781,8 +912,22 @@ async function init() {
     }
     const btn = e.target.closest('[data-copy]');
     if (!btn) return;
-    const code = btn.closest('.code-block').querySelector('code');
-    navigator.clipboard.writeText(code ? code.textContent : '').then(() => toast('已复制代码', 'success'));
+    const block = btn.closest('.code-block');
+    const code = block ? block.querySelector('code') : null;
+    // 就地反馈：按钮文字短暂变「已复制」，不再把提示丢到屏幕底部
+    const done = () => {
+      const keep = btn.textContent;
+      btn.textContent = '已复制';
+      btn.classList.add('done');
+      clearTimeout(btn._copyTimer);
+      btn._copyTimer = setTimeout(() => {
+        btn.textContent = keep;
+        btn.classList.remove('done');
+      }, 1200);
+    };
+    navigator.clipboard.writeText(code ? code.textContent : '')
+      .then(done)
+      .catch(() => toast('复制失败，请手动选择代码', 'error'));
   };
   $('#chat').addEventListener('click', onCodeBlockClick);
 

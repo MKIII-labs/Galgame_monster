@@ -43,55 +43,12 @@ function settingsLastTab() {
     const t = settingsNormalizeTab(localStorage.getItem(SETTINGS_LAST_TAB_KEY));
     if (t && document.querySelector('#modal .snav-btn[data-tab="' + t + '"]')) return t;
   } catch (e) { /* 忽略 */ }
-  return 'model';
+  return 'chat';
 }
 
-/* 二级分段（目前只有「能力与工具」）：同一页下再按能力域切 pane */
-const SETTINGS_SUB_STATE = {};
-
-function settingsVisiblePanes(page, paneHint) {
-  const all = settingsPagePanes(page);
-  const conf = settingsPageConf(page);
-  if (!conf || !conf.subnav || !conf.subnav.length) return all;
-  let sub = paneHint ? settingsSubOfPane(page, paneHint) : null;
-  if (!sub) {
-    sub = conf.subnav.find((s) => s.id === SETTINGS_SUB_STATE[page]) || conf.subnav[0];
-  }
-  SETTINGS_SUB_STATE[page] = sub.id;
-  return sub.panes.filter((p) => all.indexOf(p) >= 0);
-}
-
-function renderSettingsSubnav(page) {
-  const bar = $('#settings-subnav');
-  if (!bar) return;
-  const conf = settingsPageConf(page);
-  if (!conf || !conf.subnav || !conf.subnav.length) {
-    bar.classList.add('hidden');
-    bar.innerHTML = '';
-    return;
-  }
-  const cur = SETTINGS_SUB_STATE[page] || conf.subnav[0].id;
-  bar.classList.remove('hidden');
-  bar.innerHTML = conf.subnav.map((s) =>
-    '<button type="button" class="settings-subnav-btn' + (s.id === cur ? ' active' : '') +
-    '" data-sub="' + escapeHtml(s.id) + '" role="tab" aria-selected="' +
-    (s.id === cur ? 'true' : 'false') + '">' + escapeHtml(s.title) + '</button>').join('');
-  bar.querySelectorAll('[data-sub]').forEach((b) => {
-    b.onclick = () => setSettingsSub(page, b.dataset.sub);
-  });
-}
-
-function setSettingsSub(page, subId) {
-  SETTINGS_SUB_STATE[page] = subId;
-  const show = settingsVisiblePanes(page);
-  show.forEach(attachPane);
-  $$('#modal .pane').forEach((pn) => pn.classList.toggle('hidden', show.indexOf(pn.dataset.pane) < 0));
-  renderSettingsSubnav(page);
-  renderSettingsAnchors(page);
-  const content = $('#modal .settings-content');
-  if (content) content.scrollTop = 0;
-  if (settingsLazyReady) keepOnlyPanes(show);
-  updateAnchorsActive();
+/* 一页 = 一个主题：页面里的 pane 全部展示，不再有二级分段 */
+function settingsVisiblePanes(page) {
+  return settingsPagePanes(page);
 }
 
 function readSettingsScroll() {
@@ -122,11 +79,12 @@ function updateSettingsPageHead(name) {
   if (desc) desc.textContent = meta[1];
   const reset = $('#settings-page-reset');
   if (reset) reset.classList.toggle('hidden', !pageResetSpec(name));
-  if (name === 'system') {
+  if (name === 'data') {
     loadAppInfo();
+    if (typeof loadHealth === 'function') loadHealth();
     if (typeof loadSettingsHistory === 'function') loadSettingsHistory();
-    if (typeof loadMobileStatus === 'function') loadMobileStatus();
   }
+  if (name === 'mobile' && typeof loadMobileStatus === 'function') loadMobileStatus();
 }
 
 function openModal(opts) {
@@ -155,11 +113,11 @@ function openModal(opts) {
 
   // 打开设置时自动查一次余额（不阻塞界面）
   refreshBalance('chat', panes[0]);
-  refreshBalance('vision', panes[1]);
+  refreshBalance('vision', panes[0]);
 
   if (typeof loadSkills === 'function') loadSkills();    // Skill 列表（静态面板，只刷数据）
   if (typeof loadAgents === 'function') loadAgents();    // 子代理定义（静态面板，只刷数据）
-  if (typeof loadTasks === 'function') loadTasks();      // 提醒 / 主动聊天面板
+  if (typeof loadTasks === 'function') loadTasks();      // 提醒面板
   if (typeof syncReminderSwitches === 'function') syncReminderSwitches();
 
   const mobileOpen = window.matchMedia('(max-width: 900px)').matches;
@@ -206,19 +164,20 @@ function setSettingsTab(name) {
   const paneHint = (raw && settingsPaneEl(raw)) ? raw : '';
   name = settingsNormalizeTab(raw);
   if (!name || !document.querySelector('#modal .snav-btn[data-tab="' + name + '"]')) {
-    name = paneHint ? settingsPageOfPane(paneHint) : 'model';
+    name = paneHint ? settingsPageOfPane(paneHint) : 'chat';
   }
   if (settingsCurrentTab && settingsCurrentTab !== name) saveSettingsScroll(settingsCurrentTab);
   $$('#modal .settings-nav .snav-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   const show = settingsVisiblePanes(name, paneHint);
   show.forEach(attachPane);                 // 目标页的面板可能还在 detached 存储里
+  // 子代理面板要先挂回 DOM 再加载；否则 loadAgents 找不到 #agents-list 会空列表
+  if (show.indexOf('agents') >= 0 && typeof loadAgents === 'function') loadAgents();
   $$('#modal .pane').forEach((pn) => pn.classList.toggle('hidden', show.indexOf(pn.dataset.pane) < 0));
   // 外观页平时是 detached 的：重新挂上时补一次主题卡片状态
-  if (name === 'ui' && typeof syncThemeCards === 'function') {
+  if (name === 'appearance' && typeof syncThemeCards === 'function') {
     const th = normalizeTheme(document.documentElement.getAttribute('data-theme')
       || ((typeof draftCfg !== 'undefined' && draftCfg && draftCfg.theme) || ''));
     syncThemeCards(th);
-    if (typeof syncAuroraPrefs === 'function') syncAuroraPrefs();
   }
   // 可见 pane 按页面定义顺序排到内容末尾，避免静态 pane 的 DOM 顺序打乱页面阅读顺序
   const contentEl = $('#modal .settings-content');
@@ -228,7 +187,6 @@ function setSettingsTab(name) {
       if (pane) contentEl.appendChild(pane);
     });
   }
-  renderSettingsSubnav(name);
   // 窄屏下设置导航自己滚动：把当前分类带进视野，避免「打开了主题页却看不到选中的导航项」
   const activeNav = $('#modal .settings-nav .snav-btn.active');
   if (activeNav && activeNav.scrollIntoView) {
@@ -304,9 +262,7 @@ function buildSettingsSearchIndex() {
 function settingsPaneName(pane) {
   const pageId = settingsPageOfPane(pane);
   const b = $('#modal .settings-nav .snav-btn[data-tab="' + pageId + '"]');
-  const pageName = b ? b.textContent.trim() : (pane || '');
-  const sub = settingsSubOfPane(pageId, pane);
-  return sub ? pageName + ' · ' + sub.title : pageName;
+  return b ? b.textContent.trim() : (pane || '');
 }
 
 function resetSettingsSearch() {
@@ -331,8 +287,6 @@ function runSettingsSearch(q) {
   }
   const hits = [];
   settingsSearchIndex.forEach((it) => {
-    // 被当前级别 / 标签隐藏的分区不参与搜索：搜不到就点不到
-    if (it.el && it.el.closest && it.el.closest('.meta-hidden')) return;
     const hay = (it.text + ' ' + it.search).toLowerCase();
     if (!kws.every((k) => hay.includes(k))) return;
     const inText = kws.every((k) => it.text.toLowerCase().includes(k));
@@ -340,15 +294,15 @@ function runSettingsSearch(q) {
   });
   const order = settingsTabs();
   hits.sort((a, b) => {
-    const pa = order.indexOf(a.it.pane);
-    const pb = order.indexOf(b.it.pane);
+    const pa = order.indexOf(settingsPageOfPane(a.it.pane));
+    const pb = order.indexOf(settingsPageOfPane(b.it.pane));
     return (pa - pb) || (a.score - b.score);
   });
   settingsSearchHits = hits.slice(0, 20).map((h) => h.it);
   settingsSearchSel = 0;
   filterSettingsNav(new Set(hits.map((h) => h.it.pane)));
   if (!settingsSearchHits.length) {
-    box.innerHTML = '<div class="settings-search-empty">无匹配项，试试「密钥」「压缩」「主题」或「B 站」</div>';
+    box.innerHTML = '<div class="settings-search-empty">无匹配项，试试「密钥」「压缩」「主题」或「语音」</div>';
     box.classList.remove('hidden');
     return;
   }
@@ -375,15 +329,13 @@ function flashSettingsTarget(el) {
 
 function settingsJumpTo(pane, el) {
   if (!pane) return;
-  setSettingsTab(pane);   // 传 pane 而不是页：让「能力与工具」自动切到所属二级分段
+  setSettingsTab(pane);   // 传 pane 而不是页：由 pane 反查出它所在的页面
   resetSettingsSearch();
   requestAnimationFrame(() => {
     const det = el && el.closest ? el.closest('details') : null;
     if (det) det.open = true;
-    const sec = el && el.closest ? el.closest('.set-section') : null;
-    if (sec) setSectionAdvanced(sec, true);              // 命中的高级项先展开
     const card = el && el.closest ? el.closest('.set-card') : null;
-    if (card) setCardCollapsed(card, false, true);      // 命中的分区若被收起，先展开
+    if (card) setCardCollapsed(card, false, true);      // 命中的卡片若被收起，先展开
     if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' });
     flashSettingsTarget(el);
     updateAnchorsActive();
@@ -483,6 +435,8 @@ function setupSettingsSearch() {
   // 「数据与高级」页
   const openData = $('#app-open-data');
   if (openData) openData.onclick = openDataDir;
+  const healthRefresh = $('#health-refresh');
+  if (healthRefresh) healthRefresh.onclick = loadHealth;
   const ciRefresh = $('#codeindex-refresh');
   if (ciRefresh) ciRefresh.onclick = codeindexRefresh;
   const ciRebuild = $('#codeindex-rebuild');
@@ -512,7 +466,7 @@ function setupSettingsSearch() {
       if (!dry.ok) throw new Error(dry.error || '检查失败');
       const stats = dry.stats || {};
       if (!stats.messages) {
-        setStatus('当前 sessions.json：' + mb(dry.before) + '，没有可压缩的正文副本。');
+        setStatus('当前会话缓存：' + mb(dry.before) + '，没有可压缩的正文副本。');
         toast('会话存储已经很干净');
         return;
       }
@@ -520,7 +474,7 @@ function setupSettingsSearch() {
         '可压缩 ' + stats.messages + ' 条消息：' + mb(dry.before)
         + ' → ' + mb(dry.after) + '。\n\n'
         + '只会移除附件正文的重复副本 / 二进制乱码，不删消息；'
-        + '写回前会自动备份 sessions.json。确定继续？');
+        + '写回前会自动备份会话缓存目录。确定继续？');
       if (!ok) { setStatus('已取消。'); return; }
       setStatus('正在压缩并写回…');
       const r = await api('/api/storage/compact', { apply: true });
@@ -535,6 +489,86 @@ function setupSettingsSearch() {
       compactSessions.disabled = false;
     }
   };
+  // ---- 磁盘占用：只读扫描（按目录列体积） ----
+  const fmtMb = (n) => (Number(n || 0) / 1048576).toFixed(1) + ' MB';
+  const diskScan = $('#disk-scan');
+  if (diskScan) diskScan.onclick = async () => {
+    const body = $('#disk-body');
+    const at = $('#disk-at');
+    diskScan.disabled = true;
+    if (body) body.textContent = '正在扫描…';
+    try {
+      const r = await api('/api/storage/usage');
+      if (!r.ok) throw new Error(r.error || '扫描失败');
+      const rows = (r.dirs || []).filter((x) => x.bytes > 0);
+      const html = rows.map((x) => '<div class="health-row"><span>' + escapeHtml(x.name)
+        + '</span><b>' + fmtMb(x.bytes) + '</b><i class="hint">' + (x.files || 0)
+        + ' 个文件</i></div>').join('');
+      if (body) {
+        body.innerHTML = (html || '<div class="health-sub">数据目录是空的。</div>')
+          + '<div class="health-row"><span>合计</span><b>' + fmtMb(r.total) + '</b></div>'
+          + (r.partial ? '<div class="health-sub">目录太大，统计提前结束（数值偏小）。</div>' : '');
+      }
+      if (at) at.textContent = '统计于 ' + new Date().toLocaleTimeString();
+    } catch (e) {
+      if (body) body.textContent = '扫描失败：' + (e && e.message ? e.message : e);
+    } finally {
+      diskScan.disabled = false;
+    }
+  };
+
+  // ---- 事件日志压缩 / 孤儿目录清理 ----
+  const pruneCheck = $('#prune-check');
+  const pruneApply = $('#prune-apply');
+  const pruneStatus = $('#prune-status');
+  const setPrune = (t) => { if (pruneStatus) pruneStatus.textContent = t; };
+  let pruneReady = false;
+  const describePrune = (r) => {
+    const ev = r.events || {};
+    const orph = r.orphans || {};
+    return '可压缩事件日志：' + (ev.candidates || 0) + ' 个会话 '
+      + fmtMb(ev.before || 0) + ' → ' + fmtMb(ev.after || 0)
+      + '；孤儿目录：' + (orph.count || 0) + ' 个，' + fmtMb(orph.bytes || 0);
+  };
+  if (pruneCheck) pruneCheck.onclick = async () => {
+    pruneCheck.disabled = true;
+    pruneReady = false;
+    if (pruneApply) pruneApply.disabled = true;
+    setPrune('正在检查事件日志…');
+    try {
+      const r = await api('/api/storage/maintenance', { apply: false });
+      if (!r.ok) throw new Error(r.error || '检查失败');
+      const hasWork = ((r.events || {}).candidates || 0) > 0
+        || ((r.orphans || {}).count || 0) > 0;
+      setPrune(describePrune(r)
+        + (hasWork ? '。确认后点「备份并清理」。' : '。目前没有可回收的内容。'));
+      pruneReady = hasWork;
+      if (pruneApply) pruneApply.disabled = !hasWork;
+    } catch (e) {
+      setPrune('检查失败：' + (e && e.message ? e.message : e));
+    } finally {
+      pruneCheck.disabled = false;
+    }
+  };
+  if (pruneApply) pruneApply.onclick = async () => {
+    if (!pruneReady) return;
+    const ok = window.confirm('会先备份到 data/event_prune_backup/，再重写事件日志并移走孤儿目录。\n确定继续？');
+    if (!ok) return;
+    pruneApply.disabled = true;
+    setPrune('正在备份并清理…（体积大时可能要十几秒）');
+    try {
+      const r = await api('/api/storage/maintenance', { apply: true });
+      if (!r.ok) throw new Error(r.error || '清理失败');
+      setPrune('已清理：事件日志 ' + (r.done || 0) + ' 个会话，孤儿目录 ' + (r.moved || 0) + ' 个'
+        + (r.backup ? '；备份在 ' + r.backup : '') + '。');
+      toast('事件日志已压缩', 'success');
+      pruneReady = false;
+    } catch (e) {
+      setPrune('清理失败：' + (e && e.message ? e.message : e));
+      toastErr('清理事件日志失败', e);
+    }
+  };
+
   const resetAll = $('#app-reset-all');
   if (resetAll) resetAll.onclick = resetAllSettings;
   const ctxMenu = $('#app-context-menu');
@@ -550,11 +584,6 @@ function setupSettingsSearch() {
     modal.addEventListener('change', onEdit);
     // 卡片：标题行点击折叠 / 展开；右上角两个按钮分别恢复本节默认、折叠
     modal.addEventListener('click', (e) => {
-      const secBtn = e.target.closest && e.target.closest('[data-act="toggle-section-adv"]');
-      if (secBtn) {
-        toggleSectionAdvanced(secBtn.closest('.set-section'));
-        return;
-      }
       const card = e.target.closest && e.target.closest('.set-card');
       if (!card) return;
       const act = e.target.closest('.set-card-act');
@@ -580,9 +609,7 @@ function setupSettingsSearch() {
       if (expand) {
         const row = expand.closest('.rule-item');
         if (!row) return;
-        const open = row.classList.toggle('open');
-        expand.textContent = open ? '收起' : '展开';
-        expand.setAttribute('aria-expanded', open ? 'true' : 'false');
+        syncProfileRuleOpen(row, !row.classList.contains('open'));
         return;
       }
       const del = e.target.closest && e.target.closest('[data-act="rule-del"]');

@@ -111,6 +111,16 @@ def test_missing_written_files(tmp_path):
     assert agent.missing_written_files(sid, str(tmp_path)) == []
 
 
+def test_missing_written_files_since_filters_old_ops(tmp_path):
+    """验收按回合过滤：since 之前的旧写操作不算本轮的丢失文件。"""
+    sid = "s_recover"
+    _add(tmp_path, sid, "old.txt", b"o", ts=1)
+    _add(tmp_path, sid, "new.txt", b"n", ts=100)
+    assert agent.missing_written_files(sid, str(tmp_path), since=50) == ["new.txt"]
+    assert set(agent.missing_written_files(sid, str(tmp_path))) == {
+        "old.txt", "new.txt"}
+
+
 def test_missing_written_files_skips_file_deleted_on_purpose(tmp_path):
     """写完又主动删掉的临时文件不算丢失：只看这个文件的最后一次操作。"""
     sid = "s_recover"

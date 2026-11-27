@@ -8,12 +8,12 @@ import pytest
 
 from app import capabilities, skills
 
-PRESET_IDS = ["code-review", "debug-helper", "decision-compare", "doc-digest",
+PRESET_IDS = ["code-review", "security-review", "debug-helper", "decision-compare", "doc-digest",
               "study-coach", "writing-polish",
               "spec-clarify", "verify-first", "safe-refactor", "repo-onboarding",
               "commit-pr", "data-analysis", "translate", "visual-restore",
               "read-before-write", "asset-pipeline", "computer-use",
-              "workflow-orchestrator"]
+              "workflow-orchestrator", "coding-discipline"]
 
 
 @pytest.fixture

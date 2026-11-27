@@ -25,24 +25,27 @@ def _no_upload_sweep(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_session_store(tmp_path, monkeypatch):
-    """测试不碰真实的 data/sessions 事件目录。
+    """测试不碰真实的会话存储（sessions.json / 事件目录 / 物化缓存）。
 
-    - 事件写到 tmp：`save_sessions` 在测试里也会调 record_all；
-    - 默认按 json 模式读取：不触发启动对账（对账会扫描真实事件目录）。
-      需要测事件语义的用例自己 monkeypatch `_store_mode`。
+    - 会话与事件都写到 tmp：`save_sessions` 在测试里也会落盘；
+    - 每个用例前清掉进程内缓存，等价于一次重启，避免上个用例的会话串进来。
     """
     try:
         from app import session_events as se
         from app import sessions
     except Exception:                       # 模块不可用时无需隔离
         return
+    monkeypatch.setattr(sessions, "SESSION_FILE", str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(sessions, "CURRENT_FILE", str(tmp_path / "current_session.json"))
+    monkeypatch.setattr(sessions, "_LEGACY_DONE", False)
     monkeypatch.setattr(se, "DATA_DIR", str(tmp_path / "events"))
     se._LAST.clear()
-    monkeypatch.setattr(sessions, "_store_mode", lambda: "json")
-    sessions.reset_merge_flag()
+    sessions.reset_cache()
+    sessions._SEARCH_NORM_DONE = False
     yield
     se._LAST.clear()
-    sessions.reset_merge_flag()
+    sessions.reset_cache()
+    sessions._SEARCH_NORM_DONE = False
 
 
 @pytest.fixture(autouse=True)

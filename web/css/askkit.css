@@ -15,7 +15,7 @@
   flex-direction: column;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   box-shadow: 0 18px 48px var(--scrim-soft);
   overflow: hidden;
   /* Electron 无边框窗口：顶栏是 -webkit-app-region: drag 的拖拽区。
@@ -33,7 +33,7 @@
   border-bottom: 1px solid var(--border);
   cursor: move; user-select: none;
 }
-.askkit-title { flex: 0 0 auto; font-size: 12.5px; font-weight: 600; }
+.askkit-title { flex: 0 0 auto; font-size: var(--fs-sm); font-weight: var(--fw-bold); }
 
 .askkit-tabs {
   flex: 1 1 auto; min-width: 0;
@@ -44,37 +44,45 @@
 .askkit-tab {
   flex: 0 0 auto;
   display: inline-flex; align-items: center; gap: 4px;
-  max-width: 140px; padding: 3px 6px 3px 8px;
+  max-width: 140px; padding: 4px 6px 4px 8px;
   border: 1px solid var(--border); border-radius: 999px;
   background: transparent; color: var(--text-dim);
-  font-size: 11.5px; font-family: var(--font); cursor: pointer;
+  font-size: var(--fs-xs); font-family: var(--font); cursor: pointer;
   white-space: nowrap;
 }
 .askkit-tab:hover { background: var(--bg-hover); color: var(--text); }
 .askkit-tab.active { color: var(--text); border-color: var(--accent); background: var(--bg); }
 .askkit-tab-t { overflow: hidden; text-overflow: ellipsis; max-width: 96px; }
-.askkit-tab-x { font-size: 10px; opacity: .55; }
+.askkit-tab-x { font-size: var(--fs-2xs); opacity: .55; }
 .askkit-tab-x:hover { opacity: 1; color: var(--text); }
 .askkit-new,
+.askkit-pin,
 .askkit-x {
   flex: 0 0 auto; padding: 0 4px; border: 0; background: none;
-  color: var(--text-dim); font-size: 14px; line-height: 1; cursor: pointer;
+  color: var(--text-dim); font-size: var(--fs-md); line-height: 1; cursor: pointer;
 }
-.askkit-x { font-size: 13px; }
-.askkit-new:hover, .askkit-x:hover { color: var(--text); }
+.askkit-x { font-size: var(--fs-sm); }
+/* 钉住：图标按钮（#i-pin），钉住态用强调色 + 浅底区分 */
+.askkit-pin {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0;
+}
+.askkit-pin .ic { width: 14px; height: 14px; }
+.askkit-new:hover, .askkit-pin:hover, .askkit-x:hover { color: var(--text); }
+.askkit-pin.on { color: var(--accent); background: var(--accent-soft); border-radius: 999px; }
 
 .askkit-quote {
   flex: 0 0 auto;
-  margin: 8px 10px 0; padding: 6px 9px;
+  margin: 8px 10px 0; padding: 6px 10px;
   border-left: 3px solid var(--accent);
-  background: var(--bg-hover); border-radius: 6px;
-  font-size: 12px; line-height: 1.6; color: var(--text-dim);
+  background: var(--bg-hover); border-radius: var(--radius-sm);
+  font-size: var(--fs-xs); line-height: var(--lh); color: var(--text-dim);
   max-height: 3.8em; overflow: hidden; cursor: pointer;
 }
 .askkit-quote::before {
   content: attr(data-ref);
-  display: block; margin-bottom: 3px;
-  font-size: 11px; color: var(--text-dim); opacity: .85;
+  display: block; margin-bottom: 4px;
+  font-size: var(--fs-2xs); color: var(--text-dim); opacity: .85;
 }
 .askkit-quote.open { max-height: 160px; overflow: auto; }
 
@@ -86,9 +94,9 @@
 }
 .askkit-tools.hidden { display: none; }
 .askkit-tool {
-  padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px;
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
   background: transparent; color: var(--text-dim);
-  font-size: 11.5px; font-family: var(--font); cursor: pointer;
+  font-size: var(--fs-xs); font-family: var(--font); cursor: pointer;
 }
 .askkit-tool:hover { background: var(--bg-hover); color: var(--text); }
 
@@ -96,8 +104,8 @@
   flex: 0 0 auto;
   max-height: 180px; overflow: auto;
   margin: 6px 10px 0; padding: 8px 10px;
-  border: 1px dashed var(--border); border-radius: 8px;
-  font-size: 12.5px; line-height: 1.65; color: var(--text);
+  border: 1px dashed var(--border); border-radius: var(--radius-md);
+  font-size: var(--fs-sm); line-height: var(--lh); color: var(--text);
   white-space: pre-wrap; word-break: break-word;
 }
 .askkit-toolout.hidden { display: none; }
@@ -119,15 +127,15 @@
 /* 批注输入 */
 .askkit-note-input {
   box-sizing: border-box; width: 100%; min-height: 54px; resize: vertical;
-  padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px;
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--bg); color: var(--text);
-  font-size: 12.5px; font-family: var(--font);
+  font-size: var(--fs-sm); font-family: var(--font);
 }
 .askkit-note-save {
   margin-top: 6px; padding: 4px 12px;
-  border: 1px solid var(--accent); border-radius: 7px;
+  border: 1px solid var(--accent); border-radius: var(--radius-sm);
   background: transparent; color: var(--accent);
-  font-size: 12px; font-family: var(--font); cursor: pointer;
+  font-size: var(--fs-xs); font-family: var(--font); cursor: pointer;
 }
 .askkit-note-save:hover { background: var(--accent-soft); }
 
@@ -139,12 +147,12 @@
 }
 .askkit-turn { display: flex; flex-direction: column; gap: 4px; }
 .askkit-q {
-  font-size: 12px; color: var(--text-dim);
+  font-size: var(--fs-xs); color: var(--text-dim);
   padding-left: 8px; border-left: 2px solid var(--border);
 }
 .askkit-q::before { content: "问："; color: var(--text-dim); }
 .askkit-a {
-  font-size: 12.5px; line-height: 1.7;
+  font-size: var(--fs-sm); line-height: var(--lh);
   white-space: pre-wrap; word-break: break-word;
 }
 .askkit-a.err { color: var(--danger); }
@@ -152,16 +160,16 @@
 .askkit-a ul, .askkit-a ol { margin: 4px 0; padding-left: 20px; }
 .askkit-a pre {
   margin: 6px 0; padding: 8px 10px; overflow: auto;
-  background: var(--bg-side); border-radius: 6px;
-  font-size: 11.5px; line-height: 1.6; white-space: pre;
+  background: var(--bg-side); border-radius: var(--radius-sm);
+  font-size: var(--fs-xs); line-height: var(--lh); white-space: pre;
 }
 .askkit-a code {
-  padding: 1px 4px; border-radius: 4px;
+  padding: 1px 4px; border-radius: var(--radius-xs);
   background: var(--bg-hover);
-  font-family: Consolas, Menlo, monospace; font-size: 11.5px;
+  font-family: Consolas, Menlo, monospace; font-size: var(--fs-xs);
 }
 .askkit-a pre code { padding: 0; background: none; }
-.askkit-stopped { margin-top: 4px; font-size: 11px; color: var(--text-dim); }
+.askkit-stopped { margin-top: 4px; font-size: var(--fs-2xs); color: var(--text-dim); }
 
 .askkit-chips {
   flex: 0 0 auto;
@@ -170,9 +178,9 @@
 }
 .askkit-chips.hidden { display: none; }
 .askkit-chip {
-  padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px;
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
   background: transparent; color: var(--text-dim);
-  font-size: 11.5px; font-family: var(--font); cursor: pointer;
+  font-size: var(--fs-xs); font-family: var(--font); cursor: pointer;
 }
 .askkit-chip:hover { background: var(--bg-hover); color: var(--text); }
 .askkit-chip[disabled] { opacity: .5; cursor: default; }
@@ -185,17 +193,17 @@
 }
 .askkit-input {
   flex: 1; min-width: 0; box-sizing: border-box;
-  padding: 6px 9px; resize: none;
-  border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 10px; resize: none;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
   background: var(--bg); color: var(--text);
-  font-size: 12.5px; line-height: 1.55; font-family: var(--font);
+  font-size: var(--fs-sm); line-height: var(--lh-snug); font-family: var(--font);
 }
 .askkit-input:focus { outline: none; border-color: var(--accent); }
 .askkit-send {
   flex: 0 0 auto;
-  padding: 7px 13px; border: 1px solid transparent; border-radius: 8px;
+  padding: 8px 14px; border: 1px solid transparent; border-radius: var(--radius-md);
   background: var(--accent); color: var(--on-accent);
-  font-size: 12px; font-family: var(--font); cursor: pointer;
+  font-size: var(--fs-xs); font-family: var(--font); cursor: pointer;
 }
 .askkit-send:hover { filter: brightness(1.06); }
 .askkit-send.busy { background: var(--bg-side); color: var(--text); border-color: var(--border); }
@@ -203,18 +211,18 @@
 .askkit-foot {
   flex: 0 0 auto;
   display: flex; align-items: center; gap: 10px;
-  padding: 0 10px 9px;
+  padding: 0 10px 10px;
 }
 .askkit-link {
   padding: 0; border: 0; background: none;
-  color: var(--accent); font-size: 11.5px; font-family: var(--font); cursor: pointer;
+  color: var(--accent); font-size: var(--fs-xs); font-family: var(--font); cursor: pointer;
 }
 .askkit-link:hover { text-decoration: underline; }
 .askkit-link[hidden] { display: none; }
 .askkit-link:disabled { color: var(--text-dim); cursor: default; text-decoration: none; }
-.askkit-hint { margin-left: auto; font-size: 11px; color: var(--text-dim); }
+.askkit-hint { margin-left: auto; font-size: var(--fs-2xs); color: var(--text-dim); }
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .askkit {
     left: 8px !important; right: 8px; top: auto !important; bottom: 8px;
     width: auto; max-height: 70vh;

@@ -116,7 +116,7 @@ def test_session_search_matches_title_and_body(monkeypatch):
         {"id": "c", "title": "剧场", "gal_scope": "gal", "updated_at": 5, "messages": []},
         {"id": "d", "title": "不匹配", "updated_at": 3, "messages": []},
     ]}
-    monkeypatch.setattr(sessions_api, "load_sessions", lambda: fake)
+    monkeypatch.setattr(sessions_api, "load_sessions", lambda copy=True: fake)
     h = FakeHandler({"q": "群"})
     sessions_api._api_session_search(h)
     code, obj = h.last()
@@ -124,6 +124,23 @@ def test_session_search_matches_title_and_body(monkeypatch):
     assert [i["id"] for i in obj["items"]] == ["a", "b"]
     assert obj["items"][0]["title_hit"] is True
     assert "群" in obj["items"][1]["hits"][0]["snippet"]
+
+
+def test_session_search_reindexes_when_session_changes():
+    """搜索索引按会话指纹复用；会话更新后必须重建，不能返回旧正文。"""
+    from app.api import sessions as sessions_api
+
+    sessions_api._SEARCH_INDEX.clear()
+    s = {"id": "s_search", "title": "t", "updated_at": 1,
+         "messages": [{"role": "user", "content": "alpha"}]}
+    rows1 = sessions_api._search_rows(s)
+    rows2 = sessions_api._search_rows(s)
+    assert rows1 is rows2                       # 未变化：复用
+    s["messages"].append({"role": "assistant", "content": "beta"})
+    s["updated_at"] = 2
+    rows3 = sessions_api._search_rows(s)
+    assert rows3 is not rows1 and len(rows3) == 2
+    sessions_api._SEARCH_INDEX.clear()
 
 
 def test_notes_tree_runs():

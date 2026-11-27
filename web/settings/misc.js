@@ -427,28 +427,27 @@ function syncAgentUI() {
   document.querySelectorAll('#agent-menu .approve-opt').forEach((b) => {
     b.classList.toggle('active', b.dataset.mode === ap);
   });
-  // 自动续跑：全局配置（不属于会话），默认 3 次
+  // 自动续跑：全局配置（不属于会话），只保留「关闭 / 无上限」两档
   const acRaw = parseInt((state.config || {}).agent_auto_continue, 10);
-  const acv = Number.isFinite(acRaw) ? acRaw : 3;
+  const acv = (Number.isFinite(acRaw) && acRaw === 0) ? 0 : -1;
   document.querySelectorAll('#agent-menu .continue-opt').forEach((b) => {
     b.classList.toggle('active', parseInt(b.dataset.continue, 10) === acv);
     b.onclick = () => setAutoContinue(parseInt(b.dataset.continue, 10) || 0);
   });
 }
 
-/* 自动续跑：模型想收尾但任务没做完时，由后端自动推它继续，最多 N 次。
-   0 = 关闭（每轮结束就停，需要用户手动说「继续」）；-1 = 无上限。 */
+/* 自动续跑：模型想收尾但任务没做完时，由后端自动推它继续。
+   只保留两档：0 = 关闭，-1 = 无上限。 */
 async function setAutoContinue(n) {
   const raw = parseInt(n, 10);
-  const v = raw < 0 ? -1 : Math.max(0, Math.min(10, raw || 0));
+  const v = raw === 0 ? 0 : -1;
   const cfg = Object.assign({}, state.config || {}, { agent_auto_continue: v });
   try {
     await api('/api/config', cfg);
   } catch (e) { toast('设置失败：' + e); return; }
   state.config = cfg;
   syncAgentUI();
-  toast(v < 0 ? '自动续跑：无上限'
-              : (v ? ('自动续跑：最多 ' + v + ' 次') : '已关闭自动续跑'));
+  toast(v === 0 ? '已关闭自动续跑' : '自动续跑：无上限');
 }
 
 /* 写入审批档位：ask 手动 / ai 自动 / full 完全访问 / custom 自定义。
@@ -631,9 +630,9 @@ async function clearSandbox() {
     const openBtn = document.querySelector('#btn-settings');
     if (openBtn) openBtn.onclick = () => openModal();
     const closeX = document.querySelector('#btn-close-modal');
-    if (closeX) closeX.onclick = closeModal;
+    if (closeX) closeX.onclick = () => closeModal();
     const cancel = document.querySelector('#btn-cancel');
-    if (cancel) cancel.onclick = closeModal;
+    if (cancel) cancel.onclick = () => closeModal();
     const save = document.querySelector('#btn-save');
     if (save) save.onclick = saveModal;
     setupSettingsSearch();

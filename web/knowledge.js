@@ -353,8 +353,7 @@ function ensureKbVis() {
 }
 
 function kbGraphSkeleton(msg) {
-  return '<div class="kb-graph-loading"><span class="kb-graph-spin"></span><span>' +
-    escapeHtml(msg || '正在加载图谱…') + '</span></div>';
+  return gmLoadingHtml(msg || '正在加载图谱…', 'kb-graph-loading');
 }
 
 // 供工作台「记忆」跳转：打开指定知识库并定位到节点

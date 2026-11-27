@@ -50,8 +50,17 @@ window.gmLoadGroup = (function () {
       const s = document.createElement('script');
       s.src = src;
       s.async = false;                 // 动态插入时保持组内顺序
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error('脚本加载失败：' + src));
+      // 这些脚本里有 UMD 库（xterm 等）：Monaco 的 AMD loader 已经在跑时，
+      // 它们会被当成匿名 AMD 模块，既挂不上 window 也会污染 loader（分词器加载失败 → 代码全白）。
+      const guard = window.__gmAmdGuard;
+      if (guard) guard.enter();
+      const done = (ok) => {
+        if (guard) guard.leave();
+        if (ok) resolve();
+        else reject(new Error('脚本加载失败：' + src));
+      };
+      s.onload = () => done(true);
+      s.onerror = () => done(false);
       document.body.appendChild(s);
     });
   }

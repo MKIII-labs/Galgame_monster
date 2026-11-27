@@ -9,7 +9,8 @@
    ============================================================ */
 'use strict';
 
-(function () {
+/* IDE 面板是惰性挂载的（<template id="tpl-ide-panel">）：面板挂载完成后再取节点绑定。 */
+function ideBottomBind() {
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
@@ -17,6 +18,8 @@
   const term = $('#ide-term');
   const intel = $('#ide-intel');
   if (!wrap || !term || !intel) return;
+  if (wrap.dataset.ibound === '1') return;
+  wrap.dataset.ibound = '1';
 
   const tabs = $$('#ide-bottom .ide-bottom-tab');
   const closeBtn = $('#ide-bottom-close');
@@ -91,4 +94,9 @@
 
   sync();
   window.ideBottom = { sync, select };
-})();
+}
+
+document.addEventListener('gm:panel-mounted', (e) => {
+  if (e.detail && e.detail.id === 'ide-panel') ideBottomBind();
+});
+ideBottomBind();

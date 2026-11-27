@@ -84,15 +84,15 @@ def test_limits_falls_back_on_bad_type():
 
 
 def test_normalize_auto_continue():
-    """0 = 关闭，1–10 = 次数，-1 = 无上限，非法值回落 3"""
+    """只保留「关闭 / 无上限」两档；旧的 3 / 5 统一按无上限处理"""
     assert agent.normalize_auto_continue(0) == 0
-    assert agent.normalize_auto_continue(5) == 5
-    assert agent.normalize_auto_continue(99) == 10
+    assert agent.normalize_auto_continue(5) == -1
+    assert agent.normalize_auto_continue(99) == -1
     assert agent.normalize_auto_continue(-1) == -1
     assert agent.normalize_auto_continue(-7) == -1
-    assert agent.normalize_auto_continue("3") == 3
-    assert agent.normalize_auto_continue("") == 3
-    assert agent.normalize_auto_continue(None) == 3
+    assert agent.normalize_auto_continue("3") == -1
+    assert agent.normalize_auto_continue("") == -1
+    assert agent.normalize_auto_continue(None) == -1
 
 
 def test_judge_write_has_no_count_threshold(tmp_path):

@@ -643,6 +643,15 @@ def _exec_tool(sandbox, tool, args, caps, allowed):
                        % (tool, "、".join(sorted(allowed)))), "TOOL_NOT_ALLOWED"
     try:
         from app import agent
+        # 脚本内的写 / 命令：先过父进程的审批回调（与主循环同一套判定）。
+        # 脚本自己没法弹审批卡，所以由调用方把 approve_tool 挂进 caps。
+        _gate = (caps or {}).get("approve_tool")
+        if _gate and (agent.writes_files(tool, args)
+                      or tool in agent.RUN_TOOLS or tool in agent.SHELL_TOOLS):
+            _ok, _why = _gate(tool, args)
+            if not _ok:
+                return (False, "❌ 脚本内 %s 未获批准：%s"
+                        % (tool, _why or "用户拒绝"), "TOOL_DENIED")
         text, undo, is_write = agent.run_tool(
             sandbox, tool, args, caps=caps,
             allow_outside=bool((caps or {}).get("allow_outside")))

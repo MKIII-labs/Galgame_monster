@@ -924,7 +924,7 @@ function dojoShowDone() {
   review.className = 'dojo-btn';
   review.textContent = '看方法卡';
   review.onclick = () => {
-    if (el.side) el.side.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    if (el.side) el.side.scrollIntoView({ block: 'nearest', behavior: GM_SMOOTH });
   };
   const today = document.createElement('button');
   today.type = 'button';

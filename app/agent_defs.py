@@ -32,7 +32,7 @@ READ_ONLY_TOOLS = {
     "research_note", "explore",
 }
 # 写权限单独开：permission: write 才允许，且每次写仍走主循环审批
-WRITE_TOOLS = {"write_file", "edit_file", "make_dir"}
+WRITE_TOOLS = {"write_file", "download_file", "doc_create", "edit_file", "make_dir"}
 ALLOWED_TOOLS = READ_ONLY_TOOLS | WRITE_TOOLS
 
 DEFAULT_MAX_TURNS = 6
@@ -162,7 +162,7 @@ BUILTINS = {
                   "code_context", "find_symbol", "impact", "repo_map",
                   "check_code", "lsp_diagnostics",
                   "git_status", "git_diff", "git_log",
-                  "write_file", "edit_file", "make_dir"],
+                  "write_file", "download_file", "edit_file", "make_dir"],
         "model": "",
         "max_turns": 8,
         "permission": "write",

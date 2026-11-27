@@ -181,8 +181,9 @@ def test_parallel_sessions_keep_streaming():
 
         step1 = ev(r"""
         (async () => {
-          await newSession(); const A = state.sessions.current;
-          await newSession(); const B = state.sessions.current;
+          // newSession 现在只建本地草案，必须 materialize 才有真实 sid
+          await newSession(); const A = await materializeDraft();
+          await newSession(); const B = await materializeDraft();
           await selectSession(A);
           document.querySelector('#input').value = 'A 慢慢回答';
           sendMessage();

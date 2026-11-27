@@ -83,6 +83,12 @@
 
   const LIST_TYPES = { ul: 1, ol: 1, task: 1 };
   const RAW_START = /^(?:\s*\|[\s:|-]|<\/?[a-zA-Z][^>]*>|\s{4,}|\t)/;
+  const NESTED_LIST = /^\s{2,}(?:[-*+]\s|\d+[.)]\s)/;
+
+  function indentOf(line) {
+    const m = /^\s*/.exec(line);
+    return Math.min(6, Math.floor((m ? m[0].length : 0) / 2));
+  }
 
   function parse(md) {
     const lines = String(md == null ? '' : md).replace(/\r\n?/g, '\n').split('\n');
@@ -111,27 +117,33 @@
       if (m) { push('h' + m[1].length, m[2].trim()); i += 1; continue; }
 
       m = /^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/.exec(line);
-      if (m) { push('task', m[2], { checked: m[1].toLowerCase() === 'x' }); i += 1; continue; }
+      if (m) {
+        push('task', m[2], { checked: m[1].toLowerCase() === 'x', indent: indentOf(line) });
+        i += 1;
+        continue;
+      }
 
       m = /^\s*[-*+]\s+(.*)$/.exec(line);
       if (m) {
+        const indent = indentOf(line);
         const buf = [m[1]];
         i += 1;
-        while (i < lines.length && /^\s{2,}\S/.test(lines[i])) {
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !NESTED_LIST.test(lines[i])) {
           buf.push(lines[i].trim()); i += 1;
         }
-        push('ul', buf.join('\n'));
+        push('ul', buf.join('\n'), { indent: indent });
         continue;
       }
 
       m = /^\s*(\d+)[.)]\s+(.*)$/.exec(line);
       if (m) {
+        const indent = indentOf(line);
         const buf = [m[2]];
         i += 1;
-        while (i < lines.length && /^\s{2,}\S/.test(lines[i])) {
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !NESTED_LIST.test(lines[i])) {
           buf.push(lines[i].trim()); i += 1;
         }
-        push('ol', buf.join('\n'), { num: Number(m[1]) || 1 });
+        push('ol', buf.join('\n'), { num: Number(m[1]) || 1, indent: indent });
         continue;
       }
 
@@ -172,15 +184,16 @@
     const parts = [];
     (blocks || []).forEach((b) => {
       const text = String(b.text || '');
+      const pad = '  '.repeat(Math.max(0, Math.min(6, Number((b.meta && b.meta.indent) || 0))));
       switch (b.type) {
         case 'h1': parts.push('# ' + text); break;
         case 'h2': parts.push('## ' + text); break;
         case 'h3': parts.push('### ' + text); break;
-        case 'ul': parts.push('- ' + text.replace(/\n/g, '\n  ')); break;
-        case 'ol': parts.push(((b.meta && b.meta.num) || 1) + '. '
-          + text.replace(/\n/g, '\n   ')); break;
-        case 'task': parts.push('- [' + (b.meta && b.meta.checked ? 'x' : ' ') + '] ' + text
-          .replace(/\n/g, '\n  ')); break;
+        case 'ul': parts.push(pad + '- ' + text.replace(/\n/g, '\n' + pad + '  ')); break;
+        case 'ol': parts.push(pad + ((b.meta && b.meta.num) || 1) + '. '
+          + text.replace(/\n/g, '\n' + pad + '   ')); break;
+        case 'task': parts.push(pad + '- [' + (b.meta && b.meta.checked ? 'x' : ' ') + '] ' + text
+          .replace(/\n/g, '\n' + pad + '  ')); break;
         case 'quote': parts.push('> ' + text.replace(/\n/g, '\n> ')); break;
         case 'code':
           parts.push('```' + ((b.meta && b.meta.lang) || '') + '\n' + text + '\n```');
@@ -208,18 +221,50 @@
     return inlineToMd(box);
   }
 
+  function setCaretTextOffset(root, offset) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let left = Math.max(0, offset);
+    let node;
+    while ((node = walker.nextNode())) {
+      const len = node.nodeValue.length;
+      if (left <= len) {
+        const r = document.createRange();
+        r.setStart(node, left);
+        r.collapse(true);
+        const sel = document.getSelection();
+        if (sel) { sel.removeAllRanges(); sel.addRange(r); }
+        return;
+      }
+      left -= len;
+    }
+  }
+
+  function caretRect(body) {
+    const sel = document.getSelection();
+    if (sel && sel.rangeCount) {
+      const rect = sel.getRangeAt(0).cloneRange().getBoundingClientRect();
+      if (rect && (rect.width || rect.height || rect.top)) return rect;
+    }
+    return body.getBoundingClientRect();
+  }
+
   function BlockEditor(el, opts) {
     this.el = el;
     this.opts = opts || {};
     this.blocks = [];
     this.dragIndex = -1;
     this._slash = null;
+    this._wiki = null;
     this._bind();
   }
 
   BlockEditor.prototype._bind = function () {
     const self = this;
     this.el.addEventListener('input', (e) => self._onInput(e));
+    this.el.addEventListener('mousedown', (e) => {
+      if (!e.target.closest('.nb-wiki')) self._closeWiki();
+      if (!e.target.closest('.nb-slash')) self._closeSlash();
+    });
     this.el.addEventListener('keydown', (e) => self._onKey(e));
     this.el.addEventListener('paste', (e) => self._onPaste(e));
     this.el.addEventListener('click', (e) => {
@@ -304,12 +349,58 @@
     else b.text = inlineToMd(body);
   };
 
+  const MD_RULES = [
+    { re: /^(#{1,3})\s+/, type: (m) => 'h' + m[1].length },
+    { re: /^[-*+]\s+\[([ xX])\]\s+/, type: () => 'task',
+      meta: (m) => ({ checked: m[1].toLowerCase() === 'x' }) },
+    { re: /^[-*+]\s+/, type: () => 'ul' },
+    { re: /^(\d+)[.)]\s+/, type: () => 'ol', meta: (m) => ({ num: Number(m[1]) || 1 }) },
+    { re: /^>\s+/, type: () => 'quote' },
+  ];
+
+  /* 输入即格式：段落开头的 Markdown 标记转成对应块 */
+  BlockEditor.prototype._applyMarkdownRule = function (body) {
+    const b = this._blockOf(body);
+    if (!b || b.type !== 'p') return false;
+    const text = String(b.text || '');
+    for (const rule of MD_RULES) {
+      const m = rule.re.exec(text);
+      if (!m) continue;
+      b.type = rule.type(m);
+      b.text = text.slice(m[0].length);
+      b.meta = Object.assign({}, b.meta, rule.meta ? rule.meta(m) : {});
+      const idx = this.blocks.indexOf(b);
+      this._closeSlash();
+      this._closeWiki();
+      this.render();
+      this.focusBlock(idx, false);
+      this._emit();
+      return true;
+    }
+    const cm = /^```([\w+-]*)$/.exec(text);
+    if (cm) {
+      b.type = 'code';
+      b.text = '';
+      b.meta = Object.assign({}, b.meta, { lang: cm[1] || '' });
+      const idx = this.blocks.indexOf(b);
+      this._closeSlash();
+      this._closeWiki();
+      this.render();
+      this.focusBlock(idx, false);
+      this._emit();
+      return true;
+    }
+    return false;
+  };
+
   BlockEditor.prototype._onInput = function (e) {
     const body = e.target.closest && e.target.closest('.nb-body');
     if (!body) return;
     this._sync(body);
+    if (!e.isComposing && this._applyMarkdownRule(body)) return;
     this._emit();
     this._maybeSlash(body);
+    this._maybeWiki(body);
   };
 
   /* 输入 `/` 时弹出块类型菜单（只在空段落里） */
@@ -389,6 +480,71 @@
     this._emit();
   };
 
+  /* 输入 [[ 时补全笔记双链 */
+  BlockEditor.prototype._maybeWiki = function (body) {
+    const b = this._blockOf(body);
+    if (!b || b.type === 'code' || b.type === 'raw') { this._closeWiki(); return; }
+    const parts = caretSplit(body);
+    const before = parts ? parts.before : '';
+    const k = before.lastIndexOf('[[');
+    const closed = before.lastIndexOf(']]');
+    if (k < 0 || closed > k) { this._closeWiki(); return; }
+    const q = before.slice(k + 2);
+    if (q.indexOf(']') >= 0 || q.indexOf('\n') >= 0 || q.length > 60) { this._closeWiki(); return; }
+    const items = this.opts.wikiSearch ? (this.opts.wikiSearch(q) || []) : [];
+    if (!items.length) { this._closeWiki(); return; }
+    const keep = this._wiki && this._wiki.block === b ? this._wiki.index : 0;
+    this._closeSlash();
+    this._wiki = { block: b, start: k, caret: before.length, items: items,
+                   index: Math.max(0, Math.min(keep, items.length - 1)) };
+    this._renderWiki(body);
+  };
+
+  BlockEditor.prototype._renderWiki = function (body) {
+    const ctx = this._wiki;
+    if (!ctx) return;
+    let pop = this.el.querySelector('.nb-wiki');
+    if (!pop) {
+      pop = document.createElement('div');
+      pop.className = 'nb-wiki';
+      this.el.appendChild(pop);
+    }
+    pop.innerHTML = ctx.items.map((it, i) =>
+      '<div class="nb-wiki-item' + (i === ctx.index ? ' on' : '') + '" data-i="' + i + '">' +
+      '<b>' + esc(it.name) + '</b><span>' + esc(it.path) + '</span></div>').join('');
+    const rect = caretRect(body);
+    pop.style.left = Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - 292))) + 'px';
+    pop.style.top = Math.round(Math.min(rect.bottom + 4, window.innerHeight - 120)) + 'px';
+    pop.classList.remove('hidden');
+    pop.querySelectorAll('.nb-wiki-item').forEach((row) => {
+      row.onmousedown = (ev) => {
+        ev.preventDefault();
+        this._applyWiki(ctx.items[Number(row.dataset.i)]);
+      };
+    });
+  };
+
+  BlockEditor.prototype._applyWiki = function (item) {
+    const ctx = this._wiki;
+    this._closeWiki();
+    if (!ctx || !item) return;
+    const b = ctx.block;
+    const text = String(b.text || '');
+    const caret = Math.min(ctx.caret, text.length);
+    const tail = text.slice(caret);
+    const rest = tail.slice(0, 2) === ']]' ? tail.slice(2) : tail;
+    b.text = text.slice(0, ctx.start) + '[[' + item.name + ']]' + rest;
+    this.render();
+    this.focusBlock(this.blocks.indexOf(b), true);
+    this._emit();
+  };
+
+  BlockEditor.prototype._closeWiki = function () {
+    this._wiki = null;
+    const pop = this.el.querySelector('.nb-wiki');
+    if (pop) pop.remove();
+  };
+
   /* 计算光标前的 Markdown 与之后的 Markdown */
   function caretSplit(body) {
     const sel = document.getSelection();
@@ -439,7 +595,28 @@
       this.applyInline(e.key === 'b' ? 'bold' : 'italic');
       return;
     }
+    if (mod && !e.shiftKey && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      this.applyLink();
+      return;
+    }
     if (mod && e.key === 's') { e.preventDefault(); if (this.opts.onSaveNow) this.opts.onSaveNow(); return; }
+
+    if (this._wiki && this._wiki.block === b) {
+      if (e.key === 'Escape') { e.preventDefault(); this._closeWiki(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const n = this._wiki.items.length;
+        this._wiki.index = (this._wiki.index + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+        this._renderWiki(body);
+        return;
+      }
+      if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+        e.preventDefault();
+        this._applyWiki(this._wiki.items[this._wiki.index]);
+        return;
+      }
+    }
 
     if (this._slash && this.blocks[idx] === this._slash.block) {
       if (e.key === 'Escape') { e.preventDefault(); this._closeSlash(); return; }
@@ -454,6 +631,16 @@
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       if (b.type === 'code' || b.type === 'raw') return;      // 代码块内换行
       e.preventDefault();
+      if (b.type === 'p' && /^(?:---|\*\*\*|___)$/.test(String(b.text || '').trim())) {
+        b.type = 'hr';
+        b.text = '';
+        b.meta = {};
+        this.blocks.splice(idx + 1, 0, { id: nid(), type: 'p', text: '', meta: {} });
+        this.render();
+        this.focusBlock(idx + 1, false);
+        this._emit();
+        return;
+      }
       const parts = caretSplit(body);
       if (!parts) return;
       const wasList = !!LIST_TYPES[b.type];
@@ -469,6 +656,7 @@
       const next = { id: nid(), type: wasList ? b.type : 'p', text: parts.after, meta: {} };
       if (b.type === 'task') next.meta.checked = false;
       if (b.type === 'ol') next.meta.num = Number((b.meta && b.meta.num) || 1) + 1;
+      if (wasList) next.meta.indent = Number((b.meta && b.meta.indent) || 0);
       this.blocks.splice(idx + 1, 0, next);
       this.render();
       this.focusBlock(idx + 1, false);
@@ -515,7 +703,40 @@
       this.focusBlock(idx + 1, false);
       return;
     }
-    if (e.key === 'Tab') e.preventDefault();     // 不把焦点甩到页面别处
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      if (LIST_TYPES[b.type]) {
+        const cur = Number((b.meta && b.meta.indent) || 0);
+        const next = Math.max(0, Math.min(6, cur + (e.shiftKey ? -1 : 1)));
+        if (next !== cur) {
+          b.meta = Object.assign({}, b.meta, { indent: next });
+          const blockEl = this.el.querySelector('.nb-block[data-id="' + b.id + '"]');
+          if (blockEl) blockEl.style.marginLeft = (next * 22) + 'px';
+          this._emit();
+        }
+        return;
+      }
+      if (b.type === 'code' || b.type === 'raw') {
+        if (e.shiftKey) {
+          const parts = caretSplit(body);
+          if (!parts) return;
+          const before = parts.before;
+          const lineStart = before.lastIndexOf('\n') + 1;
+          if (before.slice(lineStart, lineStart + 2) !== '  ') return;
+          b.text = before.slice(0, lineStart) + before.slice(lineStart + 2) + parts.after;
+          this.render();
+          const nb = this._body(b);
+          if (nb) setCaretTextOffset(nb, before.length - 2);
+          this._emit();
+          return;
+        }
+        document.execCommand('insertText', false, '  ');
+        this._sync(body);
+        this._emit();
+        return;
+      }
+      return;
+    }
   };
 
   BlockEditor.prototype._onPaste = function (e) {
@@ -558,6 +779,22 @@
     } else {
       document.execCommand(cmd, false, null);
     }
+    this._sync(body);
+    this._emit();
+  };
+
+  BlockEditor.prototype.applyLink = function () {
+    const body = document.activeElement && document.activeElement.closest
+      ? document.activeElement.closest('.nb-body') : null;
+    if (!body) return;
+    const sel = document.getSelection();
+    const text = sel && sel.rangeCount ? sel.toString() : '';
+    const raw = (this.opts.askLink ? this.opts.askLink() : window.prompt('链接地址')) || '';
+    if (!raw) return;
+    let href = String(raw).trim();
+    if (!/^(https?:|mailto:|#|\/|\.)/i.test(href)) href = 'https://' + href;
+    document.execCommand('insertHTML', false,
+      '<a href="' + esc(href) + '">' + esc(text || '链接') + '</a>');
     this._sync(body);
     this._emit();
   };
@@ -606,7 +843,10 @@
     const lang = type === 'code'
       ? '<span class="nb-lang">' + esc((b.meta && b.meta.lang) || 'text') + '</span>' : '';
     const num = type === 'ol' ? ' data-num="' + Number((b.meta && b.meta.num) || 1) + '"' : '';
-    return '<div class="nb-block nb-' + type + '"' + num + ' data-id="' + b.id + '" data-type="' + type + '">'
+    const indent = LIST_TYPES[type]
+      ? Math.max(0, Math.min(6, Number((b.meta && b.meta.indent) || 0))) : 0;
+    const pad = indent ? ' style="margin-left:' + (indent * 22) + 'px"' : '';
+    return '<div class="nb-block nb-' + type + '"' + num + pad + ' data-id="' + b.id + '" data-type="' + type + '">'
       + this._gutterHtml() + lang
       + '<div class="nb-body" contenteditable="true" spellcheck="false">' + inner + '</div></div>';
   };
@@ -664,7 +904,7 @@
     const b = this.blocks[idx];
     if (!b) return;
     const el = this.el.querySelector('.nb-block[data-id="' + b.id + '"]');
-    if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    if (el) el.scrollIntoView({ block: 'center', behavior: GM_SMOOTH });
   };
 
   BlockEditor.prototype.mount = function () {

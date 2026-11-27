@@ -6,18 +6,18 @@ from app.uploads import (_MIME_BY_EXT, _upload_path, delete_session_uploads, dro
 from app.store import _lock
 from app.export_md import (_md_name, session_markdown)
 from app.config import load_config, save_config
-from app.sessions import (DOC_TEXT_COMPAT_MAX, MAX_INLINE_DOC_CHARS, drop_session_files,
-                          ensure_session_kb_fields, find_session, invalidate_compression,
-                          load_sessions, new_id, reorder_sessions, sandbox_group,
-                          save_sessions, set_current, slim_message_for_client,
-                          trim_compress_marks, trim_qmarks)
+from app.sessions import (DOC_TEXT_COMPAT_MAX, MAX_INLINE_DOC_CHARS, cache_sessions,
+                          drop_session_files, ensure_session_kb_fields, find_session,
+                          invalidate_compression, load_sessions, mutate_session,
+                          mutate_sessions, new_id, reorder_sessions,
+                          sandbox_group, save_index, save_session, save_sessions, set_current,
+                          slim_message_for_client, trim_compress_marks, trim_qmarks)
 from app.registry import route
 from app import (agent, branch as branch_lib, docparse)
 from app.imaging import recognize_image_auto, vision_available
 
 def _api_session_new(h):
         body = h._body()
-        data = load_sessions()
         s = {"id": new_id(),
              "title": str(body.get("title") or "新对话").strip()[:60],
              "updated_at": time.time(), "messages": []}
@@ -38,11 +38,94 @@ def _api_session_new(h):
             _sctx = ""
         if _sctx:
             s["hook_session_context"] = _sctx[:6000]
-        data["sessions"].insert(0, s)
-        data["current"] = s["id"]
-        with _lock:
-            save_sessions(data)
+
+        def _add(data):
+            data.setdefault("sessions", []).insert(0, s)
+            data["current"] = s["id"]
+            return ""
+
+        data, err = mutate_sessions(_add)
+        if err:
+            return h._json({"ok": False, "error": err}, 400)
+        save_session(s)        # 只写这一条新会话
+        save_index()           # 索引单独写，不重写其它会话缓存
         h._ok_sessions(data)
+
+
+def _handoff_text(src, note=""):
+    """把上一个会话压成一段可交接的摘要：目标 / 计划进度 / 最近请求与结论。
+
+    不调用模型、不读附件正文：确定性、零成本，细节仍可回原会话查。
+    """
+    def _txt(m):
+        c = (m or {}).get("content")
+        if isinstance(c, list):
+            c = " ".join(str(x.get("text") or "") for x in c if isinstance(x, dict))
+        return str(c or "").strip()
+
+    msgs = [m for m in (src.get("messages") or []) if isinstance(m, dict)]
+    led = src.get("task_ledger") if isinstance(src.get("task_ledger"), dict) else {}
+    plan = src.get("plan") if isinstance(src.get("plan"), dict) else {}
+    lines = []
+    goal = str(led.get("goal") or plan.get("goal") or "").strip()
+    if goal:
+        lines.append("目标：" + goal[:600])
+    steps = [x for x in (led.get("steps") or []) if isinstance(x, dict)]
+    if steps:
+        done = [x for x in steps if str(x.get("status") or "") in ("done", "skipped")]
+        todo = [x for x in steps if str(x.get("status") or "") not in ("done", "skipped")]
+        lines.append("计划进度：%d/%d 步完成" % (len(done), len(steps)))
+        for x in todo[:8]:
+            lines.append("- 待做：" + str(x.get("text") or x.get("title") or "")[:160])
+    acc = [str(x) for x in (led.get("acceptance") or []) if str(x).strip()]
+    if acc:
+        lines.append("验收项：" + "；".join(acc[:6]))
+    users = [m for m in msgs if m.get("role") == "user" and _txt(m)]
+    if users:
+        lines.append("最近请求：" + _txt(users[-1])[:800])
+    ans = [m for m in msgs if m.get("role") == "assistant" and _txt(m)]
+    if ans:
+        lines.append("最后结论：" + _txt(ans[-1])[:800])
+    note = str(note or "").strip()
+    if note:
+        lines.append("用户补充：" + note[:800])
+    head = "【上一轮交接】以下是上一会话的关键上下文（自动整理；细节可以回原会话查）。"
+    tail = "直接接着做，不要重问已经确认过的事；缺信息再用 read / search 查。"
+    return "\n".join([head, *lines, tail]) if lines else (head + "\n" + tail)
+
+
+@route("/api/session/handoff")
+def _api_session_handoff(h):
+    """新会话 + 交接摘要（对齐 Trae 的 new_context：只带 handoff 重开窗口）。"""
+    body = h._body()
+    sid = str(body.get("session_id") or "").strip()
+    data = load_sessions()
+    src = find_session(data, sid)
+    if not src:
+        return h._json({"ok": False, "error": "找不到要交接的会话"}, 404)
+    from app.store import ACTIVE_STREAMS as _STREAMS
+    if sid in _STREAMS:
+        return h._json({"ok": False, "error": "会话正在生成，先停止再交接"}, 409)
+    title = str(src.get("title") or "新对话").strip()[:24]
+    s = {"id": new_id(), "title": (title + " · 续")[:60],
+         "updated_at": time.time(),
+         "messages": [{"role": "user", "content": _handoff_text(src, body.get("note"))}]}
+    for key in ("sandbox", "agent_enabled", "approval_mode", "ai_write", "scene"):
+        if src.get(key) not in (None, "", False):
+            s[key] = src[key]
+    ensure_session_kb_fields(s)
+
+    def _add(d):
+        d.setdefault("sessions", []).insert(0, s)
+        d["current"] = s["id"]
+        return ""
+
+    data, err = mutate_sessions(_add)
+    if err:
+        return h._json({"ok": False, "error": err}, 400)
+    save_session(s)
+    save_index()
+    h._ok_sessions(data)
 
 
 def _session_texts(m):
@@ -54,31 +137,68 @@ def _session_texts(m):
     return out
 
 
+# 会话搜索索引：sid -> {"sig": 会话指纹, "rows": [(消息下标, role, 小写正文)]}。
+# 以前每次按键都遍历全部消息并现场 lower()；长会话（1,681 条）会明显卡顿。
+_SEARCH_INDEX = {}
+_SEARCH_INDEX_MAX = 32
+
+
+def _search_sig(s):
+    msgs = s.get("messages") or []
+    last = msgs[-1] if msgs else {}
+    return (s.get("updated_at"), len(msgs),
+            len(str(last.get("content") or "")),
+            len(str(last.get("blocks") or "")))
+
+
+def _search_rows(s):
+    sid = str(s.get("id") or "")
+    sig = _search_sig(s)
+    ent = _SEARCH_INDEX.get(sid)
+    if ent and ent["sig"] == sig:
+        return ent["rows"]
+    rows = []
+    for i, m in enumerate(s.get("messages") or []):
+        if not isinstance(m, dict):
+            continue
+        for text in _session_texts(m):
+            rows.append((i, str(m.get("role") or ""), text, text.lower()))
+            break                      # 一条消息只搜第一段正文，与旧行为一致
+    _SEARCH_INDEX[sid] = {"sig": sig, "rows": rows}
+    while len(_SEARCH_INDEX) > _SEARCH_INDEX_MAX:
+        _SEARCH_INDEX.pop(next(iter(_SEARCH_INDEX)), None)
+    return rows
+
+
 def _api_session_search(h):
         """会话搜索：匹配标题与对话正文，返回命中的会话与片段（q 为空时返回最近会话）。"""
         body = h._body()
         q = str(body.get("q") or "").strip().lower()
-        data = load_sessions()
+        data = load_sessions(copy=False)
+        rows = data.get("sessions") or []
+        # 已删除的会话不留在索引里
+        alive = {str(s.get("id") or "") for s in rows if isinstance(s, dict)}
+        for k in list(_SEARCH_INDEX):
+            if k not in alive:
+                _SEARCH_INDEX.pop(k, None)
         items = []
-        for s in data.get("sessions") or []:
+        for s in rows:
             title = str(s.get("title") or "新对话")
             title_hit = bool(q) and q in title.lower()
             hits = []
             if q:
-                for i, m in enumerate(s.get("messages") or []):
-                    for text in _session_texts(m):
-                        pos = text.lower().find(q)
-                        if pos < 0:
-                            continue
-                        start = max(0, pos - 24)
-                        end = min(len(text), pos + len(q) + 40)
-                        snippet = " ".join(text[start:end].split())
-                        hits.append({
-                            "index": i, "role": m.get("role") or "",
-                            "snippet": ("…" if start else "") + snippet +
-                                       ("…" if end < len(text) else ""),
-                        })
-                        break
+                for i, role, text, low in _search_rows(s):
+                    pos = low.find(q)
+                    if pos < 0:
+                        continue
+                    start = max(0, pos - 24)
+                    end = min(len(text), pos + len(q) + 40)
+                    snippet = " ".join(text[start:end].split())
+                    hits.append({
+                        "index": i, "role": role,
+                        "snippet": ("…" if start else "") + snippet +
+                                   ("…" if end < len(text) else ""),
+                    })
                     if len(hits) >= 3:
                         break
             if not q or title_hit or hits:
@@ -94,26 +214,28 @@ def _api_session_search(h):
 
 def _api_session_rename(h):
         body = h._body()
-        data = load_sessions()
-        s = find_session(data, body.get("id"))
-        if s and (body.get("title") or "").strip():
-            s["title"] = body["title"].strip()
-            # 手动改名后不再让「首轮摘要标题」覆盖
-            s["title_source"] = "manual"
-            with _lock:
-                save_sessions(data)
-        h._ok_sessions(data)
+        sid = body.get("id")
+        title = (body.get("title") or "").strip()
+        if title:
+            def _rename(s):
+                s["title"] = title
+                # 手动改名后不再让「首轮摘要标题」覆盖
+                s["title_source"] = "manual"
+                return ""
+            mutate_session(sid, _rename)      # 只写这一条会话
+        h._ok_sessions(load_sessions(copy=False))
 
 
 def _api_session_pin(h):
         body = h._body()
-        data = load_sessions()
-        s = find_session(data, body.get("id"))
-        if s:
-            s["pinned"] = bool(body.get("pinned"))
-            with _lock:
-                save_sessions(data)
-        h._ok_sessions(data)
+        pinned = bool(body.get("pinned"))
+
+        def _pin(s):
+            s["pinned"] = pinned
+            return ""
+
+        mutate_session(body.get("id"), _pin)
+        h._ok_sessions(load_sessions(copy=False))
 
 
 def _api_session_reorder(h):
@@ -122,12 +244,10 @@ def _api_session_reorder(h):
         ids = body.get("ids")
         if not isinstance(ids, list) or not ids:
             return h._json({"ok": False, "error": "缺少 ids"}, 400)
-        data = load_sessions()
-        with _lock:
-            err = reorder_sessions(data, ids)
-            if err:
-                return h._json({"ok": False, "error": err}, 400)
-            save_sessions(data)
+        data, err = mutate_sessions(lambda d: reorder_sessions(d, ids))
+        if err:
+            return h._json({"ok": False, "error": err}, 400)
+        save_index()                          # 只改顺序：写索引即可
         h._ok_sessions(data)
 
 
@@ -184,8 +304,8 @@ def _api_session_group(h):
             data["sessions"] = remain
             if data.get("current") in drop:
                 data["current"] = remain[0]["id"]
-            with _lock:
-                save_sessions(data)
+            cache_sessions(data)          # 原子换内存读模型
+            save_index()                  # 只写索引，不重写剩余会话
             for sid in drop:
                 delete_session_uploads(sid)      # 附件
                 branch_lib.drop_legacy_saves(sid)   # 旧版存档残留
@@ -210,8 +330,8 @@ def _api_session_delete(h):
         drop_id = body.get("id")
         data["sessions"] = [s for s in data["sessions"] if s["id"] != drop_id]
         data["current"] = data["sessions"][0]["id"]
-        with _lock:
-            save_sessions(data)
+        cache_sessions(data)             # 原子换内存读模型
+        save_index()                     # 只写索引，不重写剩余会话
         delete_session_uploads(drop_id)      # 连带清理该会话的图片附件
         branch_lib.drop_legacy_saves(drop_id)   # 旧版存档残留
         drop_session_files(drop_id)          # 快照 / 事件流 / 轨迹 / 终端会话
@@ -224,8 +344,7 @@ def _api_session_select(h):
         sid = str(body.get("id") or "")
         if find_session(data, sid):
             data["current"] = sid
-            # 只改侧车文件；不再为一个 current 全量重写 20MB 的 sessions.json
-            # （实测每次 230ms，是切会话延迟的一半）。
+            # 只改侧车文件；不为一个 current 重写整份会话存储。
             set_current(sid)
         h._ok_sessions(data)
 
@@ -242,18 +361,12 @@ def _api_session_qmark(h):
     except (TypeError, ValueError):
         return h._json({"ok": False, "error": "消息下标不合法"}, 400)
     label = str(body.get("label") or "").strip()[:40]
-    # 读-改-写整段放进锁里：模型流式输出时也会改 sessions.json，
-    # 先 load 再 save 会把刚追加的消息覆盖掉。
-    with _lock:
-        data = load_sessions()
-        s = find_session(data, body.get("id"))
-        if not s:
-            return h._json({"ok": False, "error": "会话不存在"}, 404)
+    def _mark(s):
         msgs = s.get("messages") or []
         if not (0 <= idx < len(msgs)):
-            return h._json({"ok": False, "error": "这条消息已不存在"}, 400)
+            return "这条消息已不存在"
         if (msgs[idx] or {}).get("role") != "user":
-            return h._json({"ok": False, "error": "只能标记用户提问"}, 400)
+            return "只能标记用户提问"
         marks = []
         for m in (s.get("qmarks") or []):
             if not isinstance(m, dict):
@@ -271,14 +384,21 @@ def _api_session_qmark(h):
             marks.sort(key=lambda m: int(m.get("idx") or 0))
             marks = marks[-20:]
         s["qmarks"] = marks
-        save_sessions(data)
-    h._ok_sessions(data)
+        return ""
+
+    # 只改这一条会话：与流式落库共用会话写锁，不重写其它会话
+    s, err = mutate_session(body.get("id"), _mark)
+    if not s:
+        return h._json({"ok": False, "error": "会话不存在"}, 404)
+    if err:
+        return h._json({"ok": False, "error": err}, 400)
+    h._ok_sessions(load_sessions(copy=False))
 
 
 def _api_session_messages(h):
         """按需拉取更早的消息（切会话只回 chat_payload_msg_window 条）。"""
         body = h._body()
-        data = load_sessions()
+        data = load_sessions(copy=False)
         s = find_session(data, body.get("session_id"))
         if not s:
             return h._json({"ok": False, "error": "not found"}, 404)
@@ -295,8 +415,10 @@ def _api_session_messages(h):
         before = max(0, min(before, total))
         limit = max(1, min(limit, 200))
         start = max(0, before - limit)
+        # slim=1：分享导出只要正文 / 来源，不需要 blocks / tools / timing 这些重字段
+        slim = bool(body.get("slim"))
         h._json({"ok": True,
-                 "messages": [slim_message_for_client(x) for x in msgs[start:before]],
+                 "messages": [slim_message_for_client(x, slim=slim) for x in msgs[start:before]],
                  "from": start, "before": before, "total": total})
 
 
@@ -454,7 +576,7 @@ def _api_attach_reparse(h):
             if warn:
                 meta["warn"] = warn
             # 小文档保留一份 doc_text 兼容旧逻辑；大文档只留 docs[0].text，
-            # 否则同一篇正文会在 sessions.json 里序列化两次。
+            # 否则同一篇正文会在会话里序列化两次。
             if doc_index == 0 and len(text) <= DOC_TEXT_COMPAT_MAX:
                 msgs[index]["doc_text"] = text
             with _lock:

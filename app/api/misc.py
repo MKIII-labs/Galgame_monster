@@ -24,7 +24,7 @@ from app import expression
 # 提醒开关相关的配置键：保存这些键时要同步 Windows 计划任务
 REMINDER_SWITCH_KEYS = {
     "reminders_enabled", "reminder_inapp_enabled", "reminder_system_enabled",
-    "reminder_calendar_enabled", "auto_chat_enabled",
+    "reminder_calendar_enabled",
 }
 
 
@@ -112,7 +112,7 @@ def _api_open_path(h):
         return h._json({"ok": False, "error": "打开目录失败：%s" % e}, 500)
     open_request.clear()
     return h._json({"ok": True, "id": s["id"], "created": created, "path": path,
-                    "sessions": slim_sessions(load_sessions()),
+                    "sessions": slim_sessions(load_sessions(copy=False)),
                     "context": current_context(load_sessions())})
 
 
@@ -120,6 +120,33 @@ def _api_open_path(h):
 def _api_settings_defaults(h):
     """设置页「恢复默认」用的权威默认值：配置 + 用户画像。"""
     h._json({"ok": True, "config": default_config(), "profile": dict(DEFAULT_PROFILE)})
+
+
+@route("/api/health", methods=("GET",))
+def _api_health(h):
+    """健康与性能指标：存储体积 / 孤儿目录 / 运行态 / 最近 200 轮分段耗时。"""
+    from app import session_events, sessions as sessions_mod, store as store_mod
+    from app.api import chat as chat_mod
+
+    try:
+        storage = sessions_mod.storage_stats()
+    except Exception as e:                # noqa: BLE001  指标失败不能变成 500
+        storage = {"error": str(e)}
+    try:
+        timing = chat_mod.timing_stats()
+    except Exception:                     # noqa: BLE001
+        timing = {}
+    return h._json({
+        "ok": True,
+        "storage": storage,
+        "runtime": {
+            "active_streams": len(store_mod.ACTIVE_STREAMS),
+            "sse_jobs": len(getattr(chat_mod, "JOBS", {}) or {}),
+            "events_last": len(getattr(session_events, "_LAST", {}) or {}),
+            "json_cache": len(getattr(store_mod, "_json_cache", {}) or {}),
+        },
+        "timing": timing,
+    })
 
 
 @route("/api/app/info")

@@ -86,6 +86,10 @@ class _WSClient:
         self.sock.settimeout(timeout)
         self._buf = b""
         self._handshake()
+        # 握手后改成阻塞读：命令有各自的超时（见 CDP.send），
+        # 而读线程若跟着 20s 超时会在「模型思考 / 用户没动作」的安静期自行判死，
+        # 之后所有命令都会报「调试连接已断开：timed out」。
+        self.sock.settimeout(None)
 
     def _handshake(self):
         key = base64.b64encode(os.urandom(16)).decode("ascii")
@@ -166,6 +170,10 @@ class _WSClient:
     def close(self):
         try:
             self._send_control(0x8, b"")
+        except Exception:
+            pass
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)   # 唤醒阻塞在 recv 的读线程
         except Exception:
             pass
         try:

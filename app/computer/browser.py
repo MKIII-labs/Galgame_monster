@@ -318,6 +318,31 @@ def current_url():
         return ""
 
 
+def capture_png(timeout=15):
+    """截当前页（base64 PNG）。
+
+    受控窗口退到后台 / 被遮挡时，Chromium 可能迟迟不产出新帧，
+    `Page.captureScreenshot` 会一直等到超时（实测偶发 30s 失败）。
+    先按默认参数试一次；失败再把页面置前、退回 `fromSurface=false` 重试一次。
+    """
+    c = conn()
+    try:
+        res = c.send("Page.captureScreenshot", {"format": "png"}, timeout=timeout)
+        return (res or {}).get("data") or ""
+    except CDPError as first:
+        try:
+            c.send("Page.bringToFront", {}, timeout=5)
+        except CDPError:
+            pass
+        try:
+            res = c.send("Page.captureScreenshot",
+                         {"format": "png", "fromSurface": False,
+                          "captureBeyondViewport": False}, timeout=timeout)
+            return (res or {}).get("data") or ""
+        except CDPError as e:
+            raise CDPError("%s；重试也失败：%s" % (first, e))
+
+
 def close_all():
     with _lock:
         for c in list(_STATE["conns"].values()):

@@ -91,6 +91,7 @@
     $$('.insp-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.ipane !== name));
     if (name === 'usage') loadUsage();
     if (name === 'tools') syncTools();
+    if (name === 'aside') loadAsides();
     if (name === 'plan') {
       // 切到计划页：清掉「计划有更新」的红点，并按当前会话最新计划重画
       $$('.insp-tab').forEach((b) => b.classList.remove('has-dot'));
@@ -156,7 +157,7 @@
       chip.title = [label, arg && arg.textContent, state && state.textContent]
         .map((s) => String(s || '').trim()).filter(Boolean).join(' · ');
       chip.onclick = () => {
-        card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        card.scrollIntoView({ block: 'center', behavior: GM_SMOOTH });
         card.classList.add('insp-flash');
         setTimeout(() => card.classList.remove('insp-flash'), 1200);
       };
@@ -189,11 +190,136 @@
     const rows = $$('#chat .msg.ai');
     const last = rows[rows.length - 1];
     if (!last) { toastSafe('还没有 AI 回复'); return; }
-    last.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    last.scrollIntoView({ block: 'center', behavior: GM_SMOOTH });
   }
+
+  /* ---------------- 检查器：旁注（历史划词提问） ---------------- */
+
+  const currentSid = () => String(
+    (typeof state !== 'undefined' && state.sessions && state.sessions.current) || '');
+
+  function fmtAsideTime(ts) {
+    const n = Number(ts) || 0;
+    if (!n) return '';
+    const d = new Date(n * 1000);
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function openAsideThread(t, ev) {
+    if (!window.AskKit) { toastSafe('问答面板未加载，请刷新页面'); return; }
+    const sid = currentSid();
+    const sel = (t && t.selection) || {};
+    const rect = (ev && ev.currentTarget) ? ev.currentTarget.getBoundingClientRect() : null;
+    window.AskKit.open({
+      scope: 'session:' + sid,
+      source: 'chat',
+      threadId: t.id,
+      selection: sel,
+      includeMessage: !!t.include_message,
+      messageText: t.message_text || '',
+      anchor: t.anchor || sel.text || '',
+      label: (sel.msg_index != null) ? ('对话 · #' + sel.msg_index) : '旁注',
+      quote: t.title || sel.text || '',
+      title: '旁注',
+      rect,
+      onQuote: (text) => {
+        if (typeof addQuote === 'function') addQuote(text, '旁注');
+        else toastSafe('当前界面不支持引用');
+      },
+      onCapture: (qa, r) => {
+        if (typeof window.asideCapture !== 'function') {
+          toastSafe('笔记面板未加载，请刷新页面');
+          return;
+        }
+        window.asideCapture(sel.text || t.title || '', qa.history, sel, r);
+      },
+    });
+  }
+
+  function renderAsides(threads) {
+    const box = $('#insp-asides');
+    const hint = $('#insp-asides-hint');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!threads.length) {
+      if (hint) hint.textContent = '这个会话还没有旁注。在对话里划选文字 → 提问。';
+      return;
+    }
+    if (hint) hint.textContent = `共 ${threads.length} 条旁注（左侧最新，点击回看）`;
+    threads.forEach((t) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'insp-aside';
+      b.dataset.tid = t.id;
+      const title = document.createElement('span');
+      title.className = 'insp-aside-t';
+      title.textContent = t.title || '旁注';
+      const q = document.createElement('span');
+      q.className = 'insp-aside-q';
+      const hist = t.history || [];
+      const lastQ = (hist.length && hist[hist.length - 1].q)
+        || (t.selection && t.selection.text) || '';
+      q.textContent = String(lastQ).replace(/\s+/g, ' ').slice(0, 90);
+      const meta = document.createElement('span');
+      meta.className = 'insp-aside-meta';
+      meta.textContent = `${hist.length} 轮 · ${fmtAsideTime(t.updated_at || t.created_at)}`;
+      b.appendChild(title);
+      b.appendChild(q);
+      b.appendChild(meta);
+      b.onclick = (ev) => openAsideThread(t, ev);
+      box.appendChild(b);
+    });
+  }
+
+  async function loadAsides() {
+    const box = $('#insp-asides');
+    const hint = $('#insp-asides-hint');
+    if (!box) return;
+    const sid = currentSid();
+    if (!sid) {
+      box.innerHTML = '';
+      if (hint) hint.textContent = '先打开一个会话，划选文字提问后会显示在这里。';
+      return;
+    }
+    if (hint) hint.textContent = '读取中…';
+    try {
+      const res = await fetch('/api/ask/threads', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Auth-Token': typeof TOKEN === 'string' ? TOKEN : '',
+        },
+        body: JSON.stringify({ op: 'list', scope: 'session:' + sid, source: 'chat' }),
+      });
+      const data = await res.json();
+      const threads = ((data && data.threads) || [])
+        .filter((t) => (t.source || 'chat') === 'chat')
+        .sort((a, b) => (Number(b.created_at) || 0) - (Number(a.created_at) || 0));
+      renderAsides(threads);
+    } catch (e) {
+      box.innerHTML = '';
+      if (hint) hint.textContent = '读取失败：' + ((e && e.message) || e);
+    }
+  }
+
+  // 切会话时由 aside.js 调用：旁注线程跟着会话走，列表要重新拉
+  window.uiInspectorRefreshAsides = () => {
+    if (activeTab === 'aside' && insp && !insp.classList.contains('hidden')) loadAsides();
+  };
 
   function openInspector(tab) {
     if (!insp) return;
+    // 窄一点的大屏上，检查器 + 搜索侧栏会把聊天区挤到 400px 以下
+    if (window.innerWidth < 1400 && typeof closeSearchPanel === 'function') {
+      closeSearchPanel();
+    }
+    // 笔记停靠和检查器抢同一块右侧空间：先收起笔记（全屏时同理）
+    const nm = document.querySelector('#notes-modal');
+    if (nm && !nm.classList.contains('hidden')
+        && typeof closeNotesModal === 'function') {
+      try { closeNotesModal(); } catch (e) { /* 笔记是可选面板 */ }
+    }
     insp.classList.remove('hidden');
     if (inspBtn) {
       inspBtn.classList.add('is-on');

@@ -206,6 +206,88 @@ def delete_annotation(aid):
     return True
 
 
+# ---------------------------------------------------------------- 笔记改名 / 删除
+# 笔记的 doc_key 是 `notes:<相对路径>`。改名 / 移动 / 删除时如果不跟着迁移，
+# 批注会失联或在旧路径上变孤儿，同路径新建笔记还会继承旧批注。
+
+def _note_key_match(key, base, is_dir):
+    if key == base:
+        return True
+    return bool(is_dir and key.startswith(base + "/"))
+
+
+def remap_note_keys(old_rel, new_rel, is_dir=False):
+    """笔记改名 / 移动后迁移批注与文献条目：notes:<old> → notes:<new>。"""
+    old_rel = norm_key(old_rel)
+    new_rel = norm_key(new_rel)
+    old_base = "notes:" + old_rel
+    new_base = "notes:" + new_rel
+    if not old_rel or not new_rel or old_base == new_base:
+        return 0
+    migrate_legacy()
+    conn = db.get_db()
+
+    def target(key):
+        if key == old_base:
+            return new_base
+        if is_dir and key.startswith(old_base + "/"):
+            return new_base + key[len(old_base):]
+        return ""
+
+    changed = 0
+    rows = conn.execute(
+        "SELECT id, doc_key FROM annotations WHERE doc_key LIKE 'notes:%'").fetchall()
+    for r in rows:
+        nk = target(str(r["doc_key"] or ""))
+        if not nk:
+            continue
+        conn.execute("UPDATE annotations SET doc_key=?, doc_type=? WHERE id=?",
+                     (nk, doc_type_of(nk), r["id"]))
+        changed += 1
+    docs = conn.execute(
+        "SELECT doc_key FROM documents WHERE doc_key LIKE 'notes:%'").fetchall()
+    for r in docs:
+        key = str(r["doc_key"] or "")
+        nk = target(key)
+        if not nk:
+            continue
+        if conn.execute("SELECT 1 FROM documents WHERE doc_key=?", (nk,)).fetchone():
+            conn.execute("DELETE FROM documents WHERE doc_key=?", (key,))
+        else:
+            conn.execute("UPDATE documents SET doc_key=? WHERE doc_key=?", (nk, key))
+        changed += 1
+    conn.commit()
+    return changed
+
+
+def drop_note_keys(rel, is_dir=False):
+    """删除笔记 / 文件夹：清掉 notes:<rel> 的批注与文献条目，避免留下孤儿。"""
+    rel = norm_key(rel)
+    base = "notes:" + rel
+    if not rel:
+        return 0
+    migrate_legacy()
+    conn = db.get_db()
+    removed = 0
+    rows = conn.execute(
+        "SELECT id, doc_key FROM annotations WHERE doc_key LIKE 'notes:%'").fetchall()
+    for r in rows:
+        if not _note_key_match(str(r["doc_key"] or ""), base, is_dir):
+            continue
+        conn.execute("DELETE FROM annotations WHERE id=?", (r["id"],))
+        removed += 1
+    docs = conn.execute(
+        "SELECT doc_key FROM documents WHERE doc_key LIKE 'notes:%'").fetchall()
+    for r in docs:
+        key = str(r["doc_key"] or "")
+        if not _note_key_match(key, base, is_dir):
+            continue
+        conn.execute("DELETE FROM documents WHERE doc_key=?", (key,))
+        removed += 1
+    conn.commit()
+    return removed
+
+
 # ---------------------------------------------------------------- 文献条目
 
 def get_document(doc_key):
@@ -256,27 +338,6 @@ def save_document(doc_key, info):
          old.get("created_at") or now, now))
     conn.commit()
     return get_document(key)
-
-
-def list_documents(q=None, limit=200):
-    conn = db.get_db()
-    if q:
-        like = "%" + str(q).strip() + "%"
-        rows = conn.execute(
-            "SELECT * FROM documents WHERE title LIKE ? OR authors LIKE ? OR venue LIKE ? "
-            "OR tags LIKE ? ORDER BY updated_at DESC LIMIT ?",
-            (like, like, like, like, max(1, min(int(limit or 200), 1000)))).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM documents ORDER BY updated_at DESC LIMIT ?",
-                            (max(1, min(int(limit or 200), 1000)),)).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["authors"] = _loads(d.get("authors"), [])
-        d["tags"] = _loads(d.get("tags"), [])
-        d["extra"] = _loads(d.get("extra"), {})
-        out.append(d)
-    return out
 
 
 # ---------------------------------------------------------------- 旧数据迁移

@@ -59,33 +59,36 @@ class _Handler:
         self.out = (200, {"ok": True, "sessions": sessions.slim_sessions(data)})
 
 
-def test_qmark_api_add_rename_and_remove(monkeypatch):
+def test_qmark_api_add_rename_and_remove():
     from app.api import sessions as api_sessions
+    # 走真实（conftest 已隔离到 tmp 的）会话存储：接口现在只落单条会话
     data = _data()
     data["sessions"][0]["qmarks"] = []
-    monkeypatch.setattr(api_sessions, "load_sessions", lambda: data)
-    monkeypatch.setattr(api_sessions, "save_sessions", lambda d: None)
+    sessions.save_sessions(data)
+    sessions.reset_cache()
 
     api_sessions._api_session_qmark(_Handler(
         {"id": "s1", "idx": 0, "label": "关键结论", "text": "q0"}))
-    assert data["sessions"][0]["qmarks"][0]["label"] == "关键结论"
+    s = sessions.find_session(sessions.load_sessions(copy=False), "s1")
+    assert s["qmarks"][0]["label"] == "关键结论"
 
     # 同一消息再次提交：更新而不是叠加
     api_sessions._api_session_qmark(_Handler(
         {"id": "s1", "idx": 0, "label": "改名后", "text": "q0"}))
-    assert len(data["sessions"][0]["qmarks"]) == 1
-    assert data["sessions"][0]["qmarks"][0]["label"] == "改名后"
+    s = sessions.find_session(sessions.load_sessions(copy=False), "s1")
+    assert len(s["qmarks"]) == 1
+    assert s["qmarks"][0]["label"] == "改名后"
 
     # 空 label = 删除
     api_sessions._api_session_qmark(_Handler({"id": "s1", "idx": 0, "label": ""}))
-    assert data["sessions"][0]["qmarks"] == []
+    s = sessions.find_session(sessions.load_sessions(copy=False), "s1")
+    assert s["qmarks"] == []
 
 
-def test_qmark_api_rejects_assistant_message(monkeypatch):
+def test_qmark_api_rejects_assistant_message():
     from app.api import sessions as api_sessions
-    data = _data()
-    monkeypatch.setattr(api_sessions, "load_sessions", lambda: data)
-    monkeypatch.setattr(api_sessions, "save_sessions", lambda d: None)
+    sessions.save_sessions(_data())
+    sessions.reset_cache()
     h = _Handler({"id": "s1", "idx": 1, "label": "x"})
     api_sessions._api_session_qmark(h)
     assert h.out[0] == 400

@@ -6,11 +6,52 @@
 import base64
 import os
 import subprocess
+from urllib.parse import parse_qs, urlparse
 
 from app import share
 from app.registry import route
+from app.search import _public_get
 
 _MAX_IMPORT_B64 = 30 * 1024 * 1024      # 导入包 base64 上限（约 22MB 原文件）
+_MAX_SHARE_IMAGE = 3 * 1024 * 1024      # 分享内联的外链图片上限（与前端一致）
+
+
+@route("/api/share/image")
+def _api_share_image(h):
+    """把外链图片取回来给分享页内联：只允许公网 http(s)，单张最多 3MB。"""
+    qs = parse_qs(urlparse(h.path).query)
+    url = (qs.get("url") or [""])[0].strip()
+    if not url:
+        return h._json({"ok": False, "error": "缺少图片地址"}, 400)
+    r = _public_get(url, timeout=15, headers={"Accept": "image/*"}, stream=True)
+    if r is None:
+        return h._json({"ok": False, "error": "图片抓取失败"}, 502)
+    try:
+        if r.status_code != 200:
+            return h._json({"ok": False, "error": "图片返回 %s" % r.status_code}, 502)
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if not ctype.startswith("image/"):
+            return h._json({"ok": False, "error": "目标不是图片"}, 400)
+        chunks = []
+        total = 0
+        for chunk in r.iter_content(64 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > _MAX_SHARE_IMAGE:
+                return h._json({"ok": False, "error": "图片超过 3MB"}, 400)
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        if not data:
+            return h._json({"ok": False, "error": "图片为空"}, 400)
+        return h._send(200, data, ctype, cache="private, max-age=3600")
+    except Exception as e:                   # noqa: BLE001  网络中断 / 读流失败
+        return h._json({"ok": False, "error": "图片读取失败：%s" % e}, 502)
+    finally:
+        try:
+            r.close()
+        except Exception:                    # noqa: BLE001
+            pass
 
 
 @route("/api/share/save")
